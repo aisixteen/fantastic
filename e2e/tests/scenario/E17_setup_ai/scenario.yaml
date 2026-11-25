@@ -36,9 +36,12 @@ runs:
   # are kept — PLAIN in this throwaway home, never the real keychain), kv
   # overflow, advanced (enter opens the provider's fields — context_window, kv_slots,
   # metrics_url, server_dialect, … caching — then the chat's: its conversation's
-  # settings, then the request knobs, temperature … reasoning_effort (30th),
-  # thinking_token_budget, … max_tokens (39th, the last); #632: the knobs are the
-  # chat's record, the set-up writes each on its own record)
+  # settings (… line_summaries, render_cache_bytes, output_reserve …), then the
+  # request knobs, temperature … reasoning_effort (33rd), thinking_token_budget,
+  # … max_tokens (41st, the last); #632: the knobs are the chat's record, the
+  # set-up writes each on its own record). The form has no search: the walk is
+  # counted against that list, and the at_* frames name the field the cursor (▸)
+  # stands on, so a list that changes fails here by name, not by a wrong write)
   # → advanced closed again, CREATE & OPEN CHAT ──
   - name: write
     timeout: 300
@@ -112,6 +115,7 @@ runs:
       key enter
       type {vllm_kv_slots}
       key enter
+      # kv_slots (2nd) → reasoning_effort (33rd): 31 down
       key down
       key down
       key down
@@ -141,11 +145,15 @@ runs:
       key down
       key down
       key down
+      key down
+      key down
+      shot at_effort
       key left
       key down
       key enter
       type 65536
       key enter
+      # thinking_token_budget (34th) → max_tokens (41st, the last): 7 down
       key down
       key down
       key down
@@ -153,11 +161,13 @@ runs:
       key down
       key down
       key down
+      shot at_max
       key enter
       type {max_tokens}
       key enter
       wait 200
       shot filled
+      # max_tokens (41st) → the advanced line: 41 up
       key up
       key up
       key up
@@ -197,6 +207,9 @@ runs:
       key up
       key up
       key up
+      key up
+      key up
+      shot at_advanced
       key enter
       key down
       key enter
@@ -208,6 +221,10 @@ runs:
       exit 8000
     frames:
       page: {contains: ["NEW AI AGENT", "1 / 2"], lacks: ["vllm    not in this build"]}
+      # the counted walk lands on each field by name (the cursor ▸ before its label)
+      at_effort: {contains: ["▸ reasoning effort"]}
+      at_max: {contains: ["▸ max tokens"]}
+      at_advanced: {contains: ["▸ ▾ advanced"]}
       # the key masked, PLAIN in the run's throwaway home — never the real keychain
       filled: {contains: ["vllm-1", "{ctx}", "xhigh", "65536", "‹ a 0600 text file (plain) ›", "‹ paste a new key ›"]}
       # made, its chat open: the agent is the selected one

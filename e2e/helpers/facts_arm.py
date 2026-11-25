@@ -329,13 +329,15 @@ async def reboot_agent(root, core, bk, fb: str, aid: str, strategy: str, extra: 
     (`prune_grants` is gone): the human's line on the arm stays in the human's own
     record, so the re-created agent answers the human, the ws leg (by its `rest`
     line) and its provider with NO re-grant. Asserted here: before the delete no
-    other record's `can` names the arm but the human's; after it the human's line
-    still does."""
+    other record's `can` names the arm but the leg's (`rest`, seeded from the probe's
+    `reach`) and the human's; after it both lines are still there."""
     if watch_conn is not None:
         await watch_conn.close()
     named = sorted(hid for hid in root.agent_ids()
                    if hid != aid and aid in (root.record(hid).get("can") or {}))
-    assert named == ["user"], f"reboot_agent({aid}): lines naming it: {named}, want ['user']"
+    assert named == ["rest", "user"], (
+        f"reboot_agent({aid}): lines naming it: {named}, want ['rest', 'user']")
+    rest_line = (root.record("rest").get("can") or {}).get(aid)
     r = await call(root, root.id, {"type": "delete_agent", "id": aid, "keep_memory": True})
     assert not (isinstance(r, dict) and r.get("error")), f"delete_agent({aid}): {r}"
     if core is not None:
@@ -345,6 +347,9 @@ async def reboot_agent(root, core, bk, fb: str, aid: str, strategy: str, extra: 
     kept = root.record("user").get("can") or {}
     assert kept.get(aid) == lines.ALL, (
         f"reboot_agent({aid}): the human's line did not survive the delete: {kept}")
+    rest_kept = (root.record("rest").get("can") or {}).get(aid)
+    assert rest_kept == rest_line, (
+        f"reboot_agent({aid}): the leg's line did not survive the delete: {rest_kept}, was {rest_line}")
     return await connect(
         root, core, bk, agent_id=aid,
         can=arm_can(fb),

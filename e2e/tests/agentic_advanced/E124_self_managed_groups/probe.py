@@ -1,15 +1,16 @@
 """LIVE TEST — SELF-MANAGED GROUPS (#174): ONE master AI finishes a queue of Exercism
 python tasks by running up to `MAX_GROUPS` worker groups at once, from its prompt
-alone. There is no group code: a group is three agents the master creates under one
-id prefix (`g<k>_worker` an AI, `g<k>_editor` a file_bridge, `g<k>_runner` an
-exec_bridge — E43's runner trio) with the kernel verbs every AI has, and deletes when
-its task is checked.
+alone. There is no group code: a group is four agents the master creates under one
+id prefix (`g<k>_worker` an AI chat, and under it its provider `g<k>_worker_prov`,
+`g<k>_editor` a file_bridge and `g<k>_runner` an exec_bridge — E43's runner trio)
+with the kernel verbs every AI has, and deletes when its task is checked.
 
 THE HARNESS CREATES NO GROUPS. It builds the queue (`queue`, a file agent over the
 copied exercises), creates the master with its recipe as `pre_system_prompt` and its
-`create` line on itself (`who` the group prefix; a worker's `can` forced to the
-memory store, the queue and the key store, so the master hands a worker no line it
-does not hold)
+`create` line on itself (`who` the group prefix, of the chat and the provider
+bundles; a worker chat's `can` forced to the memory store and the queue, its
+provider's to the memory store and the key store, so the master hands a worker no
+line it does not hold)
 (`helpers.groups.master_prompt`), says "begin", and then only watches: it samples the
 live agent ids on a timer into a `GroupLedger`.
 
@@ -42,9 +43,9 @@ sys.path.insert(
     ),
 )
 from backends import backend as _resolve_backend  # noqa: E402
-from helpers import Limits, add_lines, connect, creds, lines, memory, probe_agent, relay, verdict  # noqa: E402
+from helpers import Limits, add_lines, connect, lines, memory, probe_agent, relay, verdict  # noqa: E402
 from helpers.lines import is_unknown  # noqa: E402
-from helpers.ai import IDLE_END, QuietWatch  # noqa: E402
+from helpers.ai import CHAT_MODULE, IDLE_END, QuietWatch, chat_pair  # noqa: E402
 from helpers.groups import PRACTICE, GroupLedger, group_of, make_queue, master_prompt, wall_seconds  # noqa: E402
 from helpers.kernel import home, open_kernel  # noqa: E402
 
@@ -102,31 +103,52 @@ def worker_ids() -> list[str]:
     return [f"{PREFIX}{k}_worker" for k in range(1, len(TASKS) + 1)]
 
 
-def worker_record() -> dict:
-    """The fields every worker gets verbatim: the plug's (model aside — the master
-    sets the worker's model), the memory store and the window. Its `can` is not
-    among them: the master's `create` line forces it (`worker_can`)."""
-    rec = {k: v for k, v in BK.record(role="worker").items() if k != "model"}
-    return {**rec, "context_window": CTX, "memory_store_id": memory.MEMORY}
+def worker_pair() -> tuple[dict, dict]:
+    """The two create payloads every worker is (#632), as `chat_pair` builds them from the
+    plug: the provider (`g<k>_worker_prov`, the plug's handler, endpoint and key ref, its
+    memory store) and the chat (`g<k>_worker`, `ai_chat.tools`, the memory store and the
+    window) whose `provider_id` names it. `<k>` stays a placeholder: the master fills it."""
+    return chat_pair(BK, {"id": f"{PREFIX}<k>_worker", "context_window": CTX,
+                          "memory_store_id": memory.MEMORY}, role="worker", parent=MASTER)
+
+
+#: what the master's prompt names itself (ids, position, the provider the chat names,
+#: the model it sets on the chat), and the `can` its `create` line forces
+NAMED = ("type", "id", "parent_id", "provider_id", "model", "can")
+
+
+def worker_fields() -> tuple[dict, dict]:
+    """(chat fields, provider fields) each worker half gets verbatim: `worker_pair`
+    minus `NAMED`."""
+    prov, chat = worker_pair()
+    keep = lambda d: {k: v for k, v in d.items() if k not in NAMED}  # noqa: E731
+    return keep(chat), keep(prov)
 
 
 def worker_can() -> dict:
-    """The `can` every worker carries, forced by the master's `create` line: the
-    memory store its conversation lives in, the queue it reports into, and the key
-    (`creds.creator_line`) when the plug has one. No line on the master (O14): one
-    level per target, and the master's own target is its `create` line."""
-    key = creds.creator_line(BK.record(role="worker").get("handler_module"))["can"] if BK.key_ref else {}
-    return {memory.MEMORY: lines.ALL, QUEUE: lines.ALL, **key}
+    """The `can` every worker CHAT carries, forced by the master's `create` line: the
+    memory store its conversation lives in and the queue it reports into. Its provider
+    is below it (reached by position) and holds the key; no line on the master (O14):
+    one level per target, and the master's own target is its `create` line."""
+    return {memory.MEMORY: lines.ALL, QUEUE: lines.ALL}
+
+
+def provider_can() -> dict:
+    """The `can` every worker's PROVIDER carries, forced by the master's `create` line:
+    `chat_pair`'s — the memory store, and the key store's `get` when the plug has a key
+    (`creds.creator_line`)."""
+    return worker_pair()[0]["can"]
 
 
 def master_lines() -> dict:
-    """The master's `create` line on ITSELF: `g*` ids, of the three bundles a group is,
-    with exactly the fields the recipe sets (every field a create carries must be
-    named by the line)."""
-    worker = BK.record(role="worker").get("handler_module")
+    """The master's `create` line on ITSELF: `g*` ids, of the four bundles a group is
+    (the worker chat, its provider, the editor, the runner), with exactly the fields
+    the recipe sets (every field a create carries must be named by the line)."""
+    prov = BK.record(role="worker").get("handler_module")
     return {MASTER: lines.create(
         who=(f"{PREFIX}*",),
-        what={worker: {"*": "*", "can": worker_can()},
+        what={CHAT_MODULE: {"*": "*", "can": worker_can()},
+              prov: {"*": "*", "can": provider_can()},
               "file_bridge.tools": {"root": "*", "allow": "*"},
               "exec_bridge.tools": {"cwd": "*", "inherit_env": "*", "allowed": "*"}})}
 
@@ -200,8 +222,9 @@ async def main() -> None:
             "description": "The task queue: one folder per task, README.task.md in each.",
         }}]))[0]["result"]
         assert not (made or {}).get("error"), made
-        prompt = master_prompt(MAX_GROUPS, wmodel, queue_dir, PREFIX,
-                               worker_record=worker_record(), test_command=TEST_CMD)
+        chat_fields, prov_fields = worker_fields()
+        prompt = master_prompt(MAX_GROUPS, wmodel, queue_dir, PREFIX, worker_chat=chat_fields,
+                               worker_provider=prov_fields, test_command=TEST_CMD)
         extra = {"caching": "provider_cache"} if BK.name == "anthropic" else {}
         conn = await connect(
             root, core, BK,

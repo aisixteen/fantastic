@@ -1,21 +1,24 @@
 # E124 `self_managed_groups` — a master runs its own worker groups (#174)
 
 One master AI finishes a queue of Exercism python tasks by running up to
-`MAX_GROUPS` worker groups at once. There is **no group code**: a group is three
-agents the master creates under one id prefix — `g<k>_worker` (an AI) and, under
-it, `g<k>_editor` (a `file_bridge` over the task's folder) and `g<k>_runner` (an
-`exec_bridge` that may start the task's suite), E43's runner trio — with the kernel
-verbs every AI already has (`create_agent`, `send`, `delete_agent`), and deletes once
-the task is checked (the worker, its subtree with it). The recipe is the master's `pre_system_prompt`
+`MAX_GROUPS` worker groups at once. There is **no group code**: a group is four
+agents the master creates under one id prefix — `g<k>_worker` (an AI chat, which
+takes the task through `send`) and, under it, `g<k>_worker_prov` (the provider its
+`provider_id` names, which completes its turns), `g<k>_editor` (a `file_bridge`
+over the task's folder) and `g<k>_runner` (an `exec_bridge` that may start the
+task's suite), E43's runner trio — with the kernel verbs every AI already has
+(`create_agent`, `send`, `delete_agent`), and deletes once the task is checked (the
+worker, its subtree with it). The recipe is the master's `pre_system_prompt`
 (`helpers/groups.py` `master_prompt`); the task list is not in it, so the prompt does
 not grow with the queue.
 
 **The harness creates no groups.** It copies the exercises into `queue/<task>/`
 (solutions and docs left out, the instructions written as `README.task.md`), makes
 the `queue` file agent, creates the master with its `create` line on itself (`who`
-`g*`; every worker's `can` forced to the memory store, the queue and the key store,
-so the master hands a worker no line it does not hold; the editor and runner go
-under their worker), says "begin" and then only watches: it samples the live agent
+`g*`, of the chat and the provider bundles; every worker chat's `can` forced to the
+memory store and the queue, its provider's to the memory store and the key store, so
+the master hands a worker no line it does not hold; the provider, editor and runner
+go under their worker), says "begin" and then only watches: it samples the live agent
 ids on a timer into a `GroupLedger`. Workers report into the queue (`<task>/DONE.md`);
 a worker's last reply wakes the master.
 

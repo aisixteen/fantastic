@@ -42,7 +42,7 @@ runs:
     lock_released: true
 - name: evict
   # THE LINES ARE THE HOLDERS' OWN (`can`): a chat its store and its provider,
-  # and the system block it reads; a provider its store and the key; the user
+  # and the system block it reads (the verbs prompt_file.rs sends it, PROMPT_VERBS); a provider its store and the key; the user
   # the blueprint's key store (its cap chain). The chats are the user's children: it reaches them
   # by position. No record keeps a list of callers.
   seed:
@@ -118,7 +118,10 @@ runs:
           - capabilities
         prompt_file:
           call:
-          - read
+          - read_stream
+          - watch_path
+          - unwatch_path
+          - watch
   - path: .fantastic/agents/user/agents/ai_b_provider/agent.yaml
     record:
       id: ai_b_provider
@@ -165,7 +168,10 @@ runs:
           - capabilities
         prompt_file:
           call:
-          - read
+          - read_stream
+          - watch_path
+          - unwatch_path
+          - watch
   - path: .fantastic/agents/user/agents/ai_c_provider/agent.yaml
     record:
       id: ai_c_provider
@@ -212,7 +218,10 @@ runs:
           - capabilities
         prompt_file:
           call:
-          - read
+          - read_stream
+          - watch_path
+          - unwatch_path
+          - watch
   timeout: 420
   script: |
     wait 2500

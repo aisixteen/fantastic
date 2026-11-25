@@ -51,7 +51,10 @@ INTERP = sys.executable
 #: A monitor sees only output printed after it starts, and a model takes ~20 s from
 #: the starts to its monitors, so the FATALs come after that.
 WORKERS = {"w5": (40, 5), "w10": (45, 10), "w20": (50, 20), "w60": (-1, 60)}
-#: Seconds a model may take, on top of a monitor's cadence, to see the match and kill.
+#: Seconds a model may take, on top of a monitor's cadence, to see the match and kill —
+#: IDLE seconds: the time the AI spent in a turn between the FATAL line and the kill is
+#: its own latency (a monitor's message waits for the turn in flight), counted on top
+#: (`Sampler.busy_between`).
 SLACK = 75.0
 #: The clean worker must have run about the asked-for minute before it was stopped.
 W60_MIN_RUN = 45.0
@@ -94,7 +97,7 @@ def _task() -> str:
         "About one minute after the workers started: CANCEL every monitor still live (the "
         "monitor itself — not by stopping its worker), check that none is left, then stop "
         "every worker still running, and confirm with a short summary.\n"
-        f"How you build this is your call: `{RUNNER}`'s readme (reflect it with readme=true) "
+        f"How you build this is your call: `{RUNNER}`'s readme (reflect it) "
         "shows the pieces. Nothing needs "
         "you between events — end with done; a message to you wakes you. "
         'When everything is stopped, end your run by calling done — emit <call name="done"></call>.'
@@ -135,6 +138,8 @@ class Sampler:
         #: monitor id → whether its job still ran when it was first seen gone
         self.ended_while_running: dict[int, bool] = {}
         self.ai_busy = False
+        #: (sample time, the AI had a task in `ps`) — its turn time, for the windows
+        self.busy_marks: list[tuple[float, bool]] = []
         self.stop = asyncio.Event()
 
     async def sample(self) -> None:
@@ -162,6 +167,16 @@ class Sampler:
         self.max_monitors = max(self.max_monitors, len(live))
         ps = (await _call(self.root, "kernel", {"type": "ps"})).get("tasks") or []
         self.ai_busy = any(t.get("agent") == AI for t in ps)
+        self.busy_marks.append((time.time(), self.ai_busy))
+
+    def busy_between(self, a: float, b: float) -> float:
+        """Seconds of [a, b] the AI was in a turn: each sample's busy flag holds until
+        the next sample."""
+        total = 0.0
+        for (t0, busy), (t1, _) in zip(self.busy_marks, self.busy_marks[1:]):
+            if busy:
+                total += max(0.0, min(t1, b) - max(t0, a))
+        return total
 
     def busy(self) -> bool:
         return bool(
@@ -271,9 +286,12 @@ async def main():
                 continue
             fatal_at, code = float(fatal.split()[0]), fatal.split()[1]
             lag = (dead_at - fatal_at) if dead_at else float("inf")
-            info.append(f"{n}: FATAL code {code}, stopped {lag:.1f}s after it (cadence {cadence}s)")
+            turn = sampler.busy_between(fatal_at, dead_at) if dead_at else 0.0
+            info.append(f"{n}: FATAL code {code}, stopped {lag:.1f}s after it "
+                        f"({turn:.1f}s of it in the model's turns; cadence {cadence}s)")
             checks.append(((f"{n} stopped EARLY, after its FATAL and within {cadence}s + {SLACK:.0f}s "
-                            f"({lag:.1f}s)"), not alive_now and 0 <= lag <= cadence + SLACK))
+                            f"+ its {turn:.0f}s of turns ({lag:.1f}s)"),
+                           not alive_now and 0 <= lag <= cadence + SLACK + turn))
             checks.append((f"{n}'s FATAL line shown to the user (code {code})", code in transcript))
         checks.append((f"no job still running at the end ({len(sampler.running)})", not sampler.running))
         checks.append((f"no monitor still live at the end ({len(sampler.live)})", not sampler.live))

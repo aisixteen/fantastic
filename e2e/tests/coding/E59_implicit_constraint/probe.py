@@ -15,8 +15,10 @@ code, and the host string is absent. Neither token appears in the task text.
 from __future__ import annotations
 
 import asyncio
+import json
 import secrets
 import sys
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(
@@ -24,7 +26,7 @@ sys.path.insert(
     str(next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())),
 )
 from backends import backend as _resolve_backend
-from helpers import verdict
+from helpers import ctx_score, verdict
 from helpers.facts_arm import (
     FOLD_ARMS,
     LOREM,
@@ -54,6 +56,25 @@ TASK = (
     "read and summarising anything operationally interesting you noted.\n"
     f"Do not re-read README.md. Then {DONE}."
 )
+
+
+def loop_cause(a: dict, aid: str) -> list[str]:
+    """WHY A RUN LOOPED, from the model's own calls in its store rows: the calls it
+    repeated byte for byte, the files it read more than once, and how often it went
+    to its own memory (`recall`, `grep`) against how often it checkpointed (`facts`)."""
+    calls = ctx_score.calls_made(a["msgs"])
+    same = Counter(json.dumps([c["target"], c["payload"]], sort_keys=True) for c in calls)
+    reads = Counter(str(c["payload"].get("path")) for c in calls
+                    if c["payload"].get("type") == "read")
+    mine = Counter(c["payload"].get("type") for c in calls if c["target"] == aid)
+    out = [f"{aid}: {a['turns']} turns, {len(calls)} calls; on itself: "
+           + (", ".join(f"{v} x{n}" for v, n in sorted(mine.items())) or "none")
+           + f"; checkpoints (facts) {a['dumps']}"]
+    rep = [(k, n) for k, n in same.most_common() if n > 1][:3]
+    out += [f"  repeated x{n}: {k[:200]}" for k, n in rep] or ["  no call repeated"]
+    again = sorted((p, n) for p, n in reads.items() if n > 1)
+    out += [f"  re-read x{n}: {p}" for p, n in again]
+    return out
 
 
 async def main():
@@ -100,6 +121,10 @@ async def main():
             ("the facts arm did NOT leak the staging host (negative, baited)",
              not score(facts)[1]),
         ]
+        print("\n  WHY IT LOOPED:")
+        for a in (recency, facts):
+            for line in loop_cause(a, a["id"]):
+                print(f"    {line}")
         r, f = score(recency), score(facts)
         print(f"\n  MEASURED — recency: code={r[0]} leaked={r[1]}   "
               f"facts: code={f[0]} leaked={f[1]}")

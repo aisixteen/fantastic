@@ -100,9 +100,10 @@ async def main():
             "first attempt will be DENIED by the gate — when it is, do NOT retry "
             "blindly: stop and report that you were denied. "
             f"{DONE}.", client_id="w", via="user")
-        h1 = {"messages": await store_rows(root, core, "ai")}
-        # every gate denial is the unknown answer, byte-identical to a missing id
-        seen = str(h1.get("messages", h1))
+        h1 = await store_rows(root, core, "ai")
+        # every gate denial is the unknown answer, byte-identical to a missing id;
+        # matched on the rows' TEXT (a repr of the rows escapes the quotes)
+        seen = "\n".join(str(r.get("content") or "") for r in h1)
         denied = "unknown_agent" in seen and "no agent 'vault'" in seen
 
         # ── 2. the reviewer opens the gate (authority the writer lacks) ──

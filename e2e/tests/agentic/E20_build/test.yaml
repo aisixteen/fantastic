@@ -9,6 +9,8 @@ runner: probe.py
 # REST. The Python product keeps the old grant model (#170).
 runtimes: [rust]
 costs: turns
+# 30 min: it builds and runs a program; the 15 min default can stop a progressing run.
+hard_stop_minutes: 30
 limits:
   idle_seconds: 40
   max_turns: 40

@@ -1583,4 +1583,21 @@ pub(crate) mod create_tests {
         assert!(chat["can"].get("prompt_file").is_none());
         assert_eq!(chat["can"]["memory"], json!({"call": ["append", "read", "copy"]}));
     }
+
+    /// Every request knob (#632) a spec carries lands on the chat and never on its provider.
+    #[test]
+    fn pair_specs_routes_every_knob_to_the_chat() {
+        let me = AgentId::from("canvas_root");
+        let mut spec = Map::new();
+        spec.insert("handler_module".into(), json!("vllm_backend.tools"));
+        for k in fantastic_ai_core::record::KNOBS {
+            spec.insert(k.to_string(), json!(format!("v_{k}")));
+        }
+        let (prov, chat, _) = BackendBundle::pair_specs(&me, "helper", "memory", None, spec, Map::new());
+        let prov = prov.expect("a provider");
+        for k in fantastic_ai_core::record::KNOBS {
+            assert_eq!(chat.get(k), Some(&json!(format!("v_{k}"))), "{k} on the chat");
+            assert!(prov.get(k).is_none(), "{k} leaked to the provider: {prov:?}");
+        }
+    }
 }

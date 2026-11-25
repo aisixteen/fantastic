@@ -56,6 +56,8 @@ sys.path.insert(
     ),
 )
 from helpers import (
+    add_lines,
+    creds,
     verdict,
 )
 
@@ -93,12 +95,25 @@ EXTRA = (
 # as well as the ask, so a failure would be attributable to either.
 
 
+# THE KEY LINE THE CHAIN NEEDS. `hour_ai_prov` reads its key through the forced
+# `creds: get`, and every ancestor whose tree does not hold the key store caps that
+# call: the builder `ai` and the chat `hour_ai` each hold the same line, written by
+# the operator (the builder's beside its `create` line, the chat's once it exists).
+KEY_LINE = {creds.CREDS: creds.GET}
+
+
+async def _wire_builder(root, aid: str) -> None:
+    await add_lines(root, aid, {**P.creator_lines(aid), **KEY_LINE})
+
+
 async def main() -> None:
     # SAME fixture and SAME interpreter as probe 05 — only the ask differs.
     ok = await P.run(
         task=P.TASK + EXTRA,
         brain_backend=BRAIN_BACKEND,
         banner="COMBINED — state graph + child workers + clock + an AI agent",
+        wire_builder=_wire_builder,
+        sub_lines=KEY_LINE,
     )
     print(f"\n  COMBINED  ->  {'PASS' if ok else 'FAIL'}")
     verdict(ok)

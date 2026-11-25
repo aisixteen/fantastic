@@ -3,7 +3,8 @@ queue, and the measurements. No kernel, no model, no network.
 
 A master AI runs up to `max_groups` worker groups at once, from its prompt alone. The
 substrate has no group code and needs none: a group is the agents the master creates
-under one id prefix (`g<k>_worker`, `g<k>_editor` and `g<k>_runner` under it) with
+under one id prefix (`g<k>_worker` a chat, and under it its provider
+`g<k>_worker_prov`, `g<k>_editor` and `g<k>_runner`) with
 the kernel verbs every AI already has (`create_agent`, `send`, `delete_agent`) and
 the master's `create` line on itself (`who` the prefix). So a group is a
 NAMING convention, and this module only reads names: `group_of` parses the prefix,
@@ -33,7 +34,8 @@ def master_prompt(
     queue_dir: str,
     group_prefix: str = "g",
     *,
-    worker_record: dict | None = None,
+    worker_chat: dict | None = None,
+    worker_provider: dict | None = None,
     test_command: list[str] | None = None,
 ) -> str:
     """The master's `pre_system_prompt`. It states the bound, the worker model and the
@@ -41,17 +43,23 @@ def master_prompt(
     it (the master reads the queue), so its length does not grow with the queue and
     barely with `max_groups`.
 
-    `worker_record` is the record fields every worker gets verbatim (the plug's
-    handler, endpoint, key reference, memory store; its `can` is forced by the
-    master's `create` line, so it is not among them); `test_command` the argv the
-    group's runner may start. A worker reaches its editor and runner by position
-    (they are created under it) and reports into the queue through its own line on
-    `queue`; it holds no line on the master (one level per target: the master's own
-    target is its `create` line)."""
+    A worker is a PAIR (#632): the chat `<p><k>_worker` (`ai_chat.tools`), which takes
+    the task through `send` and completes each turn through the provider its
+    `provider_id` names, and that provider `<p><k>_worker_prov`, created UNDER the chat
+    so the chat reaches it by position. `worker_chat` / `worker_provider` are the record
+    fields each half gets verbatim (the chat's handler, memory store and window; the
+    plug's handler, endpoint, key reference, memory store); neither carries `id`,
+    `parent_id`, `provider_id`, `model` or `can` — the prompt names the first four and
+    the master's `create` line forces each `can`. `test_command` is the argv the
+    group's runner may start. A worker reaches its provider, editor and runner by
+    position (they are created under it) and reports into the queue through its own
+    line on `queue`; it holds no line on the master (one level per target: the
+    master's own target is its `create` line)."""
     p = group_prefix
     cmd = test_command or ["python", "-m", "pytest", "-q"]
     start = json.dumps({"type": "start", "command": cmd[0], "args": cmd[1:]})
-    fields = json.dumps(worker_record or {}, sort_keys=True)
+    chat_fields = json.dumps(worker_chat or {}, sort_keys=True)
+    prov_fields = json.dumps(worker_provider or {}, sort_keys=True)
     return (
         "You are the MASTER. You finish a queue of coding tasks by running worker "
         "groups. You never write code yourself.\n\n"
@@ -61,13 +69,18 @@ def master_prompt(
         f"THE QUEUE: one folder per task under `{queue_dir}`. Read it with the file "
         "agent `queue` (verb `list`, then `read` the task's README.task.md). Each "
         "folder holds a stub and its test file.\n\n"
-        f"A GROUP k (k = 1, 2, 3, … one new k per task, never reused) is three agents "
+        f"A GROUP k (k = 1, 2, 3, … one new k per task, never reused) is four agents "
         f"you create with `create_agent` to `kernel`, in this order (an agent reaches "
-        f"the agents below it with no line, so the editor and runner go UNDER the "
-        f"worker):\n"
-        f"  `{p}<k>_worker`: `parent_id` = your own id. An AI: copy these fields "
-        f"verbatim: {fields}; set `model` = `{worker_model}`. Its `can` is set for "
-        f"you (the memory store, and `queue` for its report).\n"
+        f"the agents below it with no line, so the provider, the editor and the runner "
+        f"go UNDER the worker):\n"
+        f"  `{p}<k>_worker`: the worker, an AI chat: it takes the task through `send` "
+        f"and answers through its provider. `parent_id` = your own id; copy these "
+        f"fields verbatim: {chat_fields}; set `model` = `{worker_model}` and "
+        f"`provider_id` = `{p}<k>_worker_prov`. Its `can` is set for you (the memory "
+        f"store, and `queue` for its report).\n"
+        f"  `{p}<k>_worker_prov`: the worker's provider, the agent its `provider_id` "
+        f"names, which completes each of its turns. `parent_id` = `{p}<k>_worker`; "
+        f"copy these fields verbatim: {prov_fields}. Its `can` is set for you.\n"
         f"  `{p}<k>_editor`: `parent_id` = `{p}<k>_worker`, handler_module "
         f"`file_bridge.tools`, root `{queue_dir}/<task>`, allow [\".\"].\n"
         f"  `{p}<k>_runner`: `parent_id` = `{p}<k>_worker`, handler_module "
@@ -77,7 +90,7 @@ def master_prompt(
         "`status` with its job_id until it is not running, `tail` for the output).\n\n"
         "THE RECIPE, repeat until the queue is empty:\n"
         f"  1. While live groups < {max_groups} and tasks are left: create the next "
-        "group (one batch of three `create_agent`), then `send` its worker the task "
+        "group (one batch of four `create_agent`), then `send` its worker the task "
         "(the task's instructions, its stub and test file names, the editor and "
         "runner ids, the start payload, and: never edit the test file; when the "
         "suite exits 0, write the line `DONE <task>` to `<task>/DONE.md` through "
@@ -87,7 +100,7 @@ def master_prompt(
         "  3. Check it: start the suite on that group's runner yourself and poll it. "
         "Green: the task is finished. Red: `send` the worker the failure once more.\n"
         f"  4. Delete the finished group: `delete_agent` its worker to `kernel` (its "
-        "editor and runner go with it), then go to 1.\n"
+        "provider, editor and runner go with it), then go to 1.\n"
         "When every task is finished and no group is alive, say ALL DONE and call "
         "`done`."
     )

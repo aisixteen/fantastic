@@ -22,7 +22,7 @@
 use serde_json::{json, Map, Value};
 use std::sync::OnceLock;
 
-use crate::refusal::{refusal_hint, with, BAD_ARG, MISSING_ARG, UNHANDLED};
+use crate::refusal::{refusal_hint, with, BAD_ARG, MISSING_ARG, RESERVED_ID, UNHANDLED};
 
 #[doc(hidden)]
 pub use schemars;
@@ -1319,6 +1319,17 @@ pub fn unparsed(verb: &str, why: &str) -> Value {
 /// `answers` are the verb names the agent takes.
 #[must_use]
 pub fn unknown_verb(agent: &str, verb: &Value, answers: &[&str]) -> Value {
+    // The line a TREE VERB acts by (`create`/`update`/`delete`) sent to an agent:
+    // the root's verb, on that agent as its operand. The tree verbs themselves
+    // never get here — `send` answers them `not_here` before any handler runs.
+    let hint = match verb.as_str() {
+        Some("create") => {
+            format!("create_agent goes to `{RESERVED_ID}`, with parent_id={agent}")
+        }
+        Some("update") => format!("update_agent goes to `{RESERVED_ID}`, with id={agent}"),
+        Some("delete") => format!("delete_agent goes to `{RESERVED_ID}`, with id={agent}"),
+        _ => format!("reflect {agent} tier=detailed lists each verb's arguments"),
+    };
     let mut r = refusal_hint(
         UNHANDLED,
         format!(
@@ -1326,7 +1337,7 @@ pub fn unknown_verb(agent: &str, verb: &Value, answers: &[&str]) -> Value {
             fantastic_bundle::py_repr_value(verb),
             answers.join(", ")
         ),
-        format!("reflect {agent} tier=detailed lists each verb's arguments"),
+        hint,
     );
     with(&mut r, "verb", verb.clone());
     r

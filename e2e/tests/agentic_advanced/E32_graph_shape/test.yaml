@@ -9,6 +9,8 @@ runner: probe.py
 # REST. The Python product keeps the old grant model (#170).
 runtimes: [rust]
 costs: turns
+# 30 min: it builds live agents and plans long; the 15 min default stopped a run mid-build.
+hard_stop_minutes: 30
 limits:
   idle_seconds: 60
   max_turns: 50
