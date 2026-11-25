@@ -136,48 +136,15 @@ pub fn home_dir_from_env() -> Result<PathBuf, String> {
     }
 }
 
-/// How a saved set-up's record is judged before it is written: `(kernel, handler_module,
-/// fields)` → the refusal. A set-up is a record to be born, so the judge is the create's
-/// check. The binary that makes agents from set-ups names its own when one set-up is born
-/// as more than one record (an AI: a provider and its chat); [`by_bundle`] otherwise.
-pub type SetupCheck = fn(&Kernel, &str, &serde_json::Map<String, Value>) -> Result<(), Value>;
-
-/// The default [`SetupCheck`]: the handler's bundle judges every field as its create would
-/// (`Bundle::check_record`).
-pub fn by_bundle(
-    kernel: &Kernel,
-    hm: &str,
-    fields: &serde_json::Map<String, Value>,
-) -> Result<(), Value> {
-    let Some(bundle) = kernel.bundles.get(hm) else {
-        return Err(refusal(
-            INVALID_META,
-            format!("persist_record: no bundle {hm:?} is linked into this build"),
-        ));
-    };
-    bundle.check_record("create_agent", fields)
-}
-
 /// The saved set-up part of the home store. Construct it with its dir.
 pub struct UserHomeStore {
     home: Result<PathBuf, String>,
-    check: SetupCheck,
 }
 
 impl UserHomeStore {
-    /// `home`: the resolved dir (or why there is none). Set-ups are judged [`by_bundle`]
-    /// until [`UserHomeStore::with_check`] names another judge.
+    /// `home`: the resolved dir (or why there is none).
     pub fn new(home: Result<PathBuf, String>) -> Self {
-        Self {
-            home,
-            check: by_bundle,
-        }
-    }
-
-    /// The same store, its set-ups judged by `check`.
-    pub fn with_check(mut self, check: SetupCheck) -> Self {
-        self.check = check;
-        self
+        Self { home }
     }
 
     /// The saved set-ups dir for a READ: `None` when nothing was ever saved — a
@@ -261,15 +228,18 @@ impl UserHomeStore {
     pub(crate) fn persist(&self, a: verbs::PersistRecord, kernel: &Arc<Kernel>) -> Result<Value, Value> {
         let name = a.name;
         let hm = a.record.handler_module.as_str();
-        // A saved set-up is checked against the DECLARED RECORD it is born as (the same
-        // declaration its create is checked with, by the bundle's own shared entry —
-        // [`SetupCheck`]): every field known and of its type, and the required ones
-        // present (a saved set-up is a record to be born: the create's check).
+        let Some(bundle) = kernel.bundles.get(hm) else {
+            return Err(refusal(INVALID_META, format!("persist_record: no bundle {hm:?} is linked into this build")));
+        };
+        // A saved set-up is checked against the bundle's DECLARED RECORD (the same
+        // declaration its create is checked with, by the bundle's own shared entry):
+        // every field known and of its type, and the required ones present (a saved
+        // set-up is a record to be born: the create's check).
         // `memory_store_id` is required by a backend's record but is never saved (NOT_SAVED: the
         // creator adds it), so the check sees it present, as the creator's create will
         let mut probe = a.record.rest.clone();
         probe.insert("memory_store_id".into(), Value::String(String::new()));
-        (self.check)(kernel, hm, &probe)?;
+        bundle.check_record("create_agent", &probe)?;
         let path = self.saved_for_write()?.join(format!("{name}.yaml"));
         let now = read_private(&path)?.map(|b| version(&b));
         if let Some(want) = a.if_match.as_deref() {

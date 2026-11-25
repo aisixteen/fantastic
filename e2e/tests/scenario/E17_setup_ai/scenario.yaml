@@ -235,6 +235,8 @@ runs:
       files_exist:
         - .fantastic/agents/user/agents/vllm-1/agent.yaml
         - home/user/setups/ai_agent/vllm-1.yaml
+        # its chat share (knobs), judged by the chat: an AI set-up is saved as two records
+        - home/user/setups/ai_agent/vllm-1__chat.yaml
       # the key the page stored IS the configured one (compared, never printed)
       key_stored_is: VLLM_API_KEY
 

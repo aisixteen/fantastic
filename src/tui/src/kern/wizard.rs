@@ -105,13 +105,12 @@ mod tests {
     const VLLM: &str = fantastic_vllm_backend::HANDLER_MODULE;
 
     /// A host with the real vLLM backend, the real chat, and the user's home (`home` under
-    /// `user`, its set-ups judged as the shell judges them) in `dir`.
+    /// `user`) in `dir`.
     fn host(dir: &std::path::Path) -> Host {
         let mut k = Kernel::new();
         k.bundles.register(
             user_store::HANDLER_MODULE,
-            UserStore::new(Ok(dir.join("home")), dir.join("project"))
-                .with_setup_check(crate::kern::setup::check_set_up),
+            UserStore::new(Ok(dir.join("home")), dir.join("project")),
         );
         k.bundles.register(VLLM, fantastic_vllm_backend::VllmBundle);
         k.bundles.register(
@@ -152,10 +151,11 @@ mod tests {
     }
 
     /// E17: the wizard's page-2 texts with request knobs set (#632: the chat's) are saved as
-    /// one set-up, and that set-up splits as the pair is made — every knob on the chat's
-    /// share, none on the provider's. The backend's record alone refuses the knob.
+    /// TWO records, each judged by its own bundle: the provider's share under the name, the
+    /// chat's under `<name>__chat`. The shelf shows them as one set-up, every knob on the
+    /// chat's record and none on the provider's; forgetting it forgets both.
     #[tokio::test]
-    async fn the_wizard_saves_a_set_up_with_knobs_and_they_split_onto_the_chat() {
+    async fn the_wizard_saves_a_set_up_with_knobs_as_two_records() {
         let dir = std::env::temp_dir().join(format!("fc-wizard-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -174,42 +174,27 @@ mod tests {
         super::save_edit(&h, "vllm-1", VLLM, &texts, None)
             .await
             .expect("the set-up is saved");
-        let shelf = crate::kern::saved::shelf(&h).await.unwrap();
-        let saved = &shelf
-            .saved
-            .iter()
-            .find(|s| s.name == "vllm-1")
-            .expect("saved under its name")
-            .record;
-        assert_eq!(
-            (
-                saved["reasoning_effort"].clone(),
-                saved["min_p"].clone(),
-                saved["max_tokens"].clone()
-            ),
-            (json!("medium"), json!(0.05), json!(4096))
-        );
-        let mut fields = saved.clone();
-        fields.remove("handler_module");
-        let (provider, chat) = crate::kern::backend::split(&fields);
+        let read = |n: &str| {
+            let p = dir.join("home").join("user").join("setups").join("ai_agent").join(format!("{n}.yaml"));
+            std::fs::read_to_string(&p).unwrap_or_default()
+        };
+        let (provider, chat) = (read("vllm-1"), read("vllm-1__chat"));
+        assert!(provider.contains(VLLM), "the provider's record: {provider}");
+        assert!(chat.contains(fantastic_ai_core::chat_bundle::HANDLER_MODULE), "the chat's record: {chat}");
         for k in ["reasoning_effort", "min_p", "max_tokens"] {
-            assert_eq!(chat.get(k), saved.get(k), "{k} on the chat's share");
-            assert!(
-                provider.get(k).is_none(),
-                "{k} leaked to the provider: {provider:?}"
-            );
+            assert!(chat.contains(k), "{k} on the chat's record: {chat}");
+            assert!(!provider.contains(k), "{k} leaked to the provider: {provider}");
         }
-        // the backend's own record still refuses a knob
-        let mut probe = fields.clone();
-        probe.insert("memory_store_id".into(), json!("memory"));
-        let refused = fantastic_user_home_store::by_bundle(&h.kernel, VLLM, &probe).unwrap_err();
-        assert!(
-            refused["error"]
-                .as_str()
-                .unwrap_or("")
-                .contains("has no record field"),
-            "{refused}"
+        let shelf = crate::kern::saved::shelf(&h).await.unwrap();
+        assert_eq!(shelf.saved.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), vec!["vllm-1"], "one set-up");
+        let saved = &shelf.saved[0].record;
+        assert_eq!(
+            (saved["reasoning_effort"].clone(), saved["min_p"].clone(), saved["max_tokens"].clone(), saved["handler_module"].clone()),
+            (json!("medium"), json!(0.05), json!(4096), json!(VLLM))
         );
+        crate::kern::saved::forget(&h, "vllm-1").await.expect("forgotten");
+        assert!(read("vllm-1").is_empty() && read("vllm-1__chat").is_empty(), "both records forgotten");
+        assert!(crate::kern::saved::save(&h, "x__chat", json!({"handler_module": VLLM})).await.is_err(), "the suffix is reserved");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

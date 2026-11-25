@@ -8,6 +8,12 @@
 //! backend, model and endpoint. It never carries an id, a memory store or
 //! lines — whoever creates an agent from it adds those. Nothing is a default
 //! until the human makes one (`prefer`).
+//!
+//! An AI set-up is born as TWO records (a provider and its chat, `make_ai`), so it is
+//! SAVED as two: `<name>` holds the provider's share (judged by the backend) and
+//! `<name>__chat` the chat's share (its settings and request knobs, judged by the chat),
+//! split as the pair is (`kern::backend::split`). Each record is checked by its own
+//! bundle, as every saved record is. [`shelf`] shows them as one set-up again.
 
 use serde_json::{json, Map, Value};
 
@@ -15,6 +21,13 @@ use crate::kern::host::Host;
 
 /// The home store's agent id (the blueprint's).
 pub const HOME_ID: &str = "home";
+
+/// The suffix of the record that holds an AI set-up's chat share.
+pub const CHAT_SUFFIX: &str = "__chat";
+
+fn chat_name(name: &str) -> String {
+    format!("{name}{CHAT_SUFFIX}")
+}
 
 /// One saved set-up.
 #[derive(Debug, Clone, PartialEq)]
@@ -72,7 +85,18 @@ pub async fn shelf(host: &Host) -> Result<Shelf, String> {
                 record: t.get("record")?.as_object()?.clone(),
             })
         })
-        .collect();
+        .collect::<Vec<Saved>>();
+    // an AI set-up's chat share is shown on its set-up, never as one of its own
+    let (chats, mut saved): (Vec<Saved>, Vec<Saved>) = saved.into_iter().partition(|s| s.name.ends_with(CHAT_SUFFIX));
+    for s in &mut saved {
+        if let Some(c) = chats.iter().find(|c| c.name == chat_name(&s.name)) {
+            for (k, v) in &c.record {
+                if k != "handler_module" {
+                    s.record.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
     Ok(Shelf {
         saved,
         preferred: r["preferred"].as_str().map(str::to_string),
@@ -80,12 +104,54 @@ pub async fn shelf(host: &Host) -> Result<Shelf, String> {
     })
 }
 
-/// Save `record` as saved set-up `name`. Returns where it was written.
+/// Save `record` as saved set-up `name`. Returns where it was written. An AI set-up (a
+/// backend's) is written as its two records; a set-up with no chat share leaves none.
 pub async fn save(host: &Host, name: &str, record: Value) -> Result<String, String> {
+    if name.ends_with(CHAT_SUFFIX) {
+        return Err(format!("a set-up name may not end in {CHAT_SUFFIX:?}"));
+    }
+    let Value::Object(mut record) = record else {
+        return persist(host, name, record).await;
+    };
+    let handler = record.get("handler_module").and_then(Value::as_str).unwrap_or("").to_string();
+    let is_ai = host.kernel.bundles.catalog().any(|(m, b)| m == handler && crate::kern::setup::is_backend(b));
+    if !is_ai {
+        return persist(host, name, Value::Object(record)).await;
+    }
+    record.remove("handler_module");
+    let (mut provider, mut chat) = crate::kern::backend::split(&record);
+    let has_chat = chat.keys().any(|k| !provider.contains_key(k));
+    provider.insert("handler_module".into(), json!(handler));
+    let path = persist(host, name, Value::Object(provider)).await?;
+    if has_chat {
+        chat.insert("handler_module".into(), json!(fantastic_ai_core::chat_bundle::HANDLER_MODULE));
+        persist(host, &chat_name(name), Value::Object(chat)).await?;
+    } else {
+        forget_one(host, &chat_name(name), true).await?;
+    }
+    Ok(path)
+}
+
+async fn persist(host: &Host, name: &str, record: Value) -> Result<String, String> {
     let r = host.operator(HOME_ID, json!({"type": "persist_record", "name": name, "record": record})).await.result;
     match err_of(&r) {
         Some(e) => Err(e),
         None => Ok(r["path"].as_str().unwrap_or("").to_string()),
+    }
+}
+
+/// Forget saved set-up `name`, its chat share with it.
+pub async fn forget(host: &Host, name: &str) -> Result<(), String> {
+    forget_one(host, name, false).await?;
+    forget_one(host, &chat_name(name), true).await
+}
+
+async fn forget_one(host: &Host, name: &str, if_any: bool) -> Result<(), String> {
+    let r = host.operator(HOME_ID, json!({"type": "forget_record", "name": name})).await.result;
+    match err_of(&r) {
+        Some(_) if if_any && r.get("reason").and_then(Value::as_str) == Some(fantastic_kernel::refusal::NOT_FOUND) => Ok(()),
+        Some(e) => Err(e),
+        None => Ok(()),
     }
 }
 
