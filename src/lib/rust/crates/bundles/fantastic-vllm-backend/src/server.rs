@@ -43,12 +43,15 @@ const INFO: &str = "vllm:cache_config_info";
 pub struct ServerReadError {
     pub field: String,
     pub message: String,
+    /// The endpoint's HTTP status, when it answered one (`provider::read_reason`).
+    pub status: Option<u16>,
 }
 
 fn fail(field: &str, message: String) -> ServerReadError {
     ServerReadError {
         field: field.to_string(),
         message,
+        status: None,
     }
 }
 
@@ -99,13 +102,16 @@ async fn get(
     let resp = req.send().await.map_err(|_| unreachable())?;
     let status = resp.status().as_u16();
     if status != 200 {
-        return Err(fail(
-            field,
-            format!(
-                "{field}: GET {url} answered HTTP {status} — the server (or a door in \
-                 front of it) does not serve it; set {field} on the record"
-            ),
-        ));
+        return Err(ServerReadError {
+            status: Some(status),
+            ..fail(
+                field,
+                format!(
+                    "{field}: GET {url} answered HTTP {status} — the server (or a door in \
+                     front of it) does not serve it; set {field} on the record"
+                ),
+            )
+        });
     }
     resp.text().await.map_err(|_| unreachable())
 }
@@ -362,7 +368,13 @@ pub async fn resolve(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Option<Value> 
     let values = match read(&rec, &key).await {
         Ok(v) => v,
         Err(e) => {
-            let mut r = refusal(BAD_ARG, e.message);
+            // a key the store refuses is permanent too: no retry mends it
+            let reason = if e.field == "credentials" {
+                fantastic_kernel::refusal::UNAUTHORIZED
+            } else {
+                fantastic_ai_core::provider::read_reason(e.status)
+            };
+            let mut r = refusal(reason, e.message);
             with(&mut r, "arg", json!(e.field));
             return Some(r);
         }

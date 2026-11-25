@@ -50,12 +50,15 @@ pub struct ServerReadError {
     pub field: String,
     /// The refusal text.
     pub message: String,
+    /// The API's HTTP status, when it answered one (`provider::read_reason`).
+    pub status: Option<u16>,
 }
 
 fn fail(field: &str, message: String) -> ServerReadError {
     ServerReadError {
         field: field.to_string(),
         message,
+        status: None,
     }
 }
 
@@ -198,10 +201,13 @@ pub async fn read(
         } else {
             ""
         };
-        return Err(fail(
-            first,
-            format!("{first}: GET {url} answered HTTP {code}{why}; set {first} on the record"),
-        ));
+        return Err(ServerReadError {
+            status: Some(code),
+            ..fail(
+                first,
+                format!("{first}: GET {url} answered HTTP {code}{why}; set {first} on the record"),
+            )
+        });
     }
     let body = resp.text().await.map_err(|_| unreachable())?;
     let entry = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
@@ -281,7 +287,13 @@ pub async fn resolve(
     let mut values = match read(&rec, &key).await {
         Ok(v) => v,
         Err(e) => {
-            let mut r = refusal(BAD_ARG, e.message);
+            // a key the store refuses is permanent too: no retry mends it
+            let reason = if e.field == "credentials" {
+                fantastic_kernel::refusal::UNAUTHORIZED
+            } else {
+                fantastic_ai_core::provider::read_reason(e.status)
+            };
+            let mut r = refusal(reason, e.message);
             with(&mut r, "arg", json!(e.field));
             return Err(r);
         }

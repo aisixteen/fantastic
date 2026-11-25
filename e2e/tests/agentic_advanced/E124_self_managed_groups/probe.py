@@ -43,7 +43,7 @@ sys.path.insert(
     ),
 )
 from backends import backend as _resolve_backend  # noqa: E402
-from helpers import Limits, add_lines, connect, lines, memory, probe_agent, relay, verdict  # noqa: E402
+from helpers import Limits, add_lines, connect, creds, lines, memory, probe_agent, relay, verdict  # noqa: E402
 from helpers.lines import is_unknown  # noqa: E402
 from helpers.ai import CHAT_MODULE, IDLE_END, QuietWatch, chat_pair  # noqa: E402
 from helpers.groups import PRACTICE, GroupLedger, group_of, make_queue, master_prompt, wall_seconds  # noqa: E402
@@ -129,8 +129,19 @@ def worker_can() -> dict:
     """The `can` every worker CHAT carries, forced by the master's `create` line: the
     memory store its conversation lives in and the queue it reports into. Its provider
     is below it (reached by position) and holds the key; no line on the master (O14):
-    one level per target, and the master's own target is its `create` line."""
-    return {memory.MEMORY: lines.ALL, QUEUE: lines.ALL}
+    one level per target, and the master's own target is its `create` line.
+
+    THE KEY LINE (owner option 1, as E31): when the provider holds the key store's `get`,
+    every ancestor of it must hold that line too, or the ancestor cap cuts it — so the
+    chat above the provider carries it, and the master holds it to hand it down."""
+    can = {memory.MEMORY: lines.ALL, QUEUE: lines.ALL}
+    return {**can, **key_line()}
+
+
+def key_line() -> dict:
+    """The key store's `get` when the plug has a key (the provider's forced line names
+    it), else nothing."""
+    return {creds.CREDS: creds.GET} if creds.CREDS in worker_pair()[0]["can"] else {}
 
 
 def provider_can() -> dict:
@@ -145,7 +156,7 @@ def master_lines() -> dict:
     (the worker chat, its provider, the editor, the runner), with exactly the fields
     the recipe sets (every field a create carries must be named by the line)."""
     prov = BK.record(role="worker").get("handler_module")
-    return {MASTER: lines.create(
+    return {**key_line(), MASTER: lines.create(
         who=(f"{PREFIX}*",),
         what={CHAT_MODULE: {"*": "*", "can": worker_can()},
               prov: {"*": "*", "can": provider_can()},

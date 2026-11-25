@@ -213,9 +213,11 @@ async fn a_complete_the_server_cannot_answer_is_refused() {
         json!({"type": "complete", "rid": "r1", "messages": [{"role": "user", "content": "hi"}]}),
     )
     .await;
+    // a 404 is permanent through the shared classifier (`provider::read_reason`): the
+    // chain gives up at once instead of re-reading every pass; the field is still named
     assert_eq!(
         (&r["reason"], &r["arg"]),
-        (&json!("bad_arg"), &json!("model")),
+        (&json!("not_found"), &json!("model")),
         "{r}"
     );
     let rec = helpers::agent_meta(&AgentId::from("o1"), &kernel);
@@ -267,4 +269,22 @@ async fn the_key_rides_the_chat_only_when_set() {
         let last = seen(&srv).await.pop().expect("a request");
         assert_eq!(last.1.as_deref(), want);
     }
+}
+
+/// A key the server refuses (401) on the pre-turn `/api/tags` read is PERMANENT through the
+/// shared classifier (`provider::read_reason`).
+#[tokio::test]
+async fn a_refused_key_on_the_model_read_is_permanent() {
+    let srv = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/tags"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&srv)
+        .await;
+    let (status, _) = server::read_model_at(&srv.uri(), &NoKey).await.unwrap_err();
+    assert_eq!(status, Some(401));
+    assert_eq!(
+        fantastic_ai_core::provider::read_reason(status),
+        fantastic_kernel::refusal::UNAUTHORIZED
+    );
 }
