@@ -175,8 +175,9 @@ const STORE_VERBS: [&str; 3] = ["append", "read", "copy"];
 /// new chat cell gets"). The canvas hands it out from its own self line (Q50).
 const PARENT_VERBS: [&str; 1] = ["send"];
 
-/// What a chat calls on the project's system block (the `prompt_file` view).
-const PROMPT_VERBS: [&str; 1] = ["read"];
+/// What a chat calls on the project's system block (the `prompt_file` view): the
+/// verbs the lib's prompt loader sends it — its text (`read`) and its changes (`watch`).
+const PROMPT_VERBS: [&str; 2] = ["read", "watch"];
 
 /// The bundle.
 #[derive(Default)]
@@ -1570,9 +1571,9 @@ pub(crate) mod create_tests {
         assert_eq!(chat["can"]["helper_provider"], json!({"call": ["complete", "watch", "capabilities"]}));
         assert!(chat["can"].get("credentials").is_none());
         assert!(chat.get("callable_by").is_none(), "no target keeps a list of callers");
-        // the lines a new chat cell gets: its canvas's `send`, the system block's `read`
+        // the lines a new chat cell gets: its canvas's `send`, the system block's `read` and `watch`
         assert_eq!(chat["can"]["$parent"], json!({"call": ["send"]}));
-        assert_eq!(chat["can"]["prompt_file"], json!({"call": ["read"]}));
+        assert_eq!(chat["can"]["prompt_file"], json!({"call": ["read", "watch"]}));
         // the lines the ASKER supplied, apart: the caller's (winning a clash) and the peer's
         assert_eq!(
             Value::Object(asked),

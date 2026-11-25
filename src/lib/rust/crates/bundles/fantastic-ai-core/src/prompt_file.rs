@@ -1,17 +1,15 @@
 //! The system block from a FILE: the record's `file_bridge_id`
-//! names the file_bridge this agent reads files THROUGH, `system_prompt_file` a
-//! path on it. Not set → nothing is looked up (the default block). Set and unusable
-//! → [`PromptFileError`]: the turn fails loud, never another block. Python
-//! `ai_core/prompt_file.py`, text for text.
+//! names the file VIEW this agent reads it THROUGH, `system_prompt_file` the view's
+//! own path. Not set → nothing is looked up (the default block). Set and unusable
+//! → [`PromptFileError`]: the turn fails loud, never another block.
 //!
-//! The agent reads the file through that bridge, AS ITSELF — every read and watch
-//! is its own gated send, so its own `can` holds a line on the bridge (`read_stream`,
-//! `watch_path`, `unwatch_path`, `watch`).
-//! It holds the path under the bridge's disk watcher (`watch_path`) and watches the
-//! bridge through a private inbox: a `changed` event for the path marks the text
-//! STALE, and the next turn reads it again — no restart, and no read on a turn
+//! The agent reads the file through that view, AS ITSELF, with the view's own verbs
+//! only — every read and watch is its own gated send, so its own `can` holds a line
+//! on the view (`read`, `watch`). It watches the view through a private inbox and
+//! arms the view's change relay (`watch`): a `changed` event for the path marks the
+//! text STALE, and the next turn reads it again — no restart, and no read on a turn
 //! nothing changed. RAM only: armed on the first turn that needs it, re-armed when
-//! the record names another bridge or path, dropped when either field is cleared
+//! the record names another view or path, dropped when either field is cleared
 //! or the agent deleted. The reason a set file is unusable is also the agent's
 //! `system_prompt_file_error` until a read succeeds.
 
@@ -56,12 +54,13 @@ fn named<'a>(meta: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     meta.get(key)?.as_str()
 }
 
-/// `(file_bridge_id, system_prompt_file)` when the record names both, or `None`.
+/// `(file_bridge_id, system_prompt_file)` — the view and its path — when the record
+/// names both, or `None`.
 #[must_use]
 pub fn ref_of(meta: &Map<String, Value>) -> Option<(String, String)> {
-    let bridge = named(meta, "file_bridge_id")?;
+    let view = named(meta, "file_bridge_id")?;
     let path = named(meta, "system_prompt_file")?;
-    Some((bridge.to_string(), path.to_string()))
+    Some((view.to_string(), path.to_string()))
 }
 
 /// Why the file is not this agent's block right now, or `None`.
@@ -116,7 +115,7 @@ pub async fn text(
         if let Some(path) = named(&meta, "system_prompt_file") {
             return Err(PromptFileError(format!(
                 "{self_id}: system_prompt_file {} is set but the record has no file_bridge_id \
-                 — name the file_bridge it is read through",
+                 — name the file view it is read through",
                 py_repr(path)
             )));
         }
@@ -179,8 +178,10 @@ fn failed(status: Status, res: &Value) -> bool {
         || res.get("error").is_some_and(|e| !e.is_null())
 }
 
+/// Watch the view (its events reach a private inbox), then arm its change relay
+/// (`watch`) — the watch first, so no change between the two is missed.
 async fn arm(self_id: &AgentId, kernel: &Arc<Kernel>, file: (String, String)) {
-    let (bridge, path) = file.clone();
+    let (view, path) = file.clone();
     let inbox = AgentId::from(format!("{}/prompt_file", self_id.as_str()));
     let stale = Arc::new(AtomicBool::new(true));
     files().lock().expect("prompt files").insert(
@@ -203,27 +204,21 @@ async fn arm(self_id: &AgentId, kernel: &Arc<Kernel>, file: (String, String)) {
             st.error = Some(e);
         }
     };
-    let (status, res) = send(kernel, &bridge, json!({"type": "watch_path", "path": path})).await;
-    if failed(status, &res) {
-        set_error(format!("{bridge} watch_path {path}: {}", why(status, &res)));
-        return;
-    }
+    let view_id = AgentId::from(view.as_str());
     let mut rx = kernel.ensure_inbox(&inbox);
-    if let Some(denial) = kernel
-        .watch(&AgentId::from(bridge.as_str()), inbox.clone())
-        .await
-    {
+    if let Some(denial) = kernel.watch(&view_id, inbox.clone()).await {
         kernel.remove_inbox(&inbox);
         set_error(format!(
-            "{bridge} watch: {}",
+            "{view} watch: {}",
             fantastic_kernel::refusal::error_text(&denial).unwrap_or_default()
         ));
-        let _ = send(
-            kernel,
-            &bridge,
-            json!({"type": "unwatch_path", "path": path}),
-        )
-        .await;
+        return;
+    }
+    let (status, res) = send(kernel, &view, json!({"type": "watch"})).await;
+    if failed(status, &res) {
+        kernel.unwatch(&view_id, &inbox).await;
+        kernel.remove_inbox(&inbox);
+        set_error(format!("{view} watch {path}: {}", why(status, &res)));
         return;
     }
     let norm = normpath(&path);
@@ -287,19 +282,45 @@ pub(crate) async fn read_bytes(
     Ok(bytes)
 }
 
-/// The whole file through `read_stream`, as utf-8 → (text, None) or (None, why).
-async fn read(kernel: &Arc<Kernel>, bridge: &str, path: &str) -> (Option<String>, Option<String>) {
-    let bytes = match read_bytes(kernel, bridge, path).await {
-        Ok(b) => b,
-        Err(why) => return (None, Some(why)),
+/// The whole file through the view's `read`, page by page: its lines joined again,
+/// with the trailing newline it had → (text, None) or (None, why). The view refuses
+/// a binary or non-utf-8 file itself.
+async fn read(kernel: &Arc<Kernel>, view: &str, path: &str) -> (Option<String>, Option<String>) {
+    let mut lines: Vec<String> = Vec::new();
+    let newline = loop {
+        let offset = lines.len();
+        let (status, res) = send(
+            kernel,
+            view,
+            json!({"type": "read", "path": path, "offset": offset}),
+        )
+        .await;
+        if failed(status, &res) {
+            return (
+                None,
+                Some(format!("{view} read {path}: {}", why(status, &res))),
+            );
+        }
+        let page = res.get("lines").and_then(Value::as_array);
+        lines.extend(
+            page.into_iter()
+                .flatten()
+                .filter_map(|l| l.get("text").and_then(Value::as_str))
+                .map(str::to_string),
+        );
+        if res.get("eof").and_then(Value::as_bool) == Some(true) || lines.len() == offset {
+            break res.get("newline").and_then(Value::as_bool) == Some(true);
+        }
     };
-    match String::from_utf8(bytes) {
-        Ok(t) => (Some(t), None),
-        Err(e) => (None, Some(format!("{bridge} {path}: not utf-8 ({e})"))),
+    let mut text = lines.join("\n");
+    if newline {
+        text.push('\n');
     }
+    (Some(text), None)
 }
 
-/// Stop watching: the drain task, the watch, the inbox, the bridge's path hold.
+/// Stop watching: the drain task, the watch on the view, the inbox. The view's own
+/// relay is the view's (it ends with the view).
 pub async fn drop_file(self_id: &AgentId, kernel: &Arc<Kernel>) {
     let Some(st) = files()
         .lock()
@@ -308,18 +329,11 @@ pub async fn drop_file(self_id: &AgentId, kernel: &Arc<Kernel>) {
     else {
         return;
     };
-    let (bridge, path) = st.file;
     if let Some(tid) = st.task {
         kernel.cancel_task(&tid).await;
         kernel
-            .unwatch(&AgentId::from(bridge.as_str()), &st.inbox)
+            .unwatch(&AgentId::from(st.file.0.as_str()), &st.inbox)
             .await;
         kernel.remove_inbox(&st.inbox);
-        let _ = send(
-            kernel,
-            &bridge,
-            json!({"type": "unwatch_path", "path": path}),
-        )
-        .await;
     }
 }
