@@ -452,6 +452,163 @@ async fn retry_leaves_no_trace() {
     }
 }
 
+/// A malformed attempt of `kind` that the reader still refuses: for `default` a call
+/// wrapped in `<tool_call>`, for `hermes` a body both in the JSON and in a block.
+fn still_malformed(kind: &str) -> String {
+    if kind == HERMES {
+        format!(
+            "<tool_call>\n{}\n<bytes>a</bytes>\n</tool_call>",
+            r#"{"name": "send", "arguments": {"routing": {"target_id": "notes"}, "payload": {"type": "write", "bytes": "x"}}}"#
+        )
+    } else {
+        "<tool_call>\n<call name=\"done\"></call>\n</tool_call>".to_string()
+    }
+}
+
+/// The report of `kind`'s reader for the whole answer `text`.
+fn report_of(kind: &str, text: &str) -> String {
+    if kind == HERMES {
+        hermes_report(text)
+    } else {
+        default_report(text)
+    }
+    .expect("the reader fails it")
+}
+
+/// A `done` status whose reason is `cancelled`.
+fn is_cancelled(v: &Value) -> bool {
+    is_status(v, "done") && v["detail"]["reason"] == json!("cancelled")
+}
+
+/// A malformed attempt, then a good one (the first GPU run, #766): the events the e2e
+/// harness reads are `retrying` with the error, then `streaming`, then `done` with
+/// reason `ok`; no `failed`, no cancel. Exactly two requests, the second carrying the
+/// re-ask pair; the stored answer is attempt 2's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_then_reask_completes() {
+    for kind in ["default", HERMES] {
+        let tmp = TempDir::new().unwrap();
+        let (kernel, backend) = mk_kernel(&tmp, &format!("tr_reask_{kind}")).await;
+        let bad = still_malformed(kind);
+        // the internal `done` as the reader gives it back, for either type
+        let done_call = crate::tool_parse::render_call("done", &Map::new());
+        let good = if kind == HERMES {
+            set_model(&kernel, &backend, QWEN).await;
+            hermes(&done_call)
+        } else {
+            done_call.clone()
+        };
+        let report = report_of(kind, &bad);
+        let model = if kind == HERMES { QWEN } else { PLAIN };
+        let s = script_as(&backend, model, vec![pass(&bad), pass(&good)]);
+        let mut rx = watch(&kernel, &backend).await;
+        send_go(&kernel, &backend).await;
+        let evs = events_until(&mut rx, |v| is_status(v, "done")).await;
+        let retry = evs
+            .iter()
+            .position(|v| is_status(v, "retrying"))
+            .unwrap_or_else(|| panic!("{kind}: no retrying status: {evs:#?}"));
+        let d = &evs[retry]["detail"];
+        assert_eq!(d["attempt"], json!(1), "{kind}: {d}");
+        assert_eq!(d["kind"], json!("call"), "{kind}: {d}");
+        assert_eq!(
+            d["error"],
+            json!(report.lines().next().unwrap_or_default()),
+            "{kind}: {d}"
+        );
+        let streaming = evs[retry..]
+            .iter()
+            .position(|v| is_status(v, "streaming"))
+            .map(|i| retry + i)
+            .unwrap_or_else(|| panic!("{kind}: no streaming after the retry: {evs:#?}"));
+        let done = evs
+            .iter()
+            .position(|v| is_status(v, "done"))
+            .unwrap_or_else(|| panic!("{kind}: the call never ended: {evs:#?}"));
+        assert!(retry < streaming && streaming < done, "{kind}: {evs:#?}");
+        assert_eq!(
+            evs[done]["detail"]["reason"],
+            json!("ok"),
+            "{kind}: {:?}",
+            evs[done]
+        );
+        assert!(
+            !evs.iter()
+                .any(|v| is_status(v, "failed") || is_cancelled(v)),
+            "{kind}: {evs:#?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(s.passes_served(), 2, "{kind}");
+        let view = s.request_messages(0);
+        let n = view.len();
+        let a2 = s.request_messages(1);
+        assert_eq!(a2[..n], view[..], "{kind}: attempt 2 starts with the view");
+        assert_eq!(
+            a2[n..],
+            [
+                json!({"role": "assistant", "content": bad}),
+                json!({"role": "user", "content": report}),
+            ][..],
+            "{kind}"
+        );
+        assert_eq!(answers(&kernel, &backend).await, vec![done_call], "{kind}");
+    }
+}
+
+/// Every attempt malformed: `CALL_RETRIES` `retrying` statuses, each with its error,
+/// then the harness stop ends the call `failed` with reason `gave_up` and the stop's
+/// reason as its error; no cancel. Exactly `1 + CALL_RETRIES` requests; the stored
+/// answer is the `stop` call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn all_malformed_gives_up() {
+    let n = 1 + crate::constants::CALL_RETRIES;
+    for kind in ["default", HERMES] {
+        let tmp = TempDir::new().unwrap();
+        let (kernel, backend) = mk_kernel(&tmp, &format!("tr_giveup_{kind}")).await;
+        let bad = still_malformed(kind);
+        let wording = if kind == HERMES {
+            set_model(&kernel, &backend, QWEN).await;
+            crate::model_format::hermes::STOP_REASON
+        } else {
+            crate::model_format::default::STOP_REASON
+        };
+        let reason = crate::model_format::fill(wording, &[("n", &n.to_string())]);
+        let model = if kind == HERMES { QWEN } else { PLAIN };
+        let s = script_as(&backend, model, (0..8).map(|_| pass(&bad)).collect());
+        let mut rx = watch(&kernel, &backend).await;
+        send_go(&kernel, &backend).await;
+        let evs = events_until(&mut rx, |v| is_status(v, "failed")).await;
+        let retries: Vec<&Value> = evs.iter().filter(|v| is_status(v, "retrying")).collect();
+        assert_eq!(
+            retries.len(),
+            crate::constants::CALL_RETRIES,
+            "{kind}: {evs:#?}"
+        );
+        for (i, r) in retries.iter().enumerate() {
+            assert_eq!(r["detail"]["attempt"], json!(i + 1), "{kind}: {r}");
+            assert_eq!(r["detail"]["kind"], json!("call"), "{kind}: {r}");
+            assert!(
+                r["detail"]["error"].as_str().is_some_and(|e| !e.is_empty()),
+                "{kind}: {r}"
+            );
+        }
+        let st = evs.last().expect("an event");
+        assert!(is_status(st, "failed"), "{kind}: {evs:#?}");
+        assert_eq!(st["detail"]["reason"], json!("gave_up"), "{kind}: {st}");
+        assert_eq!(st["detail"]["error"], json!(reason), "{kind}: {st}");
+        assert!(!evs.iter().any(is_cancelled), "{kind}: {evs:#?}");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(s.passes_served(), n, "{kind}");
+        let mut args = Map::new();
+        args.insert("reason".to_string(), json!(reason));
+        assert_eq!(
+            answers(&kernel, &backend).await,
+            vec![crate::tool_parse::render_call("stop", &args)],
+            "{kind}"
+        );
+    }
+}
+
 // T2
 /// The re-ask request is the typed view, then per failed attempt its raw text without
 /// thinking as the assistant and its report, in the type's wording, as the user;

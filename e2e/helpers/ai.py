@@ -277,6 +277,20 @@ async def connect(
             ev.get("phase") == "done" and det.get("reason") not in (None, "ok")
         )
 
+    def _errored(ev: dict, det: dict) -> bool:
+        """A status carrying `detail.error` that is not a `retrying` one.
+
+        `retrying` (a malformed call re-asked, `kind: "call"`, or a dropped link
+        retried) carries the error it retries; the call is still live, and
+        tripping on it cancels the re-ask in flight. A call that then runs out of
+        attempts ends `failed` or `done` with a reason, which `_died` catches.
+        """
+        return (
+            ev.get("type") == "status"
+            and bool(det.get("error"))
+            and ev.get("phase") != "retrying"
+        )
+
     def _ended(ev: dict) -> bool:
         return ev.get("type") == "status" and ev.get("phase") in ("done", "failed")
 
@@ -297,7 +311,7 @@ async def connect(
                 await watcher.connect()
                 async for ev in watcher.events():
                     det = ev.get("detail") or {}
-                    if ev.get("type") == "status" and det.get("error"):
+                    if _errored(ev, det):
                         _failed(str(det["error"]))
                     if _died(ev, det):
                         _failed(f"turn ended: {det.get('reason')}")
@@ -328,7 +342,7 @@ async def connect(
                 _failed(f"turn ended: {det.get('reason')}")
             elif _ended(ev):
                 _note_end(det)
-            if ev.get("type") == "status" and det.get("error"):
+            if _errored(ev, det):
                 _failed(det["error"])
             if ev.get("type") == "context" and ev.get("phase") == "too_small":
                 _failed(f"context too_small: {det}")

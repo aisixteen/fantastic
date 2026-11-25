@@ -65,8 +65,6 @@ pub(crate) const REPORT_ROUTING_KEY: &str = include_str!("res/hermes/report_rout
 pub(crate) const REPORT_PAYLOAD: &str = include_str!("res/hermes/report_payload.txt");
 /// A send that names no recipient.
 pub(crate) const REPORT_NO_TARGET: &str = include_str!("res/hermes/report_no_target.txt");
-/// `payload.bytes` written inside the JSON (section 5, item 2).
-pub(crate) const REPORT_BYTES_IN_JSON: &str = include_str!("res/hermes/report_bytes_in_json.txt");
 /// Anything between the JSON and the closer that is not one block of a send (S24).
 pub(crate) const REPORT_BLOCK: &str = include_str!("res/hermes/report_block.txt");
 /// A JSON call with no tags, or a closer with no opener (S21).
@@ -286,10 +284,12 @@ fn write_call(name: &str, arguments: &Map<String, Value>) -> String {
         };
         // EXPERIMENTAL (Q12): the body leaves the JSON. This departs from the trained
         // Hermes format, where a body is an inline JSON string: models mis-escape long
-        // code inside JSON strings (quotes, backslashes, newlines), so the body follows
-        // the JSON line inside the call as a raw block, `<bytes>BODY</bytes>`, byte for
-        // byte, nothing escaped; it ends at the first `</bytes>`, as the internal
-        // `<bytes>` does. To be measured against the inline form. Pinned by R15.
+        // code inside JSON strings (quotes, backslashes, newlines), so render writes the
+        // body after the JSON line inside the call as a raw block, `<bytes>BODY</bytes>`,
+        // byte for byte, nothing escaped; it ends at the first `</bytes>`, as the internal
+        // `<bytes>` does. The reader takes both forms: this raw block, and the trained
+        // inline `payload.bytes` string. Render writes only the raw block. To be measured
+        // against the inline form. Pinned by R15.
         if let Some(Value::String(b)) = payload.get("bytes") {
             body = Some(b.clone());
             payload.shift_remove("bytes");
@@ -689,6 +689,14 @@ fn read_call(raw: &str, tools: &[&str]) -> Result<String, String> {
         ));
     }
     let internal = if name == "send" {
+        // an inline body must be a JSON string: `numbers_as_text` would make a number one
+        let typed_bytes = call
+            .get("arguments")
+            .and_then(|a| a.get("payload"))
+            .and_then(|p| p.get("bytes"));
+        if typed_bytes.is_some_and(|b| !b.is_string()) {
+            return Err(REPORT_PAYLOAD.to_string());
+        }
         send_args(args, body)?
     } else {
         if body.is_some() {
@@ -768,10 +776,12 @@ fn block_of(rest: &str) -> Result<Option<String>, String> {
         return Ok(None);
     }
     // EXPERIMENTAL (Q12): the body of a send is read from the raw block after the JSON
-    // line, not from the JSON. This departs from the trained Hermes format, where a body
-    // is an inline JSON string: models mis-escape long code inside JSON strings, so the
-    // body is taken verbatim, nothing unescaped, to the first `</bytes>`. To be measured
-    // against the inline form. A body inside the JSON is refused (section 5, item 2).
+    // line. This departs from the trained Hermes format, where a body is an inline JSON
+    // string: models mis-escape long code inside JSON strings, so the block's body is
+    // taken verbatim, nothing unescaped, to the first `</bytes>`. The trained inline
+    // form is read too: a `payload.bytes` string with no block is the body, as JSON
+    // decoded it (`send_args`). A body in both places is refused. Render writes only
+    // the raw block. To be measured against the inline form.
     let Some(after) = rest.strip_prefix(BYTES_OPEN) else {
         return Err(REPORT_BLOCK.to_string());
     };
@@ -802,18 +812,19 @@ fn send_args(
             &[("key", k.as_str()), ("fields", ROUTING.join(", ").as_str())],
         ));
     }
-    let payload = match args.get("payload") {
+    let mut payload = match args.get("payload") {
         None => Map::new(),
         Some(Value::Object(p)) => p.clone(),
         Some(_) => return Err(REPORT_PAYLOAD.to_string()),
     };
-    if payload.contains_key("bytes") {
-        return Err(if body.is_some() {
-            REPORT_BLOCK.to_string()
-        } else {
-            REPORT_BYTES_IN_JSON.to_string()
-        });
-    }
+    // EXPERIMENTAL (Q12): the trained inline body, a `payload.bytes` string, is the body
+    // when no block follows, as JSON decoded it, nothing trimmed.
+    let body = match (payload.shift_remove("bytes"), body) {
+        (None, body) => body,
+        (Some(_), Some(_)) => return Err(REPORT_BLOCK.to_string()),
+        (Some(Value::String(b)), None) => Some(b),
+        (Some(_), None) => return Err(REPORT_PAYLOAD.to_string()),
+    };
     let named = |v: Option<&Value>| match v.map(text_of) {
         Some(Value::String(s)) => !s.trim().is_empty(),
         Some(Value::Array(items)) => items

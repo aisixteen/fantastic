@@ -39,8 +39,9 @@ Qwen/Qwen3-8B:
   none (DeepSeek tool tokens, no tools variable)
 No text of these templates is taken; they decide only the rules.
 
-Departure, EXPERIMENTAL (Q12): a send's payload.bytes is not in the JSON; it follows the
-JSON line inside the call as <bytes>BODY</bytes>, verbatim. See hermes.rs.
+Departure, EXPERIMENTAL (Q12): render writes a send's payload.bytes not in the JSON; it
+follows the JSON line inside the call as <bytes>BODY</bytes>, verbatim. The reader also
+takes the trained inline payload.bytes string. See hermes.rs.
 
 Partial-JSON crates checked (1.12, crates.io, 2026-11-24):
 - partial-json-fixer 0.5.5 (MIT), json_partial 0.2.1 (MIT OR Apache-2.0), jiter 0.19.0
