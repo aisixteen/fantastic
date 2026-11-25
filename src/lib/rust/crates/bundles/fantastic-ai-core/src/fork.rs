@@ -30,9 +30,15 @@ use crate::memory::{
 };
 
 /// Rows that belong to the live state of ONE agent, never to a prefix a fork
-/// inherits: the pause state, the messages held for it, a late arrival and the marks
-/// (each fork writes its own).
-const NOT_COPIED: [&str; 4] = ["pause", "held", "late", "mark"];
+/// inherits: the pause state, the messages held for it, a late arrival, the marks
+/// (each fork writes its own) and the traces (#766: a chat's trace count is its own).
+const NOT_COPIED: [&str; 5] = [
+    "pause",
+    "held",
+    "late",
+    "mark",
+    crate::model_format::trace::KIND,
+];
 
 fn kind_of(r: &Value) -> Option<&str> {
     r.get("kind").and_then(Value::as_str)

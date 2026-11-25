@@ -18,7 +18,7 @@ use tempfile::TempDir;
 const HANDLER_MODULE: &str = "mock_backend.tools";
 
 #[derive(Clone)]
-enum ScriptEvent {
+pub(crate) enum ScriptEvent {
     Token(String),
     /// The provider stream fails mid-pass. `run_generation` propagates it, so the
     /// `send` reply carries an `error` — which is what a broken chain must look
@@ -73,8 +73,16 @@ pub(crate) struct MockScript {
 type Responder = Box<dyn Fn(&[Value]) -> Option<String> + Send + Sync>;
 
 impl MockScript {
+    /// Hold the NEXT request until the returned gate is notified (its `gate`
+    /// field): a test makes its own write while that pass is in flight.
+    pub(crate) fn hold_next(&self) -> Arc<tokio::sync::Notify> {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        *self.gate.lock().unwrap() = Some(Arc::clone(&gate));
+        gate
+    }
+
     /// How many provider passes have been served. python's `.calls`.
-    fn passes_served(&self) -> usize {
+    pub(crate) fn passes_served(&self) -> usize {
         self.requests.lock().unwrap().len()
     }
 
@@ -92,7 +100,7 @@ impl MockScript {
     }
 
     /// The model-view messages handed to pass `n`, as values.
-    fn request_messages(&self, n: usize) -> Vec<Value> {
+    pub(crate) fn request_messages(&self, n: usize) -> Vec<Value> {
         let reqs = self.requests.lock().unwrap();
         reqs.get(n)
             .unwrap_or_else(|| panic!("pass {n} never happened"))
@@ -196,7 +204,7 @@ fn scripts() -> std::sync::MutexGuard<'static, ScriptMap> {
 
 /// Script an agent's provider. Returns the SHARED box, so a test reads the pass
 /// count and the request log off the same object the bundle serves from.
-fn script(agent: &AgentId, passes: Vec<Vec<ScriptEvent>>, delay: Duration) -> Arc<MockScript> {
+pub(crate) fn script(agent: &AgentId, passes: Vec<Vec<ScriptEvent>>, delay: Duration) -> Arc<MockScript> {
     let s = Arc::new(MockScript {
         passes: std::sync::Mutex::new(passes.into_iter().collect()),
         requests: std::sync::Mutex::new(Vec::new()),
@@ -232,7 +240,7 @@ fn script_for(agent: &AgentId) -> Arc<MockScript> {
 /// Wait for `n` provider passes. python's `_until_calls`: the chain is
 /// asynchronous, so a test waits on the served event; failing FAST is the point,
 /// since a stalled chain would otherwise wait out the 180s send ceiling.
-async fn until_passes(script: &Arc<MockScript>, n: usize) -> bool {
+pub(crate) async fn until_passes(script: &Arc<MockScript>, n: usize) -> bool {
     // Each served request stores one permit on `served`, so a request that lands
     // between the check and the wait is not lost. The timeout is only the failure
     // bound (a stalled chain), never the ordering.
@@ -249,7 +257,7 @@ async fn until_passes(script: &Arc<MockScript>, n: usize) -> bool {
         .unwrap_or(false)
 }
 
-/// A `<call>` exactly as [`crate::assembly::SEND_TO_HOWTO`] teaches it, BUILT BY
+/// A `<call>` exactly as the `default` `send` how-to (`res/default/howto_send.txt`) teaches it, BUILT BY
 /// THE RENDERER so a fixture cannot drift from the grammar the parser accepts.
 /// `reply_to`: `Some(v)` writes the key (`"self"`, another id, `"null"`),
 /// `None` OMITS it — the two are NOT the same, and which is which is the
@@ -265,7 +273,7 @@ fn call_envelope(target: &str, payload: Value, reply_to: Option<&str>) -> String
 }
 
 /// One pass that emits one whole text chunk.
-fn pass(text: impl Into<String>) -> Vec<ScriptEvent> {
+pub(crate) fn pass(text: impl Into<String>) -> Vec<ScriptEvent> {
     vec![ScriptEvent::Token(text.into())]
 }
 
@@ -349,10 +357,19 @@ fn id_for(tmp: &TempDir, tag: &str) -> String {
 /// A kernel with the mock backend, `file_bridge` and `ram_store` bundles (plus
 /// whatever `extra` registers), an unbooted `kernel_state` root handed a guid, and
 /// the shared test memory store under it.
-async fn base_kernel(tmp: &TempDir, extra: impl FnOnce(&mut Kernel)) -> Arc<Kernel> {
+pub(crate) async fn base_kernel(tmp: &TempDir, extra: impl FnOnce(&mut Kernel)) -> Arc<Kernel> {
+    base_kernel_at(tmp.path(), extra).await
+}
+
+/// [`base_kernel`] over the folder `dir`: a kernel of another process (or a new one in
+/// this process) opens the same files there, under the same guid.
+pub(crate) async fn base_kernel_at(
+    dir: &std::path::Path,
+    extra: impl FnOnce(&mut Kernel),
+) -> Arc<Kernel> {
     let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
-        state_dir: tmp.path().join(".fantastic"),
-        work_dir: tmp.path().to_path_buf(),
+        state_dir: dir.join(".fantastic"),
+        work_dir: dir.to_path_buf(),
     });
     kernel
         .bundles
@@ -371,7 +388,7 @@ async fn base_kernel(tmp: &TempDir, extra: impl FnOnce(&mut Kernel)) -> Arc<Kern
         None,
         None,
         Map::new(),
-        tmp.path().join(".fantastic"),
+        dir.join(".fantastic"),
         false,
     );
     fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
@@ -380,7 +397,7 @@ async fn base_kernel(tmp: &TempDir, extra: impl FnOnce(&mut Kernel)) -> Arc<Kern
     kernel
 }
 
-async fn mk_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
+pub(crate) async fn mk_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
     let kernel = base_kernel(tmp, |_| {}).await;
 
     let backend_id = id_for(tmp, tag);
@@ -462,7 +479,7 @@ async fn add_peer(kernel: &Arc<Kernel>, tmp: &TempDir, primary: &AgentId) -> Age
 /// because routing needs TWO in one kernel (a peer to hand a reply to).
 ///
 /// `context_window` is EXPLICIT, and that is not decoration: the default is 4096,
-/// the default system block now carries `SEND_TO_HOWTO` as well as
+/// the default system block now carries the `send` how-to as well as
 /// `CONTEXT_HOWTO`, and a chain's second turn would die on
 /// `context_insufficient` — which looks exactly like a routing bug. python
 /// documents the same trap at `test_send_to.py:53-66`.
@@ -1122,7 +1139,8 @@ fn context_estimate_and_budget() {
 async fn compact_returns_projection_with_summary() {
     let b = body(10, 80);
     let provider: Arc<dyn Provider> = Arc::new(SummaryProvider("SUMMARY"));
-    let proj = crate::strategies::compact(&b, 4, 1_000_000, &provider).await;
+    let pass = crate::model_format::pass::Pass::for_test(Arc::clone(&provider));
+    let proj = crate::strategies::compact(&b, 4, 1_000_000, &pass).await;
     assert_eq!(proj.summary.as_deref(), Some("SUMMARY"));
     assert!(!proj.omitted_marker);
     // recent verbatim, NO fabricated summary turn in the body — plus the PINNED first
@@ -1499,7 +1517,7 @@ async fn status_during_in_flight_shows_phase() {
 // Mirrors `bundled_agents/ai/ollama/ollama_backend/tests/test_send_to.py`, which
 // is canonical. Every agent here sets `context_window` explicitly (see
 // `add_backend`) — the default is smaller than the system block once
-// `SEND_TO_HOWTO` is in it, and a second turn dying on `context_insufficient`
+// the `send` how-to is in it, and a second turn dying on `context_insufficient`
 // looks exactly like a routing bug.
 
 /// The model emits a send; it really runs; its REPLY comes back as the next turn,
@@ -3391,7 +3409,7 @@ async fn the_compaction_cursor_is_the_store_length_not_the_view() {
     let _ = fantastic_kernel::test_support::as_agent(
         backend.clone(),
         crate::projection::project_context(
-            &provider,
+            &crate::model_format::pass::Pass::for_test(Arc::clone(&provider)),
             &backend,
             &state,
             &kernel,
@@ -3883,7 +3901,7 @@ async fn a_turn_whose_calls_all_reply_elsewhere_ends_the_chain() {
 
 /// Poll `cond` until it holds, with a deadline — a wait on the CONDITION, never a
 /// fixed sleep. Names `what` when the deadline passes.
-async fn until_true(what: &str, cond: impl Fn() -> bool) {
+pub(crate) async fn until_true(what: &str, cond: impl Fn() -> bool) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while !cond() {
         assert!(
@@ -4634,7 +4652,8 @@ async fn conversation(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
         .cloned()
         .unwrap_or_default()
         .into_iter()
-        .filter(|r| r.get("kind").and_then(Value::as_str) != Some("view"))
+        // view rows and the chat's trace rows (#766) are not the conversation
+        .filter(|r| !matches!(r.get("kind").and_then(Value::as_str), Some("view" | "trace")))
         .map(|mut r| {
             r["agent"] = json!(agent.as_str());
             r
@@ -4951,7 +4970,7 @@ async fn recall_long_head(
             backend,
             payload["dry"] == json!(true),
             kernel,
-            Some(&provider),
+            Some(&crate::model_format::pass::Pass::for_test(Arc::clone(&provider))),
             crate::constants::DEFAULT_CONTEXT_WINDOW,
             client_id,
         ),
@@ -5043,6 +5062,43 @@ async fn context_recall_folds_a_head_longer_than_the_budget() {
     assert_eq!(evs[0]["detail"]["recall"], true);
 }
 
+/// The folds a recall makes are still under provisional ids (`-1`, …) when the
+/// recall asks its question; those ids are never minted, so the prompt shows such
+/// a fold as `new fold`, never a `-` id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_recall_prompt_shows_no_provisional_fold_id() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "recallprov").await;
+    long_head(&kernel, &backend, "fold").await;
+    let (r, sc) = recall_long_head(&kernel, &backend, json!({}), None).await;
+    assert!(r["folded"].as_u64().unwrap_or(0) >= 1, "{r}");
+    let last = sc.passes_served() - 1;
+    let msgs = sc.request_messages(last);
+    let prompt = msgs
+        .iter()
+        .rev()
+        .find_map(|m| m["content"].as_str())
+        .expect("the recall prompt")
+        .to_string();
+    assert!(
+        prompt.starts_with("You are rebuilding your own working context"),
+        "{prompt}"
+    );
+    let is_neg = |t: &str| {
+        t.strip_prefix('-')
+            .is_some_and(|d| d.starts_with(|c: char| c.is_ascii_digit()))
+    };
+    let rows: Vec<&str> = prompt.lines().filter(|l| l.contains(" · ↑")).collect();
+    assert!(
+        rows.iter().any(|l| l.starts_with("new fold · ")),
+        "a fold made here is shown as new: {prompt}"
+    );
+    for l in &rows {
+        let parent = l.rsplit(" · ↑").next().unwrap_or("");
+        assert!(!is_neg(l) && !is_neg(parent), "a provisional id shown: {l}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dry_recall_or_another_strategy_does_not_fold() {
     let tmp = TempDir::new().unwrap();
@@ -5132,7 +5188,7 @@ async fn a_fold_projection_over_budget_writes_folds() {
     let out = fantastic_kernel::test_support::as_agent(
         backend.clone(),
         crate::projection::project_context(
-            &provider,
+            &crate::model_format::pass::Pass::for_test(Arc::clone(&provider)),
             &backend,
             &state,
             &kernel,
@@ -5309,7 +5365,7 @@ async fn successive_fold_projections_do_not_nest_into_a_chain() {
         let _ = fantastic_kernel::test_support::as_agent(
             backend.clone(),
             crate::projection::project_context(
-                &provider,
+                &crate::model_format::pass::Pass::for_test(Arc::clone(&provider)),
                 &backend,
                 &state,
                 &kernel,
@@ -6389,7 +6445,7 @@ async fn the_seam_keeps_the_goal_the_strategies_pinned() {
             let out = fantastic_kernel::test_support::as_agent(
                 backend.clone(),
                 crate::projection::project_context(
-                    &provider,
+                    &crate::model_format::pass::Pass::for_test(Arc::clone(&provider)),
                     &backend,
                     &state,
                     &kernel,
@@ -6977,9 +7033,15 @@ mod stream_parts;
 
 #[path = "tests_stall.rs"]
 mod stall;
-/// The call checker on the stream (#499).
-#[path = "tests_stream_cut.rs"]
-mod stream_cut;
+/// The pass path of a turn and of its helpers; retries inside the turn (#766).
+#[path = "tests_turn_retry.rs"]
+mod turn_retry;
+/// The `stop` call: the harness's and the model's (#766).
+#[path = "tests_stopped.rs"]
+mod stopped;
+/// Token accounting, chat-side: `used` and `window` (#766).
+#[path = "tests_used.rs"]
+mod used;
 /// Autofold: thoughts, large replies and recall by id (#556).
 #[path = "tests_autofold.rs"]
 mod autofold;
@@ -7151,8 +7213,10 @@ async fn a_broken_call_is_reported_instead_of_the_no_call_reminder() {
     assert!(nxt.contains("<call name=\"send\"></call>"), "{nxt}");
 }
 
+/// A broken call beside a good one fails the attempt (#766): nothing of it runs, and the
+/// re-ask carries the report for the whole answer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_good_calls_run_and_the_broken_one_comes_back_beside_them() {
+async fn a_broken_call_beside_a_good_one_fails_the_attempt() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "cc_b").await;
     // rendered over 7 lines, so the broken call is on line 8
@@ -7174,15 +7238,11 @@ async fn the_good_calls_run_and_the_broken_one_comes_back_beside_them() {
         .await
         .remove(0)
         .result;
-    assert!(until_passes(&s, 2).await, "the batch did not come back");
+    assert!(until_passes(&s, 2).await, "the re-ask did not come");
     let batch = last_content(&s, 1);
-    assert!(batch.contains("kernel reflect"), "{batch}");
+    assert_eq!(batch.matches("kernel reflect").count(), 0, "{batch}");
     assert!(
         batch.contains("[malformed call — nothing ran] line 8, col 1:"),
-        "{batch}"
-    );
-    assert!(
-        batch.contains("The other call of this answer ran"),
         "{batch}"
     );
 }
@@ -7256,11 +7316,12 @@ async fn an_empty_wrapper_is_reported_by_name_not_only_reminded() {
     );
 }
 
-/// A model stuck on one broken shape still ends: a turn whose only output is
-/// broken calls ran nothing, and counts as silent.
+/// A model stuck on one broken shape still ends: every attempt is malformed, so the
+/// harness stops the turn after `1 + CALL_RETRIES` attempts (#766), and nothing more is
+/// asked.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn broken_only_turns_count_toward_giving_up() {
-    let cap = crate::constants::MAX_SILENT_TURNS;
+    let cap = 1 + crate::constants::CALL_RETRIES;
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "cc_c").await;
     let s = script(
@@ -7286,7 +7347,7 @@ async fn broken_only_turns_count_toward_giving_up() {
     assert_eq!(
         s.passes_served(),
         cap,
-        "a broken-only turn reset the silent streak"
+        "the harness stop ends the chain: the model is not asked again"
     );
 }
 
@@ -7332,20 +7393,16 @@ async fn the_no_call_reminder_is_a_notice_and_the_task_is_not() {
     assert_eq!(users[1]["kind"], json!("notice"), "{:?}", users[1]);
 }
 
+/// A batch with a reply is not a notice. (A report on malformed calls is no batch any
+/// more: it is re-asked inside the turn and never stored, #766.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_report_batch_is_a_notice_and_a_batch_with_a_reply_is_not() {
+async fn a_batch_with_a_reply_is_not_a_notice() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "nt_b").await;
     let good = call_envelope("kernel", json!({"type": "reflect", "tree": "none"}), None);
     let s = script(
         &backend,
-        vec![
-            pass(E59_ANSWER),
-            pass(format!(
-                "{good}\n<send><target_id>kernel</target_id></send>"
-            )),
-            pass("<call name=\"done\"></call>"),
-        ],
+        vec![pass(good), pass("<call name=\"done\"></call>")],
         Duration::ZERO,
     );
     let _ = kernel.operator_send(vec![Item::new(
@@ -7353,15 +7410,14 @@ async fn a_report_batch_is_a_notice_and_a_batch_with_a_reply_is_not() {
             json!({"type": "send", "text": "go"}),
         )])
         .await;
-    assert!(until_passes(&s, 3).await);
+    assert!(until_passes(&s, 2).await);
     tokio::time::sleep(Duration::from_millis(200)).await;
     let users = user_rows(&kernel, &backend).await;
-    assert_eq!(users[1]["kind"], json!("notice"), "{:?}", users[1]);
-    assert!(users[2]["content"]
+    assert!(users[1]["content"]
         .as_str()
         .unwrap_or("")
         .contains("kernel reflect"));
-    assert!(users[2].get("kind").is_none(), "{:?}", users[2]);
+    assert!(users[1].get("kind").is_none(), "{:?}", users[1]);
 }
 
 #[test]
@@ -7521,10 +7577,9 @@ async fn an_inline_send_is_refused_and_nothing_reaches_the_target() {
         turn.contains("<routing><target_id>agent id</target_id></routing>"),
         "the refusal shows the routing form: {turn}"
     );
-    assert_eq!(
-        *got.lock().unwrap(),
-        vec!["ping".to_string()],
-        "create must not run"
+    assert!(
+        got.lock().unwrap().is_empty(),
+        "nothing of a malformed attempt runs, the good call beside it included (#766)"
     );
 }
 
@@ -7608,42 +7663,6 @@ async fn a_routing_name_in_the_payload_of_a_routed_call_is_delivered() {
         *got.lock().unwrap(),
         vec![json!({"type": "create", "title": "Notes", "body": "b"})]
     );
-}
-
-/// #203: the SECOND wrapped answer in a row escalates its report — the first is
-/// only named, the second says plainly that nothing has run.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_second_wrapped_answer_in_a_row_escalates() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, backend) = mk_kernel(&tmp, "esc_w").await;
-    let wrapped = "<tool_call>\n<call name=\"done\"></call>\n</tool_call>";
-    let s = script(
-        &backend,
-        vec![
-            pass(wrapped),
-            pass(wrapped),
-            pass("<call name=\"done\"></call>"),
-        ],
-        Duration::ZERO,
-    );
-    let _ = kernel.operator_send(vec![Item::new(
-            backend.clone(),
-            json!({"type": "send", "text": "go"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert!(until_passes(&s, 3).await, "the chain did not finish");
-    let first = s.request(1);
-    assert!(first.contains("holds no call"), "{first}");
-    assert!(!first.contains("[no progress"), "{first}");
-    let second = s.request(2);
-    assert!(
-        second.contains("[no progress — 2 answers in a row ran nothing]"),
-        "{second}"
-    );
-    assert!(second.contains("<tool_call>"), "{second}");
-    assert!(second.contains("must START with <call"), "{second}");
 }
 
 /// A call that actually runs resets the streak: the next wrapped answer is only
@@ -8074,7 +8093,7 @@ async fn rows_of_other_agents_are_untouched() {
 // ---- THE SPLIT: an ai_chat completes through a provider agent ----------------------------
 
 /// A provider agent whose every `complete` streams "hel" + "lo".
-struct EchoProvider;
+pub(crate) struct EchoProvider;
 
 /// Says "hel" + "lo" + the model it was built on.
 struct EchoWords(String);
@@ -8148,7 +8167,7 @@ impl Handler for EchoProvider {
 
 /// A provider on the echo bundle with its own key in the shared test store, its default
 /// seeded the way a user sets it (`set_default_model`, a `setting` row in the store).
-async fn make_provider(kernel: &Arc<Kernel>, id: &str, extra: Value, default: Option<&str>) {
+pub(crate) async fn make_provider(kernel: &Arc<Kernel>, id: &str, extra: Value, default: Option<&str>) {
     let memory = fantastic_ram_store::test_support::memory_meta(kernel, id, json!({})).await;
     let mut c = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "echo_provider.tools", "id": id});
     for (k, v) in memory {

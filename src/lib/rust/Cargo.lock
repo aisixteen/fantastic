@@ -811,6 +811,7 @@ dependencies = [
  "fantastic-file",
  "fantastic-kernel",
  "fantastic-ram-store",
+ "fantastic-sqlite-store",
  "futures-util",
  "image",
  "libc",

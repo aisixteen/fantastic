@@ -595,7 +595,8 @@ async fn an_attribute_of_any_key_but_ts_leaves_the_request_bytes_alone() {
     let (kernel, agent) = mk_kernel(&tmp, "cm_any_attr").await;
     let with = |content: &str, role: &str| {
         json!({"role": role, "content": content, "attributes": {
-            "ts": 1.0, "any_future_key": {"x": "a long value ".repeat(40)}}})
+            "ts": 1.0, "utc_offset": 7200,
+            "any_future_key": {"x": "a long value ".repeat(40)}}})
     };
     put_row(&kernel, &agent, with("hello", "user")).await;
     put_row(&kernel, &agent, with("answer", "assistant")).await;

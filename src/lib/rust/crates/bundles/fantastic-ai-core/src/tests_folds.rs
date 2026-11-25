@@ -407,3 +407,52 @@ fn a_span_is_sized_by_tokens_not_rows() {
         "everything but the goal and the tail"
     );
 }
+
+// ─── fold id order (#766, owner 2026-11-25) ─────────────────────────────
+
+#[test]
+fn a_fold_is_made_under_a_provisional_id_the_kernel_never_mints() {
+    // the n-th fold of one projection is -(n + 1); the rows already stored do not count
+    let mut rows = vec![turn(1, "user", None, "goal"), turn(2, "user", Some(1), "a")];
+    assert_eq!(crate::folds::provisional_id(&rows), -1);
+    rows.push(make_fold(&[1, 2], "t", "b", false, -1, 1, 1, None));
+    assert_eq!(crate::folds::provisional_id(&rows), -2);
+    rows.push(make_fold(&[-1], "t2", "b2", false, -2, 1, 2, Some(-1)));
+    assert_eq!(crate::folds::provisional_id(&rows), -3);
+}
+
+#[test]
+fn minted_ids_replace_the_provisional_ones_in_id_parent_refs_head_and_view_ids() {
+    let map: std::collections::BTreeMap<i64, i64> = [(-1, 40), (-2, 41)].into_iter().collect();
+    // a fold of a fold: its refs and parent name the first one; its body quotes `-1`
+    let mut inner = make_fold(&[7, 8], "inner", "says -1 · here", false, -1, 7, 1, Some(-2));
+    let mut outer = make_fold(&[-1, 9], "outer", "[fold -1 · in the body]", false, -2, 7, 2, None);
+    let mut view = json!({"kind": "view", "ids": [{"id": 3, "res": "full"}, {"id": -2, "res": "fold"}]});
+    crate::folds::remap_ids(&mut inner, &map);
+    crate::folds::remap_ids(&mut outer, &map);
+    crate::folds::remap_ids(&mut view, &map);
+    assert_eq!(row_id(&inner), Some(40));
+    assert_eq!(inner["parent"], json!(41));
+    assert_eq!(inner["refs"], json!([7, 8]));
+    assert_eq!(
+        inner["content"],
+        json!(format!("{}40 · 2 refs · L1] \"inner\"\nsays -1 · here", crate::folds::FOLD_TAG))
+    );
+    assert_eq!(row_id(&outer), Some(41));
+    assert_eq!(outer["refs"], json!([40, 9]));
+    assert_eq!(outer["parent"], Value::Null);
+    // only the head is rewritten: the body is text as written
+    assert_eq!(
+        outer["content"],
+        json!(format!(
+            "{}41 · 2 refs · L2] \"outer\"\n[fold -1 · in the body]",
+            crate::folds::FOLD_TAG
+        ))
+    );
+    assert_eq!(view["ids"], json!([{"id": 3, "res": "full"}, {"id": 41, "res": "fold"}]));
+    // a stored row is left as it is
+    let mut kept = turn(5, "user", Some(1), "[fold 5 · not a fold]");
+    let before = kept.clone();
+    crate::folds::remap_ids(&mut kept, &map);
+    assert_eq!(kept, before);
+}

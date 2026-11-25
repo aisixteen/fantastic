@@ -1,5 +1,5 @@
 //! What a row carries about itself (#618, #619): its `attributes` map: `ts` and
-//! `source` on every row; `usage`, `parts` (a delta, a full list on a checkpoint),
+//! `source` on every row; `used`, `window` (#766), `parts` (a delta, a full list on a checkpoint),
 //! `totals`, `model`, `provider` and `cost` on the assistant row. Returned whole by
 //! `rows` and `history`, never part of a request, whatever keys it holds. The totals
 //! are validated against what the provider was sent and what it reported.
@@ -82,7 +82,7 @@ fn part<'a>(parts: &'a [Value], name: &str) -> &'a Value {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_assistant_row_keeps_usage_and_every_row_a_ts() {
+async fn the_assistant_row_keeps_used_and_every_row_a_ts() {
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_kernel(&tmp, "ra_usage").await;
     let s = script(&agent, passes(2), Duration::ZERO);
@@ -104,8 +104,12 @@ async fn the_assistant_row_keeps_usage_and_every_row_a_ts() {
     }
     let answer = last_answer(&kernel, &agent).await;
     assert_eq!(
-        answer["attributes"]["usage"],
-        json!({"input": 100, "output": 40, "cache_read": 600, "cache_write": 300})
+        answer["attributes"]["used"]["pass"]["turn"]["accepted"],
+        json!({"prompt": 100, "completion": 40, "cache_read": 600, "cache_write": 300})
+    );
+    assert_eq!(
+        answer["attributes"]["window"],
+        json!({"prompt": 100, "cache_read": 600, "cache_write": 300})
     );
     // `history` returns them too
     let h = ask(&kernel, &agent, json!({"type": "history"})).await;
@@ -118,7 +122,7 @@ async fn the_assistant_row_keeps_usage_and_every_row_a_ts() {
     assert_eq!(digest["attributes"], answer["attributes"]);
     assert!(h["rows"][0]["attributes"]["ts"].is_number(), "{h}");
 
-    // an endpoint with no cache counts leaves them absent, never 0
+    // an endpoint with no cache counts: 0 in `used`, absent from the window
     *s.report.lock().unwrap() = ProviderReport {
         prompt_tokens: Some(1000),
         completion_tokens: Some(40),
@@ -127,19 +131,26 @@ async fn the_assistant_row_keeps_usage_and_every_row_a_ts() {
     say(&kernel, &agent, "again").await;
     let answer = last_answer(&kernel, &agent).await;
     assert_eq!(
-        answer["attributes"]["usage"],
-        json!({"input": 1000, "output": 40})
+        answer["attributes"]["used"]["pass"]["turn"]["accepted"],
+        json!({"prompt": 1000, "completion": 40, "cache_read": 0, "cache_write": 0})
     );
+    assert_eq!(answer["attributes"]["window"], json!({"prompt": 1000}));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_endpoint_that_reports_nothing_leaves_no_usage() {
+async fn an_endpoint_that_reports_nothing_counts_nothing() {
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_kernel(&tmp, "ra_none").await;
     let _s = script(&agent, passes(1), Duration::ZERO);
     say(&kernel, &agent, "go").await;
     let answer = last_answer(&kernel, &agent).await;
-    assert!(answer["attributes"].get("usage").is_none(), "{answer}");
+    let zero = json!({"prompt": 0, "completion": 0, "cache_read": 0, "cache_write": 0});
+    assert_eq!(
+        answer["attributes"]["used"]["pass"]["total"], zero,
+        "{answer}"
+    );
+    assert!(answer["attributes"].get("window").is_none(), "{answer}");
+    assert!(answer["attributes"].get("cost").is_none(), "{answer}");
     assert_eq!(
         answer["attributes"]["parts"]["full"],
         json!(true),
@@ -520,7 +531,13 @@ fn a_pass_is_priced_from_the_serving_providers_prices_and_never_as_zero() {
     let priced = meta(
         json!({"prices": {"m-a": {"input": 3.0, "output": 15.0, "cache_read": 0.3, "cache_write_5m": 3.75}}}),
     );
-    let usage = json!({"input": 200, "output": 50, "cache_read": 600, "cache_write": 200});
+    let counts = |prompt, completion, cache_read, cache_write| crate::used::Counts {
+        prompt,
+        completion,
+        cache_read,
+        cache_write,
+    };
+    let usage = counts(200, 50, 600, 200);
     let c = crate::row_attrs::cost(Some(&usage), &priced, "m-a").unwrap();
     assert!((c["usd"].as_f64().unwrap() - 0.00228).abs() < 1e-12, "{c}");
     assert_eq!(c["prices"]["input"], json!(3.0));
@@ -539,10 +556,11 @@ fn a_pass_is_priced_from_the_serving_providers_prices_and_never_as_zero() {
         json!({"unpriced": true})
     );
     // the same pass without cache counts is priced
-    let plain = json!({"input": 200, "output": 50});
+    let plain = counts(200, 50, 0, 0);
     assert!(crate::row_attrs::cost(Some(&plain), &no_cache, "m-a").unwrap()["usd"].is_number());
     // no usage reported: no cost either
     assert!(crate::row_attrs::cost(None, &priced, "m-a").is_none());
+    assert!(crate::row_attrs::cost(Some(&counts(0, 0, 0, 0)), &priced, "m-a").is_none());
 }
 
 #[tokio::test]
@@ -624,10 +642,14 @@ async fn provider_agent(kernel: &Arc<Kernel>, id: &str, prices: Value) {
     assert!(r.get("error").is_none(), "{r}");
 }
 
-/// Sums a usage field over rows.
+/// Sums a count of `used.pass.total` over rows.
 fn sum(rows: &[&Value], field: &str) -> i64 {
     rows.iter()
-        .map(|r| r["attributes"]["usage"][field].as_i64().unwrap_or(0))
+        .map(|r| {
+            r["attributes"]["used"]["pass"]["total"][field]
+                .as_i64()
+                .unwrap_or(0)
+        })
         .sum()
 }
 
@@ -740,13 +762,14 @@ async fn the_totals_of_a_scripted_run_validate_against_the_request_and_the_provi
         assert_eq!(r["attributes"]["source"], "cli", "{r}");
     }
     assert_eq!(
-        answers[1]["attributes"]["usage"],
-        json!({"input": 500, "output": 80, "cache_read": 1000, "cache_write": 0})
+        answers[1]["attributes"]["used"]["pass"]["total"],
+        json!({"prompt": 500, "completion": 80, "cache_read": 1000, "cache_write": 0})
     );
     assert_eq!(
-        answers[2]["attributes"]["usage"],
-        json!({"input": 800, "output": 20})
+        answers[2]["attributes"]["used"]["pass"]["total"],
+        json!({"prompt": 800, "completion": 20, "cache_read": 0, "cache_write": 0})
     );
+    assert_eq!(answers[2]["attributes"]["window"], json!({"prompt": 800}));
 
     // 4. THE TOTAL, and the total grouped by model, by provider, by both: every
     //    group's figures add up to the whole, and to the figures scripted
@@ -758,7 +781,7 @@ async fn the_totals_of_a_scripted_run_validate_against_the_request_and_the_provi
             .collect()
     };
     let near = |got: f64, want: f64| assert!((got - want).abs() < 1e-12, "{got} vs {want}");
-    for field in ["input", "output", "cache_read", "cache_write"] {
+    for field in ["prompt", "completion", "cache_read", "cache_write"] {
         let total = sum(&answers, field);
         let by_model: i64 = ["m-one", "m-two", "m-three"]
             .iter()
@@ -770,11 +793,11 @@ async fn the_totals_of_a_scripted_run_validate_against_the_request_and_the_provi
             .sum();
         assert_eq!((by_model, by_provider), (total, total), "{field}");
     }
-    assert_eq!(sum(&answers, "input"), 200 + 500 + 800 + 700 + 600 + 400);
-    assert_eq!(sum(&answers, "output"), 50 + 80 + 20 + 30 + 40 + 60);
+    assert_eq!(sum(&answers, "prompt"), 200 + 500 + 800 + 700 + 600 + 400);
+    assert_eq!(sum(&answers, "completion"), 50 + 80 + 20 + 30 + 40 + 60);
     assert_eq!(sum(&answers, "cache_read"), 600 + 1000 + 300 + 700);
     assert_eq!(sum(&answers, "cache_write"), 200 + 100);
-    assert_eq!(sum(&by("model", "m-one"), "input"), 1100);
+    assert_eq!(sum(&by("model", "m-one"), "prompt"), 1100);
     near(usd(&by("model", "m-one")), 0.00228 + 0.003 + 0.002685);
     near(usd(&by("model", "m-two")), 0.0009);
     near(usd(&by("model", "m-three")), 0.0017);
@@ -817,7 +840,7 @@ async fn the_totals_of_a_scripted_run_validate_against_the_request_and_the_provi
         // The tree primer names the provider agent, so the bare id `prov_a` may
         // appear; only the ATTRIBUTES carry it as a value of `provider`, and
         // only they carry the usage and cost keys or their exact serialization.
-        for frag in ["\"provider\":\"prov_a\"", "\"usage\"", "\"cost\"", "\"model\":"] {
+        for frag in ["\"provider\":\"prov_a\"", "\"used\":{", "\"window\":{", "\"cost\"", "\"model\":"] {
             assert!(!body.contains(frag), "request {i} holds the attribute fragment {frag}");
         }
         for a in &answers {
@@ -859,7 +882,7 @@ async fn a_restart_and_a_compaction_each_start_a_checkpoint_and_the_totals_go_on
     fantastic_kernel::test_support::as_agent(
         agent.clone(),
         crate::projection::project_context(
-            &provider,
+            &crate::model_format::pass::Pass::for_test(Arc::clone(&provider)),
             &agent,
             &state,
             &kernel,

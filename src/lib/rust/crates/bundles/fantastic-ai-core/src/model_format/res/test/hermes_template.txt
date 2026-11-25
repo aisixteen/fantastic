@@ -1,0 +1,29 @@
+# Recorded from a public chat template, for hermes::template_golden (R14). Not model-visible.
+# repository: Qwen/Qwen3-8B (https://huggingface.co/Qwen/Qwen3-8B)
+# file: tokenizer_config.json, key chat_template
+# commit: b968826d9c46dd6066d109eabc6255188de91218
+# licence: Apache-2.0 (the repository LICENSE file)
+# rendered with jinja2 3.1.4 as transformers renders a chat template (trim_blocks, lstrip_blocks,
+# tojson = json.dumps with ensure_ascii=False), add_generation_prompt false, messages: a user
+# message, an assistant message with one tool call, a tool message.
+== call ==
+<tool_call>
+{"name": "send", "arguments": {"routing": {"target_id": "notes"}, "payload": {"type": "read", "path": "a.md"}}}
+</tool_call>
+== response ==
+<tool_response>
+line one
+line two
+</tool_response>
+== full ==
+<|im_start|>user
+read a.md<|im_end|>
+<|im_start|>assistant
+<tool_call>
+{"name": "send", "arguments": {"routing": {"target_id": "notes"}, "payload": {"type": "read", "path": "a.md"}}}
+</tool_call><|im_end|>
+<|im_start|>user
+<tool_response>
+line one
+line two
+</tool_response><|im_end|>

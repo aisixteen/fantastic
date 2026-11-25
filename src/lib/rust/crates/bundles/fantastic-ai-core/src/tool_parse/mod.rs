@@ -50,15 +50,6 @@ pub use grammar::{opens_call, BYTES_CLOSE, BYTES_OPEN, CLOSE, OPEN, TOOLS};
 pub use render::{render_call, render_reply};
 pub use shape::{mint_call_id, ToolCall};
 
-/// The shape appended to every refusal: literal, minimal, copyable. Advice, not
-/// a repair — the block is never re-parsed leniently.
-pub const HINT: &str = concat!(
-    "The shape: <call name=\"send\">\n<routing><target_id>agent id</target_id></routing>\n",
-    "<payload><type>verb</type><path>a.md</path><bytes>document, verbatim, to the first ",
-    "</bytes></bytes></payload>\n</call> — one child tag per argument, a list is one tag ",
-    "whose children are all <item>, nothing is escaped."
-);
-
 /// One envelope the scanner found: `(block, call, fault, terminated)`.
 ///
 /// A `None` call with a fault means an envelope WAS opened as a call and its
@@ -181,8 +172,9 @@ pub fn malformed_calls(text: &str) -> Vec<MalformedCall> {
         .filter(|f| f.call.is_none() && f.terminated)
         .map(|f| MalformedCall {
             error: format!(
-                "call NOT dispatched: {}. Nothing ran. {HINT}",
-                f.fault.unwrap_or_default()
+                "call NOT dispatched: {}. Nothing ran. {}",
+                f.fault.unwrap_or_default(),
+                crate::model_format::default::HINT
             ),
             envelope: OPEN,
             // BOTH ENDS, never just the head — the fault in a long block is

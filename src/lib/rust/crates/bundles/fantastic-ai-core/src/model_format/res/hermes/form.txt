@@ -1,0 +1,1 @@
+A call is <tool_call>, then one JSON object {"name": "TOOL", "arguments": {…}} on its own line, then a body as <bytes>…</bytes> when the call has one, then </tool_call>.

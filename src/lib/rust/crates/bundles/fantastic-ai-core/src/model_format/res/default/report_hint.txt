@@ -1,0 +1,4 @@
+The shape: <call name="send">
+<routing><target_id>agent id</target_id></routing>
+<payload><type>verb</type><path>a.md</path><bytes>document, verbatim, to the first </bytes></bytes></payload>
+</call> — one child tag per argument, a list is one tag whose children are all <item>, nothing is escaped.

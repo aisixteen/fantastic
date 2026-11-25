@@ -247,7 +247,7 @@ pub async fn strip(
         omitted_marker: cut,
         stripped: n,
         stripped_bytes: saved,
-        folded: 0,
+        folds: Vec::new(),
         unanchored: 0,
     })
 }

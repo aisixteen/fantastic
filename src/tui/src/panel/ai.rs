@@ -26,7 +26,10 @@
 //! DRAFT, dropped when its part ends (the answer arrives as its row). The model's
 //! reasoning is never shown: a thinking part flashes `thinking`. A part that was
 //! aborted, or a malformed call, stays as one dim `not sent` line until the next
-//! turn. `S` is the agent's `stop`.
+//! turn. A MALFORMED ATTEMPT (`retrying` with `kind: "call"`) stays drawn under
+//! the line `malformed, retry m of n`, the retry streaming below it; the group
+//! lives until the next turn, as the `not sent` lines, and is in no stored row.
+//! `S` is the agent's `stop`.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -43,6 +46,9 @@ use crate::thread::{self, LineKind, Outline, OutlineState, Waiting, Zoom};
 
 /// How many lines of a text draft are drawn (its tail).
 const DRAFT_TAIL: usize = 6;
+
+/// The head of a discarded attempt's group: `malformed, retry m of n`.
+const MALFORMED_RETRY: &str = "malformed, retry";
 
 /// (row, width) → (the text's hash, its wrapped lines).
 type WrapMemo = std::collections::HashMap<(RowId, usize), (u64, std::rc::Rc<Vec<String>>)>;
@@ -96,6 +102,12 @@ pub struct AiPanel {
     /// What did not go out this turn — an aborted part, a malformed call — one
     /// line each, until the next turn.
     not_sent: Vec<String>,
+    /// The running attempt's ended drafts, kept undrawn: a malformed retry
+    /// moves them under its label.
+    ended: Vec<(String, Draft)>,
+    /// The discarded attempts, in order: each one's label and its drafts.
+    /// Cleared where `not_sent` is (the next turn's start).
+    discarded: Vec<(String, Vec<Draft>)>,
 }
 
 /// One streamed part, drawn while the model writes it.
@@ -129,34 +141,43 @@ impl AiPanel {
             waiting: Vec::new(),
             drafts: Vec::new(),
             not_sent: Vec::new(),
+            ended: Vec::new(),
+            discarded: Vec::new(),
         }
     }
 
-    /// The draft lines drawn under the transcript: the text parts' tails, the
-    /// call parts' heads, then what was not sent. Thinking stays masked (the
-    /// `thinking` line).
+    /// The draft lines drawn under the transcript: the discarded attempts, each
+    /// under its label, then the text parts' tails, the call parts' heads, then
+    /// what was not sent. Thinking stays masked (the `thinking` line).
     fn draft_lines<'a>(&self, width: u16) -> Vec<Line<'a>> {
         let w = (width as usize).saturating_sub(4).max(8);
         let mut out = Vec::new();
-        for (_, d) in &self.drafts {
-            match d.kind.as_str() {
-                "text" => {
-                    let lines: Vec<String> = d.text.lines().flat_map(|l| {
-                        let cs: Vec<char> = l.chars().collect();
-                        if cs.is_empty() { vec![String::new()] } else { cs.chunks(w).map(|c| c.iter().collect()).collect() }
-                    }).collect();
-                    for l in lines.iter().skip(lines.len().saturating_sub(DRAFT_TAIL)) {
-                        out.push(Line::from(Span::styled(format!("  {l}"), Style::default().fg(theme::FG))));
-                    }
-                }
-                "call" => out.push(Line::from(Span::styled(format!("  {}", d.head), Style::default().fg(theme::DIM)))),
-                _ => {}
+        for (label, group) in &self.discarded {
+            out.push(Line::from(Span::styled(
+                format!("  {label}"),
+                Style::default().fg(theme::DIM).add_modifier(Modifier::BOLD),
+            )));
+            for d in group {
+                draft_into(&mut out, d, w, theme::DIM);
             }
+        }
+        for (_, d) in &self.drafts {
+            draft_into(&mut out, d, w, theme::FG);
         }
         for n in &self.not_sent {
             out.push(Line::from(Span::styled(format!("  {n}"), Style::default().fg(theme::DIM).add_modifier(Modifier::CROSSED_OUT))));
         }
         out
+    }
+
+    /// A malformed attempt is retried: its ended and open drafts move, in
+    /// order, into a group under `malformed, retry m of n`. The open parts'
+    /// aborts that follow find no draft, so they add no `not sent` line.
+    fn discard_attempt(&mut self, detail: Option<&Value>) {
+        let n = |k: &str| detail.and_then(|d| d.get(k)).and_then(Value::as_i64).unwrap_or(0);
+        let label = format!("{MALFORMED_RETRY} {} of {}", n("attempt"), n("of"));
+        let group = self.ended.drain(..).chain(self.drafts.drain(..)).map(|(_, d)| d).collect();
+        self.discarded.push((label, group));
     }
 
     /// Whether a thinking part is open (the mask flashes).
@@ -650,8 +671,10 @@ impl Panel for AiPanel {
                 let id = sid();
                 if payload.get("ok") == Some(&json!(false)) {
                     self.not_sent(&id, "malformed");
-                } else {
-                    self.drafts.retain(|(s, _)| *s != id);
+                } else if let Some(at) = self.drafts.iter().position(|(s, _)| *s == id) {
+                    // kept undrawn: a malformed retry may still show it
+                    let ended = self.drafts.remove(at);
+                    self.ended.push(ended);
                 }
                 true
             }
@@ -672,18 +695,29 @@ impl Panel for AiPanel {
                 if let Some(d) = payload.get("detail").filter(|d| d.get("completion_tokens").is_some()) {
                     self.usage = Some(d.clone());
                 }
+                let detail = payload.get("detail");
+                let call_retry = phase.as_deref() == Some("retrying")
+                    && detail.and_then(|d| d.get("kind")).and_then(Value::as_str) == Some("call");
                 match phase.as_deref() {
                     Some("thinking" | "streaming" | "tool_calling") => {
-                        // a new turn: last turn's not-sent lines go
+                        // a new turn: last turn's not-sent lines and discarded
+                        // attempts go
                         if !self.live {
                             self.not_sent.clear();
+                            self.discarded.clear();
                         }
                         self.go_live();
+                    }
+                    // a malformed attempt is re-asked inside the turn: stay live
+                    _ if call_retry => {
+                        self.go_live();
+                        self.discard_attempt(detail);
                     }
                     _ => {
                         self.live = false;
                         self.since = None;
                         self.drafts.clear();
+                        self.ended.clear();
                     }
                 }
                 self.phase = phase;
@@ -896,6 +930,24 @@ impl Panel for AiPanel {
             bits.push("model view".into());
         }
         Some(bits.join(" · "))
+    }
+}
+
+/// One draft's lines, in `fg`: a text part's tail wrapped to `w`, a call
+/// part's head. A thinking part draws nothing (it stays masked).
+fn draft_into(out: &mut Vec<Line<'_>>, d: &Draft, w: usize, fg: ratatui::style::Color) {
+    match d.kind.as_str() {
+        "text" => {
+            let lines: Vec<String> = d.text.lines().flat_map(|l| {
+                let cs: Vec<char> = l.chars().collect();
+                if cs.is_empty() { vec![String::new()] } else { cs.chunks(w).map(|c| c.iter().collect()).collect() }
+            }).collect();
+            for l in lines.iter().skip(lines.len().saturating_sub(DRAFT_TAIL)) {
+                out.push(Line::from(Span::styled(format!("  {l}"), Style::default().fg(fg))));
+            }
+        }
+        "call" => out.push(Line::from(Span::styled(format!("  {}", d.head), Style::default().fg(theme::DIM)))),
+        _ => {}
     }
 }
 
@@ -1202,6 +1254,130 @@ mod tests {
         assert!(!p.live);
         p.on_event(&json!({"type":"status","phase":"thinking"}), &mut out);
         assert!(p.not_sent.is_empty());
+    }
+
+    /// Feed `evs` to `p`, then lay it out and draw it (60 x 24).
+    fn feed_and_draw(p: &mut AiPanel, evs: &[Value]) -> String {
+        let mut out = Vec::new();
+        for e in evs {
+            p.on_event(e, &mut out);
+        }
+        let s = Store::default();
+        let seen = std::collections::HashSet::new();
+        let a: AgentId = "ai".into();
+        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        p.layout(Rect::new(0, 0, 60, 24), &cx);
+        draw_once(p, &cx, 60, 24)
+    }
+
+    /// One attempt's parts: an ended text part, then an open call part.
+    fn attempt(n: u32, text: &str) -> Vec<Value> {
+        let (t, c) = (format!("ai:{n}t"), format!("ai:{n}c"));
+        vec![
+            json!({"type":"part_start","stream_id":t,"kind":"text","re":4}),
+            json!({"type":"part_delta","stream_id":t,"text":text}),
+            json!({"type":"part_end","stream_id":t}),
+            json!({"type":"part_start","stream_id":c,"kind":"call","name":"send","target":"files","re":4}),
+        ]
+    }
+
+    /// The running attempt, still writing its text: an open text part. (An ended
+    /// part of the running attempt is kept undrawn, W12, as today's ended draft.)
+    fn running(n: u32, text: &str) -> Vec<Value> {
+        let t = format!("ai:{n}t");
+        vec![
+            json!({"type":"part_start","stream_id":t,"kind":"text","re":4}),
+            json!({"type":"part_delta","stream_id":t,"text":text}),
+        ]
+    }
+
+    fn call_retry(m: u32, of: u32) -> Value {
+        json!({"type":"status","phase":"retrying","detail":{"attempt":m,"of":of,"error":"bad","kind":"call"}})
+    }
+
+    fn abort(n: u32) -> Value {
+        json!({"type":"part_abort","stream_id":format!("ai:{n}c"),"reason":"malformed"})
+    }
+
+    #[test]
+    fn malformed_attempt_stays_visible() {
+        // P1
+        let mut p = AiPanel::new("ai".into());
+        let mut evs = vec![json!({"type":"status","phase":"streaming"})];
+        evs.extend(attempt(1, "перша спроба"));
+        evs.push(call_retry(1, 2));
+        evs.push(abort(1));
+        evs.extend(running(2, "друга спроба"));
+        let screen = feed_and_draw(&mut p, &evs);
+        assert!(p.live, "the turn stays live");
+        let at = |needle: &str| screen.find(needle).unwrap_or_else(|| panic!("{needle} missing:\n{screen}"));
+        let label = at("malformed, retry 1 of 2");
+        let first = at("перша спроба");
+        let head = at("→ files send");
+        let second = at("друга спроба");
+        assert!(label < first && first < head && head < second, "{screen}");
+        assert_eq!(screen.matches("→ files send").count(), 1, "the group's call head: {screen}");
+        assert!(!screen.contains("not sent"), "{screen}");
+        assert!(p.not_sent.is_empty());
+    }
+
+    #[test]
+    fn two_retries_two_labels() {
+        // P2
+        let mut p = AiPanel::new("ai".into());
+        let mut evs = vec![json!({"type":"status","phase":"streaming"})];
+        evs.extend(attempt(1, "спроба один"));
+        evs.push(call_retry(1, 2));
+        evs.push(abort(1));
+        evs.extend(attempt(2, "спроба два"));
+        evs.push(call_retry(2, 2));
+        evs.push(abort(2));
+        evs.extend(running(3, "спроба три"));
+        let screen = feed_and_draw(&mut p, &evs);
+        let at = |needle: &str| screen.find(needle).unwrap_or_else(|| panic!("{needle} missing:\n{screen}"));
+        let order = [
+            at("malformed, retry 1 of 2"),
+            at("спроба один"),
+            at("malformed, retry 2 of 2"),
+            at("спроба два"),
+            at("спроба три"),
+        ];
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{screen}");
+        assert_eq!(p.discarded.len(), 2);
+    }
+
+    #[test]
+    fn discarded_text_is_ephemeral() {
+        // P3
+        let mut p = AiPanel::new("ai".into());
+        let mut evs = vec![json!({"type":"status","phase":"streaming"})];
+        evs.extend(attempt(1, "відкинуто"));
+        evs.push(call_retry(1, 2));
+        evs.push(abort(1));
+        evs.push(json!({"type":"status","phase":"done"}));
+        let screen = feed_and_draw(&mut p, &evs);
+        assert!(!p.live);
+        assert!(screen.contains("malformed, retry 1 of 2"), "kept until the next turn:\n{screen}");
+        let screen = feed_and_draw(&mut p, &[json!({"type":"status","phase":"thinking"})]);
+        assert!(p.discarded.is_empty());
+        assert!(!screen.contains("malformed, retry") && !screen.contains("відкинуто"), "{screen}");
+        // a panel built anew over the same store shows none
+        let mut fresh = AiPanel::new("ai".into());
+        let screen = feed_and_draw(&mut fresh, &[]);
+        assert!(!screen.contains("malformed, retry") && !screen.contains("відкинуто"), "{screen}");
+    }
+
+    #[test]
+    fn transport_retry_unchanged() {
+        // P4
+        let mut p = AiPanel::new("ai".into());
+        let mut evs = vec![json!({"type":"status","phase":"streaming"})];
+        evs.extend(attempt(1, "обрив"));
+        evs.push(json!({"type":"status","phase":"retrying","detail":{"attempt":1,"of":2,"error":"reset"}}));
+        let screen = feed_and_draw(&mut p, &evs);
+        assert!(!p.live);
+        assert!(p.drafts.is_empty() && p.ended.is_empty() && p.discarded.is_empty());
+        assert!(!screen.contains("malformed, retry") && !screen.contains("обрив"), "{screen}");
     }
 
     #[test]

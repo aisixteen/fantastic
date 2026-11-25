@@ -1,0 +1,1 @@
+{n} attempts in a row wrote malformed calls, so the harness stopped the turn.

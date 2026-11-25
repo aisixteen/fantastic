@@ -290,7 +290,7 @@ async fn project(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
     as_agent(
         agent.clone(),
         crate::projection::project_context(
-            &provider,
+            &crate::model_format::pass::Pass::for_test(Arc::clone(&provider)),
             agent,
             &state,
             kernel,
@@ -798,7 +798,7 @@ fn a_fold_that_cannot_be_placed_is_an_error_not_a_panic() {
 }
 
 #[tokio::test]
-async fn write_fold_reports_an_unplaceable_span_before_it_summarizes() {
+async fn summarize_fold_reports_an_unplaceable_span_before_it_summarizes() {
     // NO PANIC IN A TURN: a span with a member that has no known place is
     // `FoldFail::Anchor` — the turn's error — and nothing is asked or written.
     let tmp = TempDir::new().unwrap();
@@ -811,17 +811,18 @@ async fn write_fold_reports_an_unplaceable_span_before_it_summarizes() {
         json!({"role": "user", "id": 31, "kind": "fold", "refs": [1], "content": "no anchor"}),
         json!({"role": "user", "id": 32, "content": "a"}),
     ];
+    let pass = crate::model_format::pass::Pass::for_test(Arc::clone(&provider));
     let ctx = crate::strategies::ProjectionCtx {
         budget: 4000,
         recent_n: 6,
-        provider: &provider,
+        pass: &pass,
         self_id: &backend,
         kernel: &kernel,
         client_id: "cli",
     };
     let out = as_agent(
         backend.clone(),
-        crate::strategies::fold::write_fold(&ctx, &rows, &[0, 1]),
+        crate::strategies::fold::summarize_fold(&ctx, &rows, &[0, 1]),
     )
     .await;
     match out {

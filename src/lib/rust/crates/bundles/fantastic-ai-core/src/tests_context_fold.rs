@@ -505,6 +505,7 @@ async fn a_view_array_naming_a_missing_row_is_no_view() {
         crate::memory::save_view(
             &backend,
             &kernel,
+            &[],
             &[json!({"id": 999_999, "res": "full"})],
             1000,
             "test",

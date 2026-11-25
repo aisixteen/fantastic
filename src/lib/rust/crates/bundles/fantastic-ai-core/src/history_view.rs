@@ -175,21 +175,6 @@ fn cap120(s: &str) -> String {
     s.chars().take(120).collect()
 }
 
-/// The body of the correction `content` carries, when it carries one: a block
-/// tagged `- -` whose body opens with the malformed-call or unsupported-tag report.
-/// A `call NOT dispatched:` body is no cut.
-fn correction(content: &str) -> Option<&str> {
-    reply_blocks(content).into_iter().find_map(|b| {
-        if parse_reply_tag(b) != Some(("-", "-")) {
-            return None;
-        }
-        let body = body_of(b);
-        (body.starts_with("[malformed call — nothing ran]")
-            || body.starts_with("[unsupported tag — not read]"))
-        .then_some(body)
-    })
-}
-
 /// The `thinking` size the row records, in tokens (`thinking` plus `thinking_cut`),
 /// when it has thinking.
 fn thinking_tokens(row: &Value) -> Option<usize> {
@@ -202,42 +187,6 @@ fn thinking_tokens(row: &Value) -> Option<usize> {
         .and_then(Value::as_u64)
         .map_or(0, |n| n as usize);
     Some((t.chars().count() + cut).div_ceil(CHARS_PER_TOKEN))
-}
-
-/// What a cut row shows in place of its last line: the anchor, with what to do.
-fn cut_content(content: &str, thought: Option<usize>, id: i64, correction: &str) -> String {
-    let c = content.trim_end();
-    let (prefix, last) = match c.rfind('\n') {
-        Some(i) => (c[..i].trim_end(), c[i + 1..].trim()),
-        None => ("", c.trim()),
-    };
-    let wrote = cap120(last);
-    let thought = thought.map_or(String::new(), |x| format!(" after thinking ~{x} tokens"));
-    let lines: Vec<&str> = correction.split('\n').collect();
-    let action = match lines.iter().position(|l| *l == "write it as:") {
-        Some(i) => {
-            let mut form = String::new();
-            for l in &lines[i + 1..] {
-                form.push_str(l);
-                if l.ends_with("</call>") {
-                    break;
-                }
-            }
-            format!("rewrite as {form}")
-        }
-        None => {
-            let caret = lines.get(2).map_or("", |l| l.trim());
-            let caret = caret.trim_start_matches(['^', '~']);
-            caret.strip_prefix(' ').unwrap_or(caret).to_string()
-        }
-    };
-    let anchor =
-        format!("[cut · you wrote {wrote}{thought} · nothing ran · ACTION: {action} · full: {id}]");
-    if prefix.is_empty() {
-        anchor
-    } else {
-        format!("{prefix}\n{anchor}")
-    }
 }
 
 /// What a recall reply recalled, as the anchor says it (` · id N`, or
@@ -363,21 +312,14 @@ fn with_kept(anchor: String, summary: Option<&str>) -> String {
 }
 
 /// AUTOFOLD (#556): the row `store[idx]`, whose current message is `msg`, as the
-/// model sees it — an anchor in place of a thought, a cut answer's last line, an
-/// answered large body or any answered recall reply. Pure and never stored: the
-/// store keeps every row whole, and `recall` with the row's id reads it back.
-/// `incoming` is the text of the turn being assembled, which is the correction a
-/// last cut row is followed by. A row with no int `id` comes back unchanged. Also
-/// which form the row took: `whole`, `cut`, `thought_anchor` (the anchor stands for
-/// the whole answer), `thought` (the anchor sits on the answer), `recalled` (a recall
-/// reply) or `anchor` (a large body).
+/// model sees it — an anchor in place of a thought, an answered large body or any
+/// answered recall reply. Pure and never stored: the store keeps every row whole,
+/// and `recall` with the row's id reads it back. A row with no int `id` comes back
+/// unchanged. Also which form the row took: `whole`, `thought_anchor` (the anchor
+/// stands for the whole answer), `thought` (the anchor sits on the answer),
+/// `recalled` (a recall reply) or `anchor` (a large body).
 #[must_use]
-pub fn autofold(
-    store: &[Value],
-    idx: usize,
-    msg: &Value,
-    incoming: Option<&str>,
-) -> (Value, &'static str) {
+pub fn autofold(store: &[Value], idx: usize, msg: &Value) -> (Value, &'static str) {
     let (Some(row), Some(content)) = (store.get(idx), msg.get("content").and_then(Value::as_str))
     else {
         return (msg.clone(), "whole");
@@ -386,31 +328,18 @@ pub fn autofold(
         return (msg.clone(), "whole");
     };
     match row.get("role").and_then(Value::as_str) {
-        Some("assistant") => {
-            let next = match store.get(idx + 1) {
-                Some(n) => Some(content_of(n)),
-                None => incoming,
-            };
-            let thought = thinking_tokens(row);
-            if let Some(body) = next.and_then(correction) {
-                return (
-                    with_content(msg, cut_content(content, thought, id, body)),
-                    "cut",
-                );
+        Some("assistant") => match thinking_tokens(row) {
+            Some(x) => {
+                let anchor = format!("[thought ~{x} tokens · id {id}]");
+                let (shown, form) = if content.is_empty() {
+                    (anchor, "thought_anchor")
+                } else {
+                    (format!("{anchor}\n{content}"), "thought")
+                };
+                (with_content(msg, shown), form)
             }
-            match thought {
-                Some(x) => {
-                    let anchor = format!("[thought ~{x} tokens · id {id}]");
-                    let (shown, form) = if content.is_empty() {
-                        (anchor, "thought_anchor")
-                    } else {
-                        (format!("{anchor}\n{content}"), "thought")
-                    };
-                    (with_content(msg, shown), form)
-                }
-                None => (msg.clone(), "whole"),
-            }
-        }
+            None => (msg.clone(), "whole"),
+        },
         Some("user") => {
             let answered = store[idx + 1..]
                 .iter()
@@ -515,8 +444,8 @@ mod tests {
     }
 
     /// The view message of `store[idx]` after autofold.
-    fn folded(store: &[Value], idx: usize, incoming: Option<&str>) -> String {
-        let (out, _) = autofold(store, idx, &store[idx], incoming);
+    fn folded(store: &[Value], idx: usize) -> String {
+        let (out, _) = autofold(store, idx, &store[idx]);
         out["content"].as_str().unwrap().to_string()
     }
 
@@ -532,30 +461,22 @@ mod tests {
         format!("first line\n{}", "x".repeat(chars - 11))
     }
 
-    /// A correction as the model is sent it.
-    fn correction_for(answer: &str) -> String {
-        format!(
-            "[reply to - · - - · ↑9]\n{}",
-            crate::call_check::check(answer, 0)[0]
-        )
-    }
-
     #[test]
     fn a_row_with_thinking_shows_its_thought_anchor() {
         let thinking = "t".repeat(400);
         let mut a = row(5, "assistant", "answer");
         a["thinking"] = json!(thinking);
         let store = [a];
-        let shown = folded(&store, 0, None);
+        let shown = folded(&store, 0);
         assert_eq!(shown, "[thought ~100 tokens · id 5]\nanswer");
         assert!(!shown.contains("tttt"));
         // no thinking, no anchor
         let plain = [row(6, "assistant", "answer")];
-        assert_eq!(folded(&plain, 0, None), "answer");
+        assert_eq!(folded(&plain, 0), "answer");
         // an anchor alone when the answer is empty
         let mut e = row(7, "assistant", "");
         e["thinking"] = json!("t".repeat(8));
-        assert_eq!(folded(&[e], 0, None), "[thought ~2 tokens · id 7]");
+        assert_eq!(folded(&[e], 0), "[thought ~2 tokens · id 7]");
     }
 
     #[test]
@@ -563,10 +484,7 @@ mod tests {
         let mut a = row(5, "assistant", "answer");
         a["thinking"] = json!("t".repeat(400));
         a["thinking_cut"] = json!(400);
-        assert_eq!(
-            folded(&[a], 0, None),
-            "[thought ~200 tokens · id 5]\nanswer"
-        );
+        assert_eq!(folded(&[a], 0), "[thought ~200 tokens · id 5]\nanswer");
     }
 
     #[test]
@@ -575,15 +493,15 @@ mod tests {
         let over = format!("{tag}{}", big_body(AUTOFOLD_AT * 4 + 4));
         let store = [row(8, "user", &over), row(9, "assistant", "ok")];
         assert_eq!(
-            folded(&store, 0, None),
+            folded(&store, 0),
             "[folded · read reply from notes · ~16001 tokens · head: \"first line\" · get: 8]"
         );
         let at = format!("{tag}{}", big_body(AUTOFOLD_AT * 4));
         let store = [row(8, "user", &at), row(9, "assistant", "ok")];
-        assert_eq!(folded(&store, 0, None), at);
+        assert_eq!(folded(&store, 0), at);
         // unanswered: whole
         let store = [row(8, "user", &over)];
-        assert_eq!(folded(&store, 0, None), over);
+        assert_eq!(folded(&store, 0), over);
     }
 
     #[test]
@@ -595,7 +513,7 @@ mod tests {
         );
         let content = format!("{small}\n\n{large}");
         let store = [row(8, "user", &content), row(9, "assistant", "ok")];
-        let shown = folded(&store, 0, None);
+        let shown = folded(&store, 0);
         let (first, second) = shown.split_once("\n\n").expect("two blocks");
         assert_eq!(first, small);
         assert!(
@@ -620,92 +538,61 @@ mod tests {
             row(27, "assistant", "ok"),
         ];
         assert_eq!(
-            folded(&store, 1, None),
+            folded(&store, 1),
             "[folded · recall reply from ai · id 12 · ~1 tokens · get: 21]"
         );
         assert_eq!(
-            folded(&store, 4, None),
+            folded(&store, 4),
             "[folded · recall reply from ai · query \"codename\" · ~1 tokens · get: 24]"
         );
         assert_eq!(
-            folded(&store, 6, None),
+            folded(&store, 6),
             "[folded · recall reply from ai · ~1 tokens · get: 26]"
         );
         // unanswered: whole
         assert_eq!(
-            folded(&store[..2], 1, None),
+            folded(&store[..2], 1),
             "[reply to 7 · ai recall · ↑20]\ntiny"
         );
     }
 
-    fn cut_store(thinking: Option<&str>, next: Option<&str>) -> Vec<Value> {
-        let mut a = row(30, "assistant", "Sending.\n<invoke name=\"send\">");
-        if let Some(t) = thinking {
-            a["thinking"] = json!(t);
-        }
-        let mut v = vec![a];
-        if let Some(n) = next {
-            v.push(row(31, "user", n));
-        }
-        v
-    }
-
+    /// H12: an old conversation with a stored correction block. The block shows
+    /// whole as the reply block it is, and the row before it shows whole: its
+    /// thought anchor only, no cut anchor.
     #[test]
-    fn a_cut_row_folds_at_once_with_its_action() {
-        let fix = correction_for("Sending.\n<invoke name=\"send\">");
-        let think = "t".repeat(28);
-        for (store, incoming) in [
-            (cut_store(Some(&think), None), Some(fix.as_str())),
-            (cut_store(Some(&think), Some(&fix)), None),
-        ] {
-            let shown = folded(&store, 0, incoming);
-            assert!(
-                shown.starts_with(
-                    "Sending.\n[cut · you wrote <invoke name=\"send\"> after thinking ~7 tokens"
-                ),
-                "{shown}"
-            );
-            assert!(shown.contains(" · nothing ran · ACTION: "), "{shown}");
-            assert!(shown.ends_with(" · full: 30]"), "{shown}");
-        }
-        // no thinking, no segment; a one-line answer has no prefix
-        let mut one = cut_store(None, None);
-        one[0]["content"] = json!("<invoke name=\"send\">");
-        let shown = folded(&one, 0, Some(&fix));
-        assert!(
-            shown.starts_with("[cut · you wrote <invoke name=\"send\"> · nothing ran"),
-            "{shown}"
-        );
-    }
-
-    #[test]
-    fn an_unsupported_tag_correction_gives_the_caret_instruction_as_action() {
-        let fix = correction_for("Hello <b>bold</b> text");
-        assert!(fix.contains("[unsupported tag — not read]"), "{fix}");
-        let mut a = row(30, "assistant", "Hello <b>");
-        a["thinking"] = json!("t".repeat(4));
-        let shown = folded(&[a], 0, Some(&fix));
-        assert!(
-            shown.contains("ACTION: `<b>` is not part of the call grammar — delete it · full: 30]"),
-            "{shown}"
-        );
-    }
-
-    #[test]
-    fn a_row_before_an_ordinary_reply_or_a_not_dispatched_report_is_not_a_cut() {
-        let mut a = row(30, "assistant", "text\n<call name=\"done\"></call>");
-        a["thinking"] = json!("t".repeat(4));
+    fn old_correction_is_a_plain_block() {
+        let before = "Sending.\n<function=send>";
+        let mut a = row(30, "assistant", before);
+        a["thinking"] = json!("t".repeat(28));
+        let malformed =
+            "[reply to - · - - · ↑30]\n[malformed call — nothing ran] line 2, col 1:\n  \
+                         <function=send>\n  ^~~~~~~~~~~~~~~ not a call tag\n";
+        let unsupported =
+            "[reply to - · - - · ↑30]\n[unsupported tag — not read] line 1, col 1:\n  \
+                           <b>\n  ^~~ `<b>` is not part of the call grammar — delete it\n";
         let ordinary = "[reply to 5 · notes read]\nbody";
         let not_run = "[reply to - · - -]\ncall NOT dispatched: a send names its target";
-        for next in [ordinary, not_run, "plain user text"] {
-            let shown = folded(&[a.clone(), row(31, "user", next)], 0, None);
+        for next in [malformed, unsupported, ordinary, not_run, "plain user text"] {
+            let store = [a.clone(), row(31, "user", next)];
+            let (out, form) = autofold(&store, 0, &store[0]);
+            assert_eq!(form, "thought", "{next}");
             assert_eq!(
-                shown,
-                "[thought ~1 tokens · id 30]\ntext\n<call name=\"done\"></call>"
+                out["content"],
+                json!(format!("[thought ~7 tokens · id 30]\n{before}")),
+                "{next}"
+            );
+            // the block itself, unanswered and answered, is the stored text whole
+            assert_eq!(autofold(&store, 1, &store[1]), (store[1].clone(), "whole"));
+            let answered = [a.clone(), row(31, "user", next), row(32, "assistant", "ok")];
+            assert_eq!(
+                autofold(&answered, 1, &answered[1]),
+                (answered[1].clone(), "whole"),
+                "{next}"
             );
         }
-        let shown = folded(&[a.clone()], 0, Some(not_run));
-        assert!(shown.starts_with("[thought ~"), "{shown}");
+        // the last row of the store, with no row after it, shows whole too
+        let store = [a.clone()];
+        assert_eq!(autofold(&store, 0, &store[0]).1, "thought");
     }
 
     #[test]
@@ -716,7 +603,7 @@ mod tests {
         );
         assert!(!will_fold(&big));
         let kept = [row(7, "user", &big), row(8, "assistant", "ok")];
-        assert_eq!(autofold(&kept, 0, &kept[0], None).1, "whole");
+        assert_eq!(autofold(&kept, 0, &kept[0]).1, "whole");
     }
 
     #[test]
@@ -766,7 +653,7 @@ mod tests {
             "x".repeat(AUTOFOLD_AT * 4 + 4)
         );
         let store = kept_row(&big, Some("the part I need"));
-        let (out, form) = autofold(&store, 0, &store[0], None);
+        let (out, form) = autofold(&store, 0, &store[0]);
         assert_eq!(form, "anchor");
         assert_eq!(
             out["content"],
@@ -790,12 +677,12 @@ mod tests {
             Some(""),
         ] {
             let store = kept_row(&big, keep);
-            let (out, _) = autofold(&store, 0, &store[0], None);
+            let (out, _) = autofold(&store, 0, &store[0]);
             assert_eq!(out["content"], json!(plain), "{keep:?}");
         }
         let at = "y".repeat(KEEP_SUMMARY_MAX * 4);
         let store = kept_row(&big, Some(&at));
-        let (out, _) = autofold(&store, 0, &store[0], None);
+        let (out, _) = autofold(&store, 0, &store[0]);
         assert!(out["content"].as_str().unwrap().ends_with(&at));
     }
 }

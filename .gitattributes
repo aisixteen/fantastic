@@ -3,3 +3,7 @@
 # YAML/JSON fixtures and every byte-compared test vector. Binary files are left
 # alone (`auto` detects them).
 * text=auto eol=lf
+
+# Recorded render vectors whose bytes include a CRLF from the history fixture (#766):
+# stored as written, never normalised.
+src/lib/rust/crates/bundles/fantastic-ai-core/src/model_format/res/test/prefix_*.txt -text

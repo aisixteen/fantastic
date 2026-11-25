@@ -6,7 +6,8 @@
 //! — and that means "done": nothing parsed, nothing dispatched, no error came
 //! back, and the run ends looking finished with the task untouched.
 
-use super::{extract_tool_calls, malformed_calls, HINT, OPEN};
+use super::{extract_tool_calls, malformed_calls, OPEN};
+use crate::model_format::default::HINT;
 
 /// The advice is a PROMPT, not a diagnostic: a model reads it and retries from
 /// it, and every runtime must say the same words. Pinned as LITERAL TEXT (this

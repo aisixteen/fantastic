@@ -165,6 +165,10 @@ pub(crate) async fn refresh(agent_id: &AgentId, kernel: &Arc<Kernel>, state: &Ba
             o.status == fantastic_kernel::Status::Completed && o.result.get("error").is_none()
         })
         .map(|o| &o.result);
+    // the model the provider names is a source of the chat's call format (#766)
+    if let Some(m) = answered.and_then(|r| r.get("model")).and_then(Value::as_str) {
+        crate::model_format::rules::note_seen(state, m);
+    }
     let capabilities = match answered {
         Some(r) => model_entry(r, model),
         None => {

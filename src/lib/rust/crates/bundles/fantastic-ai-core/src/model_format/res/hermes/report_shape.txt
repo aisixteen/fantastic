@@ -1,0 +1,1 @@
+[malformed call — nothing ran] a call is one JSON object with exactly "name" (the tool) and "arguments" (an object): {"name": "TOOL", "arguments": {…}}.

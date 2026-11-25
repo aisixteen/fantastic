@@ -14,7 +14,7 @@ use crate::context::{
 use crate::events::to_caller;
 use crate::helpers::{agent_meta, now_secs};
 use crate::memory::{load_history, save_view, MemoryStoreError};
-use crate::provider::Provider;
+use crate::model_format::pass::Pass;
 use crate::state::BackendState;
 use crate::strategies::{
     compact, fold::fold, is_known_strategy, strip::strip, truncate, ProjectionCtx,
@@ -114,9 +114,11 @@ pub fn context_notice(
 /// [`crate::assembly::assemble_messages`]) — the index the reaction cursor is
 /// recorded at. It is NOT derivable from `messages`, which is a deduped/trimmed
 /// view.
+///
+/// `pass`: the chat's pass path; a strategy that summarizes makes a task pass on it.
 #[allow(clippy::too_many_arguments)]
-pub async fn project_context(
-    provider: &Arc<dyn Provider>,
+pub(crate) async fn project_context(
+    pass: &Pass,
     self_id: &AgentId,
     state: &Arc<BackendState>,
     kernel: &Arc<Kernel>,
@@ -224,7 +226,7 @@ pub async fn project_context(
     let pctx = ProjectionCtx {
         budget: body_budget,
         recent_n: recent,
-        provider,
+        pass,
         self_id,
         kernel,
         client_id,
@@ -233,7 +235,7 @@ pub async fn project_context(
         "truncate" => truncate(&body, body_budget),
         "strip" => strip(&body, &pctx).await?,
         "fold" => fold(&body, &pctx).await?,
-        _ => compact(&body, recent, body_budget, provider).await,
+        _ => compact(&body, recent, body_budget, pass).await,
     };
     let dropped_pre = body.len().saturating_sub(proj.body.len());
     let notice = context_notice(
@@ -270,6 +272,31 @@ pub async fn project_context(
     while out_body.len() > 1 && over(&out_body) {
         out_body = out_body[1..].to_vec();
     }
+    // THE VIEW ARRAY, written by every projection: what the model sees, at what
+    // resolution — so the next turn (and the next process) rebuilds the same bytes.
+    // The fold rows this projection made go in the same append, before it (#766 RS5).
+    // `projection.view_ids` below is read after it, so it names the minted ids.
+    let minted = save_view(
+        self_id,
+        kernel,
+        &proj.folds,
+        &out_body
+            .iter()
+            .filter_map(|m| {
+                m.get("id")
+                    .and_then(Value::as_i64)
+                    .map(|id| json!({"id": id, "res": res_of(m)}))
+            })
+            .collect::<Vec<_>>(),
+        b,
+        &format!("projection: {strat_name}"),
+    )
+    .await?;
+    // the folds' ids were minted in that append (#766, fold id order): this request
+    // shows the ids the store holds
+    for m in &mut out_body {
+        crate::folds::remap_ids(m, &minted);
+    }
     let dropped_n = body.len().saturating_sub(out_body.len());
     let summarized = proj.summary.is_some();
     let reported = *state.reported.lock().expect("reported poisoned");
@@ -288,7 +315,7 @@ pub async fn project_context(
         "pinned_facts": 0,
         "stripped": proj.stripped,
         "stripped_bytes": proj.stripped_bytes,
-        "folded": proj.folded,
+        "folded": proj.folds.len(),
         "unanchored": proj.unanchored,
         // What the model actually sees this turn — so "after reload it sees only
         // the fold" is measured from the view, never self-reported.
@@ -297,23 +324,6 @@ pub async fn project_context(
         "view_ids_truncated":
             out_body.iter().filter(|m| m.get("id").is_some()).count() > 200,
     }));
-    // THE VIEW ARRAY, written by every projection: what the model sees, at what
-    // resolution — so the next turn (and the next process) rebuilds the same bytes.
-    save_view(
-        self_id,
-        kernel,
-        &out_body
-            .iter()
-            .filter_map(|m| {
-                m.get("id")
-                    .and_then(Value::as_i64)
-                    .map(|id| json!({"id": id, "res": res_of(m)}))
-            })
-            .collect::<Vec<_>>(),
-        b,
-        &format!("projection: {strat_name}"),
-    )
-    .await?;
     // `store_len`, NOT `body.len() - 1`. `body` is the DEDUPED/trimmed model view
     // and `derive_reaction` slices the FULL durable store by this index; whenever
     // the trimmers dropped whole turns the index came up short by that many, so the
@@ -323,12 +333,12 @@ pub async fn project_context(
         Some((store_len, client_id.to_string()));
     // a compaction reshapes the head: the next request's parts are a checkpoint
     *state.prev_request.lock().expect("prev_request poisoned") = None;
-    if proj.folded > 0 {
+    if !proj.folds.is_empty() {
         // "When it feels it folded, it runs context_recall" — at the start of
         // the next turn, over the new head. DEBOUNCED: every RECALL_EVERY-th
         // batch (python: 11 folds, 5 recalls in 60 turns before the debounce).
         let mut since = state.folds_since.lock().expect("folds_since poisoned");
-        *since += proj.folded;
+        *since += proj.folds.len();
         if *since >= RECALL_EVERY {
             *since = 0;
             *state.recall_due.lock().expect("recall_due poisoned") = true;
@@ -350,7 +360,7 @@ pub async fn project_context(
                 "pinned_facts": 0,
                 "stripped": proj.stripped,
                 "stripped_bytes": proj.stripped_bytes,
-                "folded": proj.folded,
+                "folded": proj.folds.len(),
                 "unanchored": proj.unanchored,
             },
         }),

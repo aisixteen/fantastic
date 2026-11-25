@@ -232,6 +232,11 @@ fn kind_of(r: &Value) -> Option<&str> {
     r.get("kind").and_then(Value::as_str)
 }
 
+/// A trace row (#766): the chat's own record of its passes, never in the head.
+fn is_trace(r: &Value) -> bool {
+    kind_of(r) == Some(crate::model_format::trace::KIND)
+}
+
 /// The head cache — loaded from the store on first use (lazy boot). Python
 /// `_head`.
 pub async fn head(self_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<Vec<Value>> {
@@ -245,7 +250,11 @@ pub async fn head(self_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<Vec<Valu
         json!({"type": "read", "from_last_kind": "clear"}),
     )
     .await?;
-    let h = rows_of(&res, self_id);
+    // TRACE ROWS ARE NO PART OF THE HEAD (#766): the head does not grow by the cap
+    let h: Vec<Value> = rows_of(&res, self_id)
+        .into_iter()
+        .filter(|r| !is_trace(r))
+        .collect();
     m.heads
         .lock()
         .expect("heads poisoned")
@@ -297,7 +306,7 @@ pub async fn refresh_head(self_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<
     let mut seen: std::collections::HashSet<i64> = ids.into_iter().collect();
     for r in fresh {
         let rid = r.get("id").and_then(Value::as_i64);
-        if rid.is_some_and(|i| seen.contains(&i)) {
+        if rid.is_some_and(|i| seen.contains(&i)) || is_trace(&r) {
             continue;
         }
         if kind_of(&r) == Some("clear") {
@@ -420,8 +429,17 @@ pub async fn save_history(
             })
             .or_insert_with(|| Value::Object(Map::new()));
         if let Some(a) = attrs.as_object_mut() {
-            a.entry("ts")
-                .or_insert_with(|| Value::from(crate::helpers::now_secs()));
+            let ts = a
+                .entry("ts")
+                .or_insert_with(|| Value::from(crate::helpers::now_secs()))
+                .clone();
+            // ITS UTC OFFSET (#766, 1.13), set once, here on append: a row that arrives
+            // with one keeps it; none is stored when the C library cannot place `ts`
+            if !a.contains_key(crate::row_attrs::UTC_OFFSET) {
+                if let Some(off) = crate::row_attrs::offset_at(&ts) {
+                    a.insert(crate::row_attrs::UTC_OFFSET.to_string(), off);
+                }
+            }
             a.entry("source")
                 .or_insert_with(|| Value::from(self_id.as_str()));
         }
@@ -534,26 +552,43 @@ pub fn bodies(self_id: &AgentId, kernel: &Kernel) -> Vec<(i64, String)> {
 /// The agent's STATE: the ordered ids it sees, each at a resolution — a `view`
 /// row in its memory store; the newest one in the head is current. Python
 /// `_save_view`.
+///
+/// `folds`: the fold rows this view shows that are not stored yet, each under its
+/// provisional id ([`crate::folds::provisional_id`]). They and the view row are ONE
+/// store append, folds first: a crash leaves both or neither (#766 RS5). Their ids are
+/// minted HERE, in fold order, right before that append, and every provisional id is
+/// rewritten to its minted one in the folds (`id`, `parent`, `refs`, the head of
+/// `content`) and in the view's `ids` ([`crate::folds::remap_ids`]): a row appended
+/// while a summarizer ran has a lower id than the folds, and the store's id order after
+/// a restart is the order before the stop (#766, fold id order). Returns the map
+/// (provisional -> minted), for the caller's own copies of the rows.
 pub async fn save_view(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
+    folds: &[Value],
     ids: &[Value],
     budget: i64,
     why: &str,
-) -> MemResult<()> {
-    save_history(
-        self_id,
-        kernel,
-        &[json!({
-            "kind": "view",
-            "ts": crate::helpers::now_secs(),
-            "budget": budget,
-            "why": why,
-            "ids": ids,
-        })],
-    )
-    .await
-    .map(|_| ())
+) -> MemResult<std::collections::BTreeMap<i64, i64>> {
+    let map: std::collections::BTreeMap<i64, i64> = folds
+        .iter()
+        .filter_map(crate::folds::row_id)
+        .filter(|id| *id < 0)
+        .map(|id| (id, kernel.mint_id()))
+        .collect();
+    let mut rows = folds.to_vec();
+    rows.push(json!({
+        "kind": "view",
+        "ts": crate::helpers::now_secs(),
+        "budget": budget,
+        "why": why,
+        "ids": ids,
+    }));
+    for r in &mut rows {
+        crate::folds::remap_ids(r, &map);
+    }
+    save_history(self_id, kernel, &rows).await?;
+    Ok(map)
 }
 
 /// The current view doc, when one has been written and carries an `ids` list.

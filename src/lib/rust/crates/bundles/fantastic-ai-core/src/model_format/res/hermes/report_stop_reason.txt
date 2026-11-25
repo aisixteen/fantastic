@@ -1,0 +1,1 @@
+[malformed call — nothing ran] a stop needs a reason: {"name": "stop", "arguments": {"reason": "why the work cannot be done"}}.

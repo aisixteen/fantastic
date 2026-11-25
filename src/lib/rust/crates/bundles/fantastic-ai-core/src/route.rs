@@ -30,12 +30,11 @@
 //! would trip [`fantastic_kernel::call_guard`] as a false cycle on turn 2. The
 //! INBOUND check lives in [`crate::verbs::send`], before the lock.
 
-use crate::constants::MAX_CUT_TURNS;
 use crate::events::emit_status;
 use crate::helpers::mint_batch_token;
 use crate::history_view::point_to_docs;
 use crate::state::state_for;
-use crate::tool_parse::{malformed_calls, terminated_calls};
+use crate::tool_parse::terminated_calls;
 use fantastic_bundle::{py_repr, py_repr_value, py_strip};
 use fantastic_kernel::outcome::Status;
 use fantastic_kernel::{AgentId, Item, Kernel};
@@ -512,13 +511,6 @@ pub(crate) fn silent() -> &'static Mutex<HashMap<(String, String), usize>> {
     SILENT.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// THE CUT STREAK per chain `(agent id, client id)`: turns in a row the stream
-/// checker cut at a foreign call tag (#499). At [`MAX_CUT_TURNS`] the chain gives up.
-pub(crate) fn cuts() -> &'static Mutex<HashMap<(String, String), usize>> {
-    static CUTS: OnceLock<Mutex<HashMap<(String, String), usize>>> = OnceLock::new();
-    CUTS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 /// The chain's CURRENT silent streak, read without touching it (#203). 0 when
 /// the chain has never been silent.
 fn silent_streak(self_id: &AgentId, client_id: &str) -> usize {
@@ -530,48 +522,21 @@ fn silent_streak(self_id: &AgentId, client_id: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// The wrapper tag a report blames, e.g. tool_call; tool_call when the report
-/// names none.
-fn wrapper_tag(report: &str) -> String {
-    if let Some(i) = report.find("drop the wrapper") {
-        let before = &report[..i];
-        if let Some(close) = before.rfind('`') {
-            if let Some(open) = before[..close].rfind('`') {
-                let tag: String = before[open + 1..close]
-                    .chars()
-                    .filter(|c| *c != '<' && *c != '>')
-                    .collect();
-                if !tag.is_empty() {
-                    return tag;
-                }
-            }
-        }
-    }
-    "tool_call".to_string()
-}
-
 /// #203: the escalating wording for a chain whose answers keep running nothing.
-/// `n` is the streak INCLUDING this answer; `kind` says why nothing ran.
-fn escalation(n: usize, kind: &str, tag: Option<&str>) -> String {
+/// `n` is the streak INCLUDING this answer; `kind` says why nothing ran. A malformed
+/// or foreign call is re-asked inside its turn (#766), so it has no kind here.
+fn escalation(n: usize, kind: &str) -> String {
+    // The placeholder form is the `default` type's resource (Q22): another type swaps it
+    // by exact match when it renders this text.
+    let open = crate::model_format::default::FORM_OPEN;
     let (phrase, rule) = match kind {
-        "wrapped" => {
-            let t = tag.unwrap_or("tool_call");
-            (
-                format!("put the call inside <{t}>"),
-                format!("Your next answer must START with <call name=\"…\"> — the very first characters of the answer — and contain <{t}> nowhere."),
-            )
-        }
-        "malformed" => (
-            "had calls that did not parse".to_string(),
-            "Your next answer must START with <call name=\"…\"> — the very first characters of the answer — with no other markup around or inside the call.".to_string(),
-        ),
         "thinking_only" => (
             "were only thinking, with no answer".to_string(),
             "Keep your thinking to a few lines, then write the call in your answer, after the thinking — a call inside the thinking does not run.".to_string(),
         ),
         _ => (
             "had no call".to_string(),
-            "Your next answer must START with <call name=\"…\"> — the very first characters of the answer. If the task is finished, that call is <call name=\"done\"></call>.".to_string(),
+            format!("Your next answer must START with {open} — the very first characters of the answer. If the task is finished, that call is <call name=\"done\"></call>."),
         ),
     };
     format!(
@@ -586,19 +551,14 @@ mod escalation_tests {
     #[test]
     fn escalation_texts_say_what_to_do() {
         let done = format!("<call name=\"done\"><{}call>", "/");
-        let d = escalation(3, "no_call", None);
+        let d = escalation(3, "no_call");
         assert!(d.starts_with("[no progress — 3 answers in a row ran nothing] Your last 3 answers had no call, so nothing ran.\n"));
         assert!(d.contains(&format!("If the task is finished, that call is {done}.")));
         assert!(!d.contains("nowhere"));
-        let t = escalation(2, "thinking_only", None);
+        let t = escalation(2, "thinking_only");
         assert!(t.contains("Keep your thinking to a few lines"));
         assert!(!t.contains("nowhere"));
-        let w = escalation(2, "wrapped", Some("tool_call"));
-        assert!(w.contains("and contain <tool_call> nowhere."));
-        let m = escalation(2, "malformed", None);
-        assert!(m.contains("with no other markup around or inside the call."));
-        assert!(!m.contains("nowhere"));
-        for s in [&d, &t, &w, &m] {
+        for s in [&d, &t] {
             assert!(s.ends_with("\nThen continue with your current step."));
         }
     }
@@ -1002,10 +962,6 @@ pub(crate) fn forget(self_id: &str) {
         .lock()
         .expect("silent poisoned")
         .retain(|chain, _| chain.0 != self_id);
-    cuts()
-        .lock()
-        .expect("cuts poisoned")
-        .retain(|chain, _| chain.0 != self_id);
     open_inquiries()
         .lock()
         .expect("open inquiries poisoned")
@@ -1026,14 +982,6 @@ pub fn gave_up_text(limit: usize) -> String {
     format!(
         "The LLM was not able to answer — {limit} turns in a row produced \
          no call. Reiterate the inquiry."
-    )
-}
-
-/// What a caller is told when a chain gives up after `limit` cut turns (#499).
-pub fn cut_gave_up_text(limit: usize) -> String {
-    format!(
-        "The LLM was not able to answer — {limit} turns in a row were cut at a \
-         foreign call syntax. Reiterate the inquiry."
     )
 }
 
@@ -1072,8 +1020,8 @@ end the chain explicitly: <call name=\"done\"></call>";
 /// carries the `stream_id` of the part it was streamed as.
 ///
 /// `cut`: the model stopped with a block open — ONLY A SUCCESSFUL GENERATION
-/// DISPATCHES, so the pass sends nothing, its closed calls and
-/// its malformed-call reports included; it routes as a turn that dispatched nothing.
+/// DISPATCHES, so the pass sends nothing, its closed calls included; it routes as a
+/// turn that dispatched nothing.
 #[allow(clippy::too_many_arguments)]
 pub async fn route_reply(
     self_id: AgentId,
@@ -1337,11 +1285,10 @@ async fn route_reply_gated(
     // two.
     let mut streams = call_streams;
     // ONLY THE ANSWER ACTS: calls written inside thinking are
-    // read as thinking — dispatch and the malformed-call report read the answer.
+    // read as thinking — dispatch reads the answer.
+    // A malformed or foreign call never reaches this point: the turn re-asked its model
+    // inside the attempt loop (#766), so the answer routed is the accepted one.
     let answer = crate::call_check::repair(&crate::think::without_thinking(&text));
-    // A stream-cut answer ends at its first foreign tag; a finished answer holding
-    // one was always cut. So this is true exactly for a turn the stream checker cut.
-    let foreign = !cut && crate::call_check::foreign_cut(&answer).is_some();
     let parsed = if cut {
         Vec::new()
     } else {
@@ -1360,75 +1307,17 @@ async fn route_reply_gated(
     // Grouping (not a message per call) is the whole point — see below.
     let mut units: Vec<Unit> = Vec::new();
 
-    // An envelope that OPENED and did not parse gets an error, exactly like a call
-    // missing its `target_id` does. Reported FIRST and reported even when other
-    // calls in the same pass parsed fine — a partially-read turn dispatched half
-    // the model's intent, and which half was lost is not something it can infer
-    // from the replies it got. Goes to SELF: `reply_to` lives inside the body we
-    // could not read, and the documented default for an absent `reply_to` is self
-    // anyway. TAGGED like everything else (`[reply to - · - -]`): python tags every
-    // unit, so an error block is counted in M and reads like its siblings.
-    let malformed = if cut {
-        Vec::new()
-    } else {
-        malformed_calls(&answer)
-    };
-    for bad in malformed {
-        units.push(Unit {
-            dest: self_id.as_str().to_string(),
-            target: "-".to_string(),
-            verb: "-".to_string(),
-            idx: None,
-            body: Some(bad.body()),
-            title: None,
-        });
-    }
-    // CALLS WRITTEN WRONG: markup carrying OUR call vocabulary
-    // outside every `<call` envelope — `<tool_call><function=call name="send">`,
-    // `<send>`, a JSON call — is reported like a compiler error, with the form to
-    // write instead (`call_check`). The answer's well-formed calls run as written,
-    // and each report says how many did.
-    let ran = calls
-        .iter()
-        .filter(|c| !CONTROL_CALLS.contains(&c.name.as_str()))
-        .count();
-    let mut reports = if cut {
-        Vec::new()
-    } else {
-        crate::call_check::check(&answer, ran)
-    };
-    // #203: a second answer in a row that ran NOTHING escalates its own report.
-    // The streak this turn will be counted into is read BEFORE the silent block
-    // below touches it, so n = current + 1.
-    if !reports.is_empty() && ran == 0 {
-        let n = silent_streak(&self_id, &client_id) + 1;
-        if n >= 2 {
-            let last = reports.last().expect("non-empty reports").clone();
-            let (kind, tag) = if last.contains("drop the wrapper") {
-                ("wrapped", Some(wrapper_tag(&last)))
-            } else {
-                ("malformed", None)
-            };
-            let esc = escalation(n, kind, tag.as_deref());
-            if let Some(r) = reports.last_mut() {
-                r.push('\n');
-                r.push_str(&esc);
-            }
-        }
-    }
-    for report in reports {
-        units.push(Unit {
-            dest: self_id.as_str().to_string(),
-            target: "-".to_string(),
-            verb: "-".to_string(),
-            idx: None,
-            body: Some(report),
-            title: None,
-        });
-    }
-
     let done_called = calls.iter().any(|c| c.name == "done");
     let await_called = calls.iter().any(|c| c.name == "await");
+    // `stop` (#766, 1.8): the model says the work cannot be done, and why. The reason of
+    // its first `stop` that has one; the reader refused a `stop` without one (S25).
+    let stop_called: Option<String> = calls.iter().filter(|c| c.name == "stop").find_map(|c| {
+        c.arguments
+            .get("reason")
+            .and_then(Value::as_str)
+            .filter(|r| !r.trim().is_empty())
+            .map(str::to_string)
+    });
     // `keep` and `line_summary` are notes, not actions: a turn of notes alone is a turn
     // with no call (#641, #709)
     let any_calls = calls
@@ -1512,7 +1401,8 @@ async fn route_reply_gated(
             // CONTROL CALLS, not dispatches. `done` ends the chain; `await`
             // stops the turn until something lands; `inquiry_answer` hands this
             // turn's answer back to whoever sent the inquiry (the `inquiry` verb
-            // reads it). None is a send, none is an error, none is ever nudged.
+            // reads it); `stop` ends the chain as failed. None is a send, none is an
+            // error, none is ever nudged.
             continue;
         }
         let args = &call.arguments;
@@ -1959,11 +1849,11 @@ async fn route_reply_gated(
     // the streak; a turn whose only output was BROKEN calls ran nothing and does
     // not (see MAX_SILENT_TURNS).
     let chain = (self_id.as_str().to_string(), client_id.clone());
+    // A model's `stop` gives up with the chain's silent streak as it stood before this
+    // answer, which ends it (1.8; section 5, item 4).
+    let stop_streak = silent_streak(&self_id, &client_id);
     if any_calls {
         silent().lock().expect("silent poisoned").remove(&chain);
-    }
-    if any_calls || !foreign {
-        cuts().lock().expect("cuts poisoned").remove(&chain);
     }
     // EVERY CALL-LESS TURN IS NUDGED, chain or not, a FIRST turn of pure prose
     // from a person included — otherwise a model that decided on a call, wrote it
@@ -1975,13 +1865,8 @@ async fn route_reply_gated(
     let nudging = !any_calls && !any_blocks && chained;
     // Only broken calls: their reports are the next turn — unless this chain has
     // now been silent MAX_SILENT_TURNS in a row, and gives up.
-    if !any_calls && any_blocks {
-        if foreign && cut_turn(&kernel, &self_id, &client_id, send_to.as_deref()).await {
-            return false;
-        }
-        if silent_turn(&kernel, &self_id, &client_id, send_to.as_deref()).await {
-            return false;
-        }
+    if !any_calls && any_blocks && silent_turn(&kernel, &self_id, &client_id, send_to.as_deref()).await {
+        return false;
     }
     // The chain goes on only when a reply batch lands on this agent itself.
     let to_self = blocks.iter().any(|b| b.dest == self_id.as_str());
@@ -1995,6 +1880,24 @@ async fn route_reply_gated(
         )
         .await;
         goes_on = to_self;
+    }
+    if let Some(reason) = stop_called.as_deref() {
+        // THE MODEL STOPPED (#766, 1.8): the work cannot be done. The chain ends as
+        // failed through the same give-up as the harness's stop: status `failed`,
+        // `reason: gave_up`, the model's reason as `error`, the open inquiry closed with
+        // it, `send_to` told. It wins over `done` and `await` in one answer; the calls
+        // written beside it were dispatched above, as beside `done` (section 5, item 5).
+        // No nudge, no reroll.
+        give_up(
+            &kernel,
+            &self_id,
+            &client_id,
+            send_to.as_deref(),
+            reason,
+            stop_streak,
+        )
+        .await;
+        return false;
     }
     if done_called {
         // AN INQUIRY THIS CHAIN NEVER ANSWERED is closed for its asker, saying so —
@@ -2097,7 +2000,6 @@ async fn route_reply_gated(
                 } else {
                     "no_call"
                 },
-                None,
             ));
         }
         deliver_soon(&kernel, self_id.as_str(), &nudge, &client_id, true);
@@ -2154,8 +2056,16 @@ async fn note_empty_await(
 }
 
 /// The calls that are not dispatches: they end, park or answer the chain, (`keep`)
-/// note a reply for its fold, or (`line_summary`) say in one line what the chat does now.
-const CONTROL_CALLS: [&str; 5] = ["done", "await", "inquiry_answer", "keep", "line_summary"];
+/// note a reply for its fold, (`line_summary`) say in one line what the chat does now, or
+/// (`stop`) end the chain as failed with a reason.
+const CONTROL_CALLS: [&str; 6] = [
+    "done",
+    "await",
+    "inquiry_answer",
+    "keep",
+    "line_summary",
+    "stop",
+];
 
 /// Count one silent turn of the chain (a turn that ran nothing). At
 /// [`MAX_SILENT_TURNS`] in a row the chain GIVES UP — the status says so, an open
@@ -2225,39 +2135,10 @@ async fn count_silent_turn(
     true
 }
 
-/// Count a turn the stream checker cut (#499): `true` when [`MAX_CUT_TURNS`] in a
-/// row were cut and the chain GAVE UP.
-async fn cut_turn(
-    kernel: &Arc<Kernel>,
-    self_id: &AgentId,
-    client_id: &str,
-    send_to: Option<&str>,
-) -> bool {
-    let chain = (self_id.as_str().to_string(), client_id.to_string());
-    let streak = {
-        let mut m = cuts().lock().expect("cuts poisoned");
-        let e = m.entry(chain).or_insert(0);
-        *e += 1;
-        *e
-    };
-    if streak < MAX_CUT_TURNS {
-        return false;
-    }
-    give_up(
-        kernel,
-        self_id,
-        client_id,
-        send_to,
-        &cut_gave_up_text(MAX_CUT_TURNS),
-        streak,
-    )
-    .await;
-    true
-}
-
-/// The give-up tail: forget both streaks, say so in the status, close the inquiry and
-/// tell the caller.
-async fn give_up(
+/// The give-up tail: forget the silent streak, say so in the status, close the inquiry
+/// and tell the caller. `streak` is written as `silent_turns`: the silent streak, or the
+/// number of malformed attempts of a turn the harness stopped (#766, 1.8).
+pub(crate) async fn give_up(
     kernel: &Arc<Kernel>,
     self_id: &AgentId,
     client_id: &str,
@@ -2267,7 +2148,6 @@ async fn give_up(
 ) {
     let chain = (self_id.as_str().to_string(), client_id.to_string());
     silent().lock().expect("silent poisoned").remove(&chain);
-    cuts().lock().expect("cuts poisoned").remove(&chain);
     let st = state_for(self_id);
     let mut detail = Map::new();
     detail.insert("reason".to_string(), json!("gave_up"));
@@ -2472,9 +2352,10 @@ mod tests {
             bad[0].error
         );
         assert!(
-            bad[0]
-                .error
-                .ends_with(&format!(". Nothing ran. {}", crate::tool_parse::HINT)),
+            bad[0].error.ends_with(&format!(
+                ". Nothing ran. {}",
+                crate::model_format::default::HINT
+            )),
             "verbatim hint: {:?}",
             bad[0].error
         );

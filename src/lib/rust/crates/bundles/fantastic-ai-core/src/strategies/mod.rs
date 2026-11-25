@@ -14,10 +14,9 @@ pub mod strip;
 
 use crate::constants::NOTICE_ENVELOPE_RESERVE;
 use crate::context::estimate_one;
-use crate::provider::{Provider, ProviderEvent};
+use crate::model_format::pass::Pass;
 use fantastic_bundle::py_strip;
 use fantastic_kernel::{AgentId, Kernel};
-use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -40,8 +39,9 @@ pub struct Projection {
     pub stripped: usize,
     /// `strip`: bytes that left the view with those stubs.
     pub stripped_bytes: i64,
-    /// `fold`: fold rows written this projection.
-    pub folded: usize,
+    /// `fold`: the fold rows made this projection, not yet written: the seam writes
+    /// them with its view row in ONE store append (#766 RS5).
+    pub folds: Vec<Value>,
     /// `fold`: folds left out of the view, their anchor unknown.
     pub unanchored: usize,
 }
@@ -58,8 +58,8 @@ pub struct ProjectionCtx<'a> {
     pub budget: i64,
     /// Verbatim recent turns `compact`/`truncate` keep.
     pub recent_n: usize,
-    /// The backend provider, for the strategies that summarize.
-    pub provider: &'a Arc<dyn Provider>,
+    /// The chat's pass path, for the strategies that summarize (a task pass).
+    pub(crate) pass: &'a Pass,
     /// The agent this projection is for.
     pub self_id: &'a AgentId,
     /// The kernel — the row store `fold` writes its marks to.
@@ -98,7 +98,9 @@ pub fn recent_split(body: &[Value], recent_n: usize) -> (Vec<Value>, Vec<Value>)
 ///
 /// A plain text completion (no tools; providers stream raw text) over the span
 /// rendered as `role: content` lines, wrapped in the summarizer system block.
-/// Every side call in this crate goes through it, `fold` included.
+/// Every side call in this crate goes through it, `fold` included. It is a TASK
+/// PASS (#766): the messages are rendered for the pass's model type, and the
+/// answer is plain text, never parsed.
 ///
 /// `max_tokens` bounds the output (a fold summary's budget); the second value
 /// says whether the provider stopped AT that bound (`stop_reason ==
@@ -107,8 +109,8 @@ pub fn recent_split(body: &[Value], recent_n: usize) -> (Vec<Value>, Vec<Value>)
 /// NO INPUT CUT. A REASONING MODEL THINKS OUT LOUD HERE TOO: unstripped,
 /// model-written folds carry titles beginning `<think>The user wants me to
 /// summarize…`. Side calls strip like the main turn.
-pub async fn summarize(
-    provider: &Arc<dyn Provider>,
+pub(crate) async fn summarize(
+    pass: &Pass,
     msgs: &[Value],
     max_tokens: Option<i64>,
 ) -> (String, bool) {
@@ -130,26 +132,18 @@ pub async fn summarize(
              decisions, facts, preferences, and unresolved tasks. Output ONLY the summary."}),
         json!({"role": "user", "content": rendered}),
     ];
-    provider.clear_stop_reason();
-    let Ok(mut stream) = provider.chat(&prompt, max_tokens).await else {
+    let Some(done) = pass.task(&prompt, max_tokens).await else {
         return (String::new(), false);
     };
-    let mut parts: Vec<String> = Vec::new();
-    while let Some(ev) = stream.next().await {
-        match ev {
-            Ok(ProviderEvent::Token(t)) => parts.push(t),
-            Err(_) => return (String::new(), false),
-        }
-    }
-    let cut = provider.report().stop_reason.as_deref() == Some("max_tokens");
-    (crate::think::without_thinking(&parts.join("")), cut)
+    let cut = done.report.stop_reason.as_deref() == Some("max_tokens");
+    (done.text, cut)
 }
 
 /// Summarize the overflow via [`summarize`]; degrade to a stub on ANY failure (a
 /// degraded artifact — the full transcript is whole in the durable store, so this
 /// is not a fallback chain). Python `safe_summary`.
-pub async fn safe_summary(provider: &Arc<dyn Provider>, overflow: &[Value]) -> String {
-    let (s, _cut) = summarize(provider, overflow, None).await;
+pub(crate) async fn safe_summary(pass: &Pass, overflow: &[Value]) -> String {
+    let (s, _cut) = summarize(pass, overflow, None).await;
     let s = py_strip(&s);
     if s.is_empty() {
         STUB_SUMMARY.to_string()
@@ -160,11 +154,11 @@ pub async fn safe_summary(provider: &Arc<dyn Provider>, overflow: &[Value]) -> S
 
 /// `compact` (DEFAULT): keep the recent turns verbatim + an LLM summary of
 /// the overflow. The summary rides the artifact; the seam wraps it.
-pub async fn compact(
+pub(crate) async fn compact(
     body: &[Value],
     recent: usize,
     budget: i64,
-    provider: &Arc<dyn Provider>,
+    pass: &Pass,
 ) -> Projection {
     let (overflow, recent_turns) = recent_split(body, recent);
     if overflow.is_empty() {
@@ -174,11 +168,11 @@ pub async fn compact(
             omitted_marker: false,
             stripped: 0,
             stripped_bytes: 0,
-            folded: 0,
+            folds: Vec::new(),
             unanchored: 0,
         };
     }
-    let summary = safe_summary(provider, &overflow).await;
+    let summary = safe_summary(pass, &overflow).await;
     // Reserve room for the notice the seam prepends: the wrapper envelope +
     // the summary text itself (the seam embeds this exact summary).
     let summary_cost = estimate_one(&json!({"role": "user", "content": summary}));
@@ -197,7 +191,7 @@ pub async fn compact(
             omitted_marker: false,
             stripped: 0,
             stripped_bytes: 0,
-            folded: 0,
+            folds: Vec::new(),
             unanchored: 0,
         };
     };
@@ -217,7 +211,7 @@ pub async fn compact(
         omitted_marker: false,
         stripped: 0,
         stripped_bytes: 0,
-        folded: 0,
+        folds: Vec::new(),
         unanchored: 0,
     }
 }
@@ -232,7 +226,7 @@ pub fn truncate(body: &[Value], budget: i64) -> Projection {
             omitted_marker: false,
             stripped: 0,
             stripped_bytes: 0,
-            folded: 0,
+            folds: Vec::new(),
             unanchored: 0,
         };
     }
@@ -248,7 +242,7 @@ pub fn truncate(body: &[Value], budget: i64) -> Projection {
         omitted_marker: true,
         stripped: 0,
         stripped_bytes: 0,
-        folded: 0,
+        folds: Vec::new(),
         unanchored: 0,
     }
 }

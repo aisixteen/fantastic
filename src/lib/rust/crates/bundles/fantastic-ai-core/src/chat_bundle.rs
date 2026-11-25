@@ -72,6 +72,9 @@ pub struct ChatRecord {
     /// `true` offers the `line_summary` call: the model says in one line what it is doing now; the latest line shows in the view and titles its stretch's fold.
     #[schemars(default = "default_off")]
     pub line_summaries: Option<bool>,
+    /// Bytes of RAM this chat keeps of its rows rendered for its model's call format; above it the least recently used rows go and are rendered again when needed.
+    #[schemars(range(min = 1), default = "default_render_cache_bytes")]
+    pub render_cache_bytes: Option<i64>,
     /// The fields every ai_core agent takes.
     #[serde(flatten)]
     pub ai: AiRecord,
@@ -82,6 +85,10 @@ pub struct ChatRecord {
 
 fn default_off() -> Option<bool> {
     Some(false)
+}
+
+fn default_render_cache_bytes() -> Option<i64> {
+    Some(crate::constants::RENDER_CACHE_BYTES as i64)
 }
 
 fantastic_kernel::record!(ChatRecord);
