@@ -879,6 +879,7 @@ async fn attempts(
         let mut bad: Option<String> = None;
         let mut open = false;
         let mut first = true;
+        let mut repaired: Vec<String> = Vec::new();
         while let Some(ev) = stream.next().await {
             let ProviderEvent::Token(t) = match ev {
                 Ok(ev) => ev,
@@ -890,12 +891,37 @@ async fn attempts(
             }
             raw.push_str(&t);
             let outs = reader.feed(&t);
-            take(outs, &mut text, &mut bad, &mut open, &mut first, caller).await;
+            take(
+                outs,
+                &mut text,
+                &mut bad,
+                &mut open,
+                &mut first,
+                &mut repaired,
+                caller,
+            )
+            .await;
         }
         drop(stream);
         if bad.is_none() {
             let outs = reader.finish();
-            take(outs, &mut text, &mut bad, &mut open, &mut first, caller).await;
+            take(
+                outs,
+                &mut text,
+                &mut bad,
+                &mut open,
+                &mut first,
+                &mut repaired,
+                caller,
+            )
+            .await;
+        }
+        for added in repaired {
+            let mut fields = Map::new();
+            fields.insert("attempt".into(), json!(attempt));
+            fields.insert("added".into(), json!(added));
+            pass.events()
+                .push(Mode::Turn.name(), pass.kind, "repaired", fields);
         }
         let report = pass.report(Mode::Turn);
         if attempt == 1 {
@@ -971,13 +997,14 @@ fn clear_calib_on_type_change(state: &BackendState, kind: &str) {
 }
 
 /// An attempt's reader output, taken in order: text and calls sent on, the first `Bad`
-/// ends what is forwarded, an `Open` noted.
+/// ends what is forwarded, an `Open` noted, a repair's closers kept for its trace event.
 async fn take(
     outs: Vec<Out>,
     text: &mut String,
     bad: &mut Option<String>,
     open: &mut bool,
     first: &mut bool,
+    repaired: &mut Vec<String>,
     caller: &Caller<'_>,
 ) {
     for out in outs {
@@ -991,6 +1018,7 @@ async fn take(
             }
             Out::Bad { report } => *bad = Some(report),
             Out::Open { .. } => *open = true,
+            Out::Repaired { added } => repaired.push(added),
         }
     }
 }

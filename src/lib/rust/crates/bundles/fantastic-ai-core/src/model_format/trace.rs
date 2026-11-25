@@ -1,7 +1,8 @@
 //! THE TRACES (#766, spec 1.10): the chat's own record of its passes, local only.
 //!
 //! A turn collects its events in RAM ([`Events`]): the render's `render_cold` or
-//! `render_warm` and its `cache_dropped`, each failed attempt's `retry`, the `stop`, the
+//! `render_warm` and its `cache_dropped`, each failed attempt's `retry`, each call read
+//! after a closers-only repair of its JSON (`repaired {attempt, added}`), the `stop`, the
 //! endpoint's `prefix_cache`, a `model_switched`. They are written at the turn's end, in
 //! ONE `append` under the chat's own key, after the turn's rows are stored
 //! ([`write`]); a cancelled turn or a dead process writes none. A trace row is

@@ -22,6 +22,9 @@ libc = { workspace = true }
 sha2 = "0.10"
 # The fold's MECHANICAL INDEX — python's `_PATH` / `_IDENT` patterns.
 regex = "1"
+# The hermes reader's one repair: closing brackets and braces a call's JSON lacks at its
+# end (#766). No default features: no serde dependency of its own.
+jsonrepair-rs = { version = "0.2.6", default-features = false }
 # Decode and downscale an attached image to the model's limits (#622).
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 

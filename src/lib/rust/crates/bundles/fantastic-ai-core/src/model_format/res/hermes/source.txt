@@ -49,3 +49,18 @@ Partial-JSON crates checked (1.12, crates.io, 2026-11-24):
   in the middle comes back as a whole string: none can say which strings were complete,
   which the cut head of a call needs (S13). None fits; hermes.rs has a prefix scan limited
   to `name` and `arguments.routing.target_id`.
+
+JSON-repair crates checked (2026-11-25, crates.io API; behaviour run on the GPU run's
+agentic_advanced.new_tool turn 14 send, JSON missing one closing brace):
+- jsonrepair-rs 0.2.6 (MIT, 2026-10-09; 0.2.7 2026-11-16; 166k downloads; no dependency
+  without its serde feature): adds the one `}` before the trailing newline, the rest
+  byte for byte. TAKEN, pinned at 0.2.6, applied only when serde_json does not read the
+  text inside <tool_call>, and accepted only when the result is the text with closing
+  brackets/braces added at its end and nothing else (hermes.rs `closed`).
+- llm_json 1.0.3 (MIT, port of python json_repair): re-serialises, key order changed
+  (`name` moved last): no byte comparison possible.
+- jsonrepair 0.1.0 (MIT OR Apache-2.0): the case comes back garbled.
+- partial-json-fixer 0.5.5 (MIT): appends the brace after the trailing newline; fine,
+  but a partial-JSON completer only (no other repair is wanted either way).
+- repair_json 0.1.0 (MIT, last release 2024-01), json-repair 0.4.0 (MIT, 2024-12): not
+  maintained.
