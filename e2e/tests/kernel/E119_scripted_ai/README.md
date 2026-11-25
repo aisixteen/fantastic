@@ -12,13 +12,16 @@ The AI's own `can` lines reach `memory`, `files`, its provider and `reflect` on
 the root; nothing is written on a target.
 
 The script: a `reflect` call on the root (its reply, the root's id and none of
-its guid, is the next request's user turn) → a `file_bridge` `write` (the bytes land verbatim) → calls
-written wrong, cut at its first foreign tag (#499: the compiler-style report comes
-back, nothing after the tag is stored; nothing runs) → an envelope with text outside
-a tag (its fault comes back) → a call only inside the thought (not dispatched; the
-no-call reminder comes back; the stored history has no thought) → a plain answer with
-`done` (no further request). A cut answer and a thought show in the next request as their
-autofold anchors (`[cut · …]`, `[thought ~N tokens · id N]`, #556). The checks are listed in `probe.py`'s docstring.
+its guid, is the next request's user turn) → a `file_bridge` `write` (the bytes land verbatim) →
+one turn of three attempts, re-asked inside it (#766, `CALL_RETRIES = 2`): a call written
+wrong (it fails at its first foreign tag; the re-ask is the same messages plus the attempt
+as written and the compiler-style report; nothing after the tag is read; nothing runs),
+then an envelope with text outside a tag (the second re-ask adds it and its fault), then a
+call only inside the thought (accepted, not dispatched; the no-call reminder comes back;
+the stored history has no thought) → a plain answer with `done` (no further request). After
+the accepted attempt no request and no stored row holds either failed attempt or a report.
+A thought shows in the next request as its autofold anchor (`[thought ~N tokens · id N]`,
+#556). The checks are listed in `probe.py`'s docstring.
 
 ```sh
 cd src/lib/python

@@ -1,20 +1,28 @@
-"""kernel/foreign_cut_give_up — the call checker on the STREAM (#499), against a
-SCRIPTED model. NO MODEL.
+"""kernel/foreign_cut_give_up — the call checker on the STREAM (#499) and its retries
+inside the turn (#766), against a SCRIPTED model. NO MODEL.
 
 A local OpenAI-compatible server plays the model (two: `m` for the AI, `mb` for the
 BOSS it hands its text to); the kernel's own AI agents (on both runtimes:
 `ai_chat.tools` chats naming a `vllm_backend` provider, #521) on the
 PACKAGED rust host run the chains, driven through `web_rest`.
 
-  A. the BOSS asks the AI (`inquiry`); the model writes a foreign call tag (`<invoke name="send">` followed by a loop of
-     closers) turn after turn: each answer is CUT at the tag, the correction
-     (`[malformed call — nothing ran]`) is the next request, the loop is never stored,
-     and after exactly 9 cut turns in a row the chain gives up — no 10th request —
-     and the BOSS, the sender, is told the cut error;
-  B. 8 cut turns, a real call, 8 cut turns, done: the call resets the count — 18
-     requests, no give-up;
-  C. a cut after thinking: the thought is kept in the store (`has_thinking`) and is
-     not in the next request.
+  A. the BOSS asks the AI (`inquiry`); the model writes a foreign call tag
+     (`<invoke name="send">` followed by a loop of closers) on every attempt: each
+     attempt fails at the tag and is re-asked inside the same turn (request k+1 is
+     request 1's messages plus one `{attempt as written, report}` pair per failed
+     attempt, the report `[malformed call — nothing ran]`); after exactly
+     `1 + CALL_RETRIES` = 3 attempts (`constants.rs` `CALL_RETRIES = 2`) the harness
+     stops the turn — no 4th request though the script holds more — and stores
+     the turn's call `<call name="stop"><reason>…</reason></call>` with the reason
+     `res/default/stop_reason.txt` filled with 3; no attempt and no loop is stored;
+     the BOSS, the sender, is told that reason;
+  B. nine turns in a row that each fail twice and then answer with a real call,
+     then a turn that fails twice and ends with `done`: no count runs across turns
+     — 30 requests, no stop; each turn's first request holds no failed attempt or
+     report of an earlier turn; the first request shows A's stored stop call;
+  C. a malformed answer after thinking: its re-ask holds the attempt, not the
+     thought; the stored row is the accepted attempt's, with its own thinking
+     (`has_thinking`); nothing of the failed attempt is stored.
 """
 
 from __future__ import annotations
@@ -45,8 +53,15 @@ TOKEN = "E140-" + secrets.token_hex(4)
 FOREIGN = 'Sending it.\n<invoke name="send">\n' + '</invoke>\n' * 400
 DONE = '<call name="done"></call>'
 AWAIT = '<call name="await"></call>'
-GAVE_UP = ("The LLM was not able to answer — 9 turns in a row were cut at a foreign "
-           "call syntax. Reiterate the inquiry.")
+ATTEMPTS = 3  # 1 + CALL_RETRIES (src/lib/rust/crates/bundles/fantastic-ai-core/src/constants.rs)
+# res/default/stop_reason.txt filled with ATTEMPTS
+STOP_REASON = (f"{ATTEMPTS} attempts in a row wrote malformed calls, so the harness "
+               "stopped the turn.")
+# the stored row is `render_call("stop", {reason})` = `<call name="stop">\n<reason>…</reason>\n</call>`
+# (tool_parse/render.rs); the history digest's `head` flattens `\n` to a space and
+# caps at 120 code points (verbs.rs `digest`), which this 111-char prefix fits
+STOP_HEAD = f'<call name="stop"> <reason>{STOP_REASON}</reason>'
+REPORT = "[malformed call — nothing ran]"
 
 
 def last_user(req: dict) -> str:
@@ -96,6 +111,31 @@ def main() -> int:
         h = hk.send(AI, {"type": "history", "limit": 500})
         return h.get("rows") or h.get("history") or h.get("messages") or []
 
+    def pairs(t: dict) -> list[tuple]:
+        return [(x.get("role"), x.get("content")) for x in (t["body"].get("messages") or [])]
+
+    def convo(t: dict) -> str:
+        """A request's messages without the system block, as text."""
+        return json.dumps([x for x in (t["body"].get("messages") or [])
+                           if x.get("role") != "system"], ensure_ascii=False)
+
+    def reasked(turns: list[dict], first: int, n: int) -> bool:
+        """Requests first+1 .. first+n-1 are re-asks of request `first`: its messages
+        unchanged, then one {assistant: attempt, user: report} pair per failed attempt."""
+        if len(turns) < first + n:
+            return False
+        base = pairs(turns[first])
+        for k in range(1, n):
+            got = pairs(turns[first + k])
+            if len(got) != len(base) + 2 * k or got[:len(base)] != base:
+                return False
+            for j in range(k):
+                a, r = got[len(base) + 2 * j], got[len(base) + 2 * j + 1]
+                if a[0] != "assistant" or "<invoke" not in str(a[1]) \
+                        or r[0] != "user" or not str(r[1]).startswith(REPORT):
+                    return False
+        return True
+
     ask = (f'<call name="send"><routing><target_id>{AI}</target_id></routing>'
            '<payload><type>inquiry</type><text>go A</text></payload></call>')
     reflect = (f'Looking around.\n<call name="send">\n<routing><target_id>{root}</target_id>'
@@ -126,57 +166,87 @@ def main() -> int:
                            "can": {**ai_can, BOSS: call("send")}})
         need(r.get("updated") is True, f"AI's line on BOSS: {str(r)[:200]}")
 
-        # ── A · nine cut turns in a row give up ───────────────────────────────
+        # ── A · three failed attempts: the harness stops the turn ─────────────
         m.reply(*[FOREIGN] * 12)
         mb.reply(ask, AWAIT, DONE)
         out = hk.send(BOSS, {"type": "send", "text": "go A"})
         need(not out.get("error"), f"the send is accepted: {str(out)[:200]}")
-        turns_at_least(m, 9)
+        turns_at_least(m, ATTEMPTS)
         need(idle(), "A: the chains settle")
         time.sleep(1)
         turns = m.turns()
-        need(len(turns) == 9, f"A: exactly 9 requests, none after the give-up: {len(turns)}")
-        need(all("[malformed call — nothing ran]" in last_user(t["body"]) for t in turns[1:9]),
-             "A: requests 2-9 each carry the malformed-call correction")
-        rows = [r for r in history() if r.get("role") == "assistant"]
-        need(bool(rows) and all(int(r.get("bytes") or 0) < 60 for r in rows),
-             f"A: the loop was never stored: {[r.get('bytes') for r in rows]}")
-        need(any(GAVE_UP in last_user(t["body"]) for t in mb.turns()),
-             "A: the sender (BOSS) was told the cut error: "
+        need(len(turns) == ATTEMPTS,
+             f"A: exactly {ATTEMPTS} requests, none after the harness stop: {len(turns)}")
+        need(reasked(turns, 0, ATTEMPTS),
+             "A: requests 2-3 are re-asks of request 1 inside the turn, one pair per failed "
+             "attempt, each report the malformed-call report")
+        need(all(str(p[1]).count("</invoke>") < 400 for t in turns for p in pairs(t)
+                 if p[0] == "assistant"),
+             "A: no attempt is read past the delta that held the foreign tag")
+        hist = history()
+        rows = [r for r in hist if r.get("role") == "assistant"]
+        need(len(rows) == 1 and str(rows[0].get("head")).startswith(STOP_HEAD),
+             f"A: the one stored assistant row is the harness's stop call: "
+             f"{[str(r.get('head'))[:120] for r in rows]}")
+        need(not any("<invoke" in str(r.get("head")) or REPORT in str(r.get("head"))
+                     for r in hist),
+             "A: no attempt, loop or report is stored")
+        need(any(STOP_REASON in last_user(t["body"]) for t in mb.turns()),
+             "A: the sender (BOSS) was told the stop reason: "
              f"{[last_user(t['body'])[:120] for t in mb.turns()]}")
+        seen_a = {r.get("id") for r in hist}
 
-        # ── B · 8 cuts, a call, 8 cuts, done: no give-up ──────────────────────
+        # ── B · nine retried turns in a row, then done: no stop ───────────────
         m.clear()
         mb.clear()
-        m.reply(*[FOREIGN] * 8, reflect, *[FOREIGN] * 8, DONE)
+        m.reply(*[FOREIGN, FOREIGN, reflect] * 9, FOREIGN, FOREIGN, DONE)
         out = hk.send(AI, {"type": "send", "text": "go B"})
         need(not out.get("error"), f"B: the send is accepted: {str(out)[:200]}")
-        turns_at_least(m, 18)
+        turns_at_least(m, 30)
         need(idle(), "B: the chain settles")
         time.sleep(1)
-        need(len(m.turns()) == 18, f"B: exactly 18 requests: {len(m.turns())}")
-        need(not any("were cut at a foreign call syntax" in json.dumps(t["body"])
-                     for t in mb.turns()),
-             "B: nobody was told of a give-up")
+        turns = m.turns()
+        need(len(turns) == 30, f"B: exactly 30 requests (10 turns of 3 attempts): {len(turns)}")
+        need(all(reasked(turns, 3 * k, 3) for k in range(10)),
+             "B: in each turn requests 2-3 are re-asks of its first request")
+        firsts = [convo(turns[3 * k]) for k in range(10) if len(turns) > 3 * k]
+        need(all("<invoke" not in c and REPORT not in c for c in firsts),
+             "B: no turn's first request holds a failed attempt or report of an earlier turn")
+        need(all("[reply to " in last_user(turns[3 * k]["body"]) for k in range(1, 10)
+                 if len(turns) > 3 * k),
+             "B: each later turn starts from the reflect reply of the turn before")
+        need(bool(firsts) and STOP_REASON in firsts[0],
+             "B: request 1 shows A's stored stop call")
+        new_b = [r for r in history() if r.get("id") not in seen_a]
+        need(not any(str(r.get("head")).startswith('<call name="stop">') for r in new_b),
+             "B: no stop call was stored")
+        need(not any(STOP_REASON in json.dumps(t["body"]) for t in mb.turns()),
+             "B: nobody was told of a stop")
+        seen_b = seen_a | {r.get("id") for r in new_b}
 
-        # ── C · a cut after thinking: stored, not re-sent ─────────────────────
+        # ── C · a malformed answer after thinking: re-asked, not stored ───────
         m.clear()
         mb.clear()
         m.reply(f'<think>PLAN-{TOKEN} then invoke</think>Sending it.\n<invoke name="send">',
-                DONE)
+                f'<think>KEEP-{TOKEN}</think>Done here.\n{DONE}')
         out = hk.send(AI, {"type": "send", "text": "go C"})
         need(not out.get("error"), f"C: the send is accepted: {str(out)[:200]}")
         turns_at_least(m, 2)
         need(idle(), "C: the chain settles")
         turns = m.turns()
         need(len(turns) == 2, f"C: two requests: {len(turns)}")
+        need(reasked(turns, 0, 2), "C: request 2 is the re-ask of request 1")
         if len(turns) > 1:
             msgs = json.dumps(turns[1]["body"].get("messages") or [])
             need(TOKEN not in msgs and "Sending it." in msgs,
-                 "C: request 2 holds the cut answer, not the thought")
-        need(any(r.get("has_thinking") and "Sending it." in str(r.get("head"))
-                 for r in history() if r.get("role") == "assistant"),
-             "C: the cut assistant row keeps its thinking in the store")
+                 "C: request 2 holds the failed attempt, not its thought")
+        new_c = [r for r in history() if r.get("id") not in seen_b]
+        need(any(r.get("role") == "assistant" and r.get("has_thinking")
+                 and "Done here." in str(r.get("head")) for r in new_c),
+             "C: the stored assistant row is the accepted attempt's, with its thinking")
+        need(not any("Sending it." in str(r.get("head")) or REPORT in str(r.get("head"))
+                     for r in new_c),
+             "C: nothing of the failed attempt is stored")
     finally:
         hk.close()
         m.stop()
