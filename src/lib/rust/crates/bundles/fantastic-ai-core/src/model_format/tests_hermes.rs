@@ -12,8 +12,8 @@ use serde_json::{json, Map, Value};
 use super::default::{self, Tags};
 use super::hermes::{
     Hermes, CALL_CLOSE, CALL_OPEN, FORM, FORM_OPEN, HINT, HOWTO_SEND, NAME, REPORT_BLOCK,
-    REPORT_BYTES_IN_JSON, REPORT_FOREIGN, REPORT_JSON, REPORT_NOT_A_TOOL, REPORT_NO_OPENER,
-    REPORT_NO_TARGET, REPORT_ROUTING, REPORT_ROUTING_KEY, REPORT_STOP_REASON,
+    REPORT_FOREIGN, REPORT_JSON, REPORT_NOT_A_TOOL, REPORT_NO_OPENER, REPORT_NO_TARGET,
+    REPORT_PAYLOAD, REPORT_ROUTING, REPORT_ROUTING_KEY, REPORT_STOP_REASON,
 };
 use super::{entry, fill, Out, Reader, Renderer};
 use crate::tool_parse::grammar::ROUTING;
@@ -471,13 +471,91 @@ fn bad_no_target() {
     }
 }
 
-// S8 (section 5, item 2): a body inside the JSON is refused, not read as the body.
+/// One hermes call text through the reader, read whole and split anywhere: its one
+/// call in internal text.
+fn call_of(text: &str) -> String {
+    let outs = joined(run(&[text]));
+    let call: Vec<&str> = outs
+        .iter()
+        .filter_map(|o| match o {
+            Out::Call { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(call.len(), 1, "{outs:?}");
+    assert!(
+        outs.iter()
+            .all(|o| matches!(o, Out::Text(_) | Out::Call { .. })),
+        "{outs:?}"
+    );
+    for split in every_split(text) {
+        assert_eq!(split, outs, "{text}");
+    }
+    call[0].to_string()
+}
+
+// S8 (after the first GPU run): the trained inline body, `payload.bytes` inside the
+// JSON, is read as the body, as JSON decoded it, byte for byte; it reads to the same
+// internal call as the raw block, and render still writes the raw block.
 #[test]
-fn bad_bytes_in_json() {
-    let r = bad_of(&h_call(
-        r#"{"name": "send", "arguments": {"routing": {"target_id": "notes"}, "payload": {"type": "write", "bytes": "x"}}}"#,
-    ));
-    assert_eq!(r, REPORT_BYTES_IN_JSON);
+fn bytes_in_json_read_as_body() {
+    // the GPU run's turn-5 form, verbatim
+    let inline = h_call(
+        r#"{"name":"send","arguments":{"routing":{"target_id":"desk","title":"write answer.md"},"payload":{"type":"write","path":"answer.md","bytes":"amber-df391e\n"}}}"#,
+    );
+    let got = call_of(&inline);
+    let c = calls(&got);
+    assert_eq!(c.len(), 1, "{got}");
+    assert_eq!(c[0].0, "send");
+    assert_eq!(
+        c[0].1["payload"]["bytes"],
+        Value::String("amber-df391e\n".to_string()),
+        "{got}"
+    );
+    // the same call as the raw block, and its render is the raw block
+    let block = h_call(
+        "{\"name\":\"send\",\"arguments\":{\"routing\":{\"target_id\":\"desk\",\"title\":\"write answer.md\"},\"payload\":{\"type\":\"write\",\"path\":\"answer.md\"}}}\n<bytes>amber-df391e\n</bytes>",
+    );
+    assert_eq!(call_of(&block), got);
+    let h = Hermes.render(&got);
+    assert_eq!(Hermes.render(&got), h, "render is deterministic");
+    assert!(
+        json_line(&h)["arguments"]["payload"].get("bytes").is_none(),
+        "{h}"
+    );
+    assert!(
+        h.ends_with(&format!("\n<bytes>amber-df391e\n</bytes>\n{CALL_CLOSE}")),
+        "{h}"
+    );
+    assert_eq!(call_of(&h), got);
+    // escapes decode, nothing trimmed
+    for (json_body, body) in [
+        (
+            r#"  two\nlines \"q\" \\ é\t  "#,
+            "  two\nlines \"q\" \\ é\t  ",
+        ),
+        ("", ""),
+    ] {
+        let got = call_of(&h_call(&format!(
+            r#"{{"name": "send", "arguments": {{"routing": {{"target_id": "notes"}}, "payload": {{"type": "write", "bytes": "{json_body}"}}}}}}"#
+        )));
+        assert_eq!(
+            calls(&got)[0].1["payload"]["bytes"],
+            Value::String(body.to_string()),
+            "{got}"
+        );
+    }
+}
+
+// S8: a `payload.bytes` that is not a string is refused.
+#[test]
+fn bad_bytes_in_json_not_text() {
+    for v in ["12", "null", r#"["x"]"#, r#"{"a": "x"}"#] {
+        let r = bad_of(&h_call(&format!(
+            r#"{{"name": "send", "arguments": {{"routing": {{"target_id": "notes"}}, "payload": {{"type": "write", "bytes": {v}}}}}}}"#
+        )));
+        assert_eq!(r, REPORT_PAYLOAD, "{v}");
+    }
 }
 
 // S9: a hermes model that writes the default form wrote a foreign call.
