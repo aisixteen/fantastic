@@ -118,9 +118,7 @@ runs:
           - capabilities
         prompt_file:
           call:
-          - read_stream
-          - watch_path
-          - unwatch_path
+          - read
           - watch
   - path: .fantastic/agents/user/agents/ai_b_provider/agent.yaml
     record:
@@ -168,9 +166,7 @@ runs:
           - capabilities
         prompt_file:
           call:
-          - read_stream
-          - watch_path
-          - unwatch_path
+          - read
           - watch
   - path: .fantastic/agents/user/agents/ai_c_provider/agent.yaml
     record:
@@ -218,9 +214,7 @@ runs:
           - capabilities
         prompt_file:
           call:
-          - read_stream
-          - watch_path
-          - unwatch_path
+          - read
           - watch
   timeout: 420
   script: |

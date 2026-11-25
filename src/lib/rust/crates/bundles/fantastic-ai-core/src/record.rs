@@ -93,7 +93,7 @@ pub struct AiRecord {
     /// The file_bridge this agent reads files THROUGH; null = none.
     #[schemars(length(min = 1), regex(pattern = r"\S"))]
     pub file_bridge_id: Option<String>,
-    /// A path on `file_bridge_id`, read through it as the system block; null = none.
+    /// The path of the file view `file_bridge_id` names, read through that view as the system block; null = none.
     #[schemars(length(min = 1), regex(pattern = r"\S"))]
     pub system_prompt_file: Option<String>,
     /// Text placed BEFORE the system block on every turn; null = nothing.

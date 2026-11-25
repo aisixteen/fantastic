@@ -359,7 +359,7 @@ mod tests {
                 json!({
                     "canvas_root": {"create": {"who": ["*"], "what": {"ai_chat.tools": {"model": "*"}, "canvas.tools": {}}}},
                     "memory": {"call": ["append", "read", "copy"]},
-                    "prompt_file": {"call": ["read"]},
+                    "prompt_file": {"call": ["read", "watch"]},
                     "credentials": {"call": ["get"]},
                 }),
             ),

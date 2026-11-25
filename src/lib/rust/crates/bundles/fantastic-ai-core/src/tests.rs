@@ -438,6 +438,46 @@ async fn add_file_bridge(kernel: &Arc<Kernel>, id: &str, root: &std::path::Path)
         .result;
 }
 
+/// The verbs the prompt loader sends the file view `file_bridge_id` names.
+pub(crate) const PROMPT_VIEW_VERBS: [&str; 2] = ["read", "watch"];
+
+/// A file VIEW of `path` on `agent`'s own leg (`ff_<agent>`), opened by the operator as
+/// `pv_<agent>`; `agent`'s `can` gains its line on the view ([`PROMPT_VIEW_VERBS`]) and its
+/// record names the view (`file_bridge_id`) and the path (`system_prompt_file`). The view's id.
+pub(crate) async fn name_prompt_view(kernel: &Arc<Kernel>, agent: &AgentId, path: &str) -> String {
+    let view = format!("pv_{agent}");
+    let r = kernel
+        .operator_send(vec![Item::new(
+            AgentId::from(format!("ff_{agent}").as_str()),
+            json!({"type": "open_view", "kind": "file", "path": path, "id": view}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["id"], json!(view), "{r}");
+    let mut can = crate::helpers::agent_meta(agent, kernel)
+        .get("can")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    can.insert(view.clone(), json!({"call": PROMPT_VIEW_VERBS}));
+    for (field, v) in [
+        ("can", Value::Object(can)),
+        ("file_bridge_id", json!(view)),
+        ("system_prompt_file", json!(path)),
+    ] {
+        let mut p = json!({"type": "update_agent", "id": agent.as_str()});
+        p[field] = v;
+        let r = kernel
+            .operator_send(vec![Item::new(AgentId::from("kernel_state"), p)])
+            .await
+            .remove(0)
+            .result;
+        assert!(r.get("error").is_none(), "{field}: {r}");
+    }
+    view
+}
+
 /// A SECOND backend in the same kernel — routing needs a peer to hand a reply
 /// to — with its own leg (see [`add_file_bridge`]) so the two chat stores stay
 /// separate files.

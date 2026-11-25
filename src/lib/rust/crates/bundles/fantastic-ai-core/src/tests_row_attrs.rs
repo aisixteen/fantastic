@@ -366,15 +366,7 @@ async fn a_changed_prompt_file_changes_only_the_prompt_file_part() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("prompt.md");
     std::fs::write(&path, "FILE-A {howto}").unwrap();
-    for (field, v) in [
-        ("file_bridge_id", format!("ff_{}", agent.as_str())),
-        ("system_prompt_file", "prompt.md".to_string()),
-    ] {
-        let mut p = json!({"type": "update_agent", "id": agent.as_str()});
-        p[field] = json!(v);
-        let r = ask(&kernel, &AgentId::from("kernel_state"), p).await;
-        assert!(r.get("error").is_none(), "{r}");
-    }
+    name_prompt_view(&kernel, &agent, "prompt.md").await;
     let _s = script(&agent, passes(12), Duration::ZERO);
     say(&kernel, &agent, "go").await;
     let before = replay(&rows(&kernel, &agent).await).pop().unwrap().1;

@@ -664,7 +664,7 @@ pub fn v9_tree(kernel: &Kernel) {
         let mut can = json!({
             "$parent": {"call": ["send"]},
             "memory": {"call": ["append", "read"]},
-            "prompt_file": {"call": ["read"]},
+            "prompt_file": {"call": ["read", "watch"]},
         });
         if let (Some(c), Value::Object(e)) = (can.as_object_mut(), extra) {
             c.extend(e);
@@ -734,7 +734,7 @@ pub fn v9_tree(kernel: &Kernel) {
             json!({
                 "canvas_root": {"create": {"who": ["*"], "what": {"chat": {"model": "*"}, "canvas": {}}}},
                 "memory": {"call": ["append", "read"]},
-                "prompt_file": {"call": ["read"]},
+                "prompt_file": {"call": ["read", "watch"]},
                 "credentials": {"call": ["get"]},
                 "github": {"call": ["issues"]},
             }),

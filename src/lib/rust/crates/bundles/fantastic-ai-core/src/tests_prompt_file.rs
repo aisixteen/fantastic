@@ -3,11 +3,11 @@
 //!
 //! Placeholders `{self}` `{store}` `{howto}` are filled per agent and per
 //! turn in whichever prompt is in force; `{self}\n\n{howto}` IS the
-//! default block. `file_bridge_id` + `system_prompt_file` (a path on it) make a file
-//! — read THROUGH that file_bridge, as the agent — the block, re-read on the next
-//! turn after the bridge reports it changed. Not set: nothing is looked up, the
-//! default block. Set and unusable: the turn FAILS, loud. Precedence: per-call >
-//! record > file > default.
+//! default block. `file_bridge_id` (a file view) + `system_prompt_file` (its path)
+//! make a file — read THROUGH that view with its own verbs (`read`, `watch`), as the
+//! agent — the block, re-read on the next turn after the view reports it changed. Not
+//! set: nothing is looked up, the default block. Set and unusable: the turn FAILS,
+//! loud. Precedence: per-call > record > file > default.
 
 use super::*;
 
@@ -73,12 +73,27 @@ async fn failed_turn(kernel: &Arc<Kernel>, backend: &AgentId, s: &Arc<MockScript
     r
 }
 
-/// Name the harness's own leg and a path on it.
-async fn name_file(kernel: &Arc<Kernel>, backend: &AgentId) {
-    let r = update(kernel, backend, "file_bridge_id", json!(leg(backend))).await;
-    assert!(r.get("error").is_none(), "{r}");
-    let r = update(kernel, backend, "system_prompt_file", json!("prompt.md")).await;
-    assert!(r.get("error").is_none(), "{r}");
+/// Name a file view of `prompt.md` on the harness's own leg, with the agent's line on it.
+async fn name_file(kernel: &Arc<Kernel>, backend: &AgentId) -> String {
+    name_prompt_view(kernel, backend, "prompt.md").await
+}
+
+/// The private inbox the loader watches the view through, while it is armed.
+fn watch_inbox(backend: &AgentId) -> AgentId {
+    AgentId::from(format!("{backend}/prompt_file"))
+}
+
+/// The view's own `reflect`: is its change relay on?
+async fn view_watching(kernel: &Arc<Kernel>, view: &str) -> Value {
+    kernel
+        .operator_send(vec![Item::new(
+            AgentId::from(view),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0)
+        .result["watching"]
+        .clone()
 }
 
 fn passes(n: usize) -> Vec<Vec<ScriptEvent>> {
@@ -147,12 +162,16 @@ async fn the_file_is_the_block_and_an_edit_is_live_next_turn() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "pf_file").await;
     std::fs::write(prompt_path(&tmp), "FILE-ROLE\n").unwrap();
-    name_file(&kernel, &backend).await;
+    let view = name_file(&kernel, &backend).await;
     let s = script(&backend, passes(12), Duration::ZERO);
     assert_eq!(
         turn(&kernel, &backend, &s, 1, json!({})).await,
         "FILE-ROLE\n"
     );
+    // armed on the view with its own verbs: no refusal, the watch inbox held, the relay on
+    assert!(crate::prompt_file::error_of(&backend).is_none());
+    assert!(kernel.inboxes.contains_key(&watch_inbox(&backend)));
+    assert_eq!(view_watching(&kernel, &view).await, json!(true));
     tokio::time::sleep(Duration::from_millis(300)).await;
     std::fs::write(prompt_path(&tmp), "EDITED {self}\n").unwrap();
     // the watcher marks it stale; the next turn after that reads it again
@@ -181,6 +200,7 @@ async fn a_record_prompt_beats_the_file_and_clearing_the_field_drops_it() {
     assert_eq!(turn(&kernel, &backend, &s, 1, json!({})).await, "RECORD");
     update(&kernel, &backend, "system_prompt", Value::Null).await;
     assert_eq!(turn(&kernel, &backend, &s, 2, json!({})).await, "FILE\n");
+    assert!(kernel.inboxes.contains_key(&watch_inbox(&backend)));
     update(&kernel, &backend, "system_prompt_file", Value::Null).await;
     let default = turn(&kernel, &backend, &s, 3, json!({})).await;
     assert!(
@@ -188,6 +208,8 @@ async fn a_record_prompt_beats_the_file_and_clearing_the_field_drops_it() {
         "{default}"
     );
     assert!(crate::prompt_file::error_of(&backend).is_none());
+    // cleared: unarmed — the watch inbox is gone
+    assert!(!kernel.inboxes.contains_key(&watch_inbox(&backend)));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -251,6 +273,25 @@ async fn a_path_without_file_bridge_id_fails_and_a_bridge_alone_is_the_default()
         block.contains(&format!("You are `{}`.", backend.as_str())),
         "{block}"
     );
+}
+
+/// The loader sends only a file view's verbs: a bridge named as the view (the agent holding
+/// every verb on it) answers no `watch`, so the turn fails loud and nothing is read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bridge_named_as_the_view_fails_the_turn() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "pf_brg").await;
+    std::fs::write(prompt_path(&tmp), "BRIDGE-READ\n").unwrap();
+    let r = update(&kernel, &backend, "file_bridge_id", json!(leg(&backend))).await;
+    assert!(r.get("error").is_none(), "{r}");
+    let r = update(&kernel, &backend, "system_prompt_file", json!("prompt.md")).await;
+    assert!(r.get("error").is_none(), "{r}");
+    let s = script(&backend, passes(1), Duration::ZERO);
+    let r = failed_turn(&kernel, &backend, &s).await;
+    let why = r["error"].as_str().unwrap_or_default();
+    assert!(why.contains(&format!("{} watch", leg(&backend))), "{r}");
+    assert!(!why.contains("BRIDGE-READ"), "{r}");
+    assert!(!kernel.inboxes.contains_key(&watch_inbox(&backend)));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
