@@ -470,7 +470,9 @@ async fn a_complete_the_server_cannot_answer_is_refused_naming_the_field() {
         json!({"type": "complete", "rid": "r1", "messages": [{"role": "user", "content": "hi"}]}),
     )
     .await;
-    assert_eq!(r["reason"], json!("bad_arg"), "{r}");
+    // a 404 is permanent through the shared classifier (`provider::read_reason`): the
+    // chain gives up at once; the field is still named
+    assert_eq!(r["reason"], json!("not_found"), "{r}");
     assert_eq!(r["arg"], json!("kv_slots"), "{r}");
     assert!(
         r["error"]
@@ -525,4 +527,34 @@ async fn a_key_the_store_refuses_refuses_naming_credentials() {
         assert_eq!(e.field, "credentials", "{extra}");
         assert_eq!(e.message, "vllm_backend: the store refused the key");
     }
+}
+
+/// A key the server refuses (401) on the pre-turn `/models` read is PERMANENT through the
+/// shared classifier (`provider::read_reason`): `unauthorized`, so the chain gives up at
+/// once — the read is never retried every pass (the GPU-run burst of `/v1/models` 401s).
+#[tokio::test]
+async fn a_refused_key_on_the_server_read_is_permanent() {
+    let srv = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&srv)
+        .await;
+    let mut rec = Map::new();
+    rec.insert("endpoint".into(), json!(format!("{}/v1", srv.uri())));
+    let e = server::read(&rec, &NoKey).await.unwrap_err();
+    assert_eq!(e.status, Some(401));
+    assert_eq!(
+        fantastic_ai_core::provider::read_reason(e.status),
+        fantastic_kernel::refusal::UNAUTHORIZED
+    );
+    // no HTTP status at all (unreachable) stays the field's bad_arg
+    let mut gone = Map::new();
+    gone.insert("endpoint".into(), json!("http://127.0.0.1:1/v1"));
+    let e = server::read(&gone, &NoKey).await.unwrap_err();
+    assert_eq!(e.status, None);
+    assert_eq!(
+        fantastic_ai_core::provider::read_reason(e.status),
+        fantastic_kernel::refusal::BAD_ARG
+    );
 }

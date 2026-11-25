@@ -278,18 +278,7 @@ async def connect(
         )
 
     def _errored(ev: dict, det: dict) -> bool:
-        """A status carrying `detail.error` that is not a `retrying` one.
-
-        `retrying` (a malformed call re-asked, `kind: "call"`, or a dropped link
-        retried) carries the error it retries; the call is still live, and
-        tripping on it cancels the re-ask in flight. A call that then runs out of
-        attempts ends `failed` or `done` with a reason, which `_died` catches.
-        """
-        return (
-            ev.get("type") == "status"
-            and bool(det.get("error"))
-            and ev.get("phase") != "retrying"
-        )
+        return errored_status(ev)
 
     def _ended(ev: dict) -> bool:
         return ev.get("type") == "status" and ev.get("phase") in ("done", "failed")
@@ -351,6 +340,19 @@ async def connect(
 
     conn._tasks.append(asyncio.create_task(_errspy()))
     return conn
+
+
+def errored_status(ev: dict) -> bool:
+    """A status carrying `detail.error` that is not a `retrying` one — THE one rule every
+    watcher trips on (`connect` here, and probes that watch a chain themselves).
+
+    `retrying` (a malformed call re-asked, `kind: "call"`, or a dropped link
+    retried) carries the error it retries; the call is still live, and
+    tripping on it cancels the re-ask in flight. A call that then runs out of
+    attempts ends `failed` or `done` with a reason, which a watcher catches as the end.
+    """
+    det = ev.get("detail") or {}
+    return ev.get("type") == "status" and bool(det.get("error")) and ev.get("phase") != "retrying"
 
 
 async def _live_tasks(root, aid) -> list[dict]:

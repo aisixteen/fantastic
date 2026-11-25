@@ -44,6 +44,20 @@ pub enum ErrorClass {
     Turn,
 }
 
+/// The refusal reason for a provider's READ of its endpoint before a turn (a record
+/// field left to the server: model, window, slots): the HTTP status through the one
+/// classifier — a permanent one (the key, the path) is its permanent code, so the chain
+/// gives up at once; a transient one is `transport_error`; any other answer, or no HTTP
+/// status at all (unreachable, an unreadable body), is `bad_arg` on the field.
+#[must_use]
+pub fn read_reason(status: Option<u16>) -> &'static str {
+    match status.map(http_class) {
+        Some(ErrorClass::Permanent(code)) => code,
+        Some(ErrorClass::Transient) => fantastic_kernel::refusal::TRANSPORT_ERROR,
+        _ => fantastic_kernel::refusal::BAD_ARG,
+    }
+}
+
 /// THE ONE HTTP CLASSIFIER: an endpoint's error status → what it means for the chain.
 /// 401/403 = the key, 404 = the model or the path: permanent. 408/429/5xx = the link
 /// or the load: transient. Anything else is this request's failure.

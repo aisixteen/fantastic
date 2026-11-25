@@ -65,6 +65,7 @@ from helpers import (
     Watch,
     add_lines,
     distinct_calls,
+    errored_status,
     verdict,
 )
 from helpers.ai import CHAT_MODULE
@@ -827,7 +828,9 @@ async def run(
     # the builder's lines that name ITSELF (or ids made just now) are written once
     # it exists; the human's line on the builder too (siblings)
     if wire_builder is None:
-        await add_lines(root, aid, creator_lines(aid))
+        # the key line too (owner option 1, as E31): a provider the builder makes holds
+        # the key store's `get`, and every ancestor of it must hold it or the cap cuts it
+        await add_lines(root, aid, {**creator_lines(aid), creds.CREDS: creds.GET})
     else:
         await wire_builder(root, aid)
     await add_lines(root, "user", {aid: lines.ALL})
@@ -892,7 +895,7 @@ async def run(
                     f"     tail={_d.get('partial_tail')!r} **\n",
                     flush=True,
                 )
-            if ev.get("type") == "status" and (ev.get("detail") or {}).get("error"):
+            if errored_status(ev):
                 msg = (ev.get("detail") or {}).get("error")
                 print(f"\n  ** TURN FAILED: {msg} **\n", flush=True)
                 runaway.append(f"turn failed: {msg}")
@@ -979,7 +982,7 @@ async def run(
                 await watcher.connect()
                 async for ev in watcher.events():
                     det = ev.get("detail") or {}
-                    if ev.get("type") == "status" and det.get("error"):
+                    if errored_status(ev):
                         print(f"\n  ** TURN FAILED: {det['error']} **\n", flush=True)
                         runaway.append(f"turn failed: {det['error']}")
                     elif ev.get("type") == "status" and ev.get("phase") in ("done", "failed"):

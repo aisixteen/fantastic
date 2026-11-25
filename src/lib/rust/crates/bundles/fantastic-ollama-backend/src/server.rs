@@ -63,13 +63,19 @@ pub fn served_model(body: &str, url: &str) -> Result<String, String> {
 /// # Errors
 /// The refusal text: unreachable, a non-200 answer, or not exactly one model.
 pub async fn read_model(endpoint: &str, key: &dyn KeySource) -> Result<String, String> {
+    read_model_at(endpoint, key).await.map_err(|(_, e)| e)
+}
+
+/// [`read_model`], with the server's HTTP status when it answered one
+/// (`provider::read_reason`).
+pub(crate) async fn read_model_at(endpoint: &str, key: &dyn KeySource) -> Result<String, (Option<u16>, String)> {
     let url = format!("{}/api/tags", endpoint.trim_end_matches('/'));
-    let secret = key.key(endpoint).await.map_err(|e| e.to_string())?;
+    let secret = key.key(endpoint).await.map_err(|e| (None, e.to_string()))?;
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs_f64(CONNECT_TIMEOUT))
         .timeout(Duration::from_secs_f64(READ_TIMEOUT))
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| (None, e.to_string()))?;
     let mut req = client.get(&url);
     if let Some(k) = secret.as_deref().filter(|k| !k.is_empty()) {
         req = req.bearer_auth(k);
@@ -79,16 +85,19 @@ pub async fn read_model(endpoint: &str, key: &dyn KeySource) -> Result<String, S
             "model: GET {url} failed — the server is not reachable there; set model on the record"
         )
     };
-    let resp = req.send().await.map_err(|_| unreachable())?;
+    let resp = req.send().await.map_err(|_| (None, unreachable()))?;
     let code = resp.status().as_u16();
     if code != 200 {
-        return Err(format!(
-            "model: GET {url} answered HTTP {code} — the server (or a door in front of it) \
-             does not serve it; set model on the record"
+        return Err((
+            Some(code),
+            format!(
+                "model: GET {url} answered HTTP {code} — the server (or a door in front of it) \
+                 does not serve it; set model on the record"
+            ),
         ));
     }
-    let body = resp.text().await.map_err(|_| unreachable())?;
-    served_model(&body, &url)
+    let body = resp.text().await.map_err(|_| (None, unreachable()))?;
+    served_model(&body, &url).map_err(|e| (None, e))
 }
 
 /// Read an absent `model` from the server and write it back. `None` when the
@@ -106,15 +115,15 @@ pub async fn resolve(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Option<Value> 
         return None;
     }
     let key = key_reader(agent_id, kernel, crate::BACKEND, false);
-    match read_model(&endpoint, &key).await {
+    match read_model_at(&endpoint, &key).await {
         Ok(model) => {
             let mut patch = Map::new();
             patch.insert("model".into(), json!(model));
             let written = kernel.write_own(agent_id, patch).await;
             fantastic_kernel::is_refused(&written).then_some(written)
         }
-        Err(e) => {
-            let mut r = refusal(BAD_ARG, e);
+        Err((status, e)) => {
+            let mut r = refusal(fantastic_ai_core::provider::read_reason(status), e);
             with(&mut r, "arg", json!("model"));
             Some(r)
         }

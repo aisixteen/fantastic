@@ -3021,3 +3021,27 @@ async fn http_errors_are_classed_by_the_shared_classifier() {
         assert_eq!(turn_error(&p).await.class, want, "HTTP {code}");
     }
 }
+
+/// A key the API refuses (401/403) on the pre-turn read is PERMANENT through the shared
+/// classifier (`provider::read_reason`): the verb's refusal is `unauthorized`, so the chain
+/// gives up at once instead of retrying the read every pass.
+#[tokio::test]
+async fn a_refused_key_on_the_read_is_permanent() {
+    for code in [401u16, 403] {
+        let (_srv, ep) = models(code, json!({})).await;
+        let e = server::read(&rec(json!({"endpoint": ep})), &NoKey)
+            .await
+            .unwrap_err();
+        assert_eq!(e.status, Some(code));
+        assert_eq!(
+            fantastic_ai_core::provider::read_reason(e.status),
+            fantastic_kernel::refusal::UNAUTHORIZED
+        );
+    }
+    let (_srv, ep) = models(503, json!({})).await;
+    let e = server::read(&rec(json!({"endpoint": ep})), &NoKey).await.unwrap_err();
+    assert_eq!(
+        fantastic_ai_core::provider::read_reason(e.status),
+        fantastic_kernel::refusal::TRANSPORT_ERROR
+    );
+}
