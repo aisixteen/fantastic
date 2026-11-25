@@ -388,6 +388,46 @@ async def add_lines(root, aid: str, add: dict) -> dict:
     return can
 
 
+async def human_line(root, aid: str, *, human_id: str = "user") -> dict:
+    """The human's line on `aid` (`human(ai=[])` made it with none), written once
+    `aid` exists: a line on a missing id is refused. Returns the human's `can`."""
+    return await add_lines(root, human_id, {aid: lines.ALL})
+
+
+#: The bundle of a probe hand: `user_probe`'s `send` dispatches any payload AS the
+#: hand, so a call through it is gated on the hand's own lines and position.
+HAND_MODULE = "user_probe.tools"
+
+
+async def probe_agent(root, aid: str, *, can: dict | None = None,
+                      parent: str | None = None) -> dict:
+    """Create a HAND: a `user_probe` agent `aid` under `parent` (the home when
+    none), holding exactly the lines `can` (none when absent). A probe sends
+    through it with `relay` to see what those lines and that position reach,
+    before any model runs; the probe deletes it when done."""
+    payload = {
+        "type": "create_agent", "parent_id": parent or home(root), "id": aid,
+        "handler_module": HAND_MODULE,
+        **({"can": can} if can else {}),
+    }
+    r = (await root.send([{"target": root.id, "payload": payload}]))[0]["result"]
+    if not isinstance(r, dict) or r.get("error"):
+        raise SystemExit(f"probe_agent: create {aid} refused: {r}")
+    return r
+
+
+async def relay(root, via: str, target: str, payload: dict):
+    """Send `payload` to `target` AS `via` (a hand or the human: `user_probe`'s
+    `send`) and return the target's answer. When the hop to `via` itself fails
+    (no `{sent, result}`), the answer is `{"error", "relay": <that reply>}`, so a
+    refusal of the hop never reads as the target's answer."""
+    out = (await root.send([{"target": via, "payload": {
+        "type": "send", "target": target, "payload": payload}}]))[0]["result"]
+    if isinstance(out, dict) and out.get("sent") == target and "result" in out:
+        return out["result"]
+    return {"error": f"relay: the send through {via} failed", "relay": out}
+
+
 async def human(
     root,
     *,

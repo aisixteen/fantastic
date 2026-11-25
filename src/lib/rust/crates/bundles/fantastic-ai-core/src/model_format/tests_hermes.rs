@@ -1025,6 +1025,220 @@ fn bytes_value_not_scanned() {
     );
 }
 
+// ── the call's end and the one repair (GPU run 2026-11-25) ───────────────────
+
+/// `text` through the reader, in one delta and split anywhere: the same `Out`s.
+fn read_same(text: &str) -> Vec<Out> {
+    let one = joined(run(&[text]));
+    for split in every_split(text) {
+        assert_eq!(split, one, "{text}");
+    }
+    assert_eq!(
+        joined(run(&[text])),
+        one,
+        "the same text reads the same twice"
+    );
+    one
+}
+
+/// The report `serde_json` gives for `json`, in this type's words.
+fn json_report(json: &str) -> String {
+    let e = serde_json::Deserializer::from_str(json)
+        .into_iter::<Value>()
+        .next()
+        .expect("a value is begun")
+        .expect_err("the JSON does not read");
+    fill(REPORT_JSON, &[("error", e.to_string().as_str())])
+}
+
+// Braces, brackets, quotes and `<` inside JSON strings are value bytes: `serde_json`
+// reads the call, the reader counts nothing.
+#[test]
+fn braces_and_quotes_in_strings() {
+    for title in [
+        "a } b",
+        "{{ [[ ]] }}",
+        "q \" and \\\" and \\\\",
+        "a < b > c ] }",
+    ] {
+        let args = json!({"target_id": "notes", "title": title, "payload": {"type": "read"}});
+        let mut j = String::new();
+        super::hermes::write_json(
+            &json!({"name": "send", "arguments": {"routing": {"target_id": "notes", "title": title}, "payload": {"type": "read"}}}),
+            &mut j,
+        );
+        let got = call_of(&h_call(&j));
+        assert_eq!(
+            calls(&got),
+            vec![("send".to_string(), obj(&args).clone())],
+            "{title}"
+        );
+    }
+}
+
+// A `</tool_call>` inside a JSON string is the string's bytes (S20): the call ends at
+// the first closer outside a string, and the title keeps the closer.
+#[test]
+fn closer_in_json_string_is_bytes() {
+    let head = r#"{"name": "send", "arguments": {"routing": {"target_id": "notes", "title": "a "#;
+    let text = format!(
+        "{CALL_OPEN}\n{head}{CALL_CLOSE} b\"}}, \"payload\": {{\"type\": \"read\"}}}}}}\n{CALL_CLOSE}"
+    );
+    let outs = read_same(&text);
+    let [Out::Call { text: call }] = outs.as_slice() else {
+        panic!("one call: {outs:?}");
+    };
+    let args = json!({"target_id": "notes", "title": format!("a {CALL_CLOSE} b"), "payload": {"type": "read"}});
+    assert_eq!(calls(call), vec![("send".to_string(), obj(&args).clone())]);
+}
+
+// A `</tool_call>` inside the raw block after the JSON is the block's bytes (R3): the
+// call ends at the first closer after the block's first `</bytes>`.
+#[test]
+fn closer_in_block_is_bytes() {
+    let text = format!("{CALL_OPEN}\n{SEND_JSON}\n<bytes>x {CALL_CLOSE} y</bytes>\n{CALL_CLOSE}");
+    let got = call_of(&text);
+    assert_eq!(
+        calls(&got)[0].1["payload"]["bytes"],
+        json!(format!("x {CALL_CLOSE} y"))
+    );
+}
+
+// Several calls in one answer, prose between them streamed as it comes.
+#[test]
+fn several_calls_in_order() {
+    let a = h_call(
+        r#"{"name": "send", "arguments": {"routing": {"target_id": "a"}, "payload": {"type": "read", "q": "}"}}}"#,
+    );
+    let b = format!("{CALL_OPEN}\n{SEND_JSON}\n<bytes>{CALL_CLOSE}</bytes>\n{CALL_CLOSE}");
+    let c = h_call(r#"{"name": "done", "arguments": {}}"#);
+    let text = format!("one\n{a}\ntwo\n{b}{c}\n");
+    let outs = read_same(&text);
+    let names: Vec<String> = outs
+        .iter()
+        .filter_map(|o| match o {
+            Out::Call { text } => Some(extract_tool_calls(text)[0].name.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(names, ["send", "send", "done"], "{outs:?}");
+    assert_eq!(outs.first(), Some(&Out::Text("one\n".into())));
+    assert!(
+        outs.iter()
+            .all(|o| matches!(o, Out::Text(_) | Out::Call { .. })),
+        "{outs:?}"
+    );
+}
+
+/// The send of the GPU run's `agentic_advanced.new_tool` turn 14, verbatim: its JSON
+/// lacks one closing brace.
+const NEW_TOOL_JSON: &str = r#"{"name": "send", "arguments": {"routing": {"target_id": "ai_prov"}, "payload": {"type": "complete", "rid": "sha256-compute", "messages": [{"role": "user", "content": "Compute the SHA-256 hex digest of the exact string: E160-b22389e54e51. Reply with ONLY the 64-character lowercase hex digest, nothing else."}], "max_tokens": 100, "knobs": {"temperature": 0}}}"#;
+
+// The new_tool case: `serde_json` does not read the JSON; the repair adds the one `}`
+// and nothing else, so the call reads as that JSON with the brace, after an
+// `Out::Repaired` naming the brace.
+#[test]
+fn repair_adds_missing_brace() {
+    assert!(serde_json::from_str::<Value>(NEW_TOOL_JSON).is_err());
+    let want = call_of(&h_call(&format!("{NEW_TOOL_JSON}}}")));
+    let reply = format!("\n\n{CALL_OPEN}\n{NEW_TOOL_JSON}\n{CALL_CLOSE}\n");
+    assert_eq!(
+        read_same(&reply),
+        vec![
+            Out::Text("\n\n".into()),
+            Out::Repaired { added: "}".into() },
+            Out::Call { text: want.clone() },
+            Out::Text("\n".into()),
+        ]
+    );
+    let c = calls(&want);
+    assert_eq!(c[0].1["target_id"], json!("ai_prov"));
+    assert_eq!(c[0].1["payload"]["max_tokens"], json!("100"));
+}
+
+// Closers only, several of them, in the order the open values need them.
+#[test]
+fn repair_adds_several_closers() {
+    let json = r#"{"name": "send", "arguments": {"routing": {"target_id": "notes"}, "payload": {"type": "read", "lines": ["1", "3""#;
+    let want = call_of(&h_call(&format!("{json}]}}}}}}")));
+    assert_eq!(
+        read_same(&h_call(json)),
+        vec![
+            Out::Repaired {
+                added: "]}}}".into()
+            },
+            Out::Call { text: want },
+        ]
+    );
+}
+
+// Any other repair is refused: the report is `serde_json`'s for the text the model
+// wrote, and no call is read.
+#[test]
+fn repair_refused_unless_closers_only() {
+    for json in [
+        // a quote would be added
+        r#"{"name": "done", "arguments": {"x": "open"#,
+        // a value would be added
+        r#"{"name": "done", "arguments": {"x":"#,
+        // a comma would be dropped
+        r#"{"name": "done", "arguments": {"x": "1",}}"#,
+        // a missing comma would be added
+        r#"{"name": "done" "arguments": {}}"#,
+        // nothing to repair from
+        "not json at all",
+    ] {
+        // the text inside the tags, from its first byte that is not whitespace
+        let lead = format!("{json}\n");
+        let outs = read_same(&h_call(json));
+        assert_eq!(
+            outs,
+            vec![Out::Bad {
+                report: json_report(&lead)
+            }],
+            "{json}"
+        );
+    }
+}
+
+// A repaired call is checked as any other: a repaired `stop` with no reason is refused.
+#[test]
+fn repaired_call_still_checked() {
+    let r = bad_of(&h_call(r#"{"name": "stop", "arguments": {"reason": ""}"#));
+    assert_eq!(r, REPORT_STOP_REASON);
+}
+
+// The stream ends inside a call whose JSON lacks its closers: the cut handling, no
+// repair (the call was never closed).
+#[test]
+fn stream_ends_mid_call() {
+    let prefix = format!("{CALL_OPEN}\n{NEW_TOOL_JSON}\n");
+    assert_eq!(
+        read_same(&prefix),
+        vec![
+            Out::Text("<call name=\"send\"><routing><target_id>ai_prov</target_id>".into()),
+            Out::Open {
+                name: Some("send".into()),
+                target: Some("ai_prov".into()),
+            },
+        ]
+    );
+    // a closer in a JSON string, then the end: the closer was the string's bytes, so the
+    // call is still open
+    let head = r#"{"name": "done", "arguments": {"x": "a "#;
+    let cut = format!("{CALL_OPEN}\n{head}{CALL_CLOSE} b");
+    assert_eq!(
+        read_same(&cut),
+        vec![
+            Out::Text("<call name=\"done\">".into()),
+            Out::Open {
+                name: Some("done".into()),
+                target: None,
+            },
+        ]
+    );
+}
+
 // ── the type's registration and resources ────────────────────────────────────
 
 #[test]

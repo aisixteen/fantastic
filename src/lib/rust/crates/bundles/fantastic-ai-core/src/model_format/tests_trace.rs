@@ -1534,3 +1534,28 @@ async fn switch_seen_after_restart() {
     assert_eq!(rows[0]["model"], json!(QWEN));
     assert_eq!(rows[1]["type"], json!("hermes"));
 }
+
+/// A hermes call whose JSON the reader completed with closers only is a `repaired`
+/// event of its attempt, naming the closers; a call that read as written is none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repaired_call_traced() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_hermes(&tmp, "tr_repaired").await;
+    let p = Scripted::new(
+        QWEN,
+        vec![
+            Step::says("ok\n<tool_call>\n{\"name\": \"done\", \"arguments\": {}\n</tool_call>"),
+            Step::says("ok\n<tool_call>\n{\"name\": \"done\", \"arguments\": {}}\n</tool_call>"),
+        ],
+    );
+    answered(&kernel, &a, &p, "rp_a").await;
+    let rows = traces_of(&kernel, &a, "rp_a").await;
+    assert_eq!(names(&rows), ["repaired", "render_cold"], "{rows:?}");
+    assert_eq!(rows[0]["attempt"], json!(1), "{}", rows[0]);
+    assert_eq!(rows[0]["added"], json!("}"), "{}", rows[0]);
+    assert_eq!(rows[0]["type"], json!(super::hermes::NAME), "{}", rows[0]);
+    assert_eq!(rows[0]["mode"], json!("turn"), "{}", rows[0]);
+    answered(&kernel, &a, &p, "rp_b").await;
+    let rows = traces_of(&kernel, &a, "rp_b").await;
+    assert!(!names(&rows).contains(&"repaired".to_string()), "{rows:?}");
+}

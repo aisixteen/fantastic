@@ -9,9 +9,13 @@
 //!   byte for byte. An envelope that does not parse and a stored cut marker stay as they
 //!   are.
 //! - Outbound ([`Reader`]): prose and reasoning stream live; a call is held from
-//!   `<tool_call>` to the `</tool_call>` found by reading its JSON text and then its
-//!   block ([`CallBody`]), and comes out as one [`Out::Call`] in the internal form
-//!   ([`render_call`]). There is no repair: a call that does not read, a JSON call with
+//!   `<tool_call>` to its first `</tool_call>` outside a JSON string (a closer inside a
+//!   string, or inside a raw block after the JSON, is value bytes: [`CallBody`]),
+//!   then `serde_json` reads it and it comes out as one [`Out::Call`] in the internal
+//!   form ([`render_call`]). One repair only: JSON that `serde_json` does not read and
+//!   that `jsonrepair-rs` completes by adding closing brackets and braces at its end and
+//!   nothing else ([`closed`]) is read so, and an [`Out::Repaired`] goes before its call
+//!   (the turn's `repaired` trace event). A call that does not read, a JSON call with
 //!   no tags, a closer with no opener and a call in the default form are each [`Out::Bad`]
 //!   with this type's report (`res/hermes/report_*.txt`). A stream that ends inside a
 //!   call is [`Out::Open`], after the internal head that could be read from it.
@@ -390,34 +394,28 @@ fn find_bytes(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
 /// Where the reader of a held call stands.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum Phase {
-    /// Before the JSON: whitespace, then `{`.
+    /// Looking for the first closer outside a JSON string.
     #[default]
-    Lead,
-    /// Inside the JSON object.
-    Json,
-    /// After the JSON: whitespace, then `<bytes>` or the closer.
-    After,
-    /// Inside the raw block, to its first `</bytes>`.
+    Close,
+    /// Inside the raw block that the text before the first closer opened: to its first
+    /// `</bytes>`.
     Block,
-    /// After the block: whitespace, then the closer.
+    /// After the block: to the next closer.
     AfterBlock,
-    /// The call does not read as JSON and a block: it ends at the first closer, and the
-    /// reader reports it.
-    Fallback,
 }
 
-/// The grammar of one held hermes call after `<tool_call>`: the JSON text is read with
-/// its strings, so a closer inside a string is value bytes; then the block, verbatim to
-/// its first `</bytes>`, so a closer inside it is value bytes too (R3, S20). Anything
-/// else ends at the first closer. It reads each byte once.
+/// The end of one held hermes call after `<tool_call>`: its first `</tool_call>` that is
+/// not inside a JSON string ([`in_string`]: a closer there is value bytes, S20), so a
+/// call whose JSON lacks its closing braces still ends there and is read or reported.
+/// One case reads on: when the text before that closer is one JSON value (read by
+/// `serde_json`) and then a `<bytes>` block not yet closed, the closer is the block's
+/// bytes; the call ends at the first closer after the block's first `</bytes>` (R3,
+/// S20). The end depends on the text alone, never on how it was split.
 #[derive(Debug, Default)]
 pub(crate) struct CallBody {
     seen: String,
     pos: usize,
     phase: Phase,
-    depth: u32,
-    in_str: bool,
-    esc: bool,
 }
 
 impl Body for CallBody {
@@ -433,103 +431,61 @@ impl CallBody {
     fn step(&mut self) -> Option<usize> {
         let b = self.seen.as_bytes();
         let close = CALL_CLOSE.as_bytes();
-        let open_block = BYTES_OPEN.as_bytes();
         loop {
+            let needle = match self.phase {
+                Phase::Block => BYTES_CLOSE.as_bytes(),
+                Phase::Close | Phase::AfterBlock => close,
+            };
+            let Some(i) = find_bytes(b, needle, self.pos) else {
+                // a needle split at the end of `seen` is found on the next feed
+                self.pos = self.pos.max(b.len().saturating_sub(needle.len() - 1));
+                return None;
+            };
             match self.phase {
-                Phase::Lead => {
-                    while self.pos < b.len() && is_json_ws(b[self.pos]) {
-                        self.pos += 1;
-                    }
-                    if self.pos == b.len() {
-                        return None;
-                    }
-                    if b[self.pos] == b'{' {
-                        self.pos += 1;
-                        self.depth = 1;
-                        self.phase = Phase::Json;
-                    } else {
-                        self.phase = Phase::Fallback;
-                    }
-                }
-                Phase::Json => {
-                    while self.pos < b.len() {
-                        let c = b[self.pos];
-                        if self.in_str {
-                            self.pos += 1;
-                            if self.esc {
-                                self.esc = false;
-                            } else if c == b'\\' {
-                                self.esc = true;
-                            } else if c == b'"' {
-                                self.in_str = false;
-                            }
-                            continue;
-                        }
-                        match c {
-                            // JSON has no `<` outside a string: the call is not JSON
-                            b'<' => {
-                                self.phase = Phase::Fallback;
-                                break;
-                            }
-                            b'"' => self.in_str = true,
-                            b'{' | b'[' => self.depth += 1,
-                            b'}' | b']' => self.depth -= 1,
-                            _ => {}
-                        }
-                        self.pos += 1;
-                        if self.depth == 0 {
-                            self.phase = Phase::After;
-                            break;
-                        }
-                    }
-                    if self.phase == Phase::Json {
-                        return None;
-                    }
-                }
-                Phase::After | Phase::AfterBlock => {
-                    while self.pos < b.len() && is_json_ws(b[self.pos]) {
-                        self.pos += 1;
-                    }
-                    if self.pos == b.len() {
-                        return None;
-                    }
-                    let rest = &b[self.pos..];
-                    let block_may = self.phase == Phase::After;
-                    if rest.starts_with(close) {
-                        return Some(self.pos + close.len());
-                    }
-                    if block_may && rest.starts_with(open_block) {
-                        self.pos += open_block.len();
+                Phase::Close if in_string(&self.seen[..i]) => self.pos = i + close.len(),
+                Phase::Close => match open_block(&self.seen[..i]) {
+                    Some(at) => {
+                        self.pos = at;
                         self.phase = Phase::Block;
-                        continue;
                     }
-                    if close.starts_with(rest) || (block_may && open_block.starts_with(rest)) {
-                        return None;
-                    }
-                    self.phase = Phase::Fallback;
-                }
-                Phase::Block => match find_bytes(b, BYTES_CLOSE.as_bytes(), self.pos) {
-                    Some(i) => {
-                        self.pos = i + BYTES_CLOSE.len();
-                        self.phase = Phase::AfterBlock;
-                    }
-                    None => {
-                        self.pos = self.pos.max(b.len().saturating_sub(BYTES_CLOSE.len() - 1));
-                        return None;
-                    }
+                    None => return Some(i + close.len()),
                 },
-                Phase::Fallback => {
-                    return match find_bytes(b, close, self.pos) {
-                        Some(i) => Some(i + close.len()),
-                        None => {
-                            self.pos = self.pos.max(b.len().saturating_sub(close.len() - 1));
-                            None
-                        }
-                    };
+                Phase::Block => {
+                    self.pos = i + needle.len();
+                    self.phase = Phase::AfterBlock;
                 }
+                Phase::AfterBlock => return Some(i + close.len()),
             }
         }
     }
+}
+
+/// Whether `head` (a held call's text before a closer) ends inside a JSON string, as
+/// `serde_json` reads it: its text, from its first byte that is not whitespace, stops
+/// at its end while a string is being read. A closer there is the string's bytes (S20).
+fn in_string(head: &str) -> bool {
+    let lead = head.trim_start_matches(|c: char| c.is_ascii() && is_json_ws(c as u8));
+    match serde_json::from_str::<serde::de::IgnoredAny>(lead) {
+        Err(e) => e.is_eof() && e.to_string().starts_with("EOF while parsing a string"),
+        Ok(_) => false,
+    }
+}
+
+/// When `head` (a held call's text before its first closer) is one JSON value, then
+/// whitespace, then `<bytes>` with no `</bytes>` after it: the index just past that
+/// `<bytes>`. The JSON is read by `serde_json`.
+fn open_block(head: &str) -> Option<usize> {
+    let mut it = serde_json::Deserializer::from_str(head).into_iter::<serde::de::IgnoredAny>();
+    it.next()?.ok()?;
+    let end = it.byte_offset();
+    let rest = &head[end..];
+    let lead = rest.len()
+        - rest
+            .trim_start_matches(|c: char| c.is_ascii() && is_json_ws(c as u8))
+            .len();
+    let at = end + lead;
+    let body = head[at..].strip_prefix(BYTES_OPEN)?;
+    (!body.contains(BYTES_CLOSE)).then_some(at + BYTES_OPEN.len())
 }
 
 /// The streaming state of one `hermes` answer.
@@ -565,8 +521,11 @@ impl Stream {
                     let read =
                         prose_fault(&self.prose).map_or_else(|| read_call(&raw, self.tools), Err);
                     match read {
-                        Ok(text) => {
+                        Ok(Read { text, added }) => {
                             self.prose.push('\n');
+                            if let Some(added) = added {
+                                out.push(Out::Repaired { added });
+                            }
                             out.push(Out::Call { text });
                         }
                         Err(report) => {
@@ -636,14 +595,59 @@ fn json_call_re() -> &'static regex::Regex {
     })
 }
 
+/// A held call read: its internal call text, and the closers a repair added to its
+/// JSON ([`closed`]), if it was repaired.
+struct Read {
+    text: String,
+    added: Option<String>,
+}
+
 /// One held call, opener and closer included, as internal call text; `Err` is the
-/// report.
-fn read_call(raw: &str, tools: &[&str]) -> Result<String, String> {
+/// report. When `serde_json` does not read the text inside the tags, it is read once
+/// more as [`closed`] repairs it, if it does.
+fn read_call(raw: &str, tools: &[&str]) -> Result<Read, String> {
     let inner = &raw[CALL_OPEN.len()..raw.len() - CALL_CLOSE.len()];
     let lead = inner.trim_start_matches(|c: char| c.is_ascii() && is_json_ws(c as u8));
     if lead.starts_with(BYTES_OPEN) {
         return Err(REPORT_BLOCK.to_string());
     }
+    let reads = matches!(
+        serde_json::Deserializer::from_str(lead)
+            .into_iter::<serde::de::IgnoredAny>()
+            .next(),
+        Some(Ok(_))
+    );
+    if !reads {
+        if let Some((fixed, added)) = closed(lead) {
+            return read_lead(&fixed, tools).map(|text| Read {
+                text,
+                added: Some(added),
+            });
+        }
+    }
+    read_lead(lead, tools).map(|text| Read { text, added: None })
+}
+
+/// `lead` (the text inside the tags, from its first byte that is not whitespace) as
+/// `jsonrepair-rs` repairs it, when the repair only added closing brackets and braces
+/// at its end (whitespace after them is dropped) and the result reads as JSON:
+/// `(repaired text, the closers added)`. Any other repair is refused: a quote, a comma,
+/// a value or a key the model did not write is never put in its call.
+fn closed(lead: &str) -> Option<(String, String)> {
+    let ws = |c: char| c.is_ascii() && is_json_ws(c as u8);
+    let have = lead.trim_end_matches(ws);
+    let fixed = jsonrepair_rs::jsonrepair(lead).ok()?;
+    let added = fixed.strip_prefix(have)?.trim_end_matches(ws);
+    if added.is_empty() || !added.bytes().all(|c| c == b'}' || c == b']') {
+        return None;
+    }
+    let text = format!("{have}{added}");
+    serde_json::from_str::<serde::de::IgnoredAny>(&text).ok()?;
+    Some((text, added.to_string()))
+}
+
+/// [`read_call`] from the text inside the tags, leading whitespace gone.
+fn read_lead(lead: &str, tools: &[&str]) -> Result<String, String> {
     let mut it = serde_json::Deserializer::from_str(lead).into_iter::<Value>();
     let value = match it.next() {
         Some(Ok(v)) => v,

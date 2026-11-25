@@ -888,6 +888,7 @@ dependencies = [
  "fantastic-kernel",
  "futures-util",
  "image",
+ "jsonrepair-rs",
  "libc",
  "regex",
  "schemars 0.8.22",
@@ -2096,6 +2097,12 @@ dependencies = [
  "futures-util",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "jsonrepair-rs"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69f68e68ccddaba9e4ff2d1f151ec1bb62e8475eb574c252ba86c844b8590aff"
 
 [[package]]
 name = "kasuari"
