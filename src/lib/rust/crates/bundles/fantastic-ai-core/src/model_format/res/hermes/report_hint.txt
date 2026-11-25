@@ -1,0 +1,4 @@
+The shape: <tool_call>
+{"name": "send", "arguments": {"routing": {"target_id": "agent id"}, "payload": {"type": "verb", "path": "a.md"}}}
+<bytes>document, verbatim, to the first closing bytes tag</bytes>
+</tool_call> — one JSON object, a body only in <bytes> after it, nothing in the body is escaped.

@@ -1,0 +1,1 @@
+[malformed call — nothing ran] calls are not <call> tags here: write <tool_call>, then {"name": "TOOL", "arguments": {…}} on its own line, then </tool_call>.

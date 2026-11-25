@@ -1,0 +1,75 @@
+# recorded by model_format::tests_determinism::record_prefix (#766): res/test/history.json, each row's model text through the adapter
+# adapter: default
+# rev: 1
+# rules_sha256: ff754de3206273513f5c638ae70696695c015c3647483889873a23286f4e41b4
+# commit: 4fd5bb4d949ab2eccaa8cdf1d9b5296f6a5ea245
+== row 1 user ==
+[2026-10-24 03:00 +03:00]
+Привіт! Склади, будь ласка, план для нотаток.
+== row 2 assistant ==
+[2026-10-24 03:01 +03:00]
+Почну зі сховища.
+<call name="send"><routing><target_id>notes</target_id><title>Огляд сховища</title></routing><payload><type>write</type><path>plan.md</path><bytes>fn main() {
+    println!("Привіт, ї й \"лапки\"");
+}
+  trailing spaces  
+	таб
+</bytes></payload></call>
+<call name="send"><routing><target_id>kernel</target_id></routing><payload><type>reflect</type><tier>oneliners</tier></payload></call>
+== row 3 user ==
+[2026-10-24 03:02 +03:00]
+[reply to 11 · notes write · "Огляд сховища" · ↑2 · 1 of 2 in batch 2]
+{"ok": true, "bytes": 96}
+
+[reply to 12 · kernel reflect · ↑2 · 2 of 2 in batch 2]
+call NOT dispatched: kernel refused reflect — no line to kernel in your can. Nothing ran.
+== row 4 assistant ==
+[2026-10-24 03:03 +03:00]
+<call name="keep"><of>11</of><summary>План записано в plan.md.</summary></call>
+<call name="await"></call>
+== row 5 user ==
+[2026-10-24 03:04 +03:00]
+[no call was dispatched] Your answer emitted no <call> element, so NOTHING ran — a call written in your thinking does not run: write it in your answer, after the thinking. If the task is unfinished, emit that call now. If it is finished, end the chain explicitly: <call name="done"></call>
+[no progress — 2 answers in a row ran nothing] Your last 2 answers had no call, so nothing ran.
+Your next answer must START with <call name="…"> — the very first characters of the answer. If the task is finished, that call is <call name="done"></call>.
+Then continue with your current step.
+== row 6 assistant ==
+[2026-10-24 03:05 +03:00]
+<call name="line_summary"><text>Пишу план нотаток</text></call>
+<call name="send"><routing><target_id>notes</target_id><reply_to>self</reply_to></routing><payload><type>read</type><path>plan.md</path><lines><item>1</item><item>3</item></lines></payload></call>
+== row 7 user ==
+[2026-10-25 05:46 +02:00]
+[reply to 13 · notes read · ↑6]
+План:
+1. Зібрати нотатки.
+2. Розкласти по темах.
+<call name="keep"><of>13</of><summary>…</summary></call>
+== row 8 assistant ==
+[2026-10-25 05:47 +02:00]
+<tool_call>
+{"name": "send", "arguments": {"routing": {"target_id": "notes"}}}
+</tool_call>
+== row 9 user ==
+[2026-10-25 05:48 +02:00]
+[reply to - · - -]
+[malformed call — nothing ran] line 1, col 1:
+  <tool_call>
+  ^~~~~~~~~~~ not a call tag
+write it as:
+<call name="send">
+<routing><target_id>notes</target_id></routing>
+<payload><type>reflect</type></payload>
+</call>
+A call is <call name="…">, one child tag per argument, closed by </call>.
+== row 10 assistant ==
+[2026-10-25 05:49 +02:00]
+Готово.
+<call name="inquiry_answer"><answer>Так, план готовий: два пункти.</answer></call>
+<call name="done"></call>
+== row 11 user ==
+[2026-10-26 00:33 -07:00]
+Дякую 👩‍💻
+А тепер зупинись. Кінець.
+== row 12 assistant ==
+[2026-10-26 07:34 +00:00]
+<call name="stop"><reason>Немає доступу до kernel: потрібна лінія в can.</reason></call>

@@ -1174,3 +1174,49 @@ fn a_lone_close_in_a_call_still_ends_it() {
     let (ev, _) = run(&format!("{DONE}</call>"), 3);
     assert_eq!(shape(&ev)[..2], [("start", "call"), ("end", "call")]);
 }
+
+/// S17 (#766): a held call reaches the splitter as one chunk. Fed that way it gives the
+/// same parts, the same text per part and the same `closed_calls` as the same answer fed
+/// one char at a time (stream ids are random, so parts are compared by position).
+#[test]
+fn whole_call_chunk_same_parts() {
+    let prose = "Ось план <think>спершу нотатки</think>гаразд ";
+    let chunks = [prose, CALL, " і все ", DONE];
+    let text = chunks.concat();
+
+    let mut sp = PartSplitter::new("ai");
+    let mut whole = Vec::new();
+    for c in chunks {
+        whole.extend(sp.feed(c));
+    }
+    whole.extend(sp.finish());
+    let (bytewise, by_char) = run(&text, 1);
+
+    let texts = |ev: &[PartEvent], sp: &PartSplitter| -> Vec<String> {
+        sp.parts
+            .iter()
+            .map(|p| {
+                ev.iter()
+                    .filter_map(|e| match e {
+                        PartEvent::Delta(q, t) if q.stream_id == p.stream_id => Some(t.as_str()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect()
+    };
+    let heads = |sp: &PartSplitter| -> Vec<(PartKind, Option<String>, Option<String>)> {
+        sp.parts
+            .iter()
+            .map(|p| (p.kind, p.name.clone(), p.target.clone()))
+            .collect()
+    };
+    let bodies = |sp: &PartSplitter| -> Vec<String> {
+        sp.closed_calls.iter().map(|(_, b)| b.clone()).collect()
+    };
+    assert_eq!(shape(&whole), shape(&bytewise));
+    assert_eq!(heads(&sp), heads(&by_char));
+    assert_eq!(texts(&whole, &sp), texts(&bytewise, &by_char));
+    assert_eq!(bodies(&sp), bodies(&by_char));
+    assert_eq!(sp.closed_calls.len(), 2, "{:?}", sp.closed_calls);
+}

@@ -33,6 +33,8 @@ test-support = ["fantastic-kernel/test-support"]
 [dev-dependencies]
 fantastic-credential-store = { path = "../fantastic-credential-store", features = ["test-support"] }
 fantastic-ram-store = { path = "../fantastic-ram-store", features = ["test-support"] }
+# A restart over a durable store: the trace rows survive it (#766, E6).
+fantastic-sqlite-store = { path = "../fantastic-sqlite-store" }
 fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 fantastic-file = { path = "../fantastic-file" }
 # Every AI agent keeps its conversation in a memory store; the tests wire one.

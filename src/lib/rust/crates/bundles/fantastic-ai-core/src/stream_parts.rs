@@ -159,6 +159,10 @@ pub struct PartSplitter {
     outside: String,
     /// Deltas held until the addressee is known.
     call_pending: String,
+    /// Whitespace that arrived while no prose part was open: it opens no part alone,
+    /// and leads the next prose part, so the parts do not depend on where the stream
+    /// was chunked (#766, S17). A call or a thought part drops it.
+    lead_ws: String,
     in_bytes: bool,
     /// `<call name…>` openers inside the open call not yet closed, plus itself.
     call_depth: usize,
@@ -189,6 +193,7 @@ impl PartSplitter {
             call_wrapped: false,
             outside: String::new(),
             call_pending: String::new(),
+            lead_ws: String::new(),
             in_bytes: false,
             call_depth: 1,
             parts: Vec::new(),
@@ -273,6 +278,9 @@ impl PartSplitter {
     // ── internals ──
 
     fn new_part(&mut self, kind: PartKind, name: Option<String>) -> usize {
+        if kind != PartKind::Text {
+            self.lead_ws.clear();
+        }
         let hex: String = crate::helpers::os_random(4)
             .iter()
             .map(|b| format!("{b:02x}"))
@@ -300,19 +308,27 @@ impl PartSplitter {
         } else {
             PartKind::Text
         };
-        let pi = match self.part {
-            Some(pi) => pi,
+        let (pi, text) = match self.part {
+            Some(pi) => (pi, text.to_string()),
             None => {
                 if kind == PartKind::Text && py_strip(text).is_empty() {
-                    return; // whitespace between parts is not a part
+                    // whitespace between parts is not a part; it leads the next prose
+                    self.lead_ws.push_str(text);
+                    return;
                 }
+                let lead = std::mem::take(&mut self.lead_ws);
                 let pi = self.new_part(kind, None);
                 self.part = Some(pi);
                 out.push(PartEvent::Start(self.parts[pi].clone()));
-                pi
+                let text = if kind == PartKind::Text {
+                    lead + text
+                } else {
+                    text.to_string()
+                };
+                (pi, text)
             }
         };
-        out.push(PartEvent::Delta(self.parts[pi].clone(), text.to_string()));
+        out.push(PartEvent::Delta(self.parts[pi].clone(), text));
     }
 
     fn close_text_part(&mut self, out: &mut Vec<PartEvent>) {

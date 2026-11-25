@@ -1,0 +1,6 @@
+<tool_call>
+{"name": "send", "arguments": {"routing": {"target_id": "notes"}, "payload": {"type": "write", "path": "a.md"}}}
+<bytes>first line
+second line
+</bytes>
+</tool_call>

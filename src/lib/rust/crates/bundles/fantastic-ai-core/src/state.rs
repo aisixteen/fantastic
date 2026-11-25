@@ -136,6 +136,28 @@ pub struct BackendState {
     /// The chat's current one-line summary `(text, ts)`: its latest `line_summary` call
     /// ([`crate::line_summary`]), restored from its history at boot.
     pub line_summary: Mutex<Option<(String, f64)>>,
+    /// The model the chat's provider last named (#766): the `model` of a pass's reply and
+    /// of a `capabilities` answer. RAM only; the second source of the model id a pass's
+    /// call format is chosen by, cleared when the record's `(provider_id, model)` changes.
+    pub(crate) model_seen: Mutex<Option<String>>,
+    /// The record's `(provider_id, model)` pair the model id was last resolved for, with
+    /// the provider's `models` default once asked for that pair (#766).
+    pub(crate) model_key: Mutex<Option<crate::model_format::rules::ModelKey>>,
+    /// The chat's own RENDER CACHE (#766): its rows rendered for the model type, RAM
+    /// only, bounded by its record's `render_cache_bytes`. It goes with this state.
+    pub(crate) render_cache: crate::model_format::cache::RenderCache,
+    /// The chat's token counts since its first pass (#766, 1.7): RAM, `None` until seeded
+    /// from the newest assistant row ([`crate::used::seed`]).
+    pub(crate) used_running: Mutex<Option<crate::used::Used>>,
+    /// Token counts with no row yet (#766, 1.7): they land on the next stored assistant
+    /// row ([`crate::used::land`]); a process that dies loses them.
+    pub(crate) used_pending: Mutex<crate::used::Pending>,
+    /// The model type of the chat's last finished turn pass (#766, 1.7): the calibration
+    /// belongs to it, and is cleared before a pass of another type is projected.
+    pub(crate) last_type: Mutex<Option<&'static str>>,
+    /// How many trace rows the chat's store holds (#766, 1.10): RAM, read from the store
+    /// once per process, before the chat's first trace append; then kept by the writer.
+    pub(crate) trace_count: Mutex<Option<usize>>,
 }
 
 /// The agent's chain: `alive` while a pass or its routing is running.
@@ -250,6 +272,13 @@ impl BackendState {
             caps_checked: Mutex::new(None),
             recalled_images: Mutex::new(Vec::new()),
             line_summary: Mutex::new(None),
+            model_seen: Mutex::new(None),
+            model_key: Mutex::new(None),
+            render_cache: crate::model_format::cache::RenderCache::new(),
+            used_running: Mutex::new(None),
+            used_pending: Mutex::new(crate::used::Pending::default()),
+            last_type: Mutex::new(None),
+            trace_count: Mutex::new(None),
         })
     }
 }

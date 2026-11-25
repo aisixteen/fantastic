@@ -46,13 +46,15 @@ pub const BYTES_CLOSE: &str = "</bytes>";
 
 /// The tools. Any other `name` is refused with the shape — a verb is `<type>`,
 /// never the tool name (a compression small models made under the JSON grammar).
-pub const TOOLS: [&str; 6] = [
+/// `stop` ends the chain as failed, with its `reason` (#766, 1.8).
+pub const TOOLS: [&str; 7] = [
     "send",
     "done",
     "await",
     "inquiry_answer",
     "keep",
     "line_summary",
+    "stop",
 ];
 
 /// The names `<routing>` holds: where a `send` goes, where the answer goes, what it

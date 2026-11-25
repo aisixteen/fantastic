@@ -70,75 +70,6 @@ pub fn render_reflect(v: &Value) -> String {
     py_strip(&format!("{sentence}  {fields}")).to_string()
 }
 
-/// How to reach another agent — the ENVELOPE this crate actually dispatches (see
-/// [`crate::route::route_reply`]).
-///
-/// Lands in the default system block only because routing exists: a prompt that
-/// teaches an envelope nothing dispatches is strictly worse than no prompt at all,
-/// so this text and the router are one change.
-///
-/// States facts and a few short working rules: how to address an agent, what
-/// `reflect` returns, where `reply_to` sends the answer, how to recognise a reply,
-/// and when work counts as done. It never names a loop; stopping is `done` or
-/// `await`.
-pub const SEND_TO_HOWTO: &str = r#"## Reaching other agents
-Everything is an agent with a string id; `send` reaches any of them. A call is a
-`<call>` element, one child tag per argument — no JSON, no quotes, no escaping:
-<call name="send">
-<routing><target_id>AGENT</target_id></routing>
-<payload><type>VERB</type><path>PATH</path><bytes>FIRST LINE
-SECOND LINE, with "quotes"
-</bytes></payload>
-</call>
-`<routing>` is how the call travels: `<target_id>` names the agent. `<payload>` is
-delivered whole: `<type>` the verb, every other child an argument. A value is text as
-written (`true`, `12`, a path); a list is `<item>` children; an object is child tags
-(`<edits><item><path>PATH</path><hunks>N</hunks></item></edits>`); a map's keys are its
-tags, `$` included (`<can><$parent><call><item>VERB</item></call></$parent></can>`).
-A body (a file, a patch) goes in `<bytes>`…`</bytes>` VERBATIM — real newlines and quotes,
-nothing escaped, no fence; it ends at the first `</bytes>`. `<reply_to>` in `<routing>` picks where the reply
-goes: you by default (your next message), another id hands it to them, `null` discards it.
-
-## Lines — every call is DENY-ALL
-You reach every agent below you by position. Anything else you reach only by a line in your
-`can` (in your self block): `{target: {call: [verbs]}}`, `{update: [fields]}` or `{create: …}`,
-a target being an agent id or `$parent`. Plan inside your lines — any other call is refused
-and costs a turn; never retry a refusal.
-
-## Turns
-Only your ANSWER acts: a `<call>` in your thinking does not run; write it in your answer,
-after thinking; every call in it runs. End every turn with a call, with
-`<call name="await"></call>` (stop until the next message wakes you; what you wait for is in
-flight, not lost, and a job from `exec start` wakes you with `job_done`; refused when nothing
-is pending) or with `<call name="done"></call>` (the work is done, checked as under Working). A turn with
-no call is rerolled.
-
-## Replies
-Every call runs under a pid; its reply comes back tagged `[reply to <pid> · <agent>
-<verb>]`. The calls of one turn run CONCURRENTLY (no order — if B needs A, send B after
-A's reply) and are answered TOGETHER in one later message, one block each (`N of M in
-batch …`). An unseen reply is in flight — never re-issue it; send `kernel` `<type>ps</type>`
-to check. A message to an
-agent has a deadline (600 s unless set otherwise); past it you are told of a dead letter —
-resend it, or drop it with `kernel` `<type>ack_deadletter</type>`.
-
-## How to call an agent — `reflect` with a `tier`
-Send `reflect` to the agent you ask about (`kernel` for create_agent, update_agent, ps, …)
-with a tier: `<payload><type>reflect</type><tier>oneliners</tier></payload>`.
-It answers one signature per verb you may call; add `<verb>write</verb> <tier>detailed</tier>` for one
-verb's full text.
-
-## Inquiries
-Look it up, or take the obvious reading and say your assumption. Send an `inquiry` only when
-no tool can answer and the choices lead to different work: `send` whoever owns it an
-`inquiry` (`<text>`, `<kind>text|single|multi|confirm</kind>`, `<options>`). The answer
-arrives LATER as a message under that call's pid: work on, or `<call name="await"></call>`
-for it. Asked one yourself
-(`[inquiry from …]`), do the work it needs, then answer with
-<call name="inquiry_answer"><answer>what you concluded</answer></call>
-— nothing else counts as your answer.
-"#;
-
 /// What an agent IS — `reflect`, rendered from its one declaration (every argument).
 fn reflect_howto() -> String {
     let rows = fantastic_kernel::verbs::rows(&[fantastic_kernel::declared::common::VERBS], &[]);
@@ -215,7 +146,8 @@ Your last message: what changed, where, what you checked, what is left; under te
 
 /// The context-window how-to, appended to the DEFAULT system block. Context is
 /// the backend's (it owns the conversation), so it teaches the recall /
-/// context_status affordances alongside [`SEND_TO_HOWTO`]'s addressing.
+/// context_status affordances alongside the `send` how-to's addressing (the pass
+/// type's `res/<type>/howto_send.txt`).
 pub const CONTEXT_HOWTO: &str = r#"## Context window
 Your view is finite: when it overflows, older turns are compacted and a
 `[context-notice]` says so; the transcript stays whole. Send your OWN id
@@ -341,8 +273,12 @@ async fn parts(
         // Teaching any unconditionally spends window on an affordance the agent
         // does not have.
         let flag = |k: &str| meta.get(k).and_then(Value::as_bool) == Some(true);
+        // THE `send` HOW-TO IS THE PASS TYPE'S (Q16): `res/<type>/howto_send.txt`, so a
+        // model is taught the call form it is read in. Only a switch to another type
+        // changes it.
+        let kind = crate::model_format::type_now(self_id, kernel, &meta).await;
         let mut blocks = vec![
-            SEND_TO_HOWTO.to_string(),
+            crate::model_format::of(kind).howto_send.to_string(),
             reflect_howto(),
             CONTEXT_HOWTO.to_string(),
             MEMORY_HOWTO.replace("{store}", &store),
@@ -552,7 +488,7 @@ impl From<BlockFail> for fantastic_kernel::bundle::BundleError {
 /// the default system block (a caller that wants a different role, or a different
 /// convention, owns it whole); absent that, the record's own `system_prompt` does;
 /// the default is self-identity +
-/// [`SEND_TO_HOWTO`] + [`CONTEXT_HOWTO`] + [`MEMORY_HOWTO`], and NO agent menu.
+/// the pass type's `send` how-to + [`CONTEXT_HOWTO`] + [`MEMORY_HOWTO`], and NO agent menu.
 ///
 /// The conversation is ALWAYS this agent's own (its memory store): there is no
 /// caller-supplied history.
@@ -612,7 +548,7 @@ pub async fn assemble_messages(
     let pics = Pictures::of(self_id, state, kernel, &store, &rendered);
     for r in rendered {
         let (msg, form) = if caching.folds() && r.res == "full" {
-            crate::history_view::autofold(&store, r.idx, &r.msg, Some(user_text))
+            crate::history_view::autofold(&store, r.idx, &r.msg)
         } else {
             (r.msg, if r.res == "full" { "whole" } else { "anchor" })
         };
@@ -911,7 +847,7 @@ mod tests_worknote {
         assert!(h.contains("A step counts as done only once its result is among what you found"));
         assert!(h.contains("think only about the next step"));
         // the sections run in the agreed order
-        let s = super::SEND_TO_HOWTO;
+        let s = crate::model_format::default::HOWTO_SEND;
         assert!(!s.contains("## Working"));
         let order = [
             "## Reaching",
@@ -928,10 +864,14 @@ mod tests_worknote {
     #[test]
     fn the_send_howto_says_act_early_batch_and_verify_before_done() {
         // (the text wraps lines; compare on single spaces)
-        let h = format!("{} {}", super::SEND_TO_HOWTO, super::WORKING_HOWTO)
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let h = format!(
+            "{} {}",
+            crate::model_format::default::HOWTO_SEND,
+            super::WORKING_HOWTO
+        )
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
         let h = h.as_str();
         assert!(h.contains("Read only what the request names; no docs or reflect sweep before your first real call."));
         assert!(h.contains("an error reply names the missing argument"));

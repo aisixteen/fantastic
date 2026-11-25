@@ -1,0 +1,13 @@
+[
+  {"contains": "qwen3-coder", "type": "default"},
+  {"contains": "embedding", "type": "default"},
+  {"contains": "reranker", "type": "default"},
+  {"contains": "qwen2.5-vl", "type": "default"},
+  {"contains": "qwen2.5-omni", "type": "default"},
+  {"contains": "qwen2.5-math", "type": "default"},
+  {"contains": "deepseek-r1-distill", "type": "default"},
+  {"contains": "qwen3", "type": "hermes"},
+  {"contains": "qwq", "type": "hermes"},
+  {"contains": "qwen2.5", "type": "hermes"},
+  {"contains": "hermes", "type": "hermes"}
+]

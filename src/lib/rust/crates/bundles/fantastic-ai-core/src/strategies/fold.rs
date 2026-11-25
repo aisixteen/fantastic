@@ -3,7 +3,9 @@
 //! At the watermark, oldest first, one batch down to LOW:
 //!   1. FOLD closed chains — one summarizing call per chain (title + body; the body
 //!      alone when the chain's latest `line_summary` is its title, #709), one
-//!      appended fold row each with `refs`; the members stay one descent away
+//!      fold row each with `refs`; the members stay one descent away. The fold rows
+//!      are written with the projection's view row in ONE store append
+//!      ([`crate::memory::save_view`]), so a crash leaves both or neither (#766 RS5)
 //!   2. still over → STRIP bodies in open chains (the `strip` strategy, unchanged)
 //!   3. still over → CUT (strip's own second stage)
 //!
@@ -28,13 +30,12 @@ use crate::folds::{
     chain_text, is_fold, level, make_fold, member_anchor, quoted_title, render, row_id,
     row_parent, row_role, unanchored, FoldAnchorError,
 };
-use crate::memory::{save_history, MemoryStoreError};
-use crate::provider::Provider;
+use crate::memory::MemoryStoreError;
+use crate::model_format::pass::Pass;
 use fantastic_bundle::{py_split_whitespace, py_splitlines, py_strip};
-use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 // The tunables live in [`crate::constants`]; re-exported so every
 // `crate::strategies::fold::…` path keeps working.
@@ -318,8 +319,8 @@ fn body_only(text: &str) -> Option<String> {
 ///
 /// # Errors
 /// The summary would not fit after every re-summarise.
-pub async fn summarize(
-    provider: &Arc<dyn Provider>,
+pub(crate) async fn summarize(
+    pass: &Pass,
     rows: &[Value],
     chain: &[usize],
     line: Option<&str>,
@@ -336,7 +337,7 @@ pub async fn summarize(
     let budget = SUMMARY_BUDGET;
     let ask = |content: String| async move {
         let (text, cut) = crate::strategies::summarize(
-            provider,
+            pass,
             &[json!({"role": "user", "content": content})],
             Some(budget + THINK_ALLOWANCE),
         )
@@ -396,31 +397,22 @@ pub async fn summarize(
     }
 }
 
-/// Summarize `idxs` and append ONE fold row for them (a summary that will not fit
-/// is [`FoldFail::Summary`], a member with no known place [`FoldFail::Anchor`]).
+/// Summarize `idxs` and make ONE fold row for them, not yet written: the caller writes
+/// it with its view row in one append (a summary that will not fit is
+/// [`FoldFail::Summary`], a member with no known place [`FoldFail::Anchor`]).
 /// A fold row in `idxs` is just a
 /// member — that is how folds nest: the next fold over this stretch of the view
 /// takes the earlier fold as one of its rows, and its level is one above the
 /// deepest member.
-pub async fn write_fold(
+pub async fn summarize_fold(
     ctx: &ProjectionCtx<'_>,
     rows: &[Value],
     idxs: &[usize],
 ) -> Result<Value, FoldFail> {
     let anchor = member_anchor(rows, idxs).map_err(FoldFail::Anchor)?;
     let line = crate::line_summary::of_span(ctx.self_id, ctx.kernel, rows, idxs);
-    let (title, text, degraded) = summarize_span(ctx.provider, rows, idxs, line.as_deref()).await?;
-    append_fold(
-        ctx.self_id,
-        ctx.kernel,
-        rows,
-        idxs,
-        anchor,
-        &title,
-        &text,
-        degraded,
-    )
-    .await
+    let (title, text, degraded) = summarize_span(ctx.pass, rows, idxs, line.as_deref()).await?;
+    Ok(fold_row(rows, idxs, anchor, &title, &text, degraded))
 }
 
 /// The summarised `(title, body, degraded)` of a span, the mechanical index riding
@@ -429,15 +421,15 @@ pub async fn write_fold(
 ///
 /// # Errors
 /// The summary would not fit after every re-summarise.
-pub async fn summarize_span(
-    provider: &Arc<dyn Provider>,
+pub(crate) async fn summarize_span(
+    pass: &Pass,
     rows: &[Value],
     idxs: &[usize],
     line: Option<&str>,
 ) -> Result<(String, String, bool), FoldFail> {
     // THE INDEX RIDES BESIDE THE SUMMARY, outside its budget.
     let index = mechanical_index(rows, idxs);
-    let (title, mut text, degraded) = summarize(provider, rows, idxs, line)
+    let (title, mut text, degraded) = summarize(pass, rows, idxs, line)
         .await
         .map_err(FoldFail::Summary)?;
     if !index.is_empty() {
@@ -446,23 +438,23 @@ pub async fn summarize_span(
     Ok((title, text, degraded))
 }
 
-/// Append ONE fold row over `rows[idxs]` carrying `title` and `body` as given,
-/// placed at `anchor` (the smallest leaf id it covers). The one writer both folds
-/// share: the automatic fold, after its summarizer, and `context_fold`.
-///
-/// # Errors
-/// The memory store refused the row.
-#[allow(clippy::too_many_arguments)]
-pub async fn append_fold(
-    self_id: &AgentId,
-    kernel: &Arc<Kernel>,
+/// ONE fold row over `rows[idxs]` carrying `title` and `body` as given, placed at
+/// `anchor` (the smallest leaf id it covers), under a provisional id
+/// ([`crate::folds::provisional_id`] of `rows`), NOT written. The one maker both folds
+/// share: the automatic fold, after its summarizer, and `context_fold`. Each writes its
+/// fold rows and the view row that shows them in ONE store append
+/// ([`crate::memory::save_view`]), which mints the fold's id and rewrites the
+/// provisional one: a crash leaves both or neither (#766 RS5), and the fold's id is
+/// above every row appended before that append (#766, fold id order).
+#[must_use]
+pub fn fold_row(
     rows: &[Value],
     idxs: &[usize],
     anchor: i64,
     title: &str,
     body: &str,
     degraded: bool,
-) -> Result<Value, FoldFail> {
+) -> Value {
     let ids: Vec<i64> = idxs.iter().filter_map(|&i| row_id(&rows[i])).collect();
     let lvl = 1 + idxs
         .iter()
@@ -470,13 +462,18 @@ pub async fn append_fold(
         .map(|&i| level(rows, &rows[i]))
         .max()
         .unwrap_or(0);
-    let id = kernel.mint_id();
+    let id = crate::folds::provisional_id(rows);
     let parent = idxs.first().and_then(|&i| row_parent(&rows[i]));
     let mut fr = make_fold(&ids, title, body, degraded, id, anchor, lvl, parent);
-    // written now: the view this request shows carries the `ts` its row keeps
-    fr["attributes"] = json!({"ts": crate::helpers::now_secs()});
-    save_history(self_id, kernel, std::slice::from_ref(&fr)).await?;
-    Ok(fr)
+    // stamped now: the view this request shows carries the `ts` its row keeps
+    // (and its UTC offset, #766 1.13, set once here beside the `ts`)
+    let ts = json!(crate::helpers::now_secs());
+    let offset = crate::row_attrs::offset_at(&ts);
+    fr["attributes"] = json!({"ts": ts});
+    if let Some(off) = offset {
+        fr["attributes"][crate::row_attrs::UTC_OFFSET] = off;
+    }
+    fr
 }
 
 /// The oldest foldable stretch of the VIEW, as indices into `rows`.
@@ -536,8 +533,9 @@ pub fn next_span(rows: &[Value], view: &[Value], keep_tail: usize, need: i64) ->
 /// FOLD WHEN NEAR FULL: once the rendered view passes `FOLD_AT` of `budget`, ONE
 /// fold takes the oldest rows, by tokens, down to `LOW` of it; then tidy the head
 /// (`FOLD_RUN` adjacent folds become one parent — the fold tree), budget or no
-/// budget. Returns `(rows + the fold rows written, the
-/// view, folded, unanchored)`. The turn's `fold` projection and `context_recall`
+/// budget. Returns `(rows + the fold rows made, the view, the fold rows made,
+/// unanchored)`. The fold rows are NOT written: the caller writes them with its view
+/// row in one append ([`crate::memory::save_view`]). The turn's `fold` projection and `context_recall`
 /// (a store longer than the window, e.g. written under a larger one) share it.
 /// Python `fold_down`.
 ///
@@ -545,16 +543,15 @@ pub fn next_span(rows: &[Value], view: &[Value], keep_tail: usize, need: i64) ->
 /// which holds folds without their members, keeps every fold in place.
 ///
 /// # Errors
-/// The memory store refused a fold row, a summary would not fit, or a span
-/// member has no known place.
+/// A summary would not fit, or a span member has no known place.
 pub async fn fold_down(
     rows: &[Value],
     ctx: &ProjectionCtx<'_>,
     budget: i64,
-) -> Result<(Vec<Value>, Vec<Value>, usize, usize), FoldFail> {
+) -> Result<(Vec<Value>, Vec<Value>, Vec<Value>, usize), FoldFail> {
     let mut rows: Vec<Value> = rows.to_vec();
     let mut view = render(&rows);
-    let mut folded = 0usize;
+    let mut folds: Vec<Value> = Vec::new();
     if estimate_tokens(&view) > (budget as f64 * FOLD_AT) as i64 && rows.len() > 2 {
         let target = (budget as f64 * LOW) as i64;
         // ONE FOLD, SIZED BY TOKENS: the oldest rows that bring the view to LOW,
@@ -566,9 +563,9 @@ pub async fn fold_down(
             if span.is_empty() {
                 break;
             }
-            let fr = write_fold(ctx, &rows, &span).await?;
-            rows.push(fr);
-            folded += 1;
+            let fr = summarize_fold(ctx, &rows, &span).await?;
+            rows.push(fr.clone());
+            folds.push(fr);
             view = render(&rows);
         }
     }
@@ -585,19 +582,20 @@ pub async fn fold_down(
         if span.is_empty() || !span.iter().all(|&i| is_fold(&rows[i])) {
             break;
         }
-        let fr = write_fold(ctx, &rows, &span).await?;
-        rows.push(fr);
-        folded += 1;
+        let fr = summarize_fold(ctx, &rows, &span).await?;
+        rows.push(fr.clone());
+        folds.push(fr);
         view = render(&rows);
     }
     let lost = unanchored(&rows);
-    Ok((rows, view, folded, lost))
+    Ok((rows, view, folds, lost))
 }
 
 /// Fold the oldest stretches of the view down to the low watermark, tidy the
-/// head, then hand what is left to `strip`.
+/// head, then hand what is left to `strip`. The fold rows ride the projection
+/// ([`Projection::folds`]) to the view row they are written with.
 pub async fn fold(body: &[Value], ctx: &ProjectionCtx<'_>) -> Result<Projection, FoldFail> {
-    let (_, view, folded, lost) =
+    let (_, view, folds, lost) =
         fold_down(body, ctx, ctx.budget - NOTICE_ENVELOPE_RESERVE).await?;
     // Stage two and three: strip bodies in what is left, then cut — strip's own
     // logic.
@@ -608,7 +606,7 @@ pub async fn fold(body: &[Value], ctx: &ProjectionCtx<'_>) -> Result<Projection,
         omitted_marker: out.omitted_marker,
         stripped: out.stripped,
         stripped_bytes: out.stripped_bytes,
-        folded,
+        folds,
         unanchored: lost,
     })
 }
@@ -616,9 +614,11 @@ pub async fn fold(body: &[Value], ctx: &ProjectionCtx<'_>) -> Result<Projection,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{ProviderError, ProviderEvent, ProviderReport, ProviderStream};
+    use crate::provider::{
+        Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream,
+    };
     use async_trait::async_trait;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     /// A provider that answers each call with the next scripted completion, and
     /// reports `max_tokens` as its stop reason for the first `cuts` calls. Logs
@@ -694,7 +694,7 @@ mod tests {
     async fn summary_body_falls_back_to_the_uncut_title() {
         let long = "t".repeat(200);
         let p = Scripted::new(&[&long], 0);
-        let dp: Arc<dyn Provider> = p;
+        let dp = Pass::for_test(p);
         // a span big enough that a 200-char answer is inside its summary budget
         let span = "x".repeat(20_000);
         let (title, body, degraded) = summarize(&dp, &one(&span), &[0], None).await.unwrap();
@@ -705,22 +705,22 @@ mod tests {
 
     #[tokio::test]
     async fn summary_lines_split_like_python_splitlines() {
-        let dp: Arc<dyn Provider> = Scripted::new(&["the title\u{1c}the body"], 0);
+        let dp = Pass::for_test(Scripted::new(&["the title\u{1c}the body"], 0));
         let (title, body, _) = summarize(&dp, &one("x"), &[0], None).await.unwrap();
         assert_eq!(title, "the title");
         assert_eq!(body, "the body");
-        let dp: Arc<dyn Provider> = Scripted::new(&["\r\n\"A title\"\r\n\r\nthe body\r\n"], 0);
+        let dp = Pass::for_test(Scripted::new(&["\r\n\"A title\"\r\n\r\nthe body\r\n"], 0));
         let (title, body, _) = summarize(&dp, &one("x"), &[0], None).await.unwrap();
         assert_eq!(title, "A title");
         assert_eq!(body, "the body");
-        let dp: Arc<dyn Provider> = Scripted::new(&["**\"t\"**"], 0);
+        let dp = Pass::for_test(Scripted::new(&["**\"t\"**"], 0));
         let (title, _, _) = summarize(&dp, &one("x"), &[0], None).await.unwrap();
         assert_eq!(title, "\"t\"");
     }
 
     #[tokio::test]
     async fn an_empty_summary_degrades_to_titles() {
-        let dp: Arc<dyn Provider> = Scripted::new(&["   \u{1d} "], 0);
+        let dp = Pass::for_test(Scripted::new(&["   \u{1d} "], 0));
         let (_, _, degraded) = summarize(&dp, &one("x"), &[0], None).await.unwrap();
         assert!(degraded, "python strips the information separators too");
     }
@@ -729,7 +729,7 @@ mod tests {
     async fn an_oversized_summary_is_resummarised_then_fails_loud() {
         let big = format!("TITLE\n\n{}", "word ".repeat(5000));
         let p = Scripted::new(&[&big, &big, &big, &big], 0);
-        let dp: Arc<dyn Provider> = p.clone();
+        let dp = Pass::for_test(p.clone());
         let out = summarize(&dp, &rows6(), &[1, 2, 3, 4, 5], None).await;
         let err = out.expect_err("over budget after every retry — a loud error");
         assert!(
@@ -746,7 +746,7 @@ mod tests {
     #[tokio::test]
     async fn a_retry_that_fits_is_the_summary() {
         let big = format!("TITLE\n\n{}", "word ".repeat(5000));
-        let dp: Arc<dyn Provider> = Scripted::new(&[&big, "TITLE\n\nshort summary"], 0);
+        let dp = Pass::for_test(Scripted::new(&[&big, "TITLE\n\nshort summary"], 0));
         let (title, body, degraded) = summarize(&dp, &rows6(), &[1, 2, 3, 4, 5], None)
             .await
             .unwrap();
@@ -766,7 +766,7 @@ mod tests {
             ],
             3,
         );
-        let dp: Arc<dyn Provider> = p.clone();
+        let dp = Pass::for_test(p.clone());
         let (_, body, _) = summarize(&dp, &rows6(), &[1, 2, 3, 4, 5], None)
             .await
             .unwrap();
@@ -779,7 +779,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_summary_cut_past_every_retry_fails_loud() {
-        let dp: Arc<dyn Provider> = Scripted::new(&["TITLE\n\npartial"; 4], 4);
+        let dp = Pass::for_test(Scripted::new(&["TITLE\n\npartial"; 4], 4));
         let err = summarize(&dp, &rows6(), &[1, 2, 3, 4, 5], None)
             .await
             .expect_err("loud");
@@ -789,7 +789,7 @@ mod tests {
     #[tokio::test]
     async fn given_a_line_the_title_is_the_line_and_the_summariser_writes_only_the_body() {
         let p = Scripted::new(&["ASKED: a.\n\nDONE: b."], 0);
-        let dp: Arc<dyn Provider> = p.clone();
+        let dp = Pass::for_test(p.clone());
         let (title, body, degraded) = summarize(&dp, &rows6(), &[1, 2, 3, 4, 5], Some("LINE"))
             .await
             .unwrap();
@@ -811,7 +811,7 @@ mod tests {
     async fn given_a_line_an_oversized_body_is_resummarised_without_a_title_line() {
         let big = "word ".repeat(5000);
         let p = Scripted::new(&[&big, "short body"], 0);
-        let dp: Arc<dyn Provider> = p.clone();
+        let dp = Pass::for_test(p.clone());
         let (title, body, _) = summarize(&dp, &rows6(), &[1, 2, 3, 4, 5], Some("LINE"))
             .await
             .unwrap();
@@ -826,7 +826,7 @@ mod tests {
 
     #[tokio::test]
     async fn given_a_line_an_empty_summary_degrades_and_keeps_the_line() {
-        let dp: Arc<dyn Provider> = Scripted::new(&["  "], 0);
+        let dp = Pass::for_test(Scripted::new(&["  "], 0));
         let (title, _, degraded) = summarize(&dp, &one("x"), &[0], Some("LINE")).await.unwrap();
         assert_eq!((title.as_str(), degraded), ("LINE", true));
     }

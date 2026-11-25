@@ -1,0 +1,1 @@
+[malformed call — nothing ran] a body is never in the JSON: take "bytes" out of "payload" and write the body after the JSON line as <bytes>…</bytes>, verbatim, nothing escaped.

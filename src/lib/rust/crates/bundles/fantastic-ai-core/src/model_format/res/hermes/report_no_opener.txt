@@ -1,0 +1,1 @@
+[malformed call — nothing ran] a call opens with <tool_call>, then the JSON object on its own line, then </tool_call>: a JSON call without its tags, or a </tool_call> with no <tool_call> before it, runs nothing.

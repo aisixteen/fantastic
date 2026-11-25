@@ -306,7 +306,7 @@ fn a_verb_in_the_tool_slot_is_refused_with_the_shape() {
         r#"<call name="write"><target_id>n</target_id></call>"#,
         &[
             "`write` is not a tool",
-            "send, done, await, inquiry_answer, keep, line_summary",
+            "send, done, await, inquiry_answer, keep, line_summary, stop",
             "<type>write</type>",
         ],
     );

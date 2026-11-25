@@ -17,18 +17,25 @@ use std::sync::Arc;
 /// reader never replays more than this many deltas.
 pub(crate) const CHECKPOINT_EVERY: u64 = 50;
 
-/// An attribute the model sees: its key in `attributes`, and how its value is written
-/// at the head of the message (`None`: it cannot be said, and the head leaves it out).
+/// An attribute the model sees: its key in `attributes`, and how it is written at the
+/// head of the message from the row's attributes (`None`: it cannot be said, and the
+/// head leaves it out).
 pub(crate) struct Visible {
     /// The key in the row's `attributes`.
     pub(crate) key: &'static str,
-    /// The value as the head writes it.
-    pub(crate) render: fn(&Value) -> Option<String>,
+    /// The attribute as the head writes it, read from the row's `attributes` (the value
+    /// under `key` and what it is written with, such as the `ts` head's [`UTC_OFFSET`]).
+    pub(crate) render: fn(&Map<String, Value>) -> Option<String>,
 }
 
-/// THE ATTRIBUTES THE MODEL SEES, declared once (#652): `ts`, when the row was written.
-/// Every key not declared here is stored and shown to people and tools, never rendered
-/// into the model's context.
+/// The key of a row's UTC offset (#766, 1.13): whole seconds east of UTC, in force when
+/// the row was written. Set once, where the row's `ts` is set ([`offset_at`]); the `ts`
+/// head is written with it, never with the process's time zone.
+pub(crate) const UTC_OFFSET: &str = "utc_offset";
+
+/// THE ATTRIBUTES THE MODEL SEES, declared once (#652): `ts`, when the row was written
+/// (its stored [`UTC_OFFSET`] is part of the `ts` head). Every key not declared here is
+/// stored and shown to people and tools, never rendered into the model's context.
 pub(crate) const VISIBLE: &[Visible] = &[Visible {
     key: "ts",
     render: ts_head,
@@ -42,7 +49,8 @@ pub(crate) fn head(message: &Value) -> String {
     };
     let shown: Vec<String> = VISIBLE
         .iter()
-        .filter_map(|v| attrs.get(v.key).and_then(v.render))
+        .filter(|v| attrs.contains_key(v.key))
+        .filter_map(|v| (v.render)(attrs))
         .collect();
     if shown.is_empty() {
         return String::new();
@@ -75,12 +83,23 @@ pub(crate) fn without_head(text: &str) -> &str {
     }
 }
 
-/// `ts` (epoch seconds) as the kernel's local time with its UTC offset, to the minute
-/// (#653): `[2026-11-19 21:40 +02:00]`. The offset is the one in force at that instant,
-/// so a stored row's head never changes.
-fn ts_head(ts: &Value) -> Option<String> {
+/// The row's `ts` (epoch seconds) read with the row's stored [`UTC_OFFSET`], to the
+/// minute (#653, #766 1.13): `[2026-11-19 21:40 +02:00]`. The offset was stored when the
+/// row was written, so a stored row's head never changes, under any time zone. A row
+/// with no offset, or one that is not an integer, is written in UTC (`+00:00`); the
+/// process's time zone is never read here.
+fn ts_head(attrs: &Map<String, Value>) -> Option<String> {
+    let t = attrs.get("ts")?.as_f64()?.floor() as i64;
+    let offset = attrs.get(UTC_OFFSET).and_then(Value::as_i64).unwrap_or(0);
+    Some(stamp(t, offset))
+}
+
+/// The UTC offset to store beside a row's `ts` (#766, 1.13): the process's offset at
+/// that instant ([`local_offset`]). `None` when `ts` is not a number or the C library
+/// cannot place it; then no offset is stored. Called only where a row is appended.
+pub(crate) fn offset_at(ts: &Value) -> Option<Value> {
     let t = ts.as_f64()?.floor() as i64;
-    Some(stamp(t, local_offset(t)?))
+    local_offset(t).map(Value::from)
 }
 
 /// `t` (epoch seconds) read on a clock `offset` seconds ahead of UTC, to the minute.
@@ -400,17 +419,34 @@ pub(crate) fn build(
     (parts, totals, next)
 }
 
-/// The totals of the newest assistant row the chat holds, if it has one.
-pub(crate) async fn seed_totals(self_id: &AgentId, kernel: &Arc<Kernel>) -> Option<Value> {
+/// The `attributes` of the newest assistant row the chat holds, if it has one.
+async fn newest_attributes(self_id: &AgentId, kernel: &Arc<Kernel>) -> Option<Value> {
     crate::memory::load_history(self_id, kernel, false)
         .await
         .ok()?
         .iter()
         .rev()
         .find(|r| r.get("role").and_then(Value::as_str) == Some("assistant"))?
-        .get("attributes")?
+        .get("attributes")
+        .cloned()
+}
+
+/// The totals of the newest assistant row the chat holds, if it has one.
+pub(crate) async fn seed_totals(self_id: &AgentId, kernel: &Arc<Kernel>) -> Option<Value> {
+    newest_attributes(self_id, kernel)
+        .await?
         .get("totals")
         .cloned()
+}
+
+/// The token counts since the chat's first pass, as the newest assistant row keeps them
+/// (`used.running`, #766 1.7), if it has them: a restart keeps counting.
+pub(crate) async fn seed_used(
+    self_id: &AgentId,
+    kernel: &Arc<Kernel>,
+) -> Option<crate::used::Used> {
+    let attrs = newest_attributes(self_id, kernel).await?;
+    crate::used::Used::from_value(attrs.get("used")?.get("running")?)
 }
 
 /// `model`'s entry in a provider record's `prices`: its own, else the entry of the id
@@ -432,31 +468,32 @@ fn price_entry<'a>(meta: &'a Map<String, Value>, model: &str) -> Option<&'a Valu
         })
 }
 
-/// The cost of one pass: `{usd, prices}`, the price entry of the serving provider's
-/// record kept with it (USD per million tokens: `input`, `output`, and `cache_read` /
-/// `cache_write_5m` for the cache counts the pass has), or `{unpriced: true}` when a
-/// price the pass needs is missing: never 0. `None` when the pass reported no usage.
+/// The cost of one row's pass, priced from its counts (`used.pass.total`, #766 1.7):
+/// `{usd, prices}`, the price entry of the serving provider's record kept with it (USD
+/// per million tokens: `input` for `prompt`, `output` for `completion`, `cache_read`,
+/// and `cache_write_5m` for `cache_write`), or `{unpriced: true}` when a price a
+/// non-zero count needs is missing: never 0. `None` when the pass counted nothing.
 pub(crate) fn cost(
-    usage: Option<&Value>,
+    counts: Option<&crate::used::Counts>,
     provider_meta: &Map<String, Value>,
     model: &str,
 ) -> Option<Value> {
-    let usage = usage?;
+    let counts = counts.filter(|c| !c.is_zero())?;
     let unpriced = json!({"unpriced": true});
     let Some(entry) = price_entry(provider_meta, model) else {
         return Some(unpriced);
     };
-    let n = |u: &str| usage.get(u).and_then(Value::as_f64);
     let p = |k: &str| entry.get(k).and_then(Value::as_f64);
-    let paid = |count: Option<f64>, price: Option<f64>| match count {
-        None => Some(0.0),
-        Some(c) => price.map(|p| c * p),
+    // a count of 0 costs nothing, whatever the entry prices
+    let paid = |count: i64, price: Option<f64>| match count {
+        0 => Some(0.0),
+        c => price.map(|p| c as f64 * p),
     };
     let sum = (|| {
-        let input = n("input")? * p("input")?;
-        let output = n("output")? * p("output")?;
-        let read = paid(n("cache_read"), p("cache_read"))?;
-        let write = paid(n("cache_write"), p("cache_write_5m"))?;
+        let input = paid(counts.prompt, p("input"))?;
+        let output = paid(counts.completion, p("output"))?;
+        let read = paid(counts.cache_read, p("cache_read"))?;
+        let write = paid(counts.cache_write, p("cache_write_5m"))?;
         Some((input + output + read + write) / 1e6)
     })();
     Some(match sum {
@@ -508,6 +545,12 @@ mod tests {
     /// 2026-11-19 19:40:00 UTC.
     const T: i64 = 1_795_117_200;
 
+    /// `row` with a stored UTC offset of `secs`, as an append writes it.
+    fn with_offset(mut row: Value, secs: i64) -> Value {
+        row["attributes"][UTC_OFFSET] = json!(secs);
+        row
+    }
+
     #[test]
     fn only_ts_is_declared_visible() {
         let keys: Vec<&str> = VISIBLE.iter().map(|v| v.key).collect();
@@ -521,8 +564,8 @@ mod tests {
             "model": "m-one", "provider": "prov_a", "parts": {"full": true, "list": []},
             "totals": {"requests": 1}, "budget": 900, "source": "lead",
             "keep": {"3": "k"}, "any_future_key": "x"}});
-        let stamped = stamp(T, local_offset(T).unwrap());
-        assert_eq!(model_text(&row), format!("{stamped}\ndone"));
+        let row = with_offset(row, 7200);
+        assert_eq!(model_text(&row), "[2026-11-19 21:40 +02:00]\ndone");
         // without a ts the row has no head; the content is all
         let bare = json!({"role": "user", "content": "hi", "attributes": {"source": "lead"}});
         assert_eq!(head(&bare), "");
@@ -541,11 +584,11 @@ mod tests {
         assert_eq!(stamp(-60, 0), "[1969-12-31 23:59 +00:00]");
         assert_eq!(stamp(1_772_323_200 - 1, 0), "[2026-02-28 23:59 +00:00]");
         // a fractional ts is the minute it falls in
-        let row = json!({"content": "x", "attributes": {"ts": T as f64 + 59.9}});
-        assert_eq!(
-            head(&row),
-            format!("{}\n", stamp(T, local_offset(T).unwrap()))
+        let row = with_offset(
+            json!({"content": "x", "attributes": {"ts": T as f64 + 59.9}}),
+            -18_000,
         );
+        assert_eq!(head(&row), format!("{}\n", stamp(T, -18_000)));
     }
 
     #[test]

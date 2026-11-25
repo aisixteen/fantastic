@@ -25,6 +25,11 @@
 //! into the answer (the mask keeps every byte where it was); lines and columns are
 //! counted in characters, as python counts them.
 
+use crate::model_format::default::{
+    FORM, REPORT_ALSO, REPORT_ARG, REPORT_BARE, REPORT_CLOSE, REPORT_CLOSER, REPORT_DELETE,
+    REPORT_HEAD, REPORT_JSON, REPORT_OTHER, REPORT_PARAM, REPORT_WRAPPER,
+};
+use crate::model_format::fill;
 use crate::tool_parse::grammar::{
     elements, envelopes, envelopes_in, open_tags, parse_call, tags_outside, Envelope, Malformed,
     OpenTag, PAYLOAD_TAG, ROUTING, ROUTING_TAG,
@@ -38,8 +43,8 @@ use std::sync::OnceLock;
 pub const MAX_REPORTS: usize = 3;
 /// Chars of a quoted line.
 const SHOWN: usize = 160;
-/// The last line of every report: the form, in one sentence.
-const FORM: &str = "A call is <call name=\"…\">, one child tag per argument, closed by </call>.";
+// The words of a report, the form included, are the `default` type's resource files
+// (`model_format/res/default/`, #760).
 
 /// The argument tags a call carries that are ours by name: the routing fields and
 /// the two every payload has.
@@ -570,14 +575,14 @@ fn report(text: &str, masked: &str, call: &Call) -> String {
     let mut args: Vec<(String, Value)> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
     let why = match first.kind {
-        _ if first.bare => "the opening `<` is missing",
+        _ if first.bare => REPORT_BARE,
         Kind::Json => {
             args = json_args(masked, first);
-            "calls are tags, not JSON"
+            REPORT_JSON
         }
-        Kind::Arg | Kind::Param => "an argument outside a call — open the call above it",
-        Kind::Close => "a close with no call open",
-        _ => "not a call tag",
+        Kind::Arg | Kind::Param => REPORT_ARG,
+        Kind::Close => REPORT_CLOSE,
+        _ => REPORT_OTHER,
     };
     // EVERY ARGUMENT THE MODEL WROTE carries into the form to write — the verb's
     // own (`<query>`, `<ids>`) as much as ours by name: a grep scoped by `<ids>`
@@ -620,14 +625,14 @@ fn report(text: &str, masked: &str, call: &Call) -> String {
                         .take(200)
                         .collect();
                     args.push((arg.clone(), Value::String(v)));
-                    notes.push(format!(
-                        "`{}` — one child tag per argument: <{arg}>…</{arg}>",
-                        defang(&t.text)
+                    notes.push(fill(
+                        REPORT_PARAM,
+                        &[("tag", defang(&t.text).as_str()), ("arg", arg.as_str())],
                     ));
                 }
             }
             Kind::Close if t.text != CLOSE => {
-                notes.push(format!("`{}` — close with </call>", defang(&t.text)));
+                notes.push(fill(REPORT_CLOSER, &[("tag", defang(&t.text).as_str())]));
             }
             _ => {}
         }
@@ -636,33 +641,46 @@ fn report(text: &str, masked: &str, call: &Call) -> String {
         .wrappers
         .iter()
         .map(|w| {
-            format!(
-                "line {} `{}` — drop the wrapper",
-                newlines(text, w.start) + 1,
-                defang(&w.text)
+            fill(
+                REPORT_WRAPPER,
+                &[
+                    ("line", (newlines(text, w.start) + 1).to_string().as_str()),
+                    ("tag", defang(&w.text).as_str()),
+                ],
             )
         })
         .collect();
     notes.splice(0..0, wrapped);
     let (line, col, quoted, caret) = place(text, first);
     let mut out = vec![
-        format!("[malformed call — nothing ran] line {line}, col {col}:"),
+        head(line, col),
         format!("  {quoted}"),
         format!("  {caret} {why}"),
     ];
     let callish = call.toks.iter().filter(|t| t.kind != Kind::Other).count();
     if first.kind == Kind::Close && callish == 1 {
         if let Some(last) = out.last_mut() {
-            last.push_str(" — delete it");
+            last.push_str(REPORT_DELETE);
         }
     } else {
         out.extend(rewrite(&name, &args));
     }
     if !notes.is_empty() {
-        out.push(format!("also: {}.", notes.join("; ")));
+        out.push(fill(REPORT_ALSO, &[("notes", notes.join("; ").as_str())]));
     }
     out.push(FORM.to_string());
     out.join("\n")
+}
+
+/// A malformed-call report's first line: where its first token stands, 1-based.
+fn head(line: usize, col: usize) -> String {
+    fill(
+        REPORT_HEAD,
+        &[
+            ("line", line.to_string().as_str()),
+            ("col", col.to_string().as_str()),
+        ],
+    )
 }
 
 /// A span of the answer as a token, for [`place`] — a wrapper tag is one.
@@ -688,7 +706,7 @@ fn wrapped_report(text: &str, env: &Envelope, end: usize, wrapper: &OpenTag) -> 
     let body = &block[block.find('>').map_or(0, |i| i + 1)..];
     let (line, col, quoted, caret) = place(text, &span_tok(text, wrapper.start, wrapper.end));
     let mut out = vec![
-        format!("[malformed call — nothing ran] line {line}, col {col}:"),
+        head(line, col),
         format!("  {quoted}"),
         format!(
             "  {caret} drop the wrapper: write the call at the top level, as <call name=\"…\">…</call>"
@@ -733,7 +751,7 @@ fn wrapper_only(answer: &str) -> Option<(OpenTag, String)> {
     Some((
         at,
         [
-            format!("[malformed call — nothing ran] line {line}, col {col}:"),
+            head(line, col),
             format!("  {quoted}"),
             format!(
                 "  {caret} `{}` holds no call — write one at the top level, as <call name=\"…\">…</call>",

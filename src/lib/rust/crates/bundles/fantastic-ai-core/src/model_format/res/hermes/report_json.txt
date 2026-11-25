@@ -1,0 +1,1 @@
+[malformed call — nothing ran] the text inside <tool_call> is not one JSON object ({error}). Write <tool_call>, then {"name": "TOOL", "arguments": {…}} on its own line, then </tool_call>.

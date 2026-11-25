@@ -1,0 +1,188 @@
+# #766 W1 recording, commit 4fd5bb4d: answer `several_calls` through a chat whose provider streams it in 4-char chunks.
+# tokens: the `token` texts on the chat's inbox up to the first call-ending status; parts: every part_* of the chat's
+# and the call target `notes`'s inboxes, one entry per stream_id (the chat's inbox first, then `notes`'s, each in start order), deltas joined; row: the first stored
+# assistant row. Values of the keys ["ts", "id", "parent", "stream_id", "re", "hash", "task_id", "client_id", "digest"] are replaced by "<key>".
+{
+  "answer": "First the store.\n<call name=\"send\"><routing><target_id>notes</target_id></routing><payload><type>reflect</type></payload></call>\nThen a read.\n<call name=\"send\"><routing><target_id>notes</target_id></routing><payload><type>read</type></payload></call>",
+  "tokens": [
+    "Firs",
+    "t th",
+    "e st",
+    "ore.",
+    "\n<ca",
+    "ll n",
+    "ame=",
+    "\"sen",
+    "d\"><",
+    "rout",
+    "ing>",
+    "<tar",
+    "get_",
+    "id>n",
+    "otes",
+    "</ta",
+    "rget",
+    "_id>",
+    "</ro",
+    "utin",
+    "g><p",
+    "aylo",
+    "ad><",
+    "type",
+    ">ref",
+    "lect",
+    "</ty",
+    "pe><",
+    "/pay",
+    "load",
+    "></c",
+    "all>",
+    "\nThe",
+    "n a ",
+    "read",
+    ".\n<c",
+    "all ",
+    "name",
+    "=\"se",
+    "nd\">",
+    "<rou",
+    "ting",
+    "><ta",
+    "rget",
+    "_id>",
+    "note",
+    "s</t",
+    "arge",
+    "t_id",
+    "></r",
+    "outi",
+    "ng><",
+    "payl",
+    "oad>",
+    "<typ",
+    "e>re",
+    "ad</",
+    "type",
+    "></p",
+    "aylo",
+    "ad><",
+    "/cal",
+    "l>"
+  ],
+  "parts": [
+    {
+      "start": {
+        "type": "part_start",
+        "kind": "text",
+        "re": "<re>",
+        "stream_id": "<stream_id>",
+        "source": "rec_ai_several_calls",
+        "client_id": "<client_id>"
+      },
+      "text": "First the store.\n",
+      "end": {
+        "type": "part_end",
+        "stream_id": "<stream_id>",
+        "source": "rec_ai_several_calls",
+        "client_id": "<client_id>"
+      }
+    },
+    {
+      "start": {
+        "type": "part_start",
+        "kind": "text",
+        "re": "<re>",
+        "stream_id": "<stream_id>",
+        "source": "rec_ai_several_calls",
+        "client_id": "<client_id>"
+      },
+      "text": "\nThen a read.\n",
+      "end": {
+        "type": "part_end",
+        "stream_id": "<stream_id>",
+        "source": "rec_ai_several_calls",
+        "client_id": "<client_id>"
+      }
+    },
+    {
+      "start": {
+        "type": "part_start",
+        "kind": "call",
+        "name": "send",
+        "target": "notes",
+        "re": "<re>",
+        "stream_id": "<stream_id>",
+        "source": "rec_ai_several_calls"
+      },
+      "text": "<routing><target_id>notes</target_id></routing><payload><type>reflect</type></payload>",
+      "end": {
+        "type": "part_end",
+        "ok": true,
+        "stream_id": "<stream_id>",
+        "source": "rec_ai_several_calls"
+      }
+    },
+    {
+      "start": {
+        "type": "part_start",
+        "kind": "call",
+        "name": "send",
+        "target": "notes",
+        "re": "<re>",
+        "stream_id": "<stream_id>",
+        "source": "rec_ai_several_calls"
+      },
+      "text": "<routing><target_id>notes</target_id></routing><payload><type>read</type></payload>",
+      "end": {
+        "type": "part_end",
+        "ok": true,
+        "stream_id": "<stream_id>",
+        "source": "rec_ai_several_calls"
+      }
+    }
+  ],
+  "row": {
+    "role": "assistant",
+    "content": "First the store.\n<call name=\"send\"><routing><target_id>notes</target_id></routing><payload><type>reflect</type></payload></call>\nThen a read.\n<call name=\"send\"><routing><target_id>notes</target_id></routing><payload><type>read</type></payload></call>",
+    "parent": "<parent>",
+    "attributes": {
+      "model": "stub",
+      "provider": "rec_ai_several_calls",
+      "parts": {
+        "full": true,
+        "list": [
+          {
+            "part": "self_reflect",
+            "bytes": 46,
+            "hash": "<hash>"
+          },
+          {
+            "part": "verb_docs",
+            "bytes": 8380,
+            "hash": "<hash>"
+          },
+          {
+            "part": "new_input",
+            "bytes": 28,
+            "hash": "<hash>"
+          }
+        ],
+        "digest": "<digest>"
+      },
+      "totals": {
+        "requests": 1,
+        "bytes": {
+          "self_reflect": 46,
+          "verb_docs": 8380,
+          "new_input": 28
+        },
+        "folds": 0,
+        "recalls": 0,
+        "refolds": 0
+      },
+      "ts": "<ts>",
+      "source": "rec_ai_several_calls"
+    },
+    "id": "<id>"
+  }
+}

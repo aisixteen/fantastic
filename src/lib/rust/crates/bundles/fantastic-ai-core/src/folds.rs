@@ -216,6 +216,55 @@ pub fn make_fold(
     serde_json::to_value(row).expect("a fold row is JSON")
 }
 
+/// The id a fold row carries until it is written: the `n`-th fold made by one
+/// projection or verb (0-based) is `-(n + 1)`, an id the kernel's counter never mints.
+/// [`crate::memory::save_view`] mints the real ids inside the append that writes the
+/// folds with their view row (#766, fold id order), so a fold's id is above every row
+/// appended before it, a row appended while its summarizer ran included.
+#[must_use]
+pub fn provisional_id(rows: &[Value]) -> i64 {
+    let made = rows
+        .iter()
+        .filter(|r| row_id(r).is_some_and(|id| id < 0))
+        .count();
+    -1 - i64::try_from(made).unwrap_or(i64::MAX - 1)
+}
+
+/// Rewrite the provisional ids of `map` (provisional -> minted) in one row: its `id`,
+/// its `parent`, each of its `refs`, and the id in a fold's head (`[fold <id> · `, the
+/// start of its `content`). A view row's `ids` entries are rewritten by their `id`.
+/// Any other text is left as it is.
+pub fn remap_ids(row: &mut Value, map: &std::collections::BTreeMap<i64, i64>) {
+    let to = |v: &Value| v.as_i64().and_then(|id| map.get(&id)).copied();
+    let Some(obj) = row.as_object_mut() else {
+        return;
+    };
+    let old = obj.get("id").and_then(Value::as_i64);
+    if let Some(new) = obj.get("id").and_then(to) {
+        obj.insert("id".to_string(), Value::from(new));
+        if let (Some(old), Some(Value::String(c))) = (old, obj.get_mut("content")) {
+            let from = format!("{FOLD_TAG}{old} · ");
+            if let Some(rest) = c.strip_prefix(&from) {
+                *c = format!("{FOLD_TAG}{new} · {rest}");
+            }
+        }
+    }
+    if let Some(new) = obj.get("parent").and_then(to) {
+        obj.insert("parent".to_string(), Value::from(new));
+    }
+    for key in ["refs", "ids"] {
+        if let Some(Value::Array(a)) = obj.get_mut(key) {
+            for e in a.iter_mut() {
+                if let Some(new) = to(&*e) {
+                    *e = Value::from(new);
+                } else if let Some(new) = e.get("id").and_then(to) {
+                    e["id"] = Value::from(new);
+                }
+            }
+        }
+    }
+}
+
 /// An int as python's `_int` reads one: an integer, or a string of ASCII digits.
 fn as_int(v: &Value) -> Option<i64> {
     match v {

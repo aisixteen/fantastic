@@ -179,10 +179,10 @@ pub const FOLD_RUN: usize = 3;
 /// would never end).
 pub const MAX_SILENT_TURNS: usize = 10;
 
-/// A chain that has had this many turns in a row cut at a foreign call tag (#499)
-/// gives up through the silent give-up path. A turn that is not a cut turn resets
-/// the count, and so does any turn that dispatches a call.
-pub const MAX_CUT_TURNS: usize = 9;
+/// How many times a turn re-asks its model after an answer with a malformed or foreign
+/// call (#766, Q1): at most `1 + CALL_RETRIES` attempts per sequence. After the last one
+/// failed the harness stops the turn with the `stop` call; the model is not asked again.
+pub const CALL_RETRIES: usize = 2;
 
 // ─── inline agent views (#339) ──────────────────────────────────────────────
 
@@ -200,6 +200,18 @@ pub const MAX_MARKS: usize = 20;
 /// How long a provider keeps a prompt prefix warm after a send ended (seconds).
 /// `fork_points` reports an agent `warm` while its last send is younger than this.
 pub const CACHE_LIFETIME_SECS: f64 = 300.0;
+
+// ─── the render cache (#766) ────────────────────────────────────────────────
+
+/// The default bound of one chat's render cache, in bytes (source + rendered text of
+/// its entries): the record field `render_cache_bytes` overrides it per chat.
+pub const RENDER_CACHE_BYTES: usize = 256 * 1024 * 1024;
+
+// ─── traces (#766) ──────────────────────────────────────────────────────────
+
+/// How many trace rows one chat keeps in its store (Q4): after a turn's append, the
+/// oldest beyond this are pruned by id. 0 writes none.
+pub const TRACE_CAP: usize = 1000;
 
 // ─── usage ───────────────────────────────────────────────────────────────────
 

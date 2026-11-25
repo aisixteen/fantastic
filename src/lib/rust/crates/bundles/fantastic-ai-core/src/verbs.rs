@@ -9,6 +9,7 @@ use crate::declared::{History, Inquiry, Recall, Rows, Status, Unwatch, Watch};
 use crate::events::emit_status;
 use crate::helpers::{agent_meta, mint_send_id, now_secs, safe_client};
 use crate::memory::{load_history, MemResult};
+use crate::model_format::pass::Pass;
 use crate::projection::{derive_reaction, round3, TRIGGER};
 use crate::provider::Provider;
 use crate::state::{state_for, status_snapshot, CurrentEntry, QueuedEntry};
@@ -1341,6 +1342,9 @@ pub async fn send(
     // chain is answering (#722). A retried pass leaves its inquiry open: the retry
     // may still answer it, and a give-up closes it.
     let mut turn_failed: Option<String> = None;
+    // THE HARNESS STOPPED THE TURN (#766, 1.8): its reason and the number of malformed
+    // attempts. Nothing is routed; the chain ends through the give-up.
+    let mut stopped: Option<String> = None;
     let reply = match outcome {
         Ok(Ok(Generation::Dead { text: final_text })) => {
             dead_turn = true;
@@ -1372,6 +1376,22 @@ pub async fn send(
             // The closed call parts feed routing only — never the caller's reply.
             call_streams = streams;
             reply
+        }
+        // THE HARNESS STOP: the stored row is the `stop` call, the turn's call. The reply
+        // names it like any answer; the give-up below tells the caller why.
+        Ok(Ok(Generation::Stopped {
+            reason,
+            message_id: tid,
+        })) => {
+            message_id = Some(tid);
+            let mut args = Map::new();
+            args.insert("reason".to_string(), json!(reason));
+            stopped = Some(reason);
+            json!({
+                "response": crate::tool_parse::render_call("stop", &args),
+                "client_id": client_id,
+                "message_id": tid,
+            })
         }
         // THE SEAM'S OWN WORDS. A projection refusal never opened a provider
         // pass, so no `status(done)` closes it and no `client_id` is added.
@@ -1533,6 +1553,22 @@ pub async fn send(
         crate::route::close_inquiry(kernel, agent_id.as_str(), &client_id, body).await;
     }
 
+    // THE HARNESS STOP ENDS THE CHAIN through the give-up, as a model's `stop` does
+    // (1.8): status `failed`, `reason: gave_up`, the reason in `error`, the number of
+    // malformed attempts in `silent_turns`, the open inquiry closed, `send_to` told.
+    if let Some(reason) = &stopped {
+        crate::route::give_up(
+            kernel,
+            agent_id,
+            &client_id,
+            send_to.as_deref(),
+            reason,
+            1 + crate::constants::CALL_RETRIES,
+        )
+        .await;
+        crate::route::chain_ended(kernel, agent_id);
+    }
+
     // ONE CHAIN PER AGENT (#227): the pass that read the held messages answers
     // each of them with its own reply, under that sender's own client_id.
     let answer = match &raise {
@@ -1578,7 +1614,7 @@ pub async fn send(
     // scopes `CURRENT_TASK` so the turns the chain spawns nest under it. Each turn
     // is individually killable and visible; a cancel does NOT reliably kill the
     // chain past the first hop (orphans are re-parented, exactly as in python).
-    if reply.get("error").is_none() {
+    if reply.get("error").is_none() && stopped.is_none() {
         let text = reply
             .get("response")
             .and_then(Value::as_str)
@@ -1880,13 +1916,20 @@ where
         // FIND the line anywhere in memory — rows, shared rows, bodies held this run.
         Call::Grep(a) => crate::retrieval::grep(agent_id, &a, kernel, cfg.model_window).await?,
         // Rebuild the view from the store: on boot, after folds, on request.
+        // A dry recall makes no model call, so it builds no pass (#766).
         Call::ContextRecall(a) => {
-            let p = provider_for(&fantastic_kernel::inquiry::default_client_id());
+            let dry = a.dry == Some(true);
+            let pass = if dry {
+                None
+            } else {
+                let p = provider_for(&fantastic_kernel::inquiry::default_client_id());
+                Some(Pass::new(p, agent_id, &state_for(agent_id), kernel).await)
+            };
             crate::retrieval::context_recall(
                 agent_id,
-                a.dry == Some(true),
+                dry,
                 kernel,
-                Some(&p),
+                pass.as_ref(),
                 cfg.model_window,
                 None,
             )
@@ -1900,7 +1943,8 @@ where
         // Fold a chosen stretch of the view into one fold row — the operator's mark.
         Call::ContextFold(a) => {
             let p = provider_for(&fantastic_kernel::inquiry::default_client_id());
-            crate::retrieval::context_fold(agent_id, &a, kernel, &p, cfg.model_window).await?
+            let pass = Pass::new(p, agent_id, &state_for(agent_id), kernel).await;
+            crate::retrieval::context_fold(agent_id, &a, kernel, &pass, cfg.model_window).await?
         }
         // Compact the store: drop the rows the folds already summarise.
         Call::ContextForget(a) => {

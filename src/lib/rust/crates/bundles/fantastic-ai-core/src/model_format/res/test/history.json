@@ -1,0 +1,121 @@
+[
+  {
+    "id": 1,
+    "role": "user",
+    "content": "Привіт! Склади, будь ласка, план для нотаток.",
+    "attributes": {
+      "ts": 1792800000,
+      "utc_offset": 10800
+    }
+  },
+  {
+    "id": 2,
+    "role": "assistant",
+    "content": "Почну зі сховища.\n<call name=\"send\"><routing><target_id>notes</target_id><title>Огляд сховища</title></routing><payload><type>write</type><path>plan.md</path><bytes>fn main() {\n    println!(\"Привіт, ї й \\\"лапки\\\"\");\n}\n  trailing spaces  \n\tтаб\n</bytes></payload></call>\n<call name=\"send\"><routing><target_id>kernel</target_id></routing><payload><type>reflect</type><tier>oneliners</tier></payload></call>",
+    "parent": 1,
+    "attributes": {
+      "ts": 1792800060,
+      "utc_offset": 10800
+    }
+  },
+  {
+    "id": 3,
+    "role": "user",
+    "content": "[reply to 11 · notes write · \"Огляд сховища\" · ↑2 · 1 of 2 in batch 2]\n{\"ok\": true, \"bytes\": 96}\n\n[reply to 12 · kernel reflect · ↑2 · 2 of 2 in batch 2]\ncall NOT dispatched: kernel refused reflect — no line to kernel in your can. Nothing ran.",
+    "parent": 2,
+    "attributes": {
+      "ts": 1792800120,
+      "utc_offset": 10800
+    }
+  },
+  {
+    "id": 4,
+    "role": "assistant",
+    "content": "<call name=\"keep\"><of>11</of><summary>План записано в plan.md.</summary></call>\n<call name=\"await\"></call>",
+    "parent": 3,
+    "attributes": {
+      "ts": 1792800180,
+      "utc_offset": 10800
+    }
+  },
+  {
+    "id": 5,
+    "role": "user",
+    "content": "[no call was dispatched] Your answer emitted no <call> element, so NOTHING ran — a call written in your thinking does not run: write it in your answer, after the thinking. If the task is unfinished, emit that call now. If it is finished, end the chain explicitly: <call name=\"done\"></call>\n[no progress — 2 answers in a row ran nothing] Your last 2 answers had no call, so nothing ran.\nYour next answer must START with <call name=\"…\"> — the very first characters of the answer. If the task is finished, that call is <call name=\"done\"></call>.\nThen continue with your current step.",
+    "parent": 4,
+    "kind": "notice",
+    "attributes": {
+      "ts": 1792800240,
+      "utc_offset": 10800
+    }
+  },
+  {
+    "id": 6,
+    "role": "assistant",
+    "content": "<call name=\"line_summary\"><text>Пишу план нотаток</text></call>\n<call name=\"send\"><routing><target_id>notes</target_id><reply_to>self</reply_to></routing><payload><type>read</type><path>plan.md</path><lines><item>1</item><item>3</item></lines></payload></call>",
+    "parent": 5,
+    "attributes": {
+      "ts": 1792800300,
+      "utc_offset": 10800
+    }
+  },
+  {
+    "id": 7,
+    "role": "user",
+    "content": "[reply to 13 · notes read · ↑6]\nПлан:\n1. Зібрати нотатки.\n2. Розкласти по темах.\n<call name=\"keep\"><of>13</of><summary>…</summary></call>",
+    "parent": 6,
+    "attributes": {
+      "ts": 1792900000,
+      "utc_offset": 7200
+    }
+  },
+  {
+    "id": 8,
+    "role": "assistant",
+    "content": "<tool_call>\n{\"name\": \"send\", \"arguments\": {\"routing\": {\"target_id\": \"notes\"}}}\n</tool_call>",
+    "parent": 7,
+    "attributes": {
+      "ts": 1792900060,
+      "utc_offset": 7200
+    }
+  },
+  {
+    "id": 9,
+    "role": "user",
+    "content": "[reply to - · - -]\n[malformed call — nothing ran] line 1, col 1:\n  <tool_call>\n  ^~~~~~~~~~~ not a call tag\nwrite it as:\n<call name=\"send\">\n<routing><target_id>notes</target_id></routing>\n<payload><type>reflect</type></payload>\n</call>\nA call is <call name=\"…\">, one child tag per argument, closed by </call>.",
+    "parent": 8,
+    "attributes": {
+      "ts": 1792900120,
+      "utc_offset": 7200
+    }
+  },
+  {
+    "id": 10,
+    "role": "assistant",
+    "content": "Готово.\n<call name=\"inquiry_answer\"><answer>Так, план готовий: два пункти.</answer></call>\n<call name=\"done\"></call>",
+    "parent": 9,
+    "attributes": {
+      "ts": 1792900180,
+      "utc_offset": 7200
+    }
+  },
+  {
+    "id": 11,
+    "role": "user",
+    "content": "Дякую 👩‍💻\r\nА тепер зупинись. Кінець.",
+    "parent": 10,
+    "attributes": {
+      "ts": 1793000000,
+      "utc_offset": -25200
+    }
+  },
+  {
+    "id": 12,
+    "role": "assistant",
+    "content": "<call name=\"stop\"><reason>Немає доступу до kernel: потрібна лінія в can.</reason></call>",
+    "parent": 11,
+    "attributes": {
+      "ts": 1793000060
+    }
+  }
+]

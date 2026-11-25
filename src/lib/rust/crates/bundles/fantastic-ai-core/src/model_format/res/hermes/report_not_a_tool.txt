@@ -1,0 +1,1 @@
+[malformed call — nothing ran] "{name}" is not a tool — the tools are {tools}. A VERB goes in "type" inside "payload": {"name": "send", "arguments": {"routing": {"target_id": "…"}, "payload": {"type": "{name}"}}}.

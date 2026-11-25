@@ -1,0 +1,1 @@
+[malformed call — nothing ran] after the JSON line only one <bytes>…</bytes> block may follow, for a send, and nothing else: <tool_call>, the JSON on its own line, <bytes>BODY</bytes>, </tool_call>.

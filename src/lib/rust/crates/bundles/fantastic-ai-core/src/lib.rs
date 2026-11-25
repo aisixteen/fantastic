@@ -101,6 +101,7 @@ pub mod history_view;
 mod images;
 pub mod line_summary;
 pub mod memory;
+mod model_format;
 pub mod pause;
 pub mod projection;
 pub mod prompt_file;
@@ -115,6 +116,7 @@ pub mod strategies;
 pub mod stream_parts;
 pub mod think;
 pub mod tool_parse;
+mod used;
 pub mod verbs;
 pub mod view;
 

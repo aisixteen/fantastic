@@ -10,15 +10,25 @@
 //! message. There is no loop in the kernel or in a pass: when a pass writes no
 //! call, the AI bundle may wake itself with an ordinary message to its own inbox
 //! (the nudge, `route.rs`), its own policy built from the bus.
+//!
+//! INSIDE THE TURN, ATTEMPTS (#766, 1.5): an answer whose calls are malformed or
+//! foreign for the pass's model type is re-asked, up to [`CALL_RETRIES`] times, with
+//! the failed answer and its report; nothing of a failed attempt is stored or routed.
+//! After the last one failed the harness stops the turn with the `stop` call
+//! ([`Generation::Stopped`]).
 
 use crate::assembly::assemble_messages;
+use crate::constants::CALL_RETRIES;
 use crate::context::estimate_tokens;
 use crate::events::{emit_status, to_caller, PartPublisher, PassParts};
 use crate::memory::{save_history, MemoryStoreError};
+use crate::model_format::pass::{Mode, Pass};
+use crate::model_format::Out;
 use crate::provider::{Provider, ProviderError, ProviderEvent};
 use crate::state::BackendState;
 use crate::stream_parts::{cut_marker, PartSplitter};
 use crate::think::without_thinking;
+use crate::used::{Accepted, Counts, Landed, Window};
 use fantastic_kernel::{current_task, AgentId, Kernel, TaskId};
 use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
@@ -92,6 +102,16 @@ pub enum Generation {
     Dead {
         /// The raw completion text (thinking only, or nothing).
         text: String,
+    },
+    /// THE HARNESS STOPPED THE TURN (#766, 1.8): `1 + CALL_RETRIES` attempts in a row
+    /// wrote malformed calls, so the model is not asked again. Stored: the incoming row
+    /// and the assistant row `message_id`, whose content is the `stop` call with
+    /// `reason`. Nothing is routed; the chain ends through the give-up.
+    Stopped {
+        /// The harness's reason (`res/<type>/stop_reason.txt`, the attempt count).
+        reason: String,
+        /// The assistant row this turn was stored as.
+        message_id: i64,
     },
 }
 
@@ -222,6 +242,15 @@ pub async fn run_generation(
     // before the owed recall below (which writes a view and a recall row).
     let (caching, primer) = crate::caching::settings(&crate::helpers::agent_meta(self_id, kernel))
         .map_err(|why| GenFailure::Provider(ProviderError::value_error(why)))?;
+    // THE PASS PATH (#766): every model request of this run goes through it, the turn's
+    // and its helpers' (the owed recall, the projection's fold summaries). Its model
+    // type is fixed for the run.
+    let pass = Pass::new(Arc::clone(provider), self_id, state, kernel).await;
+    // A TYPE OTHER THAN THE LAST TURN'S (#766, 1.10): traced as `model_switched`
+    crate::model_format::trace::note_switch(self_id, kernel, state, &pass).await;
+    // THE CALIBRATION BELONGS TO THE TYPE IT WAS MEASURED UNDER (#766, Q37): a pass of
+    // another type than the last finished one is projected at 1.0.
+    clear_calib_on_type_change(state, pass.kind);
     // A RECALL OWED FROM THE LAST FOLD BATCH (or from a boot) runs first, so this
     // turn is assembled over the head the recall chose — python `_recall_due`.
     let due = std::mem::take(&mut *state.recall_due.lock().expect("recall_due poisoned"));
@@ -230,7 +259,7 @@ pub async fn run_generation(
             self_id,
             false,
             kernel,
-            Some(provider),
+            Some(&pass),
             cfg.model_window,
             Some(client_id),
         )
@@ -247,14 +276,22 @@ pub async fn run_generation(
     .await?;
     // THE INCOMING MESSAGE IS WRITTEN NOW: the model reads this `ts` at its head, and
     // its row keeps the same one, so the next request renders it byte for byte the same
+    // (and its UTC offset, #766 1.13, set once here beside the `ts`)
     let incoming_ts = json!(crate::helpers::now_secs());
+    let incoming_offset = crate::row_attrs::offset_at(&incoming_ts);
+    let stamp_incoming = |m: &mut Value| {
+        m["attributes"]["ts"] = incoming_ts.clone();
+        if let Some(off) = &incoming_offset {
+            m["attributes"][crate::row_attrs::UTC_OFFSET] = off.clone();
+        }
+    };
     if let Some(last) = messages.last_mut() {
-        last["attributes"]["ts"] = incoming_ts.clone();
+        stamp_incoming(last);
     }
     // the incoming row as stored, whether the pass answers or dies: the `ts` above
     let incoming_row = |id: i64, parent: Option<i64>| {
         let mut row = incoming_row_of(state, user_text, id, parent);
-        row["attributes"]["ts"] = incoming_ts.clone();
+        stamp_incoming(&mut row);
         crate::row_attrs::with_source(row, &incoming_source(state))
     };
     // KEEP (#641): a reply that will fold after the answer carries the call that keeps
@@ -272,7 +309,7 @@ pub async fn run_generation(
     // window is read off the record EVERY turn, so a model switched to a smaller
     // one (`update_agent`) is fitted — folded — on its very next turn.
     let mut model_messages = match crate::projection::project_context(
-        provider,
+        &pass,
         self_id,
         state,
         kernel,
@@ -309,24 +346,24 @@ pub async fn run_generation(
         .lock()
         .expect("prev_request poisoned")
         .clone();
-    // a restart keeps counting from the newest stored row
+    // a restart keeps counting from the newest stored row: the request totals, and the
+    // token counts (#766, 1.7)
     let seed = if prev_request.is_none() {
         crate::row_attrs::seed_totals(self_id, kernel).await
     } else {
         None
     };
+    crate::used::seed(self_id, state, kernel).await;
 
     // THE AGENT'S CACHE MARKS (`cache_mark`): its system message, the primer's end, the
     // last fold's, the tail. Only `provider_cache` places them; the backend forwards.
     if caching.marks() {
         crate::caching::mark(&mut model_messages, primer);
     }
-    // ONE provider pass. Every chunk is a content token — the provider knows
-    // nothing of the tool protocol; the envelope is text this crate parses after.
+    // `model_view` is the INTERNAL view: the estimate and the calibration read it. Each
+    // sequence of attempts sends it rendered for its model type (`attempts`).
     let model_view = render_for_model(&model_messages);
-    // A FRESH reading per pass: a provider that reports nothing this time must not
-    // leave last pass's number standing.
-    provider.clear_prompt_tokens();
+    let meta = crate::helpers::agent_meta(self_id, kernel);
     // STREAMING PARTS: the same chunks, split into parts as
     // they are written — animation for the addressee, never action
     // ([`crate::stream_parts`]). Kept on the in-flight entry, where `stop` and
@@ -349,81 +386,130 @@ pub async fn run_generation(
     {
         c.parts = Some(Arc::clone(&parts));
     }
-    // A provider failure ABORTS every open part, then propagates (python's
-    // `except Exception: push(stop("error")); raise`).
-    // GENERATION TIME — from the request to the stream's end (the `done` detail).
+    // GENERATION TIME — from the first request to the accepted stream's end (the `done`
+    // detail).
     let gen_started = std::time::Instant::now();
-    let mut stream = match provider.chat(&model_view, None).await {
-        Ok(stream) => stream,
-        Err(e) => return Err(abort_parts(&parts, e).await),
+    let caller = Caller {
+        kernel,
+        state,
+        self_id,
+        client_id,
+        parts: &parts,
     };
-    let mut content_parts: Vec<String> = Vec::new();
-    let mut first_text_chunk = true;
-    let mut cut_stream = false;
-    while let Some(ev) = stream.next().await {
-        let ev = match ev {
-            Ok(ev) => ev,
-            Err(e) => return Err(abort_parts(&parts, e).await),
-        };
-        match ev {
-            ProviderEvent::Token(t) => {
-                // THE CALL CHECKER RUNS ON THE STREAM (#499): at the first foreign call
-                // tag the generation is cut, the rest is never read, and the turn ends
-                // as if the answer had ended there — the router then gives the usual
-                // correction. Checked only when this delta can complete a tag or a
-                // JSON call head; thinking is excluded as `without_thinking` does.
-                let t = if t.contains('>') || t.contains('"') {
-                    let mut text = content_parts.concat();
-                    text.push_str(&t);
-                    match stream_cut(&text) {
-                        Some(keep) => {
-                            let before = text.len() - t.len();
-                            cut_stream = true;
-                            if keep >= before {
-                                t[..keep - before].to_string()
-                            } else {
-                                // a tag held back (an open backtick) is now complete
-                                // behind earlier deltas: drop their tail too
-                                content_parts = vec![text[..keep].to_string()];
-                                String::new()
-                            }
-                        }
-                        None => t,
-                    }
-                } else {
-                    t
-                };
-                if first_text_chunk {
-                    first_text_chunk = false;
-                    emit_status(kernel, state, self_id, client_id, "streaming", Map::new()).await;
-                }
-                {
-                    let mut cur = state.current_meta.lock().expect("current poisoned");
-                    if let Some(c) = cur.as_mut() {
-                        c.text_so_far.push_str(&t);
-                    }
-                }
-                to_caller(
-                    kernel,
-                    self_id,
-                    client_id,
-                    json!({"type": "token", "text": t, "source": self_id.as_str()}),
-                )
-                .await;
-                {
-                    let mut p = parts.lock().await;
-                    let evs = p.splitter.feed(&t);
-                    p.publisher.push(evs, false).await;
-                }
-                content_parts.push(t);
-                if cut_stream {
-                    break;
-                }
-            }
+    let view_of = ViewOf {
+        model_messages: &model_messages,
+        model_view: &model_view,
+        request_parts: &request_parts,
+        meta: &meta,
+    };
+    // THE ATTEMPTS (#766, 1.5 step 4): one sequence under the pass's type; a failed
+    // attempt whose reply named a model of another type restarts it once, under that
+    // type, with a view rendered for it (Q26).
+    let mut restarted: Option<Pass> = None;
+    let seq = match attempts(&pass, true, &view_of, &caller).await? {
+        Seq::Restart(next) => {
+            let next = restarted.insert(*next);
+            let mut fields = Map::new();
+            fields.insert("from".into(), json!(pass.kind));
+            fields.insert("to".into(), json!(next.kind));
+            fields.insert(
+                "model".into(),
+                json!(next.model.clone().unwrap_or_default()),
+            );
+            next.events()
+                .push(Mode::Turn.name(), next.kind, "model_switched", fields);
+            // the system block's `send` how-to is the type's (Q16): the restarted
+            // request carries the new type's, so no request mixes two types' forms
+            let messages = with_howto(&model_messages, pass.kind, next.kind);
+            let view = render_for_model(&messages);
+            let view_of = ViewOf {
+                model_messages: &messages,
+                model_view: &view,
+                ..view_of
+            };
+            attempts(next, false, &view_of, &caller).await?
         }
+        other => other,
+    };
+    let cur: &Pass = restarted.as_ref().unwrap_or(&pass);
+    // THE PASS ENDED: the provider's prompt cache is warm from here (`fork_points`).
+    *state.last_send_secs.lock().expect("last_send poisoned") = Some(crate::helpers::now_secs());
+    // THE ENDPOINT'S OWN COUNT calibrates our chars/4 estimate (python `_calib`), from
+    // the window: attempt 1 of the sequence the row comes from, the request the view was
+    // built for (#766, 1.7). After a type restart the old type's ratio goes first.
+    let window = match &seq {
+        Seq::Accepted { window, .. } | Seq::Stopped { window, .. } => *window,
+        Seq::Restart(_) => None,
+    };
+    if cur.kind != pass.kind {
+        *state.calib.lock().expect("calib poisoned") = None;
     }
-    // The cut drops the provider stream: the request ends here.
-    drop(stream);
+    *state.last_type.lock().expect("last_type poisoned") = Some(cur.kind);
+    calibrate(state, window, &model_view);
+    let (last_text, report, accepted, open) = match seq {
+        Seq::Accepted {
+            text,
+            report,
+            accepted,
+            open,
+            ..
+        } => (text, report, accepted, open),
+        // THE HARNESS STOP (1.8): every attempt was malformed. The model is not asked
+        // again; the turn's call is the `stop`, its reason worded by the harness. Its
+        // row's `used` has nothing accepted: every attempt is in `turn.rejected`.
+        Seq::Stopped { errors, .. } => {
+            let reason = crate::model_format::fill(
+                crate::model_format::of(cur.kind).stop_reason,
+                &[("n", &errors.len().to_string())],
+            );
+            let mut args = Map::new();
+            args.insert("reason".to_string(), json!(reason));
+            let content = crate::tool_parse::render_call("stop", &args);
+            let mut fields = Map::new();
+            fields.insert("reason".into(), json!(reason));
+            fields.insert("errors".into(), json!(errors));
+            cur.events()
+                .push(Mode::Turn.name(), cur.kind, "stop", fields);
+            let in_id = kernel.mint_id();
+            let in_parent = incoming_parent(user_text);
+            let message_id = kernel.mint_id();
+            let mut row = json!({
+                "role": "assistant",
+                "content": content,
+                "id": message_id,
+                "parent": in_id,
+            });
+            let landing = crate::used::land(state, None);
+            let next = assistant_attributes(
+                &mut row,
+                self_id,
+                kernel,
+                provider,
+                &landing.landed,
+                window,
+                prev_request.as_ref(),
+                seed,
+                message_id,
+                request_parts,
+            );
+            save_history(self_id, kernel, &[incoming_row(in_id, in_parent), row]).await?;
+            landing.stored();
+            *state.prev_request.lock().expect("prev_request poisoned") = Some(next);
+            // THE TURN'S TRACE ROWS, once its rows are stored (#766, 1.10)
+            let events = crate::model_format::trace::of_turn(&pass, restarted.as_ref());
+            crate::model_format::trace::write(
+                self_id,
+                kernel,
+                state,
+                client_id,
+                Some(message_id),
+                events,
+            )
+            .await;
+            return Ok(Generation::Stopped { reason, message_id });
+        }
+        Seq::Restart(_) => unreachable!("a restarted sequence does not restart again"),
+    };
     // A block still open when the model stopped generating is CUT: an open call
     // is never dispatched (`extract_tool_calls` skips it) and the turn's row says
     // so.
@@ -432,9 +518,7 @@ pub async fn run_generation(
     // lists every call of the pass as not sent.
     let (cut_calls, call_streams) = {
         let mut p = parts.lock().await;
-        // A stream the checker cut (#499) is not a stopped generation: its answer
-        // ends at the foreign tag and the router corrects it like any finished one.
-        let cut = p.splitter.open_call().is_some() && !cut_stream;
+        let cut = open || p.splitter.open_call().is_some();
         let evs = p.splitter.finish();
         p.publisher.push(evs, true).await;
         let calls: Vec<_> = p
@@ -446,15 +530,6 @@ pub async fn run_generation(
             .collect();
         (cut.then_some(calls), p.splitter.closed_calls.clone())
     };
-    let last_text = content_parts.join("");
-    // THE PASS ENDED: the provider's prompt cache is warm from here (`fork_points`).
-    *state.last_send_secs.lock().expect("last_send poisoned") = Some(crate::helpers::now_secs());
-    // THE ENDPOINT'S OWN COUNT calibrates our chars/4 estimate (python `_calib`).
-    if let Some(reported) = provider.report().prompt_tokens.filter(|n| *n > 0) {
-        let est = estimate_tokens(&model_view).max(1);
-        *state.calib.lock().expect("calib poisoned") = Some(reported as f64 / est as f64);
-        *state.reported.lock().expect("reported poisoned") = Some(reported);
-    }
 
     // A DEAD TURN — nothing left once the thinking is stripped — did not answer,
     // whatever the provider's finish reason says (a tiny thinking budget can end
@@ -471,28 +546,31 @@ pub async fn run_generation(
         let in_id = kernel.mint_id();
         let in_parent = incoming_parent(user_text);
         save_history(self_id, kernel, &[incoming_row(in_id, in_parent)]).await?;
+        // it stored no assistant row: its attempt's counts wait in `turn.rejected`
+        drop(accepted);
         emit_status(kernel, state, self_id, client_id, "stalled", {
             let mut m = Map::new();
             m.insert("reason".to_string(), json!("dead_turn"));
             m
         })
         .await;
+        // its trace rows name no row: it stored none
+        let events = crate::model_format::trace::of_turn(&pass, restarted.as_ref());
+        crate::model_format::trace::write(self_id, kernel, state, client_id, None, events).await;
         return Ok(Generation::Dead { text: last_text });
     }
 
     emit_status(kernel, state, self_id, client_id, "done", {
         let mut m = Map::new();
         m.insert("reason".to_string(), json!("ok"));
-        let window = crate::context::resolve_context_window(
-            &crate::helpers::agent_meta(self_id, kernel),
-            cfg.model_window,
-        );
+        let context_window = crate::context::resolve_context_window(&meta, cfg.model_window);
         m.extend(usage_detail(
-            &provider.report(),
+            window.map(Window::sum),
+            Counts::of(&report).map(|c| c.completion),
             &model_view,
             &last_text,
             gen_started.elapsed().as_secs_f64(),
-            window,
+            context_window,
         ));
         m
     })
@@ -512,67 +590,53 @@ pub async fn run_generation(
     let message_id = kernel.mint_id();
     // APPEND this send's user + assistant turns to the memory store so context
     // management (compaction/recall) has the FULL conversation next turn.
-    let mut next_request = None;
-    let new_turns = vec![
-        incoming_row(in_id, in_parent),
-        // STRIPPED — the deliberation is not part of the conversation. The RAW
-        // text (thinking included) is what the caller receives; the router parses
-        // only the answer, and durable history loses the `<think>` spans, because a
-        // reasoning model re-fed its own prior deliberation drowns in it. A pass
-        // the model stopped with a block open leaves the CUT MARKER instead, on top
-        // of the context.
-        {
-            let mut row = json!({
-                "role": "assistant",
-                "content": match &cut_calls {
-                    Some(calls) => cut_marker(&last_text, "model stopped generating", calls),
-                    None => crate::call_check::repair(&without_thinking(&last_text)),
-                },
-                "id": message_id,
-                "parent": in_id,
-            });
-            if let Some(m) = row.as_object_mut() {
-                m.extend(crate::think::thinking_fields(&last_text));
-                // stored in `attributes` and returned by the retrieval verbs, never
-                // rendered into a request (`render_for_model` renders only the
-                // declared visible ones, `crate::row_attrs::VISIBLE`)
-                let mut attrs = Map::new();
-                let usage = usage_row(&provider.report());
-                // WHAT SERVED IT: the provider agent (the chat itself when it names
-                // none) and the model it ran, with the pass priced from that
-                // provider's record
-                let provider_id = crate::helpers::agent_meta(self_id, kernel)
-                    .get(crate::remote_provider::PROVIDER_FIELD)
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map_or_else(|| self_id.as_str().to_string(), String::from);
-                let model = provider.model();
-                if let Some(c) = crate::row_attrs::cost(
-                    usage.as_ref(),
-                    &crate::helpers::agent_meta(&AgentId::from(provider_id.as_str()), kernel),
-                    &model,
-                ) {
-                    attrs.insert("cost".to_string(), c);
-                }
-                if let Some(u) = usage {
-                    attrs.insert("usage".to_string(), u);
-                }
-                if !model.is_empty() {
-                    attrs.insert("model".to_string(), json!(model));
-                }
-                attrs.insert("provider".to_string(), json!(provider_id));
-                let (parts, totals, next) =
-                    crate::row_attrs::build(prev_request.as_ref(), seed, message_id, request_parts);
-                attrs.insert("parts".to_string(), parts);
-                attrs.insert("totals".to_string(), totals);
-                m.insert("attributes".to_string(), Value::Object(attrs));
-                next_request = Some(next);
-            }
-            row
+    //
+    // STRIPPED — the deliberation is not part of the conversation. The RAW
+    // text (thinking included) is what the caller receives; the router parses
+    // only the answer, and durable history loses the `<think>` spans, because a
+    // reasoning model re-fed its own prior deliberation drowns in it. A pass
+    // the model stopped with a block open leaves the CUT MARKER instead, on top
+    // of the context.
+    let mut row = json!({
+        "role": "assistant",
+        "content": match &cut_calls {
+            Some(calls) => cut_marker(&last_text, "model stopped generating", calls),
+            None => crate::call_check::repair(&without_thinking(&last_text)),
         },
-    ];
-    save_history(self_id, kernel, &new_turns).await?;
-    *state.prev_request.lock().expect("prev_request poisoned") = next_request;
+        "id": message_id,
+        "parent": in_id,
+    });
+    // A `stop` THE MODEL WROTE (1.8) is traced with its reason and no `errors`
+    if cut_calls.is_none() {
+        crate::model_format::trace::note_model_stop(
+            cur,
+            row["content"].as_str().unwrap_or_default(),
+        );
+    }
+    if let Some(m) = row.as_object_mut() {
+        m.extend(crate::think::thinking_fields(&last_text));
+    }
+    let landing = crate::used::land(state, Some(accepted));
+    let next = assistant_attributes(
+        &mut row,
+        self_id,
+        kernel,
+        provider,
+        &landing.landed,
+        window,
+        prev_request.as_ref(),
+        seed,
+        message_id,
+        request_parts,
+    );
+    save_history(self_id, kernel, &[incoming_row(in_id, in_parent), row]).await?;
+    landing.stored();
+    *state.prev_request.lock().expect("prev_request poisoned") = Some(next);
+    // THE TURN'S TRACE ROWS (#766, 1.10), its helpers' included, written once its rows
+    // are stored, in one append under the chat's key
+    let events = crate::model_format::trace::of_turn(&pass, restarted.as_ref());
+    crate::model_format::trace::write(self_id, kernel, state, client_id, Some(message_id), events)
+        .await;
     Ok(Generation::Answered {
         text: last_text,
         message_id,
@@ -581,25 +645,391 @@ pub async fn run_generation(
     })
 }
 
-/// Every open part ABORTS for its watchers (`"error"`), and the provider failure
-/// is handed back to propagate.
+/// The assistant row's `attributes`, stored and returned by the retrieval verbs, never
+/// rendered into a request (`render_for_model` renders only the declared visible ones,
+/// [`crate::row_attrs::VISIBLE`]): what served it (the provider agent, the chat itself
+/// when it names none, and the model it ran), its token counts (`used`, #766 1.7), the
+/// `window` of the request its view was built for when the endpoint reported one, the
+/// price of `used.pass.total`, and the request's `parts` and `totals`. What the chat
+/// remembers of the request is handed back.
+#[allow(clippy::too_many_arguments)]
+fn assistant_attributes(
+    row: &mut Value,
+    self_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    provider: &Arc<dyn Provider>,
+    used: &Landed,
+    window: Option<Window>,
+    prev_request: Option<&crate::row_attrs::PrevRequest>,
+    seed: Option<Value>,
+    message_id: i64,
+    request_parts: Vec<Value>,
+) -> crate::row_attrs::PrevRequest {
+    let mut attrs = Map::new();
+    let provider_id = crate::helpers::agent_meta(self_id, kernel)
+        .get(crate::remote_provider::PROVIDER_FIELD)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map_or_else(|| self_id.as_str().to_string(), String::from);
+    let model = provider.model();
+    if let Some(c) = crate::row_attrs::cost(
+        Some(&used.pass.total),
+        &crate::helpers::agent_meta(&AgentId::from(provider_id.as_str()), kernel),
+        &model,
+    ) {
+        attrs.insert("cost".to_string(), c);
+    }
+    attrs.insert("used".to_string(), used.to_value());
+    if let Some(w) = window {
+        attrs.insert("window".to_string(), w.to_value());
+    }
+    if !model.is_empty() {
+        attrs.insert("model".to_string(), json!(model));
+    }
+    attrs.insert("provider".to_string(), json!(provider_id));
+    let (parts, totals, next) =
+        crate::row_attrs::build(prev_request, seed, message_id, request_parts);
+    attrs.insert("parts".to_string(), parts);
+    attrs.insert("totals".to_string(), totals);
+    if let Some(m) = row.as_object_mut() {
+        m.insert("attributes".to_string(), Value::Object(attrs));
+    }
+    next
+}
+
+/// Where an attempt's output goes as it streams: the caller's `token` events, the
+/// in-flight entry's `text_so_far` and the pass's parts.
+struct Caller<'a> {
+    kernel: &'a Arc<Kernel>,
+    state: &'a Arc<BackendState>,
+    self_id: &'a AgentId,
+    client_id: &'a str,
+    parts: &'a Arc<tokio::sync::Mutex<PassParts>>,
+}
+
+impl Caller<'_> {
+    /// One piece of an attempt's internal text, sent on today's path: the first one of
+    /// an attempt opens its `streaming` status.
+    async fn send(&self, t: &str, first: &mut bool) {
+        if *first {
+            *first = false;
+            emit_status(
+                self.kernel,
+                self.state,
+                self.self_id,
+                self.client_id,
+                "streaming",
+                Map::new(),
+            )
+            .await;
+        }
+        if t.is_empty() {
+            return;
+        }
+        {
+            let mut cur = self.state.current_meta.lock().expect("current poisoned");
+            if let Some(c) = cur.as_mut() {
+                c.text_so_far.push_str(t);
+            }
+        }
+        to_caller(
+            self.kernel,
+            self.self_id,
+            self.client_id,
+            json!({"type": "token", "text": t, "source": self.self_id.as_str()}),
+        )
+        .await;
+        let mut p = self.parts.lock().await;
+        let evs = p.splitter.feed(t);
+        p.publisher.push(evs, false).await;
+    }
+
+    /// A FAILED ATTEMPT IS MARKED, THEN ITS PARTS GO (Q40): the `retrying` status
+    /// `{attempt, of, error, kind: "call"}` first, when another attempt follows; then
+    /// every open part aborts with the reason `malformed`, the attempt's text leaves the
+    /// in-flight entry and a new splitter starts. Nothing streamed is taken back.
+    async fn discard(&self, retry: Option<(usize, &str)>) {
+        if let Some((attempt, error)) = retry {
+            let mut detail = Map::new();
+            detail.insert("attempt".to_string(), json!(attempt));
+            detail.insert("of".to_string(), json!(CALL_RETRIES));
+            detail.insert("error".to_string(), json!(error));
+            detail.insert("kind".to_string(), json!("call"));
+            emit_status(
+                self.kernel,
+                self.state,
+                self.self_id,
+                self.client_id,
+                "retrying",
+                detail,
+            )
+            .await;
+        }
+        {
+            let mut p = self.parts.lock().await;
+            // the deltas still batched reach their watchers first: an abort drops them
+            p.publisher.push(Vec::new(), true).await;
+            let evs = p.splitter.stop("malformed");
+            p.publisher.push(evs, true).await;
+            p.splitter = PartSplitter::new(self.self_id.as_str());
+        }
+        let mut cur = self.state.current_meta.lock().expect("current poisoned");
+        if let Some(c) = cur.as_mut() {
+            c.text_so_far.clear();
+        }
+    }
+}
+
+/// `messages` with the `send` how-to of type `from` in each system message swapped, by
+/// exact match, for type `to`'s (the assembly put the pass type's how-to there, Q16).
+fn with_howto(messages: &[Value], from: &str, to: &str) -> Vec<Value> {
+    let (was, now) = (
+        crate::model_format::of(from).howto_send,
+        crate::model_format::of(to).howto_send,
+    );
+    messages
+        .iter()
+        .map(|m| {
+            let mut m = m.clone();
+            if m["role"] == json!("system") {
+                if let Some(text) = m.get("content").and_then(Value::as_str) {
+                    let swapped = text.replace(was, now);
+                    m["content"] = Value::String(swapped);
+                }
+            }
+            m
+        })
+        .collect()
+}
+
+/// What a sequence of attempts renders its view from.
+struct ViewOf<'a> {
+    model_messages: &'a [Value],
+    model_view: &'a [Value],
+    request_parts: &'a [Value],
+    meta: &'a Map<String, Value>,
+}
+
+/// How a sequence of attempts ended.
+enum Seq {
+    /// An attempt with no `Bad`: its internal text (reasoning intact), its report, its
+    /// counts held for the row, whether the stream ended inside a call (`Open`), and the
+    /// sequence's window (attempt 1's).
+    Accepted {
+        text: String,
+        report: crate::provider::ProviderReport,
+        accepted: Accepted,
+        open: bool,
+        window: Option<Window>,
+    },
+    /// Every attempt was malformed: each one's report, first line, in order (their
+    /// counts are in `used_pending`), and the sequence's window (attempt 1's).
+    Stopped {
+        errors: Vec<String>,
+        window: Option<Window>,
+    },
+    /// A failed attempt's reply named a model of another type: the pass for it.
+    Restart(Box<Pass>),
+}
+
+/// A report's first line: the `error` of a `retrying` status and of the trace.
+fn first_line(report: &str) -> &str {
+    report.lines().next().unwrap_or_default()
+}
+
+/// ONE SEQUENCE OF ATTEMPTS under `pass`'s type (1.5 step 4): its view rendered through
+/// the chat's cache, then up to `1 + CALL_RETRIES` requests. Each token goes through the
+/// type's reader; text and calls go on today's path as internal text, the model's raw
+/// text is kept for the re-ask. At a `Bad` nothing more of the attempt is forwarded and
+/// its stream is read to its end, unseen (Q32), so its report exists; the next attempt
+/// carries every failed attempt's raw text (no thinking) and report as a re-ask pair.
+/// `may_restart`: a failed attempt whose reply names a model of another type ends the
+/// sequence for a restart under that type (once per turn). A transport error aborts the
+/// parts and propagates: the turn is rerun whole (`verbs.rs`), from attempt 1.
+async fn attempts(
+    pass: &Pass,
+    may_restart: bool,
+    view_of: &ViewOf<'_>,
+    caller: &Caller<'_>,
+) -> Result<Seq, GenFailure> {
+    // THE TYPED VIEW (#766): each message's content rendered for the type through the
+    // chat's render cache; role, images and cache marks carried unchanged. It holds the
+    // pass's pins until the sequence is accepted (finished) or ends otherwise (dropped).
+    let typed_view = pass.view(
+        view_of.model_messages,
+        view_of.model_view,
+        view_of.request_parts,
+        view_of.meta,
+    );
+    let mut reask: Vec<Value> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    let mut window: Option<Window> = None;
+    for attempt in 1..=1 + CALL_RETRIES {
+        let mut request = typed_view.messages.clone();
+        request.extend(reask.iter().cloned());
+        // A FRESH reading per request: it clears the provider's counts first, so a
+        // provider that reports nothing this time leaves no number of an earlier one.
+        let mut stream = match pass.request(&request, None).await {
+            Ok(stream) => stream,
+            Err(e) => return Err(abort_parts(caller.parts, e).await),
+        };
+        let mut reader = pass.reader.outbound();
+        let mut raw = String::new();
+        let mut text = String::new();
+        let mut bad: Option<String> = None;
+        let mut open = false;
+        let mut first = true;
+        while let Some(ev) = stream.next().await {
+            let ProviderEvent::Token(t) = match ev {
+                Ok(ev) => ev,
+                Err(e) => return Err(abort_parts(caller.parts, e).await),
+            };
+            if bad.is_some() {
+                // READ TO ITS END, UNSEEN (Q32): the endpoint's report then exists.
+                continue;
+            }
+            raw.push_str(&t);
+            let outs = reader.feed(&t);
+            take(outs, &mut text, &mut bad, &mut open, &mut first, caller).await;
+        }
+        drop(stream);
+        if bad.is_none() {
+            let outs = reader.finish();
+            take(outs, &mut text, &mut bad, &mut open, &mut first, caller).await;
+        }
+        let report = pass.report(Mode::Turn);
+        if attempt == 1 {
+            window = Window::of(&report);
+        }
+        let Some(why) = bad else {
+            // THE ACCEPTED ATTEMPT: calls, prose, reasoning or nothing. The pass
+            // finished: its view's chain is kept, its pins go.
+            typed_view.finish(&mut pass.events(), Mode::Turn.name());
+            let accepted = pass.accepted(&report);
+            return Ok(Seq::Accepted {
+                text,
+                report,
+                accepted,
+                open,
+                window,
+            });
+        };
+        // a thrown-away attempt: its counts go to the next row's `turn.rejected`
+        pass.rejected(&report);
+        let error = first_line(&why).to_string();
+        let mut fields = Map::new();
+        fields.insert("attempt".into(), json!(attempt));
+        fields.insert("error".into(), json!(error));
+        fields.extend(retry_counts(&report));
+        pass.events()
+            .push(Mode::Turn.name(), pass.kind, "retry", fields);
+        errors.push(error);
+        // A REPLY NAMING A MODEL OF ANOTHER TYPE (Q26): no re-ask pair from it, its raw
+        // text is in this type's form; the sequence restarts once under the new type.
+        if may_restart {
+            if let Some(next) = pass.retyped(&pass.provider.model()) {
+                caller
+                    .discard(Some((attempt, errors.last().map_or("", String::as_str))))
+                    .await;
+                drop(typed_view);
+                return Ok(Seq::Restart(Box::new(next)));
+            }
+        }
+        if attempt <= CALL_RETRIES {
+            caller
+                .discard(Some((attempt, errors.last().map_or("", String::as_str))))
+                .await;
+            reask.push(json!({"role": "assistant", "content": without_thinking(&raw)}));
+            reask.push(json!({"role": "user", "content": why}));
+        } else {
+            caller.discard(None).await;
+        }
+    }
+    drop(typed_view);
+    Ok(Seq::Stopped { errors, window })
+}
+
+/// The calibration (`calib`, `reported`) from a sequence's window: the prompt the
+/// endpoint counted over our estimate of the internal view. No window (no report) leaves
+/// both as they were.
+fn calibrate(state: &BackendState, window: Option<Window>, model_view: &[Value]) {
+    let Some(reported) = window.map(Window::sum).filter(|n| *n > 0) else {
+        return;
+    };
+    let est = estimate_tokens(model_view).max(1);
+    *state.calib.lock().expect("calib poisoned") = Some(reported as f64 / est as f64);
+    *state.reported.lock().expect("reported poisoned") = Some(reported);
+}
+
+/// `calib` cleared when `kind` is not the type of the chat's last finished turn pass
+/// (Q37): the projection then runs at 1.0. A model switch inside one type keeps it.
+fn clear_calib_on_type_change(state: &BackendState, kind: &str) {
+    let last = *state.last_type.lock().expect("last_type poisoned");
+    if last.is_some_and(|k| k != kind) {
+        *state.calib.lock().expect("calib poisoned") = None;
+    }
+}
+
+/// An attempt's reader output, taken in order: text and calls sent on, the first `Bad`
+/// ends what is forwarded, an `Open` noted.
+async fn take(
+    outs: Vec<Out>,
+    text: &mut String,
+    bad: &mut Option<String>,
+    open: &mut bool,
+    first: &mut bool,
+    caller: &Caller<'_>,
+) {
+    for out in outs {
+        if bad.is_some() {
+            return;
+        }
+        match out {
+            Out::Text(t) | Out::Call { text: t } => {
+                caller.send(&t, first).await;
+                text.push_str(&t);
+            }
+            Out::Bad { report } => *bad = Some(report),
+            Out::Open { .. } => *open = true,
+        }
+    }
+}
+
+/// A failed attempt's counts as the endpoint reported them, for its `retry` trace row:
+/// `prompt` (what the cache did not serve or write), `completion`, `cache_read`,
+/// `cache_write`. None when it reported nothing.
+fn retry_counts(report: &crate::provider::ProviderReport) -> Map<String, Value> {
+    let mut m = Map::new();
+    let Some(c) = Counts::of(report) else {
+        return m;
+    };
+    m.insert("prompt".into(), json!(c.prompt));
+    m.insert("completion".into(), json!(c.completion));
+    m.insert("cache_read".into(), json!(c.cache_read));
+    m.insert("cache_write".into(), json!(c.cache_write));
+    m
+}
+
 /// The token figures a finished generation's `status` `done` carries (a chat
 /// shows `42 tok/s · 3.1k / 64k ctx`): `prompt_tokens` and
-/// `completion_tokens` as the provider REPORTED them — estimated (this layer's
-/// own count) when it reported none, and then `prompt_tokens_estimated` /
+/// `completion_tokens` as the endpoint REPORTED them (#766, 1.7: `prompt` is the
+/// window's sum, the prompt of attempt 1 of the sequence the answer came from;
+/// `completion` is the accepted attempt's) — estimated (this layer's own count)
+/// when it reported none, and then `prompt_tokens_estimated` /
 /// `completion_tokens_estimated` says so — `gen_seconds` (the wall time from the
 /// request to the stream's end, thinking included) and `context_window` (the
 /// window in force). Python `usage_detail`.
 #[must_use]
 pub fn usage_detail(
-    report: &crate::provider::ProviderReport,
+    prompt: Option<i64>,
+    completion: Option<i64>,
     model_view: &[Value],
     text: &str,
     gen_seconds: f64,
     window: i64,
 ) -> Map<String, Value> {
     let mut m = Map::new();
-    match report.prompt_tokens.filter(|n| *n > 0) {
+    match prompt.filter(|n| *n > 0) {
         Some(n) => {
             m.insert("prompt_tokens".into(), json!(n));
         }
@@ -608,7 +1038,7 @@ pub fn usage_detail(
             m.insert("prompt_tokens_estimated".into(), json!(true));
         }
     }
-    match report.completion_tokens.filter(|n| *n > 0) {
+    match completion.filter(|n| *n > 0) {
         Some(n) => {
             m.insert("completion_tokens".into(), json!(n));
         }
@@ -628,28 +1058,8 @@ pub fn usage_detail(
     m
 }
 
-/// The counts the endpoint reported for the pass, as the assistant row keeps them:
-/// `input` (what the cache did not serve or write), `output`, and the cache counts
-/// when the endpoint has them. A figure the endpoint did not report is absent, never
-/// 0; none reported leaves no `usage` at all.
-fn usage_row(report: &crate::provider::ProviderReport) -> Option<Value> {
-    let mut u = Map::new();
-    let cached = report.cache_read.unwrap_or(0) + report.cache_write.unwrap_or(0);
-    if let Some(n) = report.prompt_tokens.filter(|n| *n > 0) {
-        u.insert("input".into(), json!((n - cached).max(0)));
-    }
-    if let Some(n) = report.completion_tokens.filter(|n| *n > 0) {
-        u.insert("output".into(), json!(n));
-    }
-    if let Some(n) = report.cache_read {
-        u.insert("cache_read".into(), json!(n));
-    }
-    if let Some(n) = report.cache_write {
-        u.insert("cache_write".into(), json!(n));
-    }
-    (!u.is_empty()).then_some(Value::Object(u))
-}
-
+/// Every open part ABORTS for its watchers (`"error"`), and the provider failure
+/// is handed back to propagate.
 async fn abort_parts(parts: &tokio::sync::Mutex<PassParts>, e: ProviderError) -> GenFailure {
     let mut p = parts.lock().await;
     let evs = p.splitter.stop("error");
@@ -667,28 +1077,9 @@ pub(crate) fn incoming_parent(text: &str) -> Option<i64> {
     tok.parse::<i64>().ok()
 }
 
-/// Where the answer received so far must be cut (#499): the byte length of the raw
-/// text to keep, just past its first foreign call tag, or `None`. The check reads the
-/// answer without its thinking ([`without_thinking`]); the cut is mapped back to the
-/// raw text by its tail, which the last delta wrote.
-fn stream_cut(raw: &str) -> Option<usize> {
-    let stripped = without_thinking(raw);
-    let end = crate::call_check::foreign_cut(&stripped)?;
-    let tail = &stripped[end..];
-    let body = raw.trim_end();
-    Some(if tail.is_empty() {
-        body.len()
-    } else if body.ends_with(tail) {
-        body.len() - tail.len()
-    } else {
-        raw.len()
-    })
-}
-
 #[cfg(test)]
 mod usage_tests {
     use super::usage_detail;
-    use crate::provider::ProviderReport;
     use serde_json::json;
 
     /// python `test_the_done_detail_carries_the_token_usage`: reported figures as
@@ -696,19 +1087,13 @@ mod usage_tests {
     #[test]
     fn the_done_detail_carries_the_token_usage() {
         let view = vec![json!({"role": "user", "content": "go"})];
-        let rep = ProviderReport {
-            prompt_tokens: Some(1234),
-            completion_tokens: Some(56),
-            stop_reason: None,
-            ..Default::default()
-        };
-        let d = usage_detail(&rep, &view, "answer", 1.23456, 32768);
+        let d = usage_detail(Some(1234), Some(56), &view, "answer", 1.23456, 32768);
         assert_eq!(
             serde_json::Value::Object(d),
             json!({"prompt_tokens": 1234, "completion_tokens": 56,
                    "gen_seconds": 1.235, "context_window": 32768})
         );
-        let d = usage_detail(&ProviderReport::default(), &view, "abcdefgh", 0.5, 8192);
+        let d = usage_detail(None, None, &view, "abcdefgh", 0.5, 8192);
         assert_eq!(d["prompt_tokens_estimated"], json!(true));
         assert_eq!(d["completion_tokens"], json!(2));
         assert_eq!(d["completion_tokens_estimated"], json!(true));
