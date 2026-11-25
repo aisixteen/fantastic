@@ -324,9 +324,10 @@ impl Provider for ResponsesProvider {
                 && !ctype.to_lowercase().contains("json")
                 && attempt < RETRIES)
             {
-                let mut err = ProviderError::raised(format!("responses {code}: {detail}"));
-                err.transport = matches!(code, 502..=504);
-                return Err(err);
+                // the shared classifier: a 5xx is the link, a 401 or 404 no retry mends
+                return Err(
+                    ProviderError::raised(format!("responses {code}: {detail}")).for_status(code)
+                );
             }
             attempt += 1;
             let ctype_shown = if ctype.is_empty() {

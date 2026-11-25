@@ -143,6 +143,28 @@ fn set_up_schema(backend: &Value) -> Value {
     s
 }
 
+/// The home's judge of a saved set-up (`fantastic_user_home_store::SetupCheck`): a set-up on
+/// a backend is born as an AI pair (`make_ai`), so it is split as the pair is
+/// (`kern::backend::split`) and each share is judged by its own record — the provider's by
+/// the backend, the chat's (its settings and request knobs, #632) by the chat. Any other
+/// set-up is judged by its own bundle.
+pub fn check_set_up(
+    kernel: &fantastic_kernel::Kernel,
+    hm: &str,
+    fields: &Map<String, Value>,
+) -> Result<(), Value> {
+    let backend = kernel.bundles.get(hm).filter(is_backend);
+    let chat = kernel
+        .bundles
+        .get(fantastic_ai_core::chat_bundle::HANDLER_MODULE);
+    let (Some(backend), Some(chat)) = (backend, chat) else {
+        return fantastic_user_home_store::by_bundle(kernel, hm, fields);
+    };
+    let (provider, chat_share) = crate::kern::backend::split(fields);
+    backend.check_record("create_agent", &provider)?;
+    chat.check_record("create_agent", &chat_share)
+}
+
 /// The backends this build links with the fields a set-up writes for each ([`set_up_schema`]).
 pub fn backends(host: &Host) -> Vec<Backend> {
     let mut v: Vec<Backend> = host

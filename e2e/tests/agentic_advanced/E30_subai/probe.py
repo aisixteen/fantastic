@@ -352,26 +352,12 @@ async def _clock_lines(root, holder: str, ids: list[str]) -> None:
         await asyncio.sleep(2.0)
 
 
-async def _sub_lines(root, ids: list[str], add: dict) -> None:
-    """The OPERATOR's lines ON each named sub-AI, written the moment the creator has
-    made it (a line on a model-made id cannot be written in advance). Runs in the
-    background, like `_clock_lines`."""
-    pending = list(ids)
-    while pending:
-        live = set(await asyncio.to_thread(root.agent_ids))
-        for sid in [x for x in pending if x in live]:
-            await add_lines(root, sid, add)
-            print(f"  [operator] {sid} holds {add}", flush=True)
-            pending.remove(sid)
-        await asyncio.sleep(2.0)
-
-
 def key_lines_ok(records: dict[str, dict], made: list[str], prov_bundle: str,
                  given: dict[str, dict] | None = None) -> tuple[bool, dict]:
     """A model-created agent reads a key only through the forced line of its creator's
     `create` line: a provider holds exactly `creds: get` (or none), and no other agent
-    the model made names the key store — but for the key line the OPERATOR wrote on it
-    (`given`, by id)."""
+    the model made names the key store — but for the key line the task tells the
+    creator to hand it (`given`, by id)."""
     bad = {}
     given = given or {}
     for aid in made:
@@ -796,7 +782,7 @@ async def run(
     prefix: str = "subai_",
     sub_ais: list[str] | None = None,
     wire_builder=None,
-    sub_lines: dict | None = None,
+    handed: dict | None = None,
 ):
     """The probe, parameterized. ONE fixture and ONE `score` for every arm — a second
     copy of the scoring path is how two arms diverge silently, which the emergence
@@ -806,8 +792,12 @@ async def run(
     `sub_ais` are the chats the creator builds (the clock's line goes to each once it
     exists); `wire_builder(root, aid)` writes the builder's lines that name ids made
     after it, itself included (default: its `create` line on itself, `creator_lines`).
-    `sub_lines` are lines the operator writes ON each sub-AI once it exists (none by
-    default); the key check counts a key line there as the operator's.
+    `handed` are lines the task tells the creator to hand each sub-AI from its own
+    (none by default); the key check counts a key line there as told. The operator
+    writes no line ON a model-made agent (the clock's line is on `clock`): a `can` the
+    creator writes replaces the whole field, so an operator's line there would not
+    survive it, and one written after the agent exists can come after its provider
+    has already called.
     """
     # WHICH KERNEL is a plug (`RUNTIME=python|rust`) — see E20_build.
     # The ids the FIXTURE builds — declared before boot, because a spawned
@@ -849,11 +839,6 @@ async def run(
     _clock_task = (
         asyncio.create_task(_clock_lines(root, "clock", list(sub_ais or [SUB_AI])))
         if "clock" in await asyncio.to_thread(root.agent_ids)
-        else None
-    )
-    _sub_task = (
-        asyncio.create_task(_sub_lines(root, list(sub_ais or [SUB_AI]), sub_lines))
-        if sub_lines
         else None
     )
     # FORENSICS: pin the moment any line on the store changes, for the builder and
@@ -1221,13 +1206,11 @@ async def run(
     )
     if _clock_task is not None:
         _clock_task.cancel()
-    if _sub_task is not None:
-        _sub_task.cancel()
     # A KEY ONLY THROUGH THE FORCED LINE (harness, after the run)
     recs = await records_of(root)
     made = [i for i in recs if i not in mine]
-    given = ({sid: sub_lines[creds.CREDS] for sid in (sub_ais or [SUB_AI])}
-             if sub_lines and creds.CREDS in sub_lines else {})
+    given = ({sid: handed[creds.CREDS] for sid in (sub_ais or [SUB_AI])}
+             if handed and creds.CREDS in handed else {})
     keys_ok, stray = key_lines_ok(recs, made, BK.record().get("handler_module"), given)
     print(f"    key lines only where forced  {'OK' if keys_ok else 'NO'} stray={stray}")
     if not keys_ok:

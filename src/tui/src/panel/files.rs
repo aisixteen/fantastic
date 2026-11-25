@@ -780,7 +780,7 @@ mod tests {
         let store = crate::store::Store::default();
         let seen = std::collections::HashSet::new();
         let agent: AgentId = "files".into();
-        let cx = Cx { agent: &agent, store: &store, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx { agent: &agent, store: &store, tasks: &[], seen: &seen, reflect: None, provider: None };
         let mut out = Vec::new();
         let h = f.on_key(k, &cx, &mut out);
         (h, out)
@@ -910,7 +910,7 @@ mod tests {
         let agent: AgentId = "fv".into();
         let store = crate::store::Store::default();
         let seen = std::collections::HashSet::new();
-        let cx = Cx { agent: &agent, store: &store, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx { agent: &agent, store: &store, tasks: &[], seen: &seen, reflect: None, provider: None };
         let mut out = Vec::new();
         f.on_select(&cx, &mut out);
         assert!(matches!(out[0], Cmd::Reflect { .. }), "it asks what the agent is");

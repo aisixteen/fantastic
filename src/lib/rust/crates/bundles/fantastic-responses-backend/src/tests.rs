@@ -185,16 +185,34 @@ async fn status_refusal(code: u16) -> ProviderError {
 async fn a_503_is_a_transport_failure_and_a_401_is_not() {
     let overloaded = status_refusal(503).await;
     assert!(
-        overloaded.transport,
+        overloaded.is_transient(),
         "503 must be transport: {}",
         overloaded.message
     );
     let unauthorized = status_refusal(401).await;
     assert!(
-        !unauthorized.transport,
+        !unauthorized.is_transient(),
         "401 must not be transport: {}",
         unauthorized.message
     );
+}
+
+/// AN HTTP ERROR IS CLASSED BY THE SHARED CLASSIFIER: a refused key or an unknown
+/// model no retry mends, a 5xx is the link, a 400 is this request's own failure.
+#[tokio::test]
+async fn http_errors_are_classed_by_the_shared_classifier() {
+    use fantastic_ai_core::provider::ErrorClass;
+    use fantastic_kernel::refusal::{NOT_FOUND, UNAUTHORIZED};
+    for (code, want) in [
+        (401, ErrorClass::Permanent(UNAUTHORIZED)),
+        (403, ErrorClass::Permanent(UNAUTHORIZED)),
+        (404, ErrorClass::Permanent(NOT_FOUND)),
+        (429, ErrorClass::Transient),
+        (503, ErrorClass::Transient),
+        (400, ErrorClass::Turn),
+    ] {
+        assert_eq!(status_refusal(code).await.class, want, "HTTP {code}");
+    }
 }
 
 #[test]

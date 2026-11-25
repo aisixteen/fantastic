@@ -589,7 +589,7 @@ mod tests {
         let store = crate::store::Store::default();
         let seen = std::collections::HashSet::new();
         let a: crate::kern::model::AgentId = SETUP_ID.into();
-        let cx = Cx { agent: &a, store: &store, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx { agent: &a, store: &store, tasks: &[], seen: &seen, reflect: None, provider: None };
         let mut out = Vec::new();
         for k in keys {
             p.on_key(key(*k), &cx, &mut out);
@@ -755,7 +755,7 @@ mod tests {
         let store = crate::store::Store::default();
         let seen = std::collections::HashSet::new();
         let a: crate::kern::model::AgentId = SETUP_ID.into();
-        let cx = Cx { agent: &a, store: &store, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx { agent: &a, store: &store, tasks: &[], seen: &seen, reflect: None, provider: None };
         assert!(matches!(p.on_key(key(KeyCode::Esc), &cx, &mut Vec::new()), Handled::No), "page 1: esc is the app's — leave");
     }
 

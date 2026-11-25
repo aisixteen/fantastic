@@ -612,7 +612,7 @@ async fn an_unreachable_endpoint_is_a_transport_failure() {
         Ok(_) => panic!("chat must fail against a closed port"),
         Err(e) => e,
     };
-    assert!(err.transport, "expected transport: {}", err.message);
+    assert!(err.is_transient(), "expected transport: {}", err.message);
 }
 
 /// NO guessy default (mirror of the Python provider test): an empty model never
@@ -1083,7 +1083,56 @@ fn stream_idle_seconds_is_validated_at_the_write() {
     };
     for bad in [json!(0), json!(-1), json!("soon"), json!(true)] {
         let refused = at_the_write(bad.clone()).expect_err("refused");
-        assert_eq!(refused["arg"], json!("stream_idle_seconds"), "{bad}: {refused}");
+        assert_eq!(
+            refused["arg"],
+            json!("stream_idle_seconds"),
+            "{bad}: {refused}"
+        );
     }
     assert!(at_the_write(json!(2.5)).is_ok());
+}
+
+/// AN HTTP ERROR IS CLASSED BY THE SHARED CLASSIFIER: a refused key or an unknown
+/// model (ollama's 404) no retry mends, a 503 is the link, a 400 is this request's own.
+#[tokio::test]
+async fn http_errors_are_classed_by_the_shared_classifier() {
+    use fantastic_ai_core::provider::ErrorClass;
+    use fantastic_kernel::refusal::{NOT_FOUND, UNAUTHORIZED};
+    for (code, want) in [
+        (401, ErrorClass::Permanent(UNAUTHORIZED)),
+        (404, ErrorClass::Permanent(NOT_FOUND)),
+        (503, ErrorClass::Transient),
+        (400, ErrorClass::Turn),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(code).set_body_string(r#"{"error": "no"}"#))
+            .mount(&server)
+            .await;
+        let p = OllamaProvider {
+            endpoint: server.uri(),
+            model: "test-model".to_string(),
+            temperature: 0.3,
+            num_ctx: None,
+            num_predict: None,
+            think: None,
+            key: Arc::new(crate::tests_server::NoKey),
+            report: Default::default(),
+            stream_idle: fantastic_ai_core::provider::stream_idle_of(&serde_json::Map::new()),
+        };
+        let err = match p
+            .chat(&[json!({"role": "user", "content": "hi"})], None)
+            .await
+        {
+            Ok(_) => panic!("chat must refuse an HTTP {code}"),
+            Err(e) => e,
+        };
+        assert_eq!(err.class, want, "HTTP {code}: {}", err.message);
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "HTTP {code}"
+        );
+    }
 }

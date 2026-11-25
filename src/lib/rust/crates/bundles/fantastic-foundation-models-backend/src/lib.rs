@@ -93,7 +93,13 @@ impl FoundationModelsBackendBundle {
             .engine
             .availability()
             .reason()
-            .map(|r| ProviderError::raised(format!("{NAME}: {}", unavailable_message(r))));
+            // an unavailable on-device model is not available on the next try either
+            .map(|r| {
+                ProviderError::permanent(
+                    format!("{NAME}: {}", unavailable_message(r)),
+                    fantastic_kernel::refusal::DISABLED,
+                )
+            });
         Arc::new(FoundationModelsProvider {
             engine: Arc::clone(&self.engine),
             // the calling chat's knobs (#632); a chat that names no max_tokens gets the

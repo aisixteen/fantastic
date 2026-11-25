@@ -203,7 +203,7 @@ mod tests {
     }
 
     fn cx<'a>(s: &'a Store, a: &'a AgentId, seen: &'a HashSet<RowId>) -> Cx<'a> {
-        Cx { agent: a, store: s, tasks: &[], seen, reflect: None }
+        Cx { agent: a, store: s, tasks: &[], seen, reflect: None, provider: None }
     }
 
     #[test]

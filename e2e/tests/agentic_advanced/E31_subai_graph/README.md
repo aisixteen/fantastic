@@ -36,6 +36,16 @@ to, or not think to?). The task says the specialist must consult that agent; it 
 say for what, with which verb, or how to handle the reply. Same discipline as probe 06's
 graph-shape paragraph.
 
+## The key line
+
+`hour_ai_prov` reads its key through `creds`, and `hour_ai`, its ancestor, caps that
+call. The builder holds the line (the operator writes it beside its `create` line)
+and the task's fourth constraint tells it to hand `hour_ai` its own in the create,
+before the provider exists, and to keep it in every `can` it writes later. The
+operator writes no line on `hour_ai`: one written after the chat existed came too
+late, and the builder's own `can` update replaced it. The free twin
+`subai_key_twin` (E167) scripts that wiring.
+
 ## Held constant
 
 Everything else. Fixture, readings, canary, clock tick, unattended window, idle policy and

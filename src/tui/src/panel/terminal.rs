@@ -393,7 +393,7 @@ mod tests {
     fn a_new_size_is_told_to_the_pty_once() {
         let mut p = panel();
         let (s, seen, a) = cx_parts();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None, provider: None };
         p.layout(Rect::new(0, 0, 70, 12), &cx);
         p.layout(Rect::new(0, 0, 70, 12), &cx);
         let cmds = p.take_cmds();
@@ -435,7 +435,7 @@ mod tests {
         let mut p = panel();
         p.takeover = true;
         let (s, seen, a) = cx_parts();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None, provider: None };
         let mut out = Vec::new();
         p.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &cx, &mut out);
         p.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL), &cx, &mut out);
@@ -455,7 +455,7 @@ mod tests {
     fn a_reattach_replays_the_ring_and_a_finished_shell_restarts_on_enter() {
         let mut p = TerminalPanel::new("term".into());
         let (s, seen, a) = cx_parts();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None, provider: None };
         let mut out = Vec::new();
         // No job yet: keys and sizes go nowhere.
         p.takeover = true;

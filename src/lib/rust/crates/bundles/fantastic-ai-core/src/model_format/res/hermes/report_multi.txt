@@ -1,0 +1,3 @@
+[malformed call — nothing ran] one call per <tool_call> block — close it and open a new <tool_call> for each further call.{careful}
+write it as:
+{calls}

@@ -82,7 +82,13 @@ EXTRA = (
     "reaching it by id like any other agent; inference is a unit you wire. What it "
     "asks is your call. It is a small model, so do not depend on it being clever. "
     "Third: keep the result in the durable store as before, because I am still going to "
-    "walk away.\n\n"
+    "walk away. "
+    f"Fourth: `{P.SUB_PROV}` reads its key through its `creds` line, and `{P.SUB_AI}` is "
+    "its ancestor, so that call passes only when "
+    f"`{P.SUB_AI}`'s own `can` holds the key store line too: hand it the one you hold, "
+    "`{\"creds\": {\"call\": [\"get\"]}}`, in the `create_agent` that makes "
+    f"`{P.SUB_AI}` (before `{P.SUB_PROV}` exists), and keep it in every `can` you write "
+    f"on `{P.SUB_AI}` later — a `can` you write replaces the whole field.\n\n"
     "I have already left — this is a one-way instruction and there is nobody to answer "
     "a question. If something is ambiguous or looks wrong, decide it yourself, write "
     "down the call you made, and finish building."
@@ -97,8 +103,12 @@ EXTRA = (
 
 # THE KEY LINE THE CHAIN NEEDS. `hour_ai_prov` reads its key through the forced
 # `creds: get`, and every ancestor whose tree does not hold the key store caps that
-# call: the builder `ai` and the chat `hour_ai` each hold the same line, written by
-# the operator (the builder's beside its `create` line, the chat's once it exists).
+# call: the builder `ai` and the chat `hour_ai` each hold the same line. The operator
+# writes the builder's, beside its `create` line; the builder hands the chat its own
+# in the create (`EXTRA`, fourth), so the line is there before the provider exists
+# and stays in every `can` the builder writes. An operator line on `hour_ai` came
+# too late (a 2 s poll after the chat existed) and the builder's own `can` update
+# replaced it.
 KEY_LINE = {creds.CREDS: creds.GET}
 
 
@@ -113,7 +123,7 @@ async def main() -> None:
         brain_backend=BRAIN_BACKEND,
         banner="COMBINED — state graph + child workers + clock + an AI agent",
         wire_builder=_wire_builder,
-        sub_lines=KEY_LINE,
+        handed=KEY_LINE,
     )
     print(f"\n  COMBINED  ->  {'PASS' if ok else 'FAIL'}")
     verdict(ok)

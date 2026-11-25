@@ -513,7 +513,7 @@ pub(crate) fn silent() -> &'static Mutex<HashMap<(String, String), usize>> {
 
 /// The chain's CURRENT silent streak, read without touching it (#203). 0 when
 /// the chain has never been silent.
-fn silent_streak(self_id: &AgentId, client_id: &str) -> usize {
+pub(crate) fn silent_streak(self_id: &AgentId, client_id: &str) -> usize {
     silent()
         .lock()
         .expect("silent poisoned")

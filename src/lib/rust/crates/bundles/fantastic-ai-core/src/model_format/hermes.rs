@@ -15,10 +15,12 @@
 //!   form ([`render_call`]). One repair only: JSON that `serde_json` does not read and
 //!   that `jsonrepair-rs` completes by adding closing brackets and braces at its end and
 //!   nothing else ([`closed`]; the JSON alone when a `<bytes>` block follows it) is read so, and an [`Out::Repaired`] goes before its call
-//!   (the turn's `repaired` trace event). A call that does not read, a JSON call with
-//!   no tags, a closer with no opener and a call in the default form are each [`Out::Bad`]
-//!   with this type's report (`res/hermes/report_*.txt`). A stream that ends inside a
-//!   call is [`Out::Open`], after the internal head that could be read from it.
+//!   (the turn's `repaired` trace event). Several calls in one block are [`Out::Bad`]
+//!   with [`REPORT_MULTI`], each call written as its own block. A call that does not
+//!   read, a JSON call with no tags, a closer with no opener and a call in the default
+//!   form are each [`Out::Bad`] with this type's report (`res/hermes/report_*.txt`). A
+//!   stream that ends inside a call is [`Out::Open`], after the internal head that could
+//!   be read from it.
 //!
 //! The template the layout is written from, its commit and its licence are recorded in
 //! `res/hermes/source.txt`. The JSON writer writes what `json.dumps(.., ensure_ascii=False)`
@@ -72,6 +74,10 @@ pub(crate) const REPORT_PAYLOAD: &str = include_str!("res/hermes/report_payload.
 pub(crate) const REPORT_NO_TARGET: &str = include_str!("res/hermes/report_no_target.txt");
 /// Anything between the JSON and the closer that is not one block of a send (S24).
 pub(crate) const REPORT_BLOCK: &str = include_str!("res/hermes/report_block.txt");
+/// Several calls inside one `<tool_call>`: `{calls}` the model's own calls, each in its
+/// own block; `{careful}` empty, or a newline and the `careful:` line of each call whose
+/// destructive command the form leaves out (#255).
+pub(crate) const REPORT_MULTI: &str = include_str!("res/hermes/report_multi.txt");
 /// A JSON call with no tags, or a closer with no opener (S21).
 pub(crate) const REPORT_NO_OPENER: &str = include_str!("res/hermes/report_no_opener.txt");
 /// A call written in the default form (S9).
@@ -675,8 +681,82 @@ fn closed(lead: &str) -> Option<(String, String)> {
     Some((text, added.to_string()))
 }
 
-/// [`read_call`] from the text inside the tags, leading whitespace gone.
+/// [`read_call`] from the text inside the tags, leading whitespace gone. The format is
+/// strict, one call per block: several calls in one are [`REPORT_MULTI`], with each
+/// call that reads written as its own block; the first that does not read is reported
+/// instead, with its own report.
 fn read_lead(lead: &str, tools: &[&str]) -> Result<String, String> {
+    let Some(parts) = calls_in(lead) else {
+        return read_one(lead, tools).map(|(_, _, text)| text);
+    };
+    let mut careful = String::new();
+    let mut blocks = Vec::with_capacity(parts.len());
+    for part in parts {
+        let (name, mut internal, _) = read_one(part, tools)?;
+        if let Some(Value::Object(payload)) = internal.get("payload") {
+            let pairs: Vec<(String, Value)> = payload
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            if let Some((line, shown)) = crate::call_check::left_out(&pairs) {
+                careful.push('\n');
+                careful.push_str(&line);
+                internal.insert(
+                    "payload".to_string(),
+                    Value::Object(shown.into_iter().collect()),
+                );
+            }
+        }
+        blocks.push(write_call(&name, &internal));
+    }
+    Err(fill(
+        REPORT_MULTI,
+        &[
+            ("careful", careful.as_str()),
+            ("calls", blocks.join("\n").as_str()),
+        ],
+    ))
+}
+
+/// The calls of `lead` (the text inside one pair of tags, leading whitespace gone) when
+/// it holds more than one: each JSON value with the `<bytes>` block after it, if one
+/// follows, as written. A part that does not read as JSON runs to the end. `None` for
+/// one call, or when something other than a further JSON object follows a call (that
+/// one call's own report says what).
+fn calls_in(lead: &str) -> Option<Vec<&str>> {
+    let ws = |c: char| c.is_ascii() && is_json_ws(c as u8);
+    let mut parts = Vec::new();
+    let mut at = 0usize;
+    loop {
+        let mut it =
+            serde_json::Deserializer::from_str(&lead[at..]).into_iter::<serde::de::IgnoredAny>();
+        let Some(Ok(_)) = it.next() else {
+            parts.push(&lead[at..]);
+            break;
+        };
+        let mut end = at + it.byte_offset();
+        let after = lead[end..].trim_start_matches(ws);
+        if let Some(body) = after.strip_prefix(BYTES_OPEN) {
+            if let Some(stop) = body.find(BYTES_CLOSE) {
+                end = lead.len() - body.len() + stop + BYTES_CLOSE.len();
+            }
+        }
+        parts.push(&lead[at..end]);
+        let next = lead[end..].trim_start_matches(ws);
+        if !next.starts_with('{') {
+            if !next.is_empty() {
+                return None;
+            }
+            break;
+        }
+        at = lead.len() - next.len();
+    }
+    (parts.len() > 1).then_some(parts)
+}
+
+/// One call's text inside the tags, leading whitespace gone: its name, its internal
+/// arguments and its internal call text.
+fn read_one(lead: &str, tools: &[&str]) -> Result<(String, Map<String, Value>, String), String> {
     let mut it = serde_json::Deserializer::from_str(lead).into_iter::<Value>();
     let value = match it.next() {
         Some(Ok(v)) => v,
@@ -750,7 +830,7 @@ fn read_lead(lead: &str, tools: &[&str]) -> Result<String, String> {
     // tags (`</call>` outside a body) would not
     let back = extract_tool_calls(&text);
     if back.len() == 1 && back[0].name == *name && envelopes(&text).len() == 1 {
-        return Ok(text);
+        return Ok((name.clone(), internal, text));
     }
     let block = &text[crate::tool_parse::OPEN.len()..text.len() - CLOSE.len()];
     let error = match parse_call(block) {

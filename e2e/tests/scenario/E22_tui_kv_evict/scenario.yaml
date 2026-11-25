@@ -3,14 +3,15 @@
 # evict` — so the third rotates the least-recently-used conversation out; ai_a,
 # asked again, still answers from its history (re-prefill). Then ai_b streams a
 # long answer (its TEXT DRAFT drawn as written) and `S` stops it: the draft is
-# settled `not sent — stopped`, the producer's history keeps the cut marker.
+# settled `not sent — stopped`, the producer's history keeps the stop notice (a user row,
+# `[your turn was stopped by …]`, never the model's answer).
 #
 # Live: the operator's vLLM (VLLM_ENDPOINT, FANTASTIC_AI_MODEL, the key from
 # VLLM_API_KEY or VLLM_API_KEY_FILE — read by an env-backed credential store,
 # never printed). The shared GPU serves production: one scenario at a time.
 #
-# The `kv a/b · evicted n` status comes from the agent's own reflect (re-read on
-# select), so each frame shows the table as of selecting that agent — before
+# The `kv a/b · evicted n` status comes from the reflect of the chat's provider (read
+# with the chat's own on select), so each frame shows the table as of selecting that agent — before
 # its own turn. Three agents on two slots: c's pick shows the table full; c's
 # turn evicts, seen from a's second pick on. The
 # exact count is not pinned — a turn makes more than one model pass, and a side
@@ -324,4 +325,4 @@ runs:
     lock_released: true
     rows_grew: true
     rows_contain:
-    - '[stopped by'
+    - '[your turn was stopped by'

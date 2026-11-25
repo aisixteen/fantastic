@@ -486,6 +486,16 @@ impl App {
             .unwrap_or(PanelKind::Generic)
     }
 
+    /// The reflect of the provider `agent`'s own reflect names, when one was read.
+    fn provider_reflect(&self, agent: &AgentId) -> Option<&Value> {
+        let p = self
+            .reflects
+            .get(agent)?
+            .get(fantastic_ai_core::remote_provider::PROVIDER_FIELD)?
+            .as_str()?;
+        self.reflects.get(p)
+    }
+
     /// The context a panel renders from. Borrows; copies nothing.
     pub fn cx<'a>(&'a self, agent: &'a AgentId) -> Cx<'a> {
         Cx {
@@ -494,6 +504,7 @@ impl App {
             tasks: &self.tasks,
             seen: self.seen.ids(),
             reflect: self.reflects.get(agent),
+            provider: self.provider_reflect(agent),
         }
     }
 
@@ -807,6 +818,17 @@ impl App {
                 self.reflow();
             }
             Got::Reflect { agent, reply } => {
+                // a chat's backend state is its provider's: each read of the chat reads the
+                // provider it names too, so the two are as of the same moment
+                if let Some(p) = reply
+                    .get(fantastic_ai_core::remote_provider::PROVIDER_FIELD)
+                    .and_then(Value::as_str)
+                    .filter(|p| *p != agent.as_str())
+                {
+                    self.push(Cmd::Reflect {
+                        agent: p.to_string(),
+                    });
+                }
                 self.reflects.insert(agent.clone(), reply);
                 self.reflect_asked.insert(agent);
                 self.dirty = true;
@@ -1189,6 +1211,40 @@ mod tests {
         app.filter = Some("ai_".into());
         app.reflow();
         assert_eq!(app.selected().map(String::as_str), Some("ai_c"));
+    }
+
+    /// A chat's KV table is its provider's: a read of the chat reads the provider it names,
+    /// and the chat's panel context carries that provider's reflect.
+    #[test]
+    fn a_chats_reflect_reads_its_provider_and_the_context_carries_it() {
+        let mut app = app_on("ai_c");
+        app.on_got(Got::Reflect {
+            agent: "ai_c".into(),
+            reply: serde_json::json!({"id": "ai_c", "provider_id": "ai_c_provider"}),
+        });
+        assert!(
+            app.out
+                .iter()
+                .any(|c| matches!(c, Cmd::Reflect { agent } if agent == "ai_c_provider")),
+            "the provider is read"
+        );
+        assert!(
+            app.cx(&"ai_c".to_string()).provider.is_none(),
+            "not read yet"
+        );
+        let kv = serde_json::json!({"kv": {"slots": 2, "live": 2, "evicted": 1}});
+        app.on_got(Got::Reflect {
+            agent: "ai_c_provider".into(),
+            reply: kv.clone(),
+        });
+        assert_eq!(app.cx(&"ai_c".to_string()).provider, Some(&kv));
+        // a reply naming no provider reads nothing more
+        let before = app.out.len();
+        app.on_got(Got::Reflect {
+            agent: "worker".into(),
+            reply: serde_json::json!({"id": "worker"}),
+        });
+        assert_eq!(app.out.len(), before);
     }
 
     fn record(id: &str, view: Value) -> Record {

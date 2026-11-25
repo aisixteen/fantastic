@@ -206,7 +206,8 @@ impl Provider for OllamaProvider {
             return Err(ProviderError {
                 message: format!("{error} (status code: {code})"),
                 kind: "ResponseError",
-                transport: false,
+                // the shared classifier: a 5xx is the link, a 401 or 404 no retry mends
+                class: fantastic_ai_core::provider::http_class(code),
             });
         }
 

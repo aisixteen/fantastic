@@ -1,0 +1,11 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: two scripted OpenAI-compatible
+# servers play the builder and its new chat (free twin of subai_graph's key line).
+id: subai_key_twin
+group: agentic_advanced
+title: "a scripted builder hands its new chat the key store line in the create, before the provider exists: the provider's first completion carries the key; a `can` rewrite without the line refuses the key; the rewrite that keeps it restores it"
+runner: probe.py
+runtimes: [rust]
+costs: free
+limits:
+  idle_seconds: 120
+  turn_seconds: 300

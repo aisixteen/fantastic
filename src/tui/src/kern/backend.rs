@@ -154,6 +154,19 @@ pub(crate) fn chat_part(spec: &Map<String, Value>) -> Map<String, Value> {
     spec.iter().filter(|(k, _)| chat_only(k) || BOTH.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect()
 }
 
+/// ONE AI spec split onto the pair's two records (#632): the PROVIDER's share (every field
+/// the chat's record does not own) and the CHAT's ([`chat_part`]). The one split
+/// [`BackendBundle::pair_specs`] makes and a saved set-up is judged by
+/// (`kern::setup::check_set_up`).
+pub(crate) fn split(spec: &Map<String, Value>) -> (Map<String, Value>, Map<String, Value>) {
+    let provider = spec
+        .iter()
+        .filter(|(k, _)| !chat_only(k))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    (provider, chat_part(spec))
+}
+
 /// The provider agent the chat `ai` names, when it is an agent here.
 pub(crate) fn provider_of(host: &Host, ai: &str) -> Option<String> {
     let p = host.kernel.resolve_target(ai).and_then(|a| a.record().meta.get(PROVIDER_FIELD).and_then(Value::as_str).map(str::to_string))?;
@@ -466,14 +479,10 @@ impl BackendBundle {
         let caller_can = taken(&mut spec, "can");
         let alone = spec.get("handler_module").and_then(Value::as_str) == Some(CHAT_HANDLER);
         let prov = provider_id(ai);
-        let mut chat = Map::new();
-        for (k, v) in &spec {
-            if chat_only(k) || BOTH.contains(&k.as_str()) || alone {
-                chat.insert(k.clone(), v.clone());
-            }
+        let (mut provider, mut chat) = split(&spec);
+        if alone {
+            chat = spec;
         }
-        let mut provider = spec;
-        provider.retain(|k, _| !chat_only(k));
         for (m, id) in [(&mut chat, ai), (&mut provider, prov.as_str())] {
             m.insert("type".into(), json!("create_agent"));
             m.insert("parent_id".into(), json!(me.0));

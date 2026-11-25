@@ -26,6 +26,9 @@ pub(crate) enum ScriptEvent {
     Fail(String),
     /// A failure of the LINK (`ProviderError::transport`): the retry path (#198).
     TransportFail(String),
+    /// The endpoint answered this HTTP status, classed by the shared classifier
+    /// ([`crate::provider::http_class`]) as every backend classes it.
+    HttpFail(u16),
     /// The read clock tripped: the stream sends nothing for `idle`, then fails with
     /// the provider's own `stream_stalled` error ([`crate::provider::within`]). The
     /// window is the record's `stream_idle_seconds`, shortened for the test.
@@ -157,6 +160,10 @@ impl Provider for MockProvider {
                 ScriptEvent::Token(t) => Some(Ok(ProviderEvent::Token(t))),
                 ScriptEvent::Fail(e) => Some(Err(ProviderError::raised(e))),
                 ScriptEvent::TransportFail(e) => Some(Err(ProviderError::transport(e))),
+                ScriptEvent::HttpFail(code) => Some(Err(ProviderError::raised(format!(
+                    "mock_backend: answered HTTP {code}"
+                ))
+                .for_status(code))),
                 ScriptEvent::Stall { .. } => None,
             })
             .collect();

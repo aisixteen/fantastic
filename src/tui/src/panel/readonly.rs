@@ -147,6 +147,7 @@ pub mod testing {
             tasks: &[],
             seen: &seen,
             reflect,
+            provider: None,
         };
         f(&cx)
     }

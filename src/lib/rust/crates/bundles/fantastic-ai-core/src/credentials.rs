@@ -47,7 +47,8 @@ impl From<CredentialError> for ProviderError {
         Self {
             message: e.0,
             kind: "CredentialError",
-            transport: false,
+            // a key that cannot be read is not read on the next try either
+            class: crate::provider::ErrorClass::Permanent(fantastic_kernel::refusal::UNAUTHORIZED),
         }
     }
 }

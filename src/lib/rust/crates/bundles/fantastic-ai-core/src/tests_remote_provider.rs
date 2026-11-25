@@ -297,21 +297,80 @@ async fn a_remote_providers_cache_counts_reach_the_chats_report_and_absent_ones_
     });
     k.bundles.register("echo.tools", Echo);
     let k = Arc::new(k);
-    let root = fantastic_kernel::Agent::new(AgentId::from("kernel_state"), None, None, Map::new(), tmp.path().join(".fantastic"), false);
+    let root = fantastic_kernel::Agent::new(
+        AgentId::from("kernel_state"),
+        None,
+        None,
+        Map::new(),
+        tmp.path().join(".fantastic"),
+        false,
+    );
     fantastic_kernel::test_support::register(&k, Arc::clone(&root));
     k.set_root(Arc::clone(&root));
-    agent(&k, &root, "p", json!({"cache_read": 600, "cache_write": 300}), tmp.path());
+    agent(
+        &k,
+        &root,
+        "p",
+        json!({"cache_read": 600, "cache_write": 300}),
+        tmp.path(),
+    );
     agent(&k, &root, "q", json!({}), tmp.path());
-    agent(&k, &root, "chat", json!({"can": {"p": {"call": ["complete", "watch"]}, "q": {"call": ["complete", "watch"]}}}), tmp.path());
+    agent(
+        &k,
+        &root,
+        "chat",
+        json!({"can": {"p": {"call": ["complete", "watch"]}, "q": {"call": ["complete", "watch"]}}}),
+        tmp.path(),
+    );
     for (provider, cache) in [("p", (Some(600), Some(300))), ("q", (None, None))] {
         let rp = RemoteProvider::new(&k, &AgentId::from("chat"), provider);
-        let _: Vec<_> = fantastic_kernel::test_support::as_agent(AgentId::from("chat").clone(), async {
-            let s = rp.chat(&[json!({"role": "user", "content": "hi"})], None).await.unwrap();
-            s.collect().await
-        })
-        .await;
+        let _: Vec<_> =
+            fantastic_kernel::test_support::as_agent(AgentId::from("chat").clone(), async {
+                let s = rp
+                    .chat(&[json!({"role": "user", "content": "hi"})], None)
+                    .await
+                    .unwrap();
+                s.collect().await
+            })
+            .await;
         let r = rp.report();
         assert_eq!((r.cache_read, r.cache_write), cache, "{provider}");
-        assert_eq!((r.prompt_tokens, r.completion_tokens), (Some(100), Some(5)), "{provider}");
+        assert_eq!(
+            (r.prompt_tokens, r.completion_tokens),
+            (Some(100), Some(5)),
+            "{provider}"
+        );
     }
+}
+
+/// A FAILED PASS KEEPS ITS CLASS ACROSS `complete`: the provider's reply names it in
+/// `reason`, the chat's side reads it back — a refused key stays permanent, the link
+/// stays transient, a turn's own failure stays a turn's.
+#[test]
+fn a_failed_pass_keeps_its_class_across_complete() {
+    use crate::provider::ErrorClass;
+    use fantastic_kernel::refusal::{DISABLED, UNAUTHORIZED};
+    for e in [
+        ProviderError::raised("vllm: answered HTTP 401").for_status(401),
+        ProviderError::raised("vllm: answered HTTP 404").for_status(404),
+        ProviderError::raised("vllm: answered HTTP 503").for_status(503),
+        ProviderError::raised("vllm: answered HTTP 400").for_status(400),
+        ProviderError::permanent("fm: unavailable", DISABLED),
+        crate::credentials::CredentialError("creds/vllm: no agent".into()).into(),
+    ] {
+        let reply = failed("c~1", &e);
+        let back = settle(&reply, &Mutex::default(), &Mutex::default()).expect_err("a failed pass");
+        assert_eq!(back.class, e.class, "{reply}");
+        assert_eq!(back.message, e.message);
+    }
+    assert_eq!(
+        failed("c~1", &ProviderError::raised("x").for_status(401))["reason"],
+        json!(UNAUTHORIZED)
+    );
+    assert_eq!(
+        settle(&json!({"error": "x"}), &Mutex::default(), &Mutex::default())
+            .expect_err("failed")
+            .class,
+        ErrorClass::Turn
+    );
 }

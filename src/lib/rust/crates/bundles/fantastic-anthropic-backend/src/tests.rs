@@ -100,21 +100,21 @@ async fn turn_error(p: &AnthropicProvider) -> ProviderError {
 #[tokio::test]
 async fn connect_failure_is_transport() {
     let p = provider("http://127.0.0.1:1/v1/messages", Arc::new(Key));
-    assert!(turn_error(&p).await.transport);
+    assert!(turn_error(&p).await.is_transient());
 }
 
 #[tokio::test]
 async fn http_529_is_transport() {
     let (_srv, ep) = api(529, String::new()).await;
     let p = provider(&ep, Arc::new(Key));
-    assert!(turn_error(&p).await.transport);
+    assert!(turn_error(&p).await.is_transient());
 }
 
 #[tokio::test]
 async fn http_400_is_not_transport() {
     let (_srv, ep) = api(400, "bad request".into()).await;
     let p = provider(&ep, Arc::new(Key));
-    assert!(!turn_error(&p).await.transport);
+    assert!(!turn_error(&p).await.is_transient());
 }
 
 fn provider(endpoint: &str, key: Arc<dyn KeySource>) -> AnthropicProvider {
@@ -2995,7 +2995,29 @@ async fn the_paired_chat_may_ask_its_providers_capabilities() {
     let line = helpers::agent_meta(&chat, &kernel)["can"]["pair1"].clone();
     assert_eq!(line, json!({"call": ["complete", "watch", "capabilities"]}));
     assert!(
-        helpers::agent_meta(&AgentId::from("pair1"), &kernel).get("can").is_none(),
+        helpers::agent_meta(&AgentId::from("pair1"), &kernel)
+            .get("can")
+            .is_none(),
         "the provider keeps no list of callers"
     );
+}
+
+/// AN HTTP ERROR IS CLASSED BY THE SHARED CLASSIFIER: a refused key or an unknown
+/// model no retry mends, a 5xx (529 included) is the link, a 400 is this request's own.
+#[tokio::test]
+async fn http_errors_are_classed_by_the_shared_classifier() {
+    use fantastic_ai_core::provider::ErrorClass;
+    use fantastic_kernel::refusal::{NOT_FOUND, UNAUTHORIZED};
+    for (code, want) in [
+        (401, ErrorClass::Permanent(UNAUTHORIZED)),
+        (403, ErrorClass::Permanent(UNAUTHORIZED)),
+        (404, ErrorClass::Permanent(NOT_FOUND)),
+        (429, ErrorClass::Transient),
+        (529, ErrorClass::Transient),
+        (400, ErrorClass::Turn),
+    ] {
+        let (_srv, ep) = api(code, "no".into()).await;
+        let p = provider(&ep, Arc::new(Key));
+        assert_eq!(turn_error(&p).await.class, want, "HTTP {code}");
+    }
 }

@@ -26,6 +26,56 @@ pub enum ProviderEvent {
     Token(String),
 }
 
+/// What a provider failure means for the chain: the ONE class every backend maps its
+/// own wire errors onto, so the retry policy lives once (`verbs.rs`) and no backend
+/// carries its own list of retryable codes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorClass {
+    /// The LINK failed (connect, stall, dropped stream, HTTP 408/429/5xx): the request
+    /// was fine, so a retry may succeed (#198). `transport_retries` rerun the turn.
+    Transient,
+    /// The same request fails the same way every time (the key refused or missing,
+    /// the model unknown or unavailable): never retried, never nudged — the chain
+    /// gives up with the error. Carries the refusal code the wire names it by
+    /// ([`fantastic_kernel::refusal`]: `unauthorized`, `not_found`, `disabled`).
+    Permanent(&'static str),
+    /// This pass failed (a bad request, a broken stream): the failed turn's own retry
+    /// turn (#533) may still answer.
+    Turn,
+}
+
+/// THE ONE HTTP CLASSIFIER: an endpoint's error status → what it means for the chain.
+/// 401/403 = the key, 404 = the model or the path: permanent. 408/429/5xx = the link
+/// or the load: transient. Anything else is this request's failure.
+#[must_use]
+pub fn http_class(status: u16) -> ErrorClass {
+    use fantastic_kernel::refusal::{NOT_FOUND, UNAUTHORIZED};
+    match status {
+        401 | 403 => ErrorClass::Permanent(UNAUTHORIZED),
+        404 => ErrorClass::Permanent(NOT_FOUND),
+        408 | 429 | 500..=599 => ErrorClass::Transient,
+        _ => ErrorClass::Turn,
+    }
+}
+
+/// The class a wire `reason` names — how a failure crosses a `complete` reply
+/// ([`ProviderError::reason`] is the other direction). A provider that cannot be
+/// reached by name, or refuses the caller, is permanent like a refused key.
+#[must_use]
+pub fn reason_class(reason: Option<&str>) -> ErrorClass {
+    use fantastic_kernel::refusal::{
+        DISABLED, NOT_FOUND, TRANSPORT_ERROR, UNAUTHORIZED, UNKNOWN_AGENT,
+    };
+    match reason {
+        Some(TRANSPORT_ERROR) => ErrorClass::Transient,
+        Some(UNAUTHORIZED) => ErrorClass::Permanent(UNAUTHORIZED),
+        Some(NOT_FOUND) => ErrorClass::Permanent(NOT_FOUND),
+        Some(DISABLED) => ErrorClass::Permanent(DISABLED),
+        Some(UNKNOWN_AGENT) => ErrorClass::Permanent(UNKNOWN_AGENT),
+        _ => ErrorClass::Turn,
+    }
+}
+
 /// Why a provider pass failed.
 ///
 /// Every provider failure propagates out of the handler (python's `_send`
@@ -38,8 +88,8 @@ pub struct ProviderError {
     /// The python exception class a raise renders as (`RuntimeError`, or
     /// `ValueError` for a record field the backend cannot run without).
     pub kind: &'static str,
-    /// true when the failure is the LINK, not the model or the request — a retry may succeed (#198)
-    pub transport: bool,
+    /// What the failure means for the chain: retried, given up on, or a retry turn.
+    pub class: ErrorClass,
 }
 
 impl ProviderError {
@@ -48,7 +98,7 @@ impl ProviderError {
         Self {
             message: message.into(),
             kind: "RuntimeError",
-            transport: false,
+            class: ErrorClass::Turn,
         }
     }
 
@@ -58,7 +108,16 @@ impl ProviderError {
         Self {
             message: message.into(),
             kind: "RuntimeError",
-            transport: true,
+            class: ErrorClass::Transient,
+        }
+    }
+
+    /// A failure no retry can mend, named by its refusal `code` (see [`ErrorClass::Permanent`]).
+    pub fn permanent(message: impl Into<String>, code: &'static str) -> Self {
+        Self {
+            message: message.into(),
+            kind: "RuntimeError",
+            class: ErrorClass::Permanent(code),
         }
     }
 
@@ -68,7 +127,42 @@ impl ProviderError {
         Self {
             message: message.into(),
             kind: "ValueError",
-            transport: false,
+            class: ErrorClass::Turn,
+        }
+    }
+
+    /// This failure, classed by the endpoint's HTTP `status` ([`http_class`]). Every
+    /// backend maps an error status through here.
+    #[must_use]
+    pub fn for_status(mut self, status: u16) -> Self {
+        self.class = http_class(status);
+        self
+    }
+
+    /// A failure of the link: a retry may succeed.
+    #[must_use]
+    pub fn is_transient(&self) -> bool {
+        self.class == ErrorClass::Transient
+    }
+
+    /// The refusal code a failure no retry can mend carries; `None` for any other.
+    #[must_use]
+    pub fn permanent_code(&self) -> Option<&'static str> {
+        match self.class {
+            ErrorClass::Permanent(code) => Some(code),
+            _ => None,
+        }
+    }
+
+    /// The wire `reason` of this failure on a `complete` reply ([`reason_class`]
+    /// reads it back): `transport_error` for the link, the code of a permanent one,
+    /// none for a turn's own failure.
+    #[must_use]
+    pub fn reason(&self) -> Option<&'static str> {
+        match self.class {
+            ErrorClass::Transient => Some(fantastic_kernel::refusal::TRANSPORT_ERROR),
+            ErrorClass::Permanent(code) => Some(code),
+            ErrorClass::Turn => None,
         }
     }
 }
@@ -162,7 +256,51 @@ mod stalled_tests {
     #[test]
     fn a_stalled_read_is_a_transport_failure() {
         let err = Stalled { idle_secs: 5.0 }.error("x", "http://e");
-        assert!(err.transport, "a stalled read is the link: {}", err.message);
+        assert!(
+            err.is_transient(),
+            "a stalled read is the link: {}",
+            err.message
+        );
+    }
+
+    /// The shared HTTP classifier every backend maps its statuses through.
+    #[test]
+    fn http_statuses_are_classed_once() {
+        use fantastic_kernel::refusal::{NOT_FOUND, UNAUTHORIZED};
+        for (code, want) in [
+            (401, ErrorClass::Permanent(UNAUTHORIZED)),
+            (403, ErrorClass::Permanent(UNAUTHORIZED)),
+            (404, ErrorClass::Permanent(NOT_FOUND)),
+            (408, ErrorClass::Transient),
+            (429, ErrorClass::Transient),
+            (500, ErrorClass::Transient),
+            (503, ErrorClass::Transient),
+            (529, ErrorClass::Transient),
+            (400, ErrorClass::Turn),
+            (422, ErrorClass::Turn),
+        ] {
+            assert_eq!(http_class(code), want, "HTTP {code}");
+            assert_eq!(
+                ProviderError::raised("x").for_status(code).class,
+                want,
+                "HTTP {code}"
+            );
+        }
+    }
+
+    /// A class survives the `complete` wire: `reason` out, `reason_class` back in.
+    #[test]
+    fn a_class_crosses_the_wire_whole() {
+        use fantastic_kernel::refusal::{DISABLED, NOT_FOUND, UNAUTHORIZED};
+        for e in [
+            ProviderError::transport("x"),
+            ProviderError::raised("x"),
+            ProviderError::permanent("x", UNAUTHORIZED),
+            ProviderError::permanent("x", NOT_FOUND),
+            ProviderError::permanent("x", DISABLED),
+        ] {
+            assert_eq!(reason_class(e.reason()), e.class, "{:?}", e.class);
+        }
     }
 }
 

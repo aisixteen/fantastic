@@ -115,6 +115,9 @@ pub struct Cx<'a> {
     pub tasks: &'a [crate::kern::model::Task],
     pub seen: &'a std::collections::HashSet<crate::kern::model::RowId>,
     pub reflect: Option<&'a Value>,
+    /// The reflect of the provider the agent's own reflect names (`provider_id`): a chat's
+    /// backend state, its KV table among it, is its provider's.
+    pub provider: Option<&'a Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
