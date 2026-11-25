@@ -613,6 +613,23 @@ fn recall_render(m: &Value) -> String {
     }
 }
 
+/// Whether `m` is a delivered reply whose every block answers this agent's own
+/// `recall` or `grep` (the reply tag names the agent and the verb).
+fn own_search_reply(agent_id: &AgentId, m: &Value) -> bool {
+    if m.get("role").and_then(Value::as_str) != Some("user") {
+        return false;
+    }
+    let Some(text) = m.get("content").and_then(Value::as_str) else {
+        return false;
+    };
+    let blocks = crate::history_view::reply_blocks(text);
+    !blocks.is_empty()
+        && blocks.iter().all(|b| {
+            matches!(crate::history_view::parse_reply_tag(b),
+                Some((who, "recall" | "grep")) if who == agent_id.as_str())
+        })
+}
+
 /// `recall` verb: page turns back from the DURABLE chat store (the FULL
 /// conversation, never trimmed — so anything compaction dropped is one call
 /// away). Read-only. args: `query?` (case-insensitive substring), `limit?`
@@ -686,7 +703,14 @@ pub async fn recall(
         indexed.retain(|(i, _)| (*i as i64) < before);
     }
     if let Some(q) = &q {
-        indexed.retain(|(_, m)| py_json_dumps(m, true, None).to_lowercase().contains(q.as_str()));
+        // a QUERY searches the conversation, not its own past searches: a reply to this
+        // agent's own `recall` or `grep` echoes what it found and is left out
+        indexed.retain(|(_, m)| {
+            !own_search_reply(agent_id, m)
+                && py_json_dumps(m, true, None)
+                    .to_lowercase()
+                    .contains(q.as_str())
+        });
     }
     let total = indexed.len();
     let truncated = total > limit;
@@ -1962,4 +1986,37 @@ where
         Call::Resume(a) => crate::pause::resume(agent_id, a.note.as_deref(), kernel).await?,
     };
     Ok(reply)
+}
+
+#[cfg(test)]
+mod own_search_tests {
+    use super::own_search_reply;
+    use fantastic_kernel::AgentId;
+    use serde_json::json;
+
+    /// A query leaves out the replies to the agent's own `recall` and `grep`; a reply
+    /// from another agent, or a batch with any other block, stays searchable.
+    #[test]
+    fn a_reply_to_the_agents_own_search_is_left_out_of_a_query() {
+        let me = AgentId::from("ai");
+        let row = |c: &str| json!({"role": "user", "content": c});
+        assert!(own_search_reply(&me, &row("[reply to 3 · ai recall]\nPRJ-1")));
+        assert!(own_search_reply(&me, &row("[reply to 4 · ai grep]\nPRJ-1")));
+        assert!(own_search_reply(
+            &me,
+            &row("[reply to 5 · ai recall · 1 of 2 in batch ab]\nx\n\n[reply to 6 · ai grep · 2 of 2 in batch ab]\ny")
+        ));
+        // another agent's reply, another verb, a mixed batch, a root, an assistant row
+        assert!(!own_search_reply(&me, &row("[reply to 3 · notes recall]\nPRJ-1")));
+        assert!(!own_search_reply(&me, &row("[reply to 3 · ai history]\nPRJ-1")));
+        assert!(!own_search_reply(
+            &me,
+            &row("[reply to 5 · ai recall · 1 of 2 in batch ab]\nx\n\n[reply to 6 · fb read · 2 of 2 in batch ab]\nPRJ-1")
+        ));
+        assert!(!own_search_reply(&me, &row("the code is PRJ-1")));
+        assert!(!own_search_reply(
+            &me,
+            &json!({"role": "assistant", "content": "[reply to 3 · ai recall]\nx"})
+        ));
+    }
 }

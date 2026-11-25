@@ -11,7 +11,7 @@ use serde_json::{json, Map, Value};
 
 use super::default::{self, Tags};
 use super::hermes::{
-    Hermes, CALL_CLOSE, CALL_OPEN, FORM, FORM_OPEN, HINT, HOWTO_SEND, NAME, REPORT_BLOCK,
+    json_part, Hermes, CALL_CLOSE, CALL_OPEN, FORM, FORM_OPEN, HINT, HOWTO_SEND, NAME, REPORT_BLOCK,
     REPORT_FOREIGN, REPORT_JSON, REPORT_NOT_A_TOOL, REPORT_NO_OPENER, REPORT_NO_TARGET,
     REPORT_PAYLOAD, REPORT_ROUTING, REPORT_ROUTING_KEY, REPORT_STOP_REASON,
 };
@@ -162,14 +162,23 @@ fn roundtrip_reply_to() {
         }
         round_trip(&send(&args), &[("send", args.clone())]);
     }
-    // a JSON `null` a model writes is the text `null`, as the default type writes it
+    // a JSON `null` a model writes is the notation's null, the empty tag: a
+    // `reply_to` of nobody (the router discards the reply), and a record field the
+    // router reads as null where its schema allows null
     let text = h_call(
-        r#"{"name": "send", "arguments": {"routing": {"target_id": "notes", "reply_to": null}, "payload": {"type": "read"}}}"#,
+        r#"{"name": "send", "arguments": {"routing": {"target_id": "kernel", "reply_to": null}, "payload": {"type": "update_agent", "id": "hour_ai", "credentials": null}}}"#,
     );
     let outs = joined(run(&[text.as_str()]));
-    let want = json!({"target_id": "notes", "reply_to": "null", "payload": {"type": "read"}});
+    let internal = bytes(&outs);
+    assert!(internal.contains("<reply_to></reply_to>"), "{internal}");
+    assert!(
+        internal.contains("<credentials></credentials>"),
+        "{internal}"
+    );
+    let want = json!({"target_id": "kernel", "reply_to": "",
+                      "payload": {"type": "update_agent", "id": "hour_ai", "credentials": ""}});
     assert_eq!(
-        calls(&bytes(&outs)),
+        calls(&internal),
         vec![("send".to_string(), obj(&want).clone())]
     );
 }
@@ -223,8 +232,8 @@ fn roundtrip_nested() {
     round_trip(&send(&args), &[("send", args.clone())]);
 }
 
-// R6: numbers and booleans a hermes model writes become their text; the router's
-// typed reader then reads them as the declared type.
+// R6: numbers and booleans a hermes model writes become their text, a null the empty
+// tag; the router's typed reader then reads them as the declared type.
 #[test]
 fn scalars_become_text() {
     let text = h_call(
@@ -234,7 +243,7 @@ fn scalars_become_text() {
     let got = calls(&bytes(&outs));
     let want = json!({
         "target_id": "notes", "timeout": "30", "retries": "2",
-        "payload": {"type": "read", "offset": "12", "length": "1.5", "all": "true", "none": "null"},
+        "payload": {"type": "read", "offset": "12", "length": "1.5", "all": "true", "none": ""},
     });
     assert_eq!(got, vec![("send".to_string(), obj(&want).clone())]);
     let args = &got[0].1;
@@ -1154,6 +1163,54 @@ fn repair_adds_missing_brace() {
     let c = calls(&want);
     assert_eq!(c[0].1["target_id"], json!("ai_prov"));
     assert_eq!(c[0].1["payload"]["max_tokens"], json!("100"));
+}
+
+// The two calls of the 2026-11-25 GPU run that lacked their last `}`, as written
+// (new_tool turn 012, subai turn 007).
+const RUN_1125_NEW_TOOL: &str = r#"{"name": "send", "arguments": {"routing": {"target_id": "ai_prov"}, "payload": {"type": "complete", "rid": "sha256-compute", "messages": [{"role": "user", "content": "Compute the SHA-256 hex digest of the exact string: E160-b22389e54e51\n\nReply with ONLY the 64-character lowercase hex digest, nothing else."}], "max_tokens": 100, "knobs": {"temperature": 0}}}"#;
+const RUN_1125_SUBAI: &str = r#"{"name": "send", "arguments": {"routing": {"target_id": "kernel", "title": "create hour_ai"}, "payload": {"type": "create_agent", "id": "hour_ai", "parent_id": "ai", "handler_module": "ai_chat.tools", "display_name": "hour_ai", "model": "qwen3.8-27b", "context_window": 196608, "context_strategy": "compact", "memory_store_id": "memory", "provider_id": "hour_ai_prov", "credentials": null, "endpoint": null, "generating": false, "sentence": "An AI agent: on each clock tick it runs the hour program on hour_code, takes the printed value, stores it durably in totals under a stable name, and ends its turn with done.", "can": {"totals": {"call": ["*"]}, "memory": {"call": ["*"]}}, "tree": {"id": "hour_ai", "children": [], "sentence": "An AI agent: on each clock tick it runs the hour program on hour_code, takes the printed value, stores it durably in totals under a stable name, and ends its turn with done.", "description": "A AI agent: one completion per send. No loop of its own."}}}"#;
+
+// Each run call reads with the one `}` added; followed by a `<bytes>` block it reads
+// the same way, the JSON repaired alone and the block kept as the body.
+#[test]
+fn repair_adds_the_brace_before_a_bytes_block() {
+    for json in [RUN_1125_NEW_TOOL, RUN_1125_SUBAI] {
+        assert!(serde_json::from_str::<Value>(json).is_err());
+        let want = call_of(&h_call(&format!("{json}}}")));
+        assert_eq!(
+            read_same(&h_call(json)),
+            vec![
+                Out::Repaired { added: "}".into() },
+                Out::Call { text: want }
+            ],
+            "{json}"
+        );
+        // braces in the body are the body's: only the JSON is repaired
+        let body = "fn f() { \"}\" }\nline two\n";
+        let want = call_of(&h_call(&format!("{json}}}\n<bytes>{body}</bytes>")));
+        assert_eq!(
+            read_same(&h_call(&format!("{json}\n<bytes>{body}</bytes>"))),
+            vec![
+                Out::Repaired { added: "}".into() },
+                Out::Call { text: want.clone() }
+            ],
+            "{json}"
+        );
+        assert_eq!(calls(&want)[0].1["payload"]["bytes"], json!(body));
+    }
+    // a `<bytes>` inside a JSON string is the string's: the JSON part ends at the block
+    // after it (the internal form carries no `<bytes>` in a field, so the split is
+    // checked on its own)
+    let json = r#"{"name": "send", "arguments": {"routing": {"target_id": "notes"}, "payload": {"type": "write", "path": "a\"<bytes>.md"}}"#;
+    assert_eq!(json_part(&format!("{json}\n<bytes>x</bytes>")), format!("{json}\n"));
+    assert_eq!(json_part(json), json);
+    // a repair that would add more than closers (a value) stays refused with a block
+    // after it
+    let json = r#"{"name": "send", "arguments": {"routing": {"target_id": "notes"}, "payload": {"type": "write", "path":"#;
+    assert!(matches!(
+        read_same(&h_call(&format!("{json}\n<bytes>x</bytes>")))[..],
+        [Out::Bad { .. }]
+    ));
 }
 
 // Closers only, several of them, in the order the open values need them.

@@ -139,6 +139,42 @@ impl Sight {
         }
     }
 
+    /// May the viewer call the root's TREE VERB `verb` (`create_agent`,
+    /// `update_agent`, `delete_agent`)? The call gate does not judge a kernel verb
+    /// sent to the root: each judges its operand (`kernel_verbs`, `lifecycle`). So
+    /// the viewer sees one when one of its own lines, capped as a call is, gives
+    /// what that verb does somewhere: a `create` line creates, deletes and updates
+    /// what it selects; an `update` line updates. Any other verb answers `false`.
+    fn may_tree_verb(&self, verb: &str) -> bool {
+        let Some((c, cands)) = &self.viewer else {
+            return true;
+        };
+        let Some(me) = self.kernel.agents.get(c).map(|e| Arc::clone(&e)) else {
+            return false;
+        };
+        let can = me
+            .meta
+            .read()
+            .expect("meta lock poisoned")
+            .get("can")
+            .cloned()
+            .unwrap_or(Value::Null);
+        crate::authz::solver::lines_of(&can).into_iter().any(|l| {
+            let crate::authz::Target::Id(t) = &l.target else {
+                return false;
+            };
+            let gives = match (&l.level, verb) {
+                (
+                    crate::authz::Level::Create { .. },
+                    "create_agent" | "update_agent" | "delete_agent",
+                ) => Held::Create,
+                (crate::authz::Level::Update(_), "update_agent") => Held::Update,
+                _ => return false,
+            };
+            self.kernel.held_from(c, &AgentId::from(t.as_str()), cands) >= gives
+        })
+    }
+
     /// May the viewer create an agent of `bundle` under `a`, with any id its
     /// lines select?
     fn may_create(&self, a: &Agent, bundle: &str) -> bool {
@@ -687,10 +723,14 @@ pub async fn apply_reflect_flags(
             .map(|b| b.dynamic_verbs(target))
             .unwrap_or_default();
         let lists = verb_lists(target, bundle.as_deref());
-        // below the whole reply, only the verbs the caller may call
+        // below the whole reply, only the verbs the caller may call; on the root a
+        // tree verb shows to the holders of the lines it acts on
+        let on_root = target.parent_id.is_none();
         let shown: Vec<crate::verbs::Row> = crate::verbs::rows(&lists, &dynamic)
             .into_iter()
-            .filter(|r| whole || sight.may_call(target, r.name))
+            .filter(|r| {
+                whole || sight.may_call(target, r.name) || (on_root && sight.may_tree_verb(r.name))
+            })
             .collect();
         let man = bundle.as_ref().map(|b| b.man());
         match crate::docs::section(&target.id.0, args, &shown, man) {

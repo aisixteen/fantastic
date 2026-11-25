@@ -50,6 +50,11 @@ fn read(schema: &Value, s: &str) -> Result<Value, String> {
         return Ok(Value::String(s.to_string()));
     }
     let t = s.trim();
+    // the notation's null is the empty tag (as a reply renders it): null where the
+    // schema allows null and takes no text
+    if t.is_empty() && ks.contains(&"null") {
+        return Ok(Value::Null);
+    }
     if ks.contains(&"boolean") {
         match t {
             "true" => return Ok(Value::Bool(true)),
@@ -360,6 +365,29 @@ mod tests {
         assert_eq!(
             read_value("v", "", &schema, &args).unwrap(),
             json!({"limit": 7, "ratio": 1.5, "force": true, "path": "007", "ids": [1, 2]})
+        );
+    }
+
+    #[test]
+    fn an_empty_text_is_null_only_where_the_schema_allows_null_and_takes_no_text() {
+        let nullable = json!({"type": ["object", "null"]});
+        assert_eq!(read(&nullable, ""), Ok(Value::Null));
+        assert_eq!(
+            read(&json!({"type": ["integer", "null"]}), " "),
+            Ok(Value::Null)
+        );
+        // text first: a nullable text field keeps the empty text
+        assert_eq!(
+            read(&json!({"type": ["string", "null"]}), ""),
+            Ok(json!(""))
+        );
+        // no null in the schema: refused as before
+        assert!(read(&json!({"type": "object"}), "").is_err());
+        assert!(read(&json!({"type": "integer"}), "").is_err());
+        // a null value passes through the reader unchanged
+        assert_eq!(
+            read_value("v", "a", &nullable, &Value::Null),
+            Ok(Value::Null)
         );
     }
 

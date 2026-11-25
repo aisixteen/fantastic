@@ -512,11 +512,17 @@ impl KeySource for Refused {
 }
 
 #[tokio::test]
-async fn a_key_the_store_refuses_refuses_naming_the_first_field() {
+async fn a_key_the_store_refuses_refuses_naming_credentials() {
     let (_srv, ep) = default_vllm().await;
-    let e = server::read(&rec(&ep, json!({"model": MODEL})), &Refused)
-        .await
-        .unwrap_err();
-    assert_eq!(e.field, "context_window");
-    assert_eq!(e.message, "vllm_backend: the store refused the key");
+    // whichever field was to be read: the window, or kv_slots alone
+    for extra in [
+        json!({"model": MODEL}),
+        json!({"model": MODEL, "context_window": 4096}),
+    ] {
+        let e = server::read(&rec(&ep, extra.clone()), &Refused)
+            .await
+            .unwrap_err();
+        assert_eq!(e.field, "credentials", "{extra}");
+        assert_eq!(e.message, "vllm_backend: the store refused the key");
+    }
 }

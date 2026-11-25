@@ -209,7 +209,8 @@ impl Handler for FakeExec {
             Call::TailJob(_) => json!({
                 "job_id": 1,
                 "status": "done",
-                "lines": [{"n": 1, "stream": "stdout", "line": "hello from the job"}]
+                "lines": [{"n": 39, "stream": "stdout", "line": "hello from the job"}],
+                "printed": 39
             }),
         };
         Ok(Some(reply))
@@ -442,6 +443,11 @@ async fn a_finished_job_wakes_its_owner_once() {
     assert!(
         woken.contains("hello from the job"),
         "no tail in the wake: {woken}"
+    );
+    // the job printed 39 lines, of which the tail shows the last
+    assert!(
+        woken.contains(r#"\"lines\":39"#) || woken.contains(r#""lines":39"#),
+        "no line total in the wake: {woken}"
     );
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(wakes(&served), 1, "the owner was woken more than once");

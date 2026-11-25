@@ -12,8 +12,9 @@ On the packaged rust artifact:
      seeded record store, a minted `guid`, `tree` nesting `web` and `records`) and
      nothing that says how to call (`emits`, `cancel`, `kernel_verbs`);
   5. THE KERNEL VERBS: the operator's one-shot `kernel reflect part=docs` lists
-     the twelve; `rest` (a `call: [reflect]` line on the root) sees none of them
-     in its own `reflect kernel part=docs`;
+     the twelve; `rest` (a `call: [reflect]` line on the root, a `create` line on
+     its own tree) sees in its own `reflect kernel part=docs` exactly the tree
+     verbs that `create` line gives (`TREE_VERBS`) and none of the others;
   6. `reflect rest bundles: "all"` (the leg's own tree: the whole catalog) lists
      the shipped bundle kinds, each with its `handler_module` (an AI backend kind
      with its record `schema`); one instance of EVERY listed kind is created under
@@ -70,6 +71,9 @@ NEVER_ON_REFLECT = {"emits", "cancel", "more", "kernel_verbs"}
 KERNEL_VERBS = {"create_agent", "update_agent", "delete_agent", "ps", "ledger",
                 "ack_deadletter", "kernel_start", "cancel", "shutdown_agents",
                 "kernel_stop", "await_set", "await_cancel"}
+#: The root's tree verbs: the kernel gate judges each on its operand, so a viewer
+#: holding a `create` line sees them in the root's docs (reflect.rs `may_tree_verb`).
+TREE_VERBS = {"create_agent", "update_agent", "delete_agent"}
 #: Minimal record values per kind, beyond what `minimal()` derives from the
 #: schema's required fields. `{port}` is replaced with a free port.
 MINIMAL = {
@@ -206,9 +210,9 @@ def main() -> int:
         # 5 · rest's view of the kernel verbs
         rk = hk.send("kernel", {"type": "reflect", "part": "docs"})
         rkv = set(rk.get("verbs") or {}) if isinstance(rk, dict) else set()
-        need(not (rkv & KERNEL_VERBS),
-             f"rest's reflect kernel part=docs lists no kernel verb (call level: only the "
-             f"verbs it may call): {sorted(rkv & KERNEL_VERBS)} of {sorted(rkv)}")
+        need(rkv & KERNEL_VERBS == TREE_VERBS,
+             f"rest's reflect kernel part=docs lists exactly the tree verbs its `create` "
+             f"line gives: {sorted(rkv & KERNEL_VERBS)} of {sorted(rkv)}, want {sorted(TREE_VERBS)}")
 
         # 6 · the shipped catalog, and every kind's docs on an instance
         cat = catalog(hk, "rest")

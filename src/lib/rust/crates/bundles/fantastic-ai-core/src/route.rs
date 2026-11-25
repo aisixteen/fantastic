@@ -657,8 +657,10 @@ fn job_field<'a>(result: &'a Value, key: &str) -> Option<&'a Value> {
 /// Record a job an agent's `exec start` left running, and spawn ONE watcher task for it
 /// on the owner. The watcher waits on the exec agent's `status` until the job is no
 /// longer live (`running` or `stopping`), forgets the job, then wakes the owner once with
-/// `job_done {job_id, exit_code, tail}`. The exit key is `exit_code`, as the exec bridge
-/// names it, not `exit`.
+/// `job_done {job_id, exit_code, lines, tail}`: `tail` is the job's last 20 lines and
+/// `lines` the count of every line it printed (the exec bridge's `printed`), so a tail
+/// shorter than `lines` says the output was cut. The exit key is `exit_code`, as the
+/// exec bridge names it, not `exit`.
 pub(crate) fn watch_job(
     kernel: &Arc<Kernel>,
     owner: &str,
@@ -709,6 +711,12 @@ pub(crate) fn watch_job(
                 json!({"type": "tail", "job_id": job.clone(), "lines": 20}),
             )])
             .await;
+        // every line the job printed, of which `tail` shows the last 20
+        let lines = t
+            .first()
+            .and_then(|o| o.result.get("printed"))
+            .cloned()
+            .unwrap_or(Value::Null);
         let tail = t
             .first()
             .and_then(|o| o.result.get("lines"))
@@ -729,7 +737,7 @@ pub(crate) fn watch_job(
         drop(entry);
         let text = format!(
             "job_done {}",
-            json!({"job_id": job, "exit_code": exit, "tail": tail})
+            json!({"job_id": job, "exit_code": exit, "lines": lines, "tail": tail})
         );
         deliver_soon(&work, &owner_s, &text, &cid, false);
     });

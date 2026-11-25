@@ -38,23 +38,33 @@ pub const THINKING_CAP: usize = 32000;
 /// Python `thinking_fields`.
 #[must_use]
 pub fn thinking_fields(text: &str) -> serde_json::Map<String, serde_json::Value> {
-    let mut spans: Vec<&str> = Vec::new();
+    let mut spans: Vec<String> = Vec::new();
+    // what came before a stray closer is thinking ([`stray_end`]), its markers out
+    let start = stray_end(text);
+    if start > 0 {
+        let head = text[..start - THINK_CLOSE.len()]
+            .replace(THINK_OPEN, "")
+            .replace(THINK_CLOSE, "");
+        spans.push(fantastic_bundle::py_strip(&head).to_string());
+    }
+    let text = &text[start..];
     let mut i = 0usize;
     while let Some(rel) = text[i..].find(THINK_OPEN) {
         let a = i + rel + THINK_OPEN.len();
         match text[a..].find(THINK_CLOSE) {
             Some(relb) => {
-                spans.push(fantastic_bundle::py_strip(&text[a..a + relb]));
+                spans.push(fantastic_bundle::py_strip(&text[a..a + relb]).to_string());
                 i = a + relb + THINK_CLOSE.len();
             }
             None => {
-                spans.push(fantastic_bundle::py_strip(&text[a..]));
+                spans.push(fantastic_bundle::py_strip(&text[a..]).to_string());
                 break;
             }
         }
     }
     let thought = spans
-        .into_iter()
+        .iter()
+        .map(String::as_str)
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n");
@@ -76,11 +86,40 @@ pub fn thinking_fields(text: &str) -> serde_json::Map<String, serde_json::Value>
     out
 }
 
+/// Where the answer may start: just past the LAST stray `</think>` — a closer no
+/// `<think>` opened, which ends a deliberation the provider did not mark as one (a
+/// reasoning channel split early sends the rest of the thought, and its closer, as
+/// content) — or 0 when there is none.
+fn stray_end(text: &str) -> usize {
+    let (mut i, mut start) = (0usize, 0usize);
+    loop {
+        let open = text[i..].find(THINK_OPEN).map(|r| i + r);
+        let close = text[i..].find(THINK_CLOSE).map(|r| i + r);
+        match (open, close) {
+            (Some(o), Some(c)) if o < c => {
+                // a span: on past its own closer
+                let a = o + THINK_OPEN.len();
+                match text[a..].find(THINK_CLOSE) {
+                    Some(r) => i = a + r + THINK_CLOSE.len(),
+                    None => return start,
+                }
+            }
+            (_, Some(c)) => {
+                i = c + THINK_CLOSE.len();
+                start = i;
+            }
+            _ => return start,
+        }
+    }
+}
+
 /// The ANSWER: every `<think>…</think>` span dropped whole — what dispatch reads
 /// and what goes into durable history. An UNTERMINATED span runs to the end: the
-/// rest is thinking. Python `without_thinking`.
+/// rest is thinking. Text before a stray `</think>` is thinking too: the answer is
+/// what follows the last one ([`stray_end`]). Python `without_thinking`.
 #[must_use]
 pub fn without_thinking(text: &str) -> String {
+    let text = &text[stray_end(text)..];
     let mut out = String::new();
     let mut i = 0usize;
     loop {
@@ -278,6 +317,22 @@ mod tests {
     }
 
     #[test]
+    fn text_before_a_stray_closer_is_thinking() {
+        // a reasoning channel split early: the rest of the thought, a call it quotes
+        // and its closer arrive as content after the wrapped part
+        let quoted = "<tool_call>{\"name\": \"send\"}</tool_call>";
+        let text =
+            format!("<think>part one</think> part two quotes {quoted}\n</think>\n\nanswer");
+        assert_eq!(without_thinking(&text), "answer");
+        // several strays: the answer follows the last
+        assert_eq!(without_thinking("a</think>b</think>c"), "c");
+        // a span after the stray is still dropped
+        assert_eq!(without_thinking("a</think>b<think>t</think>c"), "bc");
+        // no stray: unchanged
+        assert_eq!(without_thinking("<think>a</think>b"), "b");
+    }
+
+    #[test]
     fn an_unterminated_span_drops_its_tail() {
         assert_eq!(
             without_thinking("kept <think>cut off mid-thou"),
@@ -319,6 +374,11 @@ mod thinking_fields_tests {
             json!({"thinking": "x\n\ny"})
         );
         assert!(thinking_fields("plain").is_empty());
+        // text before a stray closer is thinking, its markers out
+        assert_eq!(
+            serde_json::Value::Object(thinking_fields("<think>a</think> b\n</think>answer")),
+            json!({"thinking": "a b"})
+        );
         let long = format!("<think>{}</think>", "z".repeat(super::THINKING_CAP + 5));
         assert_eq!(thinking_fields(&long)["thinking_cut"], json!(5));
     }

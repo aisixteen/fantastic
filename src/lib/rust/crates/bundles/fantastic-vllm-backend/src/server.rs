@@ -299,10 +299,12 @@ pub async fn read(
         .unwrap_or("")
         .trim_end_matches('/')
         .to_string();
+    // a key the store refuses is the record's `credentials` at fault, whichever field
+    // was to be read
     let secret = key
         .key(&endpoint)
         .await
-        .map_err(|e| fail(want.first().copied().unwrap_or("model"), e.to_string()))?;
+        .map_err(|e| fail("credentials", e.to_string()))?;
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs_f64(seconds(rec, "connect_timeout")))
         .read_timeout(Duration::from_secs_f64(seconds(rec, "read_timeout")))

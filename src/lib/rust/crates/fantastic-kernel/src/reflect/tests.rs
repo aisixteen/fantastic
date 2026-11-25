@@ -1703,3 +1703,51 @@ async fn the_bundle_catalog_shows_an_agent_only_the_bundles_it_may_create() {
         .result;
     assert!(r.get("bundles").is_none(), "{r}");
 }
+
+#[tokio::test]
+async fn the_root_shows_its_tree_verbs_to_the_holders_of_the_lines_they_act_on() {
+    // the call gate does not judge a kernel verb sent to the root, so reflect
+    // shows create/update/delete_agent from the viewer's lines, not a call line
+    let kernel = v9_kernel();
+    let payload = json!({"type": "reflect", "tree": "none"});
+    let tree_verbs = |r: &Value| -> Vec<String> {
+        keys_of(&r["verbs"])
+            .into_iter()
+            .filter(|v| ["create_agent", "update_agent", "delete_agent"].contains(&v.as_str()))
+            .collect()
+    };
+    crate::test_support::grant(
+        &kernel,
+        "user",
+        "kernel_state",
+        json!({"call": ["reflect"]}),
+    );
+    let r = reflect_as(&kernel, "user", "kernel_state", payload.clone())
+        .await
+        .result;
+    assert_eq!(
+        keys_of(&r["verbs"]),
+        ["reflect"],
+        "no line acts on the tree: {r}"
+    );
+    // an update line: update_agent only
+    crate::test_support::grant(&kernel, "user", "prov_1", json!({"update": ["model"]}));
+    let r = reflect_as(&kernel, "user", "kernel_state", payload.clone())
+        .await
+        .result;
+    assert_eq!(tree_verbs(&r), ["update_agent"], "{r}");
+    // a create line: all three
+    crate::test_support::grant(
+        &kernel,
+        "user",
+        "canvas_garage",
+        json!({"create": {"who": ["*"], "what": {"chat": {}}}}),
+    );
+    let mut shown = tree_verbs(
+        &reflect_as(&kernel, "user", "kernel_state", payload)
+            .await
+            .result,
+    );
+    shown.sort();
+    assert_eq!(shown, ["create_agent", "delete_agent", "update_agent"]);
+}

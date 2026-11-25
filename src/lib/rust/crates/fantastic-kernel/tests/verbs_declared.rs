@@ -312,6 +312,26 @@ async fn an_unknown_verb_is_refused_with_the_list() {
         r["error"], "unknown verb 'nope'; p answers: greet, tally, reflect",
         "{r}"
     );
+    assert_eq!(
+        r["hint"], "reflect p tier=detailed lists each verb's arguments",
+        "{r}"
+    );
+}
+
+/// The line name a tree verb acts by, sent to an agent, is the root's verb: the
+/// refusal's hint names `kernel` and the agent as the operand.
+#[tokio::test]
+async fn a_tree_verb_sent_to_an_agent_hints_the_kernel() {
+    let (_t, k) = with_probe().await;
+    for (verb, hint) in [
+        ("create", "create_agent goes to `kernel`, with parent_id=p"),
+        ("update", "update_agent goes to `kernel`, with id=p"),
+        ("delete", "delete_agent goes to `kernel`, with id=p"),
+    ] {
+        let r = call(&k, "p", json!({"type": verb})).await;
+        assert_eq!(r["reason"], "unhandled", "{verb}: {r}");
+        assert_eq!(r["hint"], hint, "{verb}: {r}");
+    }
 }
 
 /// The refusal of an unknown verb echoes the RAW `type` — python `verb=t`: `null` when

@@ -14,7 +14,7 @@
 //!   then `serde_json` reads it and it comes out as one [`Out::Call`] in the internal
 //!   form ([`render_call`]). One repair only: JSON that `serde_json` does not read and
 //!   that `jsonrepair-rs` completes by adding closing brackets and braces at its end and
-//!   nothing else ([`closed`]) is read so, and an [`Out::Repaired`] goes before its call
+//!   nothing else ([`closed`]; the JSON alone when a `<bytes>` block follows it) is read so, and an [`Out::Repaired`] goes before its call
 //!   (the turn's `repaired` trace event). A call that does not read, a JSON call with
 //!   no tags, a closer with no opener and a call in the default form are each [`Out::Bad`]
 //!   with this type's report (`res/hermes/report_*.txt`). A stream that ends inside a
@@ -24,8 +24,9 @@
 //! `res/hermes/source.txt`. The JSON writer writes what `json.dumps(.., ensure_ascii=False)`
 //! writes, as the template's `tojson` does: `", "` and `": "` between items, no trailing
 //! space, non-ASCII as it is. Leaves are text: the internal form types nothing
-//! (`tool_parse::typed` does, at the router), so a number, `true`, `false` or `null` a
-//! model writes becomes that literal text (`arbitrary_precision` keeps a number's text).
+//! (`tool_parse::typed` does, at the router), so a number, `true` or `false` a model
+//! writes becomes that literal text (`arbitrary_precision` keeps a number's text); a
+//! `null` becomes the empty tag, read as null where the schema allows null.
 //!
 //! The cut head needs the name and the target out of an incomplete JSON text. No
 //! maintained partial-JSON crate says which strings were complete (each completes the
@@ -618,14 +619,42 @@ fn read_call(raw: &str, tools: &[&str]) -> Result<Read, String> {
         Some(Ok(_))
     );
     if !reads {
-        if let Some((fixed, added)) = closed(lead) {
-            return read_lead(&fixed, tools).map(|text| Read {
+        // the JSON alone is repaired: a `<bytes>` block after it is the body, kept as
+        // written
+        let json = json_part(lead);
+        if let Some((fixed, added)) = closed(json) {
+            let have = json.trim_end_matches(|c: char| c.is_ascii() && is_json_ws(c as u8));
+            let whole = format!("{fixed}{}", &lead[have.len()..]);
+            return read_lead(&whole, tools).map(|text| Read {
                 text,
                 added: Some(added),
             });
         }
     }
     read_lead(lead, tools).map(|text| Read { text, added: None })
+}
+
+/// The JSON of `lead`: the text before its first `<bytes>` outside a JSON string, or
+/// all of it when no block follows.
+pub(super) fn json_part(lead: &str) -> &str {
+    let b = lead.as_bytes();
+    let (mut in_string, mut escaped) = (false, false);
+    for (i, &c) in b.iter().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+        } else if c == b'"' {
+            in_string = true;
+        } else if b[i..].starts_with(BYTES_OPEN.as_bytes()) {
+            return &lead[..i];
+        }
+    }
+    lead
 }
 
 /// `lead` (the text inside the tags, from its first byte that is not whitespace) as
@@ -856,11 +885,13 @@ fn send_args(
     Ok(out)
 }
 
-/// A JSON value with every leaf as text: a number as its literal, `true`, `false` and
-/// `null` as those words. The internal form types nothing.
+/// A JSON value with every leaf as text: a number as its literal, `true` and `false` as
+/// those words. `null` stays null: the internal form writes it as an empty tag, the
+/// notation's null, which the router reads as null where the schema allows it. The
+/// internal form types nothing else.
 fn text_of(v: &Value) -> Value {
     match v {
-        Value::Null => Value::String("null".to_string()),
+        Value::Null => Value::Null,
         Value::Bool(b) => Value::String(if *b { "true" } else { "false" }.to_string()),
         Value::Number(n) => Value::String(n.to_string()),
         Value::String(s) => Value::String(s.clone()),
