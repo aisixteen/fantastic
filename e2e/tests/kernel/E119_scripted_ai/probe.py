@@ -17,17 +17,23 @@ The script, one model answer per request:
      is the operator's; the AI holds `call: [reflect]` on the root);
   2. a `write` to a file_bridge, `bytes` verbatim: the file lands on disk with
      exactly those bytes; the next request carries the `write` reply;
-  3. a call written WRONG — a `<tool_call><function=call name="send">` wrapper: the
-     stream is CUT at the first foreign tag (#499), so nothing after it is read
-     or stored; nothing runs (no file); the next request carries the
-     compiler-style report (`[malformed call — nothing ran] line L, col C`, a
-     caret, `write it as:` + the form) and none of the cut text;
-  4. an envelope with text outside a tag: not dispatched; the next request carries
-     the envelope's fault (`call NOT dispatched: text outside a tag`);
-  5. a call INSIDE the thought (`reasoning_content`), an answer with none: nothing
-     is dispatched (no file); the next request carries the no-call reminder
-     (`[no call was dispatched]`), and its history holds the answer without the
-     thought (stripped before the turn is stored);
+  3-5 are ONE turn, re-asked inside it (#766: at most `1 + CALL_RETRIES` = 3
+  attempts, `constants.rs` `CALL_RETRIES = 2`):
+  3. attempt 1, a call written WRONG — a `<tool_call><function=call name="send">`
+     wrapper: the attempt fails at the first foreign tag, nothing after it is read;
+     nothing runs (no file). Request 4 is the RE-ASK: request 3's messages unchanged,
+     then the attempt as written (cut there) and the compiler-style report
+     (`[malformed call — nothing ran] line L, col C`, a caret, `write it as:` + the
+     form) as the last user message;
+  4. attempt 2, an envelope with text outside a tag: not dispatched; request 5 is
+     request 4's messages, then this attempt and its fault (`call NOT dispatched:
+     text outside a tag`);
+  5. attempt 3, a call INSIDE the thought (`reasoning_content`), an answer with
+     none: accepted (a call-less answer is not a malformed one); nothing is
+     dispatched (no file); request 6 carries the no-call reminder (`[no call was
+     dispatched]`), its history holds the answer without the thought (stripped
+     before the turn is stored, shown as its `[thought ~N tokens …]` anchor) and
+     NOTHING of attempts 1 and 2: neither attempt nor report is stored or re-sent;
   6. a plain answer + `done`: the chain ends — no further request reaches the
      server once the agent has nothing in flight.
 
@@ -114,19 +120,24 @@ def main() -> int:
         # 2 · a file write, bytes verbatim
         (f'<call name="send">\n<routing><target_id>{FILES}</target_id></routing>\n<payload><type>write</type>\n'
          f'<path>out.txt</path>\n<bytes>{TOKEN}\n"quoted" & <raw></bytes></payload>\n</call>'),
-        # 3a · a call written wrong: cut at the first foreign tag
+        # 3 · attempt 1 of one turn: a call written wrong, failed at the first foreign tag
         ('I will write it.\n<tool_call><function=call name="send"><target_id>files'
          '</target_id><type>write</type><path>bad.txt</path></function></tool_call>'),
-        # 3b · an envelope with text outside a tag
+        # 4 · attempt 2: an envelope with text outside a tag
         f'<call name="send">oops<routing><target_id>{FILES}</target_id></routing><payload><type>reflect</type></payload></call>',
-        # 4 · a call inside the thought only
+        # 5 · attempt 3: a call inside the thought only (accepted: no call)
         (f'<think>I could run <call name="send"><routing><target_id>{FILES}</target_id></routing><payload>'
          '<type>write</type><path>think.txt</path><bytes>x</bytes></payload></call> but I will not.'
          '</think>Thinking it over.'),
-        # 5 · a plain answer, and the chain ends
+        # 6 · a plain answer, and the chain ends
         'All finished: the file is written.\n<call name="done"></call>',
     ]
     req2 = ""
+
+    def history() -> list[dict]:
+        h = hk.send(AI, {"type": "history", "limit": 500})
+        return h.get("rows") or h.get("history") or h.get("messages") or []
+
     try:
         rec = hk.create(parent_id="rest", handler_module="file_bridge.tools", id=FILES,
                         root="files", allow=["."], ingress_rule="allow_all_ingress")
@@ -171,21 +182,37 @@ def main() -> int:
              f"the write landed verbatim: {body!r}")
         need("[reply to " in u[2] and f"{FILES} write" in u[2],
              f"request 3 carries the write reply: {u[2][:160]!r}")
-        # 3 → 4
+        # 3 → 4 → 5: one turn, re-asked inside it (#766)
+        msgs = [[(x.get("role"), x.get("content")) for x in (t["body"].get("messages") or [])]
+                for t in turns] + [[]] * len(script)
         need(not (work / "files" / "bad.txt").exists(), "a call written wrong ran nothing")
         need("[malformed call — nothing ran] line 2, col 12" in u[3] and "^~" in u[3]
              and "write it as:" in u[3] and '<call name="send">' in u[3],
              f"request 4 carries the compiler-style report: {u[3][:200]!r}")
-        need("bad.txt" not in json.dumps(turns[3]["body"]["messages"] if len(turns) > 3 else []),
-             "the cut: nothing after the first foreign tag was stored or quoted")
-        need(any("[cut · you wrote " in m.get("content", "") and "ACTION: " in m.get("content", "")
-                 for m in turns[3]["body"]["messages"] if m.get("role") == "assistant"),
-             "request 4 shows the cut answer as its anchor")
+        need(len(msgs[3]) == len(msgs[2]) + 2 and msgs[3][:-2] == msgs[2],
+             "request 4 is the re-ask: request 3's messages unchanged, then one pair")
+        reask1 = msgs[3][-2] if len(msgs[3]) >= 2 else (None, "")
+        need(reask1[0] == "assistant" and str(reask1[1]).startswith("I will write it.\n<tool_call>"),
+             f"request 4's re-ask pair holds attempt 1 as written: {str(reask1[1])[:120]!r}")
+        need("bad.txt" not in json.dumps(msgs[3]),
+             "attempt 1 is read no further than its first foreign tag: nothing after it is quoted")
         need("call NOT dispatched: text outside a tag (`oops`)" in u[4],
              "request 5 carries the broken envelope's fault")
-        # 4 → 5
+        need(len(msgs[4]) == len(msgs[3]) + 2 and msgs[4][:-2] == msgs[3]
+             and msgs[4][-2][0] == "assistant" and "oops" in str(msgs[4][-2][1]),
+             "request 5 is the second re-ask: request 4's messages, then attempt 2 and its fault")
+        # 5 → 6
         need(not (work / "files" / "think.txt").exists(),
              "a call inside the thought was not dispatched")
+        gone = ("I will write it.", "<tool_call>", "oops", "[malformed call", "text outside a tag")
+        later = json.dumps([[x for x in r if x[0] != "system"] for r in msgs[5:len(turns)]])
+        need(not any(g in later for g in gone),
+             f"no request after the accepted attempt holds attempt 1, attempt 2 or a report: "
+             f"{[g for g in gone if g in later]}")
+        stored = json.dumps(history())
+        need(not any(g in stored for g in gone),
+             f"the store holds neither failed attempt nor a report: "
+             f"{[g for g in gone if g in stored]}")
         hist = json.dumps((turns[5]["body"].get("messages") if len(turns) > 5 else None) or [])
         need("Thinking it over." in hist and "think.txt" not in hist,
              "the thought is stripped before the turn is stored: request 6 holds the "

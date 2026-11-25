@@ -12,7 +12,11 @@ next to a `file_bridge` agent (`files`) holding an 80 kB file.
       recalls row B by id and gets the body whole;
   P3. after the next answer the recall reply is `[folded · recall reply … id B …]`; the
       store row B is still whole;
-  P4. a cut answer after thinking is its `[cut · …]` anchor in the correction turn.
+  P4. a malformed answer after thinking (a foreign `<invoke>` and 50 closers) is
+      re-asked inside its turn (#766): request 2 is request 1's messages, then the
+      attempt without its thought, read no further than the delta that held the
+      foreign tag, and the report; the store holds neither;
+  P5. the next send: no request holds the failed attempt, its thought or its report.
 """
 
 from __future__ import annotations
@@ -178,17 +182,41 @@ def main() -> int:
         need(any(r.get("id") == b and int(r.get("bytes") or 0) > 64000 for r in history()),
              "P3: the store row is still whole")
 
-        # ── P4 · a cut answer is its anchor in the correction turn ────────────
+        # ── P4 · a malformed answer is re-asked inside its turn (#766) ────────
         m.clear()
         m.reply(CUT, DONE)
         turns = run("P4", "cut it", 2)
-        cut = [str(x.get("content")) for x in (messages_of(turns[1]) if len(turns) > 1 else [])
-               if x.get("role") == "assistant"]
-        need(any('[cut · you wrote <invoke name="send"> after thinking ~' in c
-                 and "ACTION: " in c and "full: " in c for c in cut),
-             f"P4: request 2 shows the cut answer as its anchor: {cut[-1:]!r}")
+        pairs = [[(x.get("role"), x.get("content")) for x in messages_of(t)] for t in turns]
+        pairs += [[], []]
+        need(len(pairs[1]) == len(pairs[0]) + 2 and pairs[1][:-2] == pairs[0],
+             "P4: request 2 is the re-ask: request 1's messages unchanged, then one pair")
+        att = str(pairs[1][-2][1]) if len(pairs[1]) >= 2 else ""
+        rpt = str(pairs[1][-1][1]) if len(pairs[1]) >= 2 else ""
+        need(len(pairs[1]) >= 2 and pairs[1][-2][0] == "assistant"
+             and att.startswith('Sending it.\n<invoke name="send">'),
+             f"P4: the re-ask pair holds the attempt as written: {att[:120]!r}")
+        need(att.count("</invoke>") < 50,
+             f"P4: the attempt is read no further than the foreign tag's delta: "
+             f"{att.count('</invoke>')} of 50 closers")
+        need(pairs[1][-1][0] == "user" and rpt.startswith("[malformed call — nothing ran]"),
+             f"P4: the re-ask's last user message is the report: {rpt[:120]!r}")
         need(f"CUT-{TOKEN}" not in (blob(turns[1]) if len(turns) > 1 else ""),
-             "P4: the cut thought is not in the request")
+             "P4: the failed attempt's thought is not in the re-ask")
+        rows = [r for r in history() if r.get("role") == "assistant"]
+        need(not any("<invoke" in str(r.get("head")) or "Sending it." in str(r.get("head"))
+                     for r in rows)
+             and not any("[malformed call" in str(r.get("head")) for r in history()),
+             "P4: the store holds neither the failed attempt nor its report")
+
+        # ── P5 · the failed attempt is in no later request ────────────────────
+        m.clear()
+        m.reply(DONE)
+        turns = run("P5", "after", 1)
+        seen = json.dumps([x for x in (messages_of(turns[0]) if turns else [])
+                           if x.get("role") != "system"], ensure_ascii=False)
+        need("Sending it." not in seen and "<invoke" not in seen
+             and "[malformed call" not in seen and f"CUT-{TOKEN}" not in seen,
+             "P5: the next request holds no byte of the failed attempt, its thought or report")
     finally:
         hk.close()
         m.stop()
