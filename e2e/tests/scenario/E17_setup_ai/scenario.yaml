@@ -5,7 +5,7 @@
 # (VLLM_ENDPOINT, FANTASTIC_AI_MODEL), the window and output (CTX, MAX_TOKENS;
 # a frame's `{ctx}` is the same CTX), the KV table (VLLM_KV_SLOTS, VLLM_KV_OVERFLOW), the key
 # (VLLM_API_KEY / VLLM_API_KEY_FILE — typed into the page, never printed).
-# Reasoning: xhigh with a 64k thinking budget.
+# Reasoning: xhigh with a 32k thinking budget (it must stay below max_tokens).
 
 id: setup_ai
 title: fantastic — the set-up page writes the configured AI agent, stores its key, it answers (live)
@@ -151,7 +151,7 @@ runs:
       key left
       key down
       key enter
-      type 65536
+      type 32768
       key enter
       # thinking_token_budget (34th) → max_tokens (41st, the last): 7 down
       key down
@@ -226,7 +226,7 @@ runs:
       at_max: {contains: ["▸ max tokens"]}
       at_advanced: {contains: ["▸ ▾ advanced"]}
       # the key masked, PLAIN in the run's throwaway home — never the real keychain
-      filled: {contains: ["vllm-1", "{ctx}", "xhigh", "65536", "‹ a 0600 text file (plain) ›", "‹ paste a new key ›"]}
+      filled: {contains: ["vllm-1", "{ctx}", "xhigh", "32768", "‹ a 0600 text file (plain) ›", "‹ paste a new key ›"]}
       # made, its chat open: the agent is the selected one
       written: {contains: [" · vllm-1 · "], lacks: ["✕"]}
     after_exit:
