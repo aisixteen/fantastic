@@ -11,9 +11,9 @@ use serde_json::{json, Map, Value};
 
 use super::default::{self, Tags};
 use super::hermes::{
-    json_part, Hermes, CALL_CLOSE, CALL_OPEN, FORM, FORM_OPEN, HINT, HOWTO_SEND, NAME, REPORT_BLOCK,
-    REPORT_FOREIGN, REPORT_JSON, REPORT_NOT_A_TOOL, REPORT_NO_OPENER, REPORT_NO_TARGET,
-    REPORT_PAYLOAD, REPORT_ROUTING, REPORT_ROUTING_KEY, REPORT_STOP_REASON,
+    json_part, Hermes, CALL_CLOSE, CALL_OPEN, FORM, FORM_OPEN, HINT, HOWTO_SEND, NAME,
+    REPORT_BLOCK, REPORT_FOREIGN, REPORT_JSON, REPORT_MULTI, REPORT_NOT_A_TOOL, REPORT_NO_OPENER,
+    REPORT_NO_TARGET, REPORT_PAYLOAD, REPORT_ROUTING, REPORT_ROUTING_KEY, REPORT_STOP_REASON,
 };
 use super::{entry, fill, Out, Reader, Renderer};
 use crate::tool_parse::grammar::ROUTING;
@@ -882,6 +882,91 @@ fn bad_block_and_json_bytes() {
     assert_eq!(r, REPORT_BLOCK);
 }
 
+// ── several calls in one block ───────────────────────────────────────────────
+
+/// The first line of [`REPORT_MULTI`], as the model reads it.
+const MULTI: &str = "[malformed call — nothing ran] one call per <tool_call> block — close it and open a new <tool_call> for each further call.";
+
+/// `text` read whole and split anywhere: one `Bad`, the same each time, no call.
+fn multi_bad(text: &str) -> String {
+    let r = bad_of(text);
+    for split in every_split(text) {
+        assert_eq!(bad(&split), r, "{text}");
+    }
+    r
+}
+
+#[test]
+fn multi_two_calls_one_block() {
+    let a = r#"{"name": "send", "arguments": {"routing": {"target_id": "notes"}, "payload": {"type": "read", "path": "a.md"}}}"#;
+    let b = r#"{"name": "send", "arguments": {"routing": {"target_id": "files"}, "payload": {"type": "list", "path": "."}}}"#;
+    let r = multi_bad(&format!("{CALL_OPEN}\n{a}\n{b}\n{CALL_CLOSE}"));
+    assert_eq!(
+        r,
+        format!("{MULTI}\nwrite it as:\n{}\n{}", h_call(a), h_call(b))
+    );
+    assert_eq!(
+        r,
+        fill(
+            REPORT_MULTI,
+            &[
+                ("careful", ""),
+                ("calls", format!("{}\n{}", h_call(a), h_call(b)).as_str())
+            ]
+        )
+    );
+}
+
+#[test]
+fn multi_three_calls_one_block() {
+    let a = r#"{"name": "send", "arguments": {"routing": {"target_id": "notes"}, "payload": {"type": "write", "path": "a.md"}}}"#;
+    let b = r#"{"name": "line_summary", "arguments": {"text": "writing a.md"}}"#;
+    let c = r#"{"name": "await", "arguments": {}}"#;
+    let body = "one \"line\"\ntwo\n";
+    let r = multi_bad(&format!(
+        "{CALL_OPEN}\n{a}\n<bytes>{body}</bytes>\n{b}\n{c}\n{CALL_CLOSE}"
+    ));
+    assert_eq!(
+        r,
+        format!(
+            "{MULTI}\nwrite it as:\n{CALL_OPEN}\n{a}\n<bytes>{body}</bytes>\n{CALL_CLOSE}\n{}\n{}",
+            h_call(b),
+            h_call(c)
+        )
+    );
+}
+
+#[test]
+fn multi_destructive_command_left_out() {
+    let a = r#"{"name": "send", "arguments": {"routing": {"target_id": "exec"}, "payload": {"type": "run", "command": "rm -rf build"}}}"#;
+    let b = r#"{"name": "await", "arguments": {}}"#;
+    let r = multi_bad(&format!("{CALL_OPEN}\n{a}\n{b}\n{CALL_CLOSE}"));
+    let shown = r#"{"name": "send", "arguments": {"routing": {"target_id": "exec"}, "payload": {"type": "run", "command": "LEFT OUT — write the command yourself"}}}"#;
+    assert!(
+        r.starts_with(&format!("{MULTI}\ncareful: this command runs `rm -rf`")),
+        "{r}"
+    );
+    assert!(
+        r.ends_with(&format!("\nwrite it as:\n{}\n{}", h_call(shown), h_call(b))),
+        "{r}"
+    );
+    assert!(!r.contains("rm -rf build"), "{r}");
+}
+
+#[test]
+fn multi_bad_part_reports_itself() {
+    let a = r#"{"name": "send", "arguments": {"routing": {"target_id": "notes"}, "payload": {"type": "read"}}}"#;
+    let b = r#"{"name": "grep", "arguments": {"query": "x"}}"#;
+    let r = multi_bad(&format!("{CALL_OPEN}\n{a}\n{b}\n{CALL_CLOSE}"));
+    assert_eq!(
+        r,
+        fill(
+            REPORT_NOT_A_TOOL,
+            &[("name", "grep"), ("tools", TOOLS.join(", ").as_str())]
+        )
+    );
+}
+
 // S25 (H; needs `stop` in `TOOLS`, W13)
 #[test]
 fn stop_needs_reason() {
@@ -1202,7 +1287,10 @@ fn repair_adds_the_brace_before_a_bytes_block() {
     // after it (the internal form carries no `<bytes>` in a field, so the split is
     // checked on its own)
     let json = r#"{"name": "send", "arguments": {"routing": {"target_id": "notes"}, "payload": {"type": "write", "path": "a\"<bytes>.md"}}"#;
-    assert_eq!(json_part(&format!("{json}\n<bytes>x</bytes>")), format!("{json}\n"));
+    assert_eq!(
+        json_part(&format!("{json}\n<bytes>x</bytes>")),
+        format!("{json}\n")
+    );
     assert_eq!(json_part(json), json);
     // a repair that would add more than closers (a value) stays refused with a block
     // after it

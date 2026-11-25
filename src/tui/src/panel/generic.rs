@@ -370,7 +370,7 @@ mod tests {
         let store = crate::store::Store::default();
         let seen = std::collections::HashSet::new();
         let a: AgentId = "files".into();
-        let cx = Cx { agent: &a, store: &store, tasks: &[], seen: &seen, reflect: Some(&r) };
+        let cx = Cx { agent: &a, store: &store, tasks: &[], seen: &seen, reflect: Some(&r), provider: None };
         let t = text(&p.lines(&cx));
         for want in ["files  ● open", "LINES · may reach", "ingress_rule  allow_all_ingress", "read_stream", "VERBS"] {
             assert!(t.contains(want), "default view lacks {want:?}:\n{t}");
@@ -387,7 +387,7 @@ mod tests {
         let store = crate::store::Store::default();
         let seen = std::collections::HashSet::new();
         let a: AgentId = "leg".into();
-        let cx = Cx { agent: &a, store: &store, tasks: &[], seen: &seen, reflect: Some(&r) };
+        let cx = Cx { agent: &a, store: &store, tasks: &[], seen: &seen, reflect: Some(&r), provider: None };
         let t = text(&p.lines(&cx));
         assert!(t.contains("○ sealed") && t.contains("sealed — only reflect and boot answer"), "{t}");
     }
@@ -404,6 +404,7 @@ mod tests {
             tasks: &[],
             seen: &seen,
             reflect: None,
+            provider: None,
         };
         let mut out = Vec::new();
         p.on_select(&cx, &mut out);

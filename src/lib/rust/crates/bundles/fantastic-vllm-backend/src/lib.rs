@@ -198,7 +198,7 @@ impl SessionTable {
                     // python raises its own `KvSlotsFull(RuntimeError)`, and a
                     // raise renders as `<class name>: <message>`.
                     kind: "KvSlotsFull",
-                    transport: false,
+                    class: fantastic_ai_core::provider::ErrorClass::Turn,
                 });
             }
             if !self.live.is_empty() {
@@ -690,19 +690,13 @@ impl Provider for VllmProvider {
             } else {
                 String::new()
             };
-            // a transient 5xx is the LINK failing, not the request (#198)
-            if matches!(status.as_u16(), 502..=504) {
-                return Err(ProviderError::transport(format!(
-                    "{NAME}: {} answered HTTP {}{why}: {detail}",
-                    self.endpoint,
-                    status.as_u16()
-                )));
-            }
+            // the shared classifier: a 5xx is the LINK (#198), a 401 or 404 no retry mends
             return Err(ProviderError::raised(format!(
                 "{NAME}: {} answered HTTP {}{why}: {detail}",
                 self.endpoint,
                 status.as_u16()
-            )));
+            ))
+            .for_status(status.as_u16()));
         }
         Ok(consume_sse(
             resp,
@@ -905,7 +899,7 @@ impl SseState {
         let obj: Value = serde_json::from_str(data).map_err(|e| ProviderError {
             message: e.to_string(),
             kind: "JSONDecodeError",
-            transport: false,
+            class: fantastic_ai_core::provider::ErrorClass::Turn,
         })?;
         // `usage.prompt_tokens` and a `length` finish → `max_tokens`
         fantastic_ai_core::think::note_openai_usage(&obj, &self.report);

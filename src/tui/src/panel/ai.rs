@@ -891,9 +891,13 @@ impl Panel for AiPanel {
 
     fn status(&self, cx: &Cx<'_>) -> Option<String> {
         let mut bits = vec![self.agent.to_string()];
-        // THE KV-CACHE TABLE, when the backend keeps one (vLLM: `kv` in its
-        // reflect — live conversations of the slots, how many rotated out).
-        if let Some(kv) = cx.reflect.and_then(|r| r.get("kv")).filter(|k| k.get("slots").is_some_and(|s| !s.is_null())) {
+        // THE KV-CACHE TABLE, when the chat's provider keeps one (vLLM: `kv` in the
+        // provider's reflect — live conversations of the slots, how many rotated out).
+        if let Some(kv) = cx
+            .provider
+            .and_then(|r| r.get("kv"))
+            .filter(|k| k.get("slots").is_some_and(|s| !s.is_null()))
+        {
             let n = |k: &str| kv.get(k).and_then(Value::as_i64).unwrap_or(0);
             bits.push(format!("kv {}/{} · evicted {}", n("live"), n("slots"), n("evicted")));
         }
@@ -1035,6 +1039,7 @@ mod tests {
             tasks: &[],
             seen: &seen,
             reflect: None,
+            provider: None,
         };
         p.last = p.project(&cx);
         p.st.cursor = Some(1);
@@ -1064,7 +1069,14 @@ mod tests {
         let mut p = AiPanel::new("ai".into());
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+            provider: None,
+        };
         let area = Rect::new(0, 0, 60, 10);
         p.layout(area, &cx);
         let (top, cur, n) = (p.top, p.st.cursor, p.last.lines.len());
@@ -1084,7 +1096,14 @@ mod tests {
         let a: AgentId = "ai".into();
         let w = thread::waiting_for(&s, &a, crate::env::HUMAN);
         assert_eq!(w.len(), 1);
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+            provider: None,
+        };
         p.layout(Rect::new(0, 0, 70, 10), &cx);
         assert!(p.last.lines[0].asking);
         let drawn = draw_once(&p, &cx, 70, 10);
@@ -1098,7 +1117,14 @@ mod tests {
         let mut p = AiPanel::new("ai".into());
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+            provider: None,
+        };
         let area = Rect::new(0, 0, 60, 8);
         p.layout(area, &cx);
         // Put the cursor on the last line, far below an 8-row viewport.
@@ -1122,6 +1148,7 @@ mod tests {
             tasks: &[],
             seen: &seen,
             reflect: None,
+            provider: None,
         };
         let mut out = Vec::new();
         for want in [Zoom::Decisions, Zoom::Roots, Zoom::All] {
@@ -1146,7 +1173,14 @@ mod tests {
         let mut p = AiPanel::new("ai".into());
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+            provider: None,
+        };
         let mut out = Vec::new();
         p.st.cursor = Some(1);
         p.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE), &cx, &mut out);
@@ -1159,7 +1193,14 @@ mod tests {
         let mut p = AiPanel::new("ai".into());
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+            provider: None,
+        };
         let mut out = Vec::new();
         p.on_key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::NONE), &cx, &mut out);
         assert!(matches!(&out[..], [Cmd::Send { target, payload }] if target.as_str() == "ai" && payload["type"] == "context_clear"), "{out:?}");
@@ -1171,7 +1212,14 @@ mod tests {
         let mut p = AiPanel::new("ai".into());
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+            provider: None,
+        };
         let mut out = Vec::new();
         p.on_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::NONE), &cx, &mut out);
         assert!(
@@ -1181,16 +1229,42 @@ mod tests {
     }
 
     #[test]
-    fn the_status_names_the_kv_table_when_the_backend_keeps_one() {
+    fn the_status_names_the_kv_table_when_the_chats_provider_keeps_one() {
         let p = AiPanel::new("ai".into());
         let s = Store::default();
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
-        let r = json!({"kv": {"slots": 2, "overflow": "evict", "live": 2, "evicted": 1, "rejected": 0}});
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: Some(&r) };
+        let chat = json!({"model": "x", "provider_id": "ai_provider"});
+        let prov = json!({"kv": {"slots": 2, "overflow": "evict", "live": 2, "evicted": 1, "rejected": 0}});
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: Some(&chat),
+            provider: Some(&prov),
+        };
         assert!(p.status(&cx).unwrap().contains("kv 2/2 · evicted 1"));
-        let none = json!({"model": "x"});
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: Some(&none) };
+        // the chat's own reflect keeps no table: no provider read, no kv
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: Some(&prov),
+            provider: None,
+        };
+        assert!(!p.status(&cx).unwrap().contains("kv "));
+        // a provider without a table (`slots` null) shows none
+        let bare = json!({"kv": {"slots": null}});
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: Some(&chat),
+            provider: Some(&bare),
+        };
         assert!(!p.status(&cx).unwrap().contains("kv "));
     }
 
@@ -1211,6 +1285,7 @@ mod tests {
             tasks: &[],
             seen: &seen,
             reflect: None,
+            provider: None,
         };
         let line = p.status(&cx).unwrap();
         assert!(line.contains("queued · ahead 2"), "{line}");
@@ -1223,7 +1298,14 @@ mod tests {
         let s = Store::default();
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+            provider: None,
+        };
         let ev = |v: Value| v;
         // reasoning: masked
         p.on_event(&ev(json!({"type":"part_start","stream_id":"ai:1","kind":"thinking","re":4})), &mut out);
@@ -1265,7 +1347,14 @@ mod tests {
         let s = Store::default();
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+            provider: None,
+        };
         p.layout(Rect::new(0, 0, 60, 24), &cx);
         draw_once(p, &cx, 60, 24)
     }
@@ -1394,7 +1483,14 @@ mod tests {
         let mut p = AiPanel::new("ai".into());
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+            provider: None,
+        };
         let area = Rect::new(0, 0, 120, 40);
         p.layout(area, &cx);
         p.st.cursor = Some(2000);
@@ -1422,7 +1518,14 @@ mod tests {
         let mut p = AiPanel::new("ai".into());
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+            provider: None,
+        };
         p.layout(Rect::new(0, 0, 60, 20), &cx);
         let hue = |id: RowId, needle: &str| -> Option<ratatui::style::Color> {
             let l = p.last.lines.iter().find(|l| l.id == id)?;
@@ -1446,7 +1549,14 @@ mod tests {
         let mut p = AiPanel::new("ai".into());
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+            provider: None,
+        };
         p.layout(Rect::new(0, 0, 80, 10), &cx);
         let screen = draw_once(&p, &cx, 80, 10);
         assert!(
@@ -1467,7 +1577,14 @@ mod tests {
         let mut p = AiPanel::new("ai".into());
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+            provider: None,
+        };
         let area = Rect::new(0, 0, 40, 16);
         p.layout(area, &cx);
         p.st.cursor = Some(2);
@@ -1492,6 +1609,7 @@ mod tests {
             tasks: &[],
             seen: &seen,
             reflect: None,
+            provider: None,
         };
         let mut out = Vec::new();
         p.on_select(&cx, &mut out);
@@ -1517,6 +1635,7 @@ mod tests {
             tasks: &[],
             seen: &seen,
             reflect: None,
+            provider: None,
         };
         p.last = p.project(&cx);
         let n = p.last.lines.len();

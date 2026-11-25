@@ -74,7 +74,79 @@ fn the_stop_knob_is_a_string_or_a_list_of_strings() {
 #[test]
 fn no_temperature_is_sent_unless_the_chat_names_one() {
     let m = |v: Value| v.as_object().unwrap().clone();
-    assert_eq!(m(json!({})).get("temperature").and_then(Value::as_f64), None);
-    assert_eq!(m(json!({"temperature": 1.0})).get("temperature").and_then(Value::as_f64), Some(1.0));
-    assert!(RECORD.get(&m(json!({})), "temperature").is_none_or(|v| v.is_null()), "no declared default");
+    assert_eq!(
+        m(json!({})).get("temperature").and_then(Value::as_f64),
+        None
+    );
+    assert_eq!(
+        m(json!({"temperature": 1.0}))
+            .get("temperature")
+            .and_then(Value::as_f64),
+        Some(1.0)
+    );
+    assert!(
+        RECORD
+            .get(&m(json!({})), "temperature")
+            .is_none_or(|v| v.is_null()),
+        "no declared default"
+    );
+}
+
+/// No key: a keyless endpoint.
+struct NoKey;
+#[async_trait]
+impl KeySource for NoKey {
+    async fn key(
+        &self,
+        _e: &str,
+    ) -> Result<Option<String>, fantastic_ai_core::credentials::CredentialError> {
+        Ok(None)
+    }
+}
+
+/// AN HTTP ERROR IS CLASSED BY THE SHARED CLASSIFIER: a refused key or an unknown
+/// model no retry mends, a 503 is the link, a 400 is this request's own failure.
+#[tokio::test]
+async fn http_errors_are_classed_by_the_shared_classifier() {
+    use fantastic_ai_core::provider::ErrorClass;
+    use fantastic_kernel::refusal::{NOT_FOUND, UNAUTHORIZED};
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    for (code, want) in [
+        (401, ErrorClass::Permanent(UNAUTHORIZED)),
+        (404, ErrorClass::Permanent(NOT_FOUND)),
+        (503, ErrorClass::Transient),
+        (400, ErrorClass::Turn),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(code).set_body_string(r#"{"error": {"message": "no"}}"#),
+            )
+            .mount(&server)
+            .await;
+        let p = OpenAiProvider {
+            endpoint: format!("{}/v1", server.uri()),
+            model: "m".into(),
+            temperature: None,
+            max_tokens: 16,
+            stop: None,
+            key: Arc::new(NoKey),
+            report: ReportCell::default(),
+            stream_idle: Duration::from_secs(5),
+        };
+        let e = match p
+            .chat(&[json!({"role": "user", "content": "hi"})], None)
+            .await
+        {
+            Ok(_) => panic!("chat must refuse an HTTP {code}"),
+            Err(e) => e,
+        };
+        assert_eq!(e.class, want, "HTTP {code}: {}", e.message);
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "HTTP {code}"
+        );
+    }
 }

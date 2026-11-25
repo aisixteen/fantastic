@@ -681,6 +681,24 @@ async fn a_send_on_an_unavailable_model_fails_loud_naming_the_reason() {
     );
 }
 
+/// AN UNAVAILABLE MODEL IS PERMANENT: the provider's `complete` reply names it
+/// `disabled`, so the chat gives up at once instead of asking again.
+#[tokio::test]
+async fn an_unavailable_model_is_a_failure_no_retry_mends() {
+    let engine = Arc::new(FakeEngine::new().unavailable(FmReason::DEVICE_NOT_ELIGIBLE));
+    let fx = kernel(&engine, json!({})).await;
+    let r = fx
+        .call(json!({"type": "complete", "rid": "c~1",
+                     "messages": [{"role": "user", "content": "hi"}]}))
+        .await;
+    assert_eq!(
+        r["reason"],
+        json!(fantastic_kernel::refusal::DISABLED),
+        "{r}"
+    );
+    assert!(engine.requests().is_empty());
+}
+
 #[tokio::test]
 async fn unavailability_is_named_before_the_window_is_judged() {
     // The real window (4096) AND the default system block, which cannot fit: the

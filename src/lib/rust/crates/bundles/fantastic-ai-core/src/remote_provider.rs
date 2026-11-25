@@ -278,7 +278,12 @@ pub async fn complete(agent_id: &AgentId, args: &Complete, kernel: &Arc<Kernel>,
 }
 
 fn failed(rid: &str, e: &ProviderError) -> Value {
-    json!({"rid": rid, "error": e.message, "kind": e.kind, "transport": e.transport})
+    let mut out = json!({"rid": rid, "error": e.message, "kind": e.kind});
+    // the class rides the one machine field: the link, or a failure no retry mends
+    if let Some(reason) = e.reason() {
+        out["reason"] = json!(reason);
+    }
+    out
 }
 
 /// THE CHAT SIDE: the provider an AI chat's record names (`provider_id`), or a
@@ -367,14 +372,13 @@ impl RemoteProvider {
 /// The reply of a `complete`, read into the report; `Err` for a failed pass.
 fn settle(result: &Value, report: &Mutex<ProviderReport>, model: &Mutex<String>) -> Result<(), ProviderError> {
     if let Some(err) = result.get("error").and_then(Value::as_str) {
-        let transport = result.get("transport").and_then(Value::as_bool).unwrap_or(false);
-        return Err(if transport {
-            ProviderError::transport(err)
-        } else if result.get("kind").and_then(Value::as_str) == Some("ValueError") {
+        let mut e = if result.get("kind").and_then(Value::as_str) == Some("ValueError") {
             ProviderError::value_error(err)
         } else {
             ProviderError::raised(err)
-        });
+        };
+        e.class = crate::provider::reason_class(result.get("reason").and_then(Value::as_str));
+        return Err(e);
     }
     let mut r = report.lock().expect("report poisoned");
     r.prompt_tokens = result.get("prompt_tokens").and_then(Value::as_i64);

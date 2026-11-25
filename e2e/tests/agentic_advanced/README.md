@@ -18,6 +18,7 @@ that keeps working after the builder walks away".
 | `pause_resume` (E126) | FREE (no model, Python runtime): `pause` holds every message in order in the memory store, a kernel restart keeps the pause and the queue, `resume` releases the held messages in order after one resumed row, none lost or duplicated |
 | `new_tool` (E160) | the model writes a new agent (a py_agent folder bundle) for a verb no agent has, creates it under itself (its own tree: no line written, no `*`, its own `can` unchanged), calls it and answers with its value |
 | `new_tool_twin` (E162) | FREE (no model, rust runtime): the same call sequence from a scripted model — write the bundle, `reload_bundle`, `create_agent` under the AI, a self-widening of its `can` refused as the unknown answer, `reflect part=schema`, call, answer |
+| `subai_key_twin` (E167) | FREE (no model, rust runtime): the builder hands its new chat the key store line in the create, before the provider exists — the first completion carries the key; a `can` rewrite without the line refuses it; one that keeps it restores it |
 
 **Wiring here includes the lines.** The substrate is deny-all: a new agent holds
 no lines and reaches only its own tree, so a builder that only creates agents has

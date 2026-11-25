@@ -104,7 +104,8 @@ fn registry_with(state: &std::path::Path, extras: &[crate::Extra]) -> BundleRegi
         fantastic_user_home_store::user_store::UserStore::new(
             fantastic_user_home_store::home_dir_from_env(),
             std::path::absolute(state).unwrap_or_else(|_| state.to_path_buf()),
-        ),
+        )
+        .with_setup_check(crate::kern::setup::check_set_up),
     );
     // THE WEB HOST (the one HTTP/WS listener: a recorded one listens in every mode, and
     // agents add routes to it), the canvas's page and its socket leg: the blueprint's

@@ -224,3 +224,47 @@ async fn every_verb_is_checked_by_its_declaration() {
     let r = call(&k, "user", json!({"type": "reflect"})).await;
     assert_eq!(r["handler_module"], user_store::HANDLER_MODULE, "{r}");
 }
+
+/// The binary's judge (`with_setup_check`) is the one a saved set-up passes: its refusal is
+/// the answer, and nothing is written.
+#[tokio::test]
+async fn a_saved_setup_is_judged_by_the_check_the_binary_names() {
+    let td = tempfile::tempdir().unwrap();
+    let home = td.path().join("home");
+    let mut k = Kernel::new();
+    k.bundles.register(
+        user_store::HANDLER_MODULE,
+        user_store::UserStore::new(Ok(home.clone()), td.path().join("project")).with_setup_check(
+            |_, hm, _| {
+                Err(fantastic_kernel::refusal::refusal(
+                    fantastic_kernel::refusal::BAD_ARG,
+                    format!("judged: {hm}"),
+                ))
+            },
+        ),
+    );
+    k.bundles.register("demo_backend.tools", NeedsModel);
+    let k = Arc::new(k);
+    let root = agent("kernel_state", None, None, json!({"guid": "g1"}));
+    fantastic_kernel::test_support::register(&k, Arc::clone(&root));
+    k.set_root(root);
+    fantastic_kernel::test_support::register(
+        &k,
+        agent("user", None, Some("kernel_state"), json!({})),
+    );
+    fantastic_kernel::test_support::register(
+        &k,
+        agent(
+            "home",
+            Some(user_store::HANDLER_MODULE),
+            Some("user"),
+            json!({}),
+        ),
+    );
+    let r = call(&k, "user", json!({"type": "persist_record", "name": "opus", "record": {"handler_module": "demo_backend.tools", "model": "m"}})).await;
+    assert_eq!(err(&r), "judged: demo_backend.tools", "{r}");
+    assert!(
+        !saved_dir(&home).join("opus.yaml").exists(),
+        "nothing written"
+    );
+}

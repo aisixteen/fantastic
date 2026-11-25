@@ -185,7 +185,7 @@ fn risky(args: &[(String, Value)]) -> Option<&'static str> {
 /// [`risky`]; a name written directly in the call goes where its name says. A
 /// `<routing>`/`<payload>` value that does not read as tags stays as it is.
 /// A call's named arguments, in the order written.
-type Args = Vec<(String, Value)>;
+pub(crate) type Args = Vec<(String, Value)>;
 
 fn split(name: &str, args: &[(String, Value)]) -> (Args, Args) {
     if name != "send" {
@@ -216,13 +216,25 @@ fn split(name: &str, args: &[(String, Value)]) -> (Args, Args) {
 /// call, a `careful:` line with its command left out (#255).
 fn rewrite(name: &str, args: &[(String, Value)]) -> Vec<String> {
     let (routing, payload) = split(name, args);
-    let what = match risky(&payload) {
-        None => {
-            return vec!["write it as:".to_string(), expected(name, &routing, &payload)];
-        }
-        Some(what) => what,
-    };
-    let shown: Vec<(String, Value)> = payload
+    match left_out(&payload) {
+        None => vec![
+            "write it as:".to_string(),
+            expected(name, &routing, &payload),
+        ],
+        Some((careful, shown)) => vec![
+            careful,
+            "write it as:".to_string(),
+            expected(name, &routing, &shown),
+        ],
+    }
+}
+
+/// A rewrite's payload with a destructive exec command left out (#255), for every call
+/// type's rewrite (the default checker's and `hermes`'s): the `careful:` line and the
+/// payload to show, `command` and `args` as [`LEFT_OUT`]. `None` when nothing is risky.
+pub(crate) fn left_out(payload: &[(String, Value)]) -> Option<(String, Args)> {
+    let what = risky(payload)?;
+    let shown: Args = payload
         .iter()
         .map(|(k, v)| {
             if k.as_str() == "command" || k.as_str() == "args" {
@@ -232,13 +244,12 @@ fn rewrite(name: &str, args: &[(String, Value)]) -> Vec<String> {
             }
         })
         .collect();
-    vec![
+    Some((
         format!(
             "careful: this command runs `{what}`, which changes state outside this task (a stash, reset, clean or force-push acts on the whole repository, and every worktree shares it; rm -rf deletes for good). It is left out of the form below: if you still mean it, write the command yourself, and prefer one that touches only your own files."
         ),
-        "write it as:".to_string(),
-        expected(name, &routing, &shown),
-    ]
+        shown,
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

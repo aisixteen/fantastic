@@ -90,3 +90,126 @@ pub async fn save_edit(host: &Host, name: &str, module: &str, texts: &Map<String
     }
     save(host, name, module, texts).await.map(|_| ())
 }
+
+#[cfg(all(test, feature = "vllm"))]
+mod tests {
+    use std::sync::Arc;
+
+    use fantastic_kernel::{Agent, AgentId, Kernel};
+    use fantastic_user_home_store::user_store::{self, UserStore};
+    use serde_json::{json, Map, Value};
+
+    use crate::env::ClientCfg;
+    use crate::kern::host::Host;
+
+    const VLLM: &str = fantastic_vllm_backend::HANDLER_MODULE;
+
+    /// A host with the real vLLM backend, the real chat, and the user's home (`home` under
+    /// `user`, its set-ups judged as the shell judges them) in `dir`.
+    fn host(dir: &std::path::Path) -> Host {
+        let mut k = Kernel::new();
+        k.bundles.register(
+            user_store::HANDLER_MODULE,
+            UserStore::new(Ok(dir.join("home")), dir.join("project"))
+                .with_setup_check(crate::kern::setup::check_set_up),
+        );
+        k.bundles.register(VLLM, fantastic_vllm_backend::VllmBundle);
+        k.bundles.register(
+            fantastic_ai_core::chat_bundle::HANDLER_MODULE,
+            fantastic_ai_core::chat_bundle::AiChatBundle,
+        );
+        let k = Arc::new(k);
+        let agent = |id: &str, hm: Option<&str>, parent: Option<&str>| {
+            Agent::new(
+                AgentId::from(id),
+                hm.map(str::to_string),
+                parent.map(AgentId::from),
+                Map::new(),
+                dir.to_path_buf(),
+                false,
+            )
+        };
+        let root = agent("kernel_state", None, None);
+        fantastic_kernel::test_support::register(&k, Arc::clone(&root));
+        k.set_root(root);
+        fantastic_kernel::test_support::register(
+            &k,
+            agent(crate::env::HUMAN, None, Some("kernel_state")),
+        );
+        fantastic_kernel::test_support::register(
+            &k,
+            agent(
+                crate::kern::saved::HOME_ID,
+                Some(user_store::HANDLER_MODULE),
+                Some(crate::env::HUMAN),
+            ),
+        );
+        Host {
+            kernel: k,
+            cfg: ClientCfg::here(),
+            root: "kernel_state".to_string(),
+        }
+    }
+
+    /// E17: the wizard's page-2 texts with request knobs set (#632: the chat's) are saved as
+    /// one set-up, and that set-up splits as the pair is made — every knob on the chat's
+    /// share, none on the provider's. The backend's record alone refuses the knob.
+    #[tokio::test]
+    async fn the_wizard_saves_a_set_up_with_knobs_and_they_split_onto_the_chat() {
+        let dir = std::env::temp_dir().join(format!("fc-wizard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let h = host(&dir);
+        let texts: Map<String, Value> = json!({
+            "endpoint": "http://box.example:8000/v1",
+            "model": "m1",
+            "kv_overflow": "evict",
+            "reasoning_effort": "medium",
+            "min_p": "0.05",
+            "max_tokens": "4096",
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        super::save_edit(&h, "vllm-1", VLLM, &texts, None)
+            .await
+            .expect("the set-up is saved");
+        let shelf = crate::kern::saved::shelf(&h).await.unwrap();
+        let saved = &shelf
+            .saved
+            .iter()
+            .find(|s| s.name == "vllm-1")
+            .expect("saved under its name")
+            .record;
+        assert_eq!(
+            (
+                saved["reasoning_effort"].clone(),
+                saved["min_p"].clone(),
+                saved["max_tokens"].clone()
+            ),
+            (json!("medium"), json!(0.05), json!(4096))
+        );
+        let mut fields = saved.clone();
+        fields.remove("handler_module");
+        let (provider, chat) = crate::kern::backend::split(&fields);
+        for k in ["reasoning_effort", "min_p", "max_tokens"] {
+            assert_eq!(chat.get(k), saved.get(k), "{k} on the chat's share");
+            assert!(
+                provider.get(k).is_none(),
+                "{k} leaked to the provider: {provider:?}"
+            );
+        }
+        // the backend's own record still refuses a knob
+        let mut probe = fields.clone();
+        probe.insert("memory_store_id".into(), json!("memory"));
+        let refused = fantastic_user_home_store::by_bundle(&h.kernel, VLLM, &probe).unwrap_err();
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("has no record field"),
+            "{refused}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

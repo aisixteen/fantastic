@@ -1291,7 +1291,9 @@ pub async fn send(
             ) => Some(r),
         };
         match r {
-            Some(Ok(Err(GenFailure::Provider(ref pe)))) if pe.transport && attempt < retries => {
+            Some(Ok(Err(GenFailure::Provider(ref pe))))
+                if pe.is_transient() && attempt < retries =>
+            {
                 attempt += 1;
                 let message = pe.message.clone();
                 // A visible row: the model and the operator both read the retry.
@@ -1369,6 +1371,9 @@ pub async fn send(
     // THE HARNESS STOPPED THE TURN (#766, 1.8): its reason and the number of malformed
     // attempts. Nothing is routed; the chain ends through the give-up.
     let mut stopped: Option<String> = None;
+    // A PROVIDER FAILURE NO RETRY MENDS (a refused key, an unknown model): its error.
+    // Never retried, never nudged: the chain gives up with it at once.
+    let mut permanent: Option<(String, &'static str)> = None;
     let reply = match outcome {
         Ok(Ok(Generation::Dead { text: final_text })) => {
             dead_turn = true;
@@ -1504,7 +1509,11 @@ pub async fn send(
                     attached.as_ref(),
                 )
                 .await;
-                failed_reason = Some(pe.message.clone());
+                if let Some(code) = pe.permanent_code() {
+                    permanent = Some((pe.message.clone(), code));
+                } else {
+                    failed_reason = Some(pe.message.clone());
+                }
                 with_store_outcome(pe.message, stored)
             };
             raise = Some((pe.kind, message));
@@ -1563,6 +1572,19 @@ pub async fn send(
         }
         None => false,
     };
+    // A PERMANENT FAILURE ENDS THE CHAIN through the give-up, the error its reason:
+    // status `failed`, `reason: gave_up`, the open inquiry closed, `send_to` told.
+    if let Some((why, _)) = &permanent {
+        crate::route::give_up(
+            kernel,
+            agent_id,
+            &client_id,
+            send_to.as_deref(),
+            why,
+            crate::route::silent_streak(agent_id, &client_id) + 1,
+        )
+        .await;
+    }
     if !retrying && (reply.get("error").is_some() || raise.is_some()) {
         crate::route::chain_ended(kernel, agent_id);
     }
@@ -1599,13 +1621,13 @@ pub async fn send(
         Some((kind, msg)) => {
             let mut v = json!({"error": msg, "client_id": client_id});
             // A refused record (`ValueError`) is the caller's own fault, not a link
-            // or provider failure: it carries no transport code.
+            // or provider failure: it carries no transport code. A permanent failure
+            // carries its own code (`unauthorized`, `not_found`, ...).
             if *kind != "ValueError" {
-                fantastic_kernel::refusal::with(
-                    &mut v,
-                    "reason",
-                    json!(fantastic_kernel::refusal::TRANSPORT_ERROR),
-                );
+                let code = permanent
+                    .as_ref()
+                    .map_or(fantastic_kernel::refusal::TRANSPORT_ERROR, |(_, c)| *c);
+                fantastic_kernel::refusal::with(&mut v, "reason", json!(code));
             }
             v
         }

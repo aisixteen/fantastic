@@ -1104,12 +1104,13 @@ impl Provider for AnthropicProvider {
             } else {
                 ""
             };
-            let mut err = ProviderError::raised(format!(
+            // the shared classifier: a 5xx (529 included) is the link, a 401 or 404 no
+            // retry mends
+            return Err(ProviderError::raised(format!(
                 "{NAME}: {} answered HTTP {status}{why}: {detail}",
                 self.endpoint
-            ));
-            err.transport = matches!(status, 502 | 503 | 504 | 529);
-            return Err(err);
+            ))
+            .for_status(status));
         }
         Ok(consume_sse(
             resp,
@@ -1301,7 +1302,7 @@ impl SseState {
         let evt: Value = serde_json::from_str(data).map_err(|e| ProviderError {
             message: e.to_string(),
             kind: "JSONDecodeError",
-            transport: false,
+            class: fantastic_ai_core::provider::ErrorClass::Turn,
         })?;
         match evt.get("type").and_then(Value::as_str).unwrap_or("") {
             "message_start" => {

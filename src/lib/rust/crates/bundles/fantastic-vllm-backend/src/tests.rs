@@ -422,7 +422,7 @@ async fn a_stream_cut_before_finish_is_still_dropped() {
     let p = provider(&endpoint);
     let e = drain(&p, &hi(), None).await.expect_err("cut stream");
     assert!(e.message.contains("without a finish_reason"), "{e}");
-    assert!(e.transport, "{e}");
+    assert!(e.is_transient(), "{e}");
 }
 
 #[tokio::test]
@@ -1461,7 +1461,7 @@ async fn a_native_tool_call_with_bad_arguments_is_an_error() {
 async fn a_refused_connection_is_a_transport_error() {
     let p = provider("http://127.0.0.1:1/v1");
     let e = drain(&p, &hi(), None).await.expect_err("refused");
-    assert!(e.transport, "{e}");
+    assert!(e.is_transient(), "{e}");
 }
 
 #[tokio::test]
@@ -1471,7 +1471,7 @@ async fn a_stream_without_a_finish_is_a_transport_error() {
     let p = provider(&endpoint);
     let e = drain(&p, &hi(), None).await.expect_err("no finish_reason");
     assert!(e.message.contains("ended without a finish_reason"), "{e}");
-    assert!(e.transport, "{e}");
+    assert!(e.is_transient(), "{e}");
 }
 
 #[tokio::test]
@@ -1479,7 +1479,7 @@ async fn an_api_400_is_not_a_transport_error() {
     let (_server, endpoint) = server_with("bad request".to_string(), 400).await;
     let p = provider(&endpoint);
     let e = drain(&p, &hi(), None).await.expect_err("400");
-    assert!(!e.transport, "{e}");
+    assert!(!e.is_transient(), "{e}");
 }
 
 #[tokio::test]
@@ -1488,5 +1488,28 @@ async fn a_503_is_a_transport_error() {
     let p = provider(&endpoint);
     let e = drain(&p, &hi(), None).await.expect_err("503");
     assert!(e.message.contains("HTTP 503"), "{e}");
-    assert!(e.transport, "{e}");
+    assert!(e.is_transient(), "{e}");
+}
+
+/// AN HTTP ERROR IS CLASSED BY THE SHARED CLASSIFIER: a refused key (the 401 storm)
+/// or an unknown model no retry mends, a 5xx is the link, a 400 is this request's own.
+#[tokio::test]
+async fn http_errors_are_classed_by_the_shared_classifier() {
+    use fantastic_ai_core::provider::ErrorClass;
+    use fantastic_kernel::refusal::{NOT_FOUND, UNAUTHORIZED};
+    for (code, want) in [
+        (401, ErrorClass::Permanent(UNAUTHORIZED)),
+        (403, ErrorClass::Permanent(UNAUTHORIZED)),
+        (404, ErrorClass::Permanent(NOT_FOUND)),
+        (500, ErrorClass::Transient),
+        (503, ErrorClass::Transient),
+        (429, ErrorClass::Transient),
+        (400, ErrorClass::Turn),
+    ] {
+        let (_server, endpoint) = server_with("no".to_string(), code).await;
+        let p = provider(&endpoint);
+        let e = drain(&p, &hi(), None).await.expect_err("an HTTP error");
+        assert!(e.message.contains(&format!("HTTP {code}")), "{e}");
+        assert_eq!(e.class, want, "HTTP {code}: {e}");
+    }
 }
