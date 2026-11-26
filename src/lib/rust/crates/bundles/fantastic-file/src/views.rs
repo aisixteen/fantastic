@@ -180,28 +180,50 @@ fn scope(verb: &str, kind: &str, own: &str, rel: Option<&str>) -> Result<String,
 
 /// python `send_bridge`: one send to the bridge, as the calling view. A send that
 /// never settled with a reply is a refusal of its own, never a silent empty answer.
-pub(crate) async fn send_bridge(
+fn bridge_reply(out: fantastic_kernel::Outcome, bridge: &str, verb: &str) -> Value {
+    if out.result.is_object() {
+        return out.result;
+    }
+    let mut v = rf::refusal(
+        rf::TRANSPORT_ERROR,
+        format!("{bridge} {verb}: the send did not settle with a reply"),
+    );
+    rf::with(&mut v, "bridge", Value::String(bridge.to_string()));
+    v
+}
+
+/// THE VIEW'S CALL TO ITS BRIDGE, async (#795): the view's own call DEFERS its
+/// settle, the send to the bridge goes out through [`Kernel::call`], and its settle —
+/// a message to the view — is mapped by `then` into the view's answer, which settles
+/// the view's call. Nothing waits. The view's handler answers `Value::Null` (its
+/// settle comes later), or the refusal of a dispatch that cannot defer.
+pub(crate) async fn send_bridge<F, Fut>(
     kernel: &Arc<Kernel>,
     bridge: &str,
     verb: &str,
     payload: Value,
-) -> Value {
-    let out = kernel
-        .send(vec![Item::new(AgentId::from(bridge), payload)])
-        .await
-        .into_iter()
-        .next();
-    match out {
-        Some(o) if o.result.is_object() => o.result,
-        _ => {
-            let mut v = rf::refusal(
-                rf::TRANSPORT_ERROR,
-                format!("{bridge} {verb}: the send did not settle with a reply"),
-            );
-            rf::with(&mut v, "bridge", Value::String(bridge.to_string()));
-            v
-        }
-    }
+    then: F,
+) -> Value
+where
+    F: FnOnce(Value) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Value> + Send + 'static,
+{
+    let d = match kernel.defer() {
+        Ok(d) => d,
+        Err(refused) => return refused,
+    };
+    let (k, b, v) = (Arc::clone(kernel), bridge.to_string(), verb.to_string());
+    crate::call_or_now(kernel, Item::new(AgentId::from(bridge), payload), move |o| async move {
+        let answer = then(bridge_reply(o, &b, &v)).await;
+        let status = if fantastic_kernel::is_refused(&answer) {
+            fantastic_kernel::Status::Errored
+        } else {
+            fantastic_kernel::Status::Completed
+        };
+        k.settle_deferred(d.pid(), fantastic_kernel::Outcome::new(Some(d.pid()), status, answer));
+    })
+    .await;
+    Value::Null
 }
 
 /// The view records the kernel holds, by kind and bridge and path.
@@ -316,9 +338,9 @@ fn bridge_name(path: &str) -> String {
 }
 
 /// The views this bundle is running: each view's relay, by view id.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct Relays {
-    held: Mutex<HashMap<String, Relay>>,
+    held: Arc<Mutex<HashMap<String, Relay>>>,
 }
 
 struct Relay {
@@ -410,31 +432,42 @@ async fn watch(
     }
     let inbox = relay_inbox(&view.0);
     let rx = kernel.ensure_inbox(&inbox);
-    let r = send_bridge(kernel, bridge, "watch_path", fantastic_kernel::verbs::call("watch_path", json!({"path": own}))).await;
-    if r.get("error").is_some() {
-        kernel.remove_inbox(&inbox);
-        return r;
-    }
-    kernel.spawn_task(
-        view,
-        "watch",
-        relay(
-            Arc::clone(kernel),
-            view.clone(),
-            rx,
-            kind.to_string(),
-            own.to_string(),
-        ),
+    // the relay starts once the bridge armed its watch: in the settle, as the view
+    let (k, relays, view, kind, own_s, bridge_s) = (
+        Arc::clone(kernel),
+        relays.clone(),
+        view.clone(),
+        kind.to_string(),
+        own.to_string(),
+        bridge.to_string(),
     );
-    relays.held.lock().expect("relays").insert(
-        view.0.clone(),
-        Relay {
-            inbox,
-            bridge: bridge.to_string(),
-            path: own.to_string(),
+    send_bridge(
+        kernel,
+        bridge,
+        "watch_path",
+        fantastic_kernel::verbs::call("watch_path", json!({"path": own})),
+        move |r| async move {
+            if r.get("error").is_some() {
+                k.remove_inbox(&inbox);
+                return r;
+            }
+            k.spawn_task(
+                &view,
+                "watch",
+                relay(Arc::clone(&k), view.clone(), rx, kind, own_s.clone()),
+            );
+            relays.held.lock().expect("relays").insert(
+                view.0.clone(),
+                Relay {
+                    inbox,
+                    bridge: bridge_s,
+                    path: own_s.clone(),
+                },
+            );
+            json!({"watching": own_s, "agent": view.0, "relayed": false})
         },
-    );
-    json!({"watching": own, "agent": view.0, "relayed": false})
+    )
+    .await
 }
 
 /// python `views.stop`: the view is going away — its relay ends, and the bridge stops
@@ -443,13 +476,14 @@ pub(crate) async fn stop(kernel: &Arc<Kernel>, relays: &Relays, view: &AgentId) 
     let st = relays.held.lock().expect("relays").remove(&view.0);
     let Some(st) = st else { return };
     kernel.remove_inbox(&st.inbox);
-    send_bridge(
-        kernel,
-        &st.bridge,
-        "unwatch_path",
-        fantastic_kernel::verbs::call("unwatch_path", json!({"path": st.path})),
-    )
-    .await;
+    // A LIFECYCLE HOOK (Q2: a direct kernel run): the delete returns once the bridge
+    // let the path go, so no change reaches a view that is gone.
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(st.bridge.as_str()),
+            fantastic_kernel::verbs::call("unwatch_path", json!({"path": st.path})),
+        )])
+        .await;
 }
 
 /// The view's verb table: `file` answers read, write, watch, reflect; `folder` answers
@@ -487,7 +521,7 @@ pub(crate) async fn dispatch(
                 body.insert("path".into(), json!(target));
                 body.insert("offset".into(), json!(a.offset));
                 body.insert("limit".into(), json!(a.limit));
-                send_bridge(kernel, &bridge, "read", fantastic_kernel::verbs::call("read", Value::Object(body))).await
+                send_bridge(kernel, &bridge, "read", fantastic_kernel::verbs::call("read", Value::Object(body)), |r| async { r }).await
             }
         },
         (FILE, Call::Write(a)) => match scope("write", FILE, &own, a.path.as_deref()) {
@@ -501,7 +535,7 @@ pub(crate) async fn dispatch(
                 if let Some(m) = &a.if_match {
                     body.insert("if_match".into(), json!(m));
                 }
-                send_bridge(kernel, &bridge, "write", fantastic_kernel::verbs::call("write", Value::Object(body))).await
+                send_bridge(kernel, &bridge, "write", fantastic_kernel::verbs::call("write", Value::Object(body)), |r| async { r }).await
             }
         },
         (FILE | FOLDER, Call::Dynamic(c)) if c.name == "watch" => {
@@ -510,7 +544,7 @@ pub(crate) async fn dispatch(
         (FOLDER, Call::List(a)) => match scope("list", FOLDER, &own, a.path.as_deref()) {
             Err(e) => e,
             Ok(target) => {
-                send_bridge(kernel, &bridge, "list", fantastic_kernel::verbs::call("list", json!({"path": target}))).await
+                send_bridge(kernel, &bridge, "list", fantastic_kernel::verbs::call("list", json!({"path": target})), |r| async { r }).await
             }
         },
         (FOLDER, Call::Dynamic(c)) if c.name == "reveal" => {
@@ -562,44 +596,55 @@ async fn reveal(kernel: &Arc<Kernel>, own: &str, bridge: &str, a: &verbs::Reveal
         Some((d, _)) => d.to_string(),
         None => ".".to_string(),
     };
-    let listed = send_bridge(kernel, bridge, "list", fantastic_kernel::verbs::call("list", json!({"path": parent}))).await;
-    if listed.get("error").is_some() {
-        return listed;
-    }
-    let name = target.rsplit('/').next().unwrap_or(&target);
-    let present = listed
-        .get("files")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .any(|f| f.get("name").and_then(Value::as_str) == Some(name));
-    if !present {
-        let mut v = rf::refusal(
-            rf::NOT_FOUND,
-            format!("reveal: {} is not in this folder", py_repr(rel)),
-        );
-        rf::with(&mut v, "path", json!(rel));
-        return v;
-    }
-    // The path inside the folder: python's `posixpath.relpath(target, own)`.
-    let inside = if own == "." {
-        target.clone()
-    } else {
-        target
-            .strip_prefix(own)
-            .map(|s| s.trim_start_matches('/'))
-            .filter(|s| !s.is_empty())
-            .unwrap_or(".")
-            .to_string()
-    };
-    let dirs: Vec<String> = match inside.rsplit_once('/') {
-        Some((d, _)) => {
-            let parts: Vec<&str> = d.split('/').collect();
-            (0..parts.len()).map(|i| parts[..=i].join("/")).collect()
-        }
-        None => Vec::new(),
-    };
-    json!({"revealed": inside, "folder_path": own, "dirs": dirs})
+    let (rel, own) = (rel.to_string(), own.to_string());
+    send_bridge(
+        kernel,
+        bridge,
+        "list",
+        fantastic_kernel::verbs::call("list", json!({"path": parent})),
+        move |listed| async move {
+            let rel = rel.as_str();
+            let own = own.as_str();
+            if listed.get("error").is_some() {
+                return listed;
+            }
+            let name = target.rsplit('/').next().unwrap_or(&target);
+            let present = listed
+                .get("files")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|f| f.get("name").and_then(Value::as_str) == Some(name));
+            if !present {
+                let mut v = rf::refusal(
+                    rf::NOT_FOUND,
+                    format!("reveal: {} is not in this folder", py_repr(rel)),
+                );
+                rf::with(&mut v, "path", json!(rel));
+                return v;
+            }
+            // The path inside the folder: python's `posixpath.relpath(target, own)`.
+            let inside = if own == "." {
+                target.clone()
+            } else {
+                target
+                    .strip_prefix(own)
+                    .map(|s| s.trim_start_matches('/'))
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(".")
+                    .to_string()
+            };
+            let dirs: Vec<String> = match inside.rsplit_once('/') {
+                Some((d, _)) => {
+                    let parts: Vec<&str> = d.split('/').collect();
+                    (0..parts.len()).map(|i| parts[..=i].join("/")).collect()
+                }
+                None => Vec::new(),
+            };
+            json!({"revealed": inside, "folder_path": own, "dirs": dirs})
+        },
+    )
+    .await
 }
 
 /// The `open_view` verb on a bridge: the arguments checked the way python checks

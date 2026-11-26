@@ -230,7 +230,7 @@ runs:
           is_error: true
           item0_not_allowed: read_stream
       - tool: send
-        args: {items: [{target: exec, payload: {type: run, command: "{pwd_cmd}", args: "{pwd_args}", wait_s: 30}}]}
+        args: {items: [{target: exec, payload: {type: run, command: "{pwd_cmd}", args: "{pwd_args}"}}]}
         expect:
           is_error: true
           item0_not_allowed: run
@@ -240,7 +240,7 @@ runs:
           item0.status: completed
           text_contains: "in the work folder $NONCE"
       - tool: send
-        args: {items: [{target: e15_exec, payload: {type: run, command: "{pwd_cmd}", args: "{pwd_args}", wait_s: 30}}]}
+        args: {items: [{target: e15_exec, payload: {type: run, command: "{pwd_cmd}", args: "{pwd_args}"}}]}
         expect:
           item0.status: completed
           text_contains: "work-e15"

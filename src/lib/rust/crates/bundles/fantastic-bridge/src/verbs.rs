@@ -23,7 +23,7 @@ pub struct Shutdown {}
 #[serde(deny_unknown_fields)]
 pub struct Reconnect {}
 
-/// Run a call on the REMOTE kernel: ships a raw `{type: call, id, target, payload}` frame over the transport, awaits the matching reply and returns the unwrapped data. The far kernel judges the call as the leg that serves it there. Local-to-local calls are plain sends; this verb is only for crossing kernels. Loop detection across several hops is the caller's job.
+/// Run a call on the REMOTE kernel: ships a raw `{type: call, id, target, payload}` frame over the transport; the matching reply frame settles this call with the unwrapped data (the call's own deadline bounds it). The far kernel judges the call as the leg that serves it there. Local-to-local calls are plain sends; this verb is only for crossing kernels. Loop detection across several hops is the caller's job.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Forward {
@@ -32,9 +32,6 @@ pub struct Forward {
     pub target: String,
     /// The call to run there: a verb frame with its own `type`.
     pub payload: Map<String, Value>,
-    /// Seconds to wait for the reply (not `timeout`, which is a call's own routing field).
-    #[serde(default = "crate::record::default_timeout")]
-    pub forward_timeout: f64,
 }
 
 /// Send `{type: watch, src: target}` over the transport and subscribe this leg to `target`: the `{type: event, src, payload}` frames for it are re-emitted on THIS bridge agent's inbox as the payload plus `src`; an event for anything not subscribed is dropped. Local watchers subscribe to the bridge itself. Idempotent.

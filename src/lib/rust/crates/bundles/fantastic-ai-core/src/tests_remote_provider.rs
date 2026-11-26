@@ -474,3 +474,63 @@ async fn the_route_reads_the_settled_text_not_the_stream() {
     let shown = live.0.lock().unwrap().clone();
     assert!(shown.len() < want.len(), "the live view dropped tokens: {} of {}", shown.len(), want.len());
 }
+
+/// THE CHAT'S ONE WATCH (#795): a chat watches its provider once, at its first request,
+/// and keeps that watch across requests — never one reader per pass. Each request's
+/// tokens still reach its own live view, and the watch ends with the chat.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_chat_keeps_one_watch_on_its_provider_across_requests() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut k = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
+    k.bundles.register("echo.tools", Echo);
+    let k = Arc::new(k);
+    let root = fantastic_kernel::Agent::new(AgentId::from("kernel_state"), None, None, Map::new(), tmp.path().join(".fantastic"), false);
+    fantastic_kernel::test_support::register(&k, Arc::clone(&root));
+    k.set_root(Arc::clone(&root));
+    agent(&k, &root, "p1w", json!({}), tmp.path());
+    agent(&k, &root, "chat1w", json!({"can": {"p1w": {"call": ["complete", "watch"]}}}), tmp.path());
+    let chat = AgentId::from("chat1w");
+    let provider = AgentId::from("p1w");
+    let mut first: Option<AgentId> = None;
+    for round in 0..2 {
+        let rp = RemoteProvider::new(&k, &chat, "p1w");
+        let live = Arc::new(SlowLive(std::sync::Mutex::new(String::new())));
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, ProviderError>>();
+        let done: crate::provider::Done = Box::new(move |r| {
+            Box::pin(async move {
+                let _ = tx.send(r);
+            })
+        });
+        fantastic_kernel::test_support::as_agent(chat.clone(), async {
+            rp.begin(
+                vec![json!({"role": "user", "content": "hi"})],
+                None,
+                (Duration::from_secs(30), 30.0),
+                Arc::clone(&live) as Arc<dyn crate::provider::Live>,
+                done,
+            )
+            .await
+        })
+        .await
+        .expect("the request is out");
+        let whole = tokio::time::timeout(Duration::from_secs(20), rx)
+            .await
+            .expect("the request settled")
+            .expect("done ran")
+            .expect("an answer");
+        assert_eq!(whole, "hello", "round {round}");
+        assert_eq!(live.0.lock().unwrap().as_str(), "hello", "round {round}: its own tokens");
+        assert!(k.has_watchers(&provider).await, "round {round}: the chat still watches");
+        let reader = chat_watches().lock().unwrap().get(&chat).map(|w| w.reader.clone());
+        assert!(reader.is_some(), "round {round}: the watch is the chat's");
+        match &first {
+            None => first = reader,
+            Some(f) => assert_eq!(reader.as_ref(), Some(f), "one reader across requests"),
+        }
+    }
+    forget_watch(&chat, &k).await;
+    assert!(!k.has_watchers(&provider).await, "the watch ends with the chat");
+}

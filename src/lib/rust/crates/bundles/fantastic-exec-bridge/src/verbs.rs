@@ -104,9 +104,6 @@ impl Mime {
     }
 }
 
-fn sixty() -> f64 {
-    60.0
-}
 fn two_hundred() -> u64 {
     200
 }
@@ -160,7 +157,7 @@ impl JsonSchema for Start {
     }
 }
 
-/// Start, wait, and return the output in ONE reply: {job_id, status, exit_code, lines}. For short commands; a job still running at `wait_s` comes back running (continue with status wait_s / tail). Read files with files.read, not run.
+/// Start a command; its reply comes when it EXITS: {job_id, status, exit_code, lines}, the last `tail` lines. The call's own deadline bounds it. For a long or interactive job use start. Read files with files.read, not run.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Run {
@@ -170,15 +167,12 @@ pub struct Run {
     pub args: Option<Vec<String>>,
     /// Run it on a terminal of this size.
     pub pty: Option<Terminal>,
-    /// How many seconds to wait for it to finish.
-    #[serde(default = "sixty")]
-    pub wait_s: f64,
     /// How many of its last lines come back.
     #[serde(default = "two_hundred")]
     pub tail: u64,
 }
 
-/// `run`'s declaration: `start`'s fields, the two waits, and the same rule that a
+/// `run`'s declaration: `start`'s fields, `tail`, and the same rule that a
 /// `command` is given unless the job runs on a terminal.
 impl JsonSchema for Run {
     fn schema_name() -> String {
@@ -193,15 +187,11 @@ impl JsonSchema for Run {
         props.insert("args".into(), serde_json::json!({
             "type": "array", "items": {"type": "string"}, "description": "Its arguments, one item each.",
         }));
-        props.insert("wait_s".into(), serde_json::json!({
-            "type": "number", "minimum": 0, "maximum": 600, "default": 60,
-            "description": "How many seconds to wait for it to finish.",
-        }));
         props.insert("tail".into(), serde_json::json!({
             "type": "integer", "minimum": 1, "maximum": 500, "default": 200,
             "description": "How many of its last lines come back.",
         }));
-        command_or_pty(gen, "Start, wait, and return the output in ONE reply: {job_id, status, exit_code, lines}. For short commands; a job still running at `wait_s` comes back running (continue with status wait_s / tail). Read files with files.read, not run.", props)
+        command_or_pty(gen, "Start a command; its reply comes when it EXITS: {job_id, status, exit_code, lines}, the last `tail` lines. The call's own deadline bounds it. For a long or interactive job use start. Read files with files.read, not run.", props)
     }
 }
 

@@ -3027,8 +3027,8 @@ fn an_unbalanced_allowed_pattern_permits_nothing() {
     assert!(command_permitted(&meta, "ls").is_some());
 }
 
-/// `run` — start, wait, output in ONE reply: a short program comes back done,
-/// with its exit code and its printed lines.
+/// `run` — its reply is the job's end: a short program comes back done, with its
+/// exit code and its printed lines.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_returns_the_output_in_one_reply() {
     let Some(py) = find_real_python() else {
@@ -3043,7 +3043,6 @@ async fn run_returns_the_output_in_one_reply() {
                 "type": "run",
                 "command": py.to_string_lossy(),
                 "args": ["-u", "-c", program],
-                "wait_s": 30,
             }),
         )])
         .await
@@ -3068,10 +3067,54 @@ async fn run_returns_the_output_in_one_reply() {
         .await;
 }
 
-/// A `wait_s` shorter than the job's life gives up at the deadline and answers
-/// `running` with the job_id, so the caller can keep watching it.
+/// THE ASYNC RUN (#795): the call is acked at once, and its settle comes when the
+/// process EXITS — as a message to the caller, with the exit code and the output.
+/// Nothing polls: the handler deferred its settle and the job's pump settled it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn run_returns_running_at_the_deadline() {
+async fn run_settles_when_the_process_exits() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let program = format!("{LF_STDIO}import sys, time; time.sleep(0.6); print(\"late\"); sys.exit(4)");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let t0 = std::time::Instant::now();
+    let ack = fantastic_kernel::send::as_operator(
+        kernel.call(
+            Item::new(
+                a.clone(),
+                json!({"type": "run", "command": py.to_string_lossy(), "args": ["-u", "-c", program]}),
+            ),
+            move |o| async move {
+                let _ = tx.send((o, std::time::Instant::now()));
+            },
+        ),
+    )
+    .await;
+    assert_eq!(ack.status, fantastic_kernel::Status::Accepted, "{:?}", ack.result);
+    assert!(t0.elapsed() < Duration::from_millis(500), "the ack waited for the job");
+    let (o, at) = tokio::time::timeout(Duration::from_secs(20), rx)
+        .await
+        .expect("the run settled")
+        .expect("delivered");
+    assert!(at.duration_since(t0) >= Duration::from_millis(500), "settled before the exit");
+    assert_eq!(o.status, fantastic_kernel::Status::Completed, "{}", o.result);
+    assert_eq!(o.result["exit_code"], 4, "{}", o.result);
+    assert_ne!(o.result["status"], "running", "{}", o.result);
+    assert!(
+        o.result["lines"]
+            .as_array()
+            .is_some_and(|l| l.iter().any(|row| row["line"].as_str() == Some("late"))),
+        "{}",
+        o.result
+    );
+}
+
+/// The call's own DEADLINE bounds a `run` (no `wait_s`): past it the run settles
+/// `timed_out` and its job is killed with it, never left running unowned.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_past_its_deadline_times_out_and_its_job_dies() {
     let Some(py) = find_real_python() else {
         return;
     };
@@ -3079,30 +3122,28 @@ async fn run_returns_running_at_the_deadline() {
     let (kernel, a) = mk_kernel(&tmp).await;
     let program = format!("{LF_STDIO}import time; time.sleep(30)");
     let t0 = std::time::Instant::now();
-    let r = kernel.operator_send(vec![Item::new(
+    let o = kernel
+        .operator_send(vec![Item::new(
             a.clone(),
-            json!({
-                "type": "run",
-                "command": py.to_string_lossy(),
-                "args": ["-u", "-c", program],
-                "wait_s": 0.5,
-            }),
-        )])
+            json!({"type": "run", "command": py.to_string_lossy(), "args": ["-u", "-c", program]}),
+        )
+        .with_timeout(0.5)])
         .await
-        .remove(0)
-        .result;
-    let took = t0.elapsed();
-    let jid = r["job_id"].as_i64().expect("job_id");
-    assert_eq!(r["status"], "running", "{r}");
-    assert!(took < Duration::from_secs(3), "took {took:?}");
-    let _ = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            json!({"type": "stop", "job_id": jid}),
-        )])
-        .await;
+        .remove(0);
+    assert_eq!(o.status, fantastic_kernel::Status::TimedOut, "{}", o.result);
+    assert!(t0.elapsed() < Duration::from_secs(5), "took {:?}", t0.elapsed());
+    let mut live = true;
+    for _ in 0..50 {
+        live = jobs::jobs().values().any(|j| j.owner == a && jobs::alive(j));
+        if !live {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(!live, "the job outlived its run");
 }
 
-/// `run` refuses a `wait_s` out of 0..=600 or not a number, and a `tail` below 1.
+/// `run` refuses a `tail` below 1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_refuses_bad_arguments() {
     let Some(py) = find_real_python() else {
@@ -3115,21 +3156,12 @@ async fn run_refuses_bad_arguments() {
         "command": py.to_string_lossy(),
         "args": ["-u", "-c", "print(1)"],
     });
-    for (arg, bad) in [
-        ("wait_s", json!(700)),
-        ("wait_s", json!("x")),
-        ("tail", json!(0)),
-    ] {
-        let mut payload = base.clone();
-        payload
-            .as_object_mut()
-            .unwrap()
-            .insert(arg.to_string(), bad);
-        let r = kernel.operator_send(vec![Item::new(a.clone(), payload)])
-            .await
-            .remove(0)
-            .result;
-        assert_eq!(r["reason"], "bad_arg", "{r}");
-        assert_eq!(r["arg"], arg, "{r}");
-    }
+    let mut payload = base.clone();
+    payload.as_object_mut().unwrap().insert("tail".to_string(), json!(0));
+    let r = kernel.operator_send(vec![Item::new(a.clone(), payload)])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(r["arg"], "tail", "{r}");
 }

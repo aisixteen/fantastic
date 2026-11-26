@@ -323,12 +323,11 @@ def relay_checks(K: HostKernel, P: HostKernel, pblob: bytes) -> None:
                  f"relay saw {g} dial with the store's password + subprotocol: {d}")
 
         for X, tag in ((K, f"{RUNTIME}→{PEER}"), (P, f"{PEER}→{RUNTIME}")):
-            r = X.send("rly", {"type": "forward", "target": "fb", "payload": {"type": "reflect"},
-                               "forward_timeout": 20})
+            r = X.send("rly", {"type": "forward", "target": "fb", "payload": {"type": "reflect"}})
             need(r.get("id") == "fb", f"relay {tag} · forward reflect: {short(r)}")
 
         n0 = relay.binary_routed
-        rs = K.send("rly", {"type": "forward", "target": "fb", "forward_timeout": 20,
+        rs = K.send("rly", {"type": "forward", "target": "fb",
                             "payload": {"type": "read_stream", "path": "blob.bin", "offset": 0}})
         chunk = rs.get("bytes")
         need(isinstance(chunk, bytes) and chunk == pblob[: len(chunk)] and len(chunk) > 0,
@@ -338,13 +337,11 @@ def relay_checks(K: HostKernel, P: HostKernel, pblob: bytes) -> None:
 
         u = P.send(P.root_id, {"type": "update_agent", "id": "rly", "ingress_rule": "deny_ingress"})
         need(u.get("updated") is True, f"{PEER} rly sealed: {short(u)}")
-        r = K.send("rly", {"type": "forward", "target": "fb", "payload": {"type": "reflect"},
-                           "forward_timeout": 20})
+        r = K.send("rly", {"type": "forward", "target": "fb", "payload": {"type": "reflect"}})
         need(r.get("reason") == "unauthorized",
              f"relay {RUNTIME}→{PEER} · a sealed serving leg refuses the tunneled call: {short(r)}")
         P.send(P.root_id, {"type": "update_agent", "id": "rly", "ingress_rule": "allow_all_ingress"})
-        r = K.send("rly", {"type": "forward", "target": "fb", "payload": {"type": "reflect"},
-                           "forward_timeout": 20})
+        r = K.send("rly", {"type": "forward", "target": "fb", "payload": {"type": "reflect"}})
         need(r.get("id") == "fb", f"relay {RUNTIME}→{PEER} · reopened live, served again: {short(r)}")
     finally:
         for k in (K, P):

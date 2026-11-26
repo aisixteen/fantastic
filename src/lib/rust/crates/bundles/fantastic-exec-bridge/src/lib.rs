@@ -861,6 +861,7 @@ async fn start_job(
             line_ring_dropped: 0,
             pty: pty_state.clone(),
             monitors_closed: false,
+            run_end: None,
         },
     );
     // The row exists: the pump may look for it now. It cannot have gone away —
@@ -971,13 +972,13 @@ async fn status_reply(agent_id: &AgentId, a: &verbs::Status) -> Value {
     }
 }
 
-/// `run` — start, wait, and answer with the output in ONE reply.
+/// `run` — start, and answer with the output when the job ENDS (#795).
 ///
-/// `wait_s` (default 60, 0–600) bounds the wait exactly like `status`'s: the job
-/// is polled every 200 ms and the reply comes as soon as it is no longer
-/// `running`/`stopping`. `tail` (default 200, 1–500) is how many of its last
-/// lines come back. A job still running at the deadline is returned `running`
-/// with its `job_id`, so the caller continues with `status wait_s` / `tail`.
+/// The reply is the job's end: its handler defers its settle and returns, and the
+/// job's pump settles it when the process exits — `{job_id, status, exit_code,
+/// lines}`, the last `tail` (default 200, 1–500) lines. Nothing polls and nothing
+/// waits: the call's own deadline bounds it (past it the kernel cancels the call,
+/// and the job with it). A job that ended before the deferral is answered at once.
 async fn run_reply(agent_id: &AgentId, a: verbs::Run, kernel: &Arc<Kernel>) -> Value {
     let (job_id, _) =
         match start_job(agent_id, a.command.as_deref(), a.args, a.pty, kernel).await {
@@ -985,34 +986,28 @@ async fn run_reply(agent_id: &AgentId, a: verbs::Run, kernel: &Arc<Kernel>) -> V
             // A refusal from `start` (no command, not allowed, no cwd) is the answer.
             Err(refused) => return refused,
         };
-    let jid = JobRef::of(job_id.get());
-    let wait_s = a.wait_s;
-    let tail = a.tail;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(wait_s);
-    loop {
-        let live = {
-            let g = jobs::jobs();
-            match jid.find(&g, agent_id) {
-                Some(j) => j.status == "running" || j.status == "stopping",
-                None => false,
-            }
-        };
-        if !live || std::time::Instant::now() >= deadline {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
-    let (status, exit_code) = {
-        let g = jobs::jobs();
-        match jid.find(&g, agent_id) {
-            Some(j) => (j.status.clone(), j.exit_code),
-            None => ("running".to_string(), None),
+    let deferred = {
+        let mut g = jobs::jobs();
+        match g.get_mut(&(agent_id.clone(), job_id)) {
+            // still running: its end settles this call
+            Some(j) if jobs::alive(j) => match kernel.defer() {
+                Ok(d) => {
+                    j.run_end = Some(jobs::RunEnd {
+                        pid: d.pid(),
+                        tail: a.tail,
+                        kernel: Arc::clone(kernel),
+                    });
+                    true
+                }
+                Err(_) => false,
+            },
+            _ => false,
         }
     };
-    let mut reply = tail::tail_reply(agent_id, &jid, tail, verbs::Stream::Both);
-    with(&mut reply, "status", json!(status));
-    with(&mut reply, "exit_code", json!(exit_code));
-    reply
+    if deferred {
+        return Value::Null;
+    }
+    jobs::run_reply_of(agent_id, job_id, a.tail)
 }
 
 /// `clear` — forget this agent's FINISHED rows: one named job, or every one.

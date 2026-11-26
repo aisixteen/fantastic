@@ -155,8 +155,7 @@ async fn forward_get_to_a_connected_credential_store_is_recorded_as_secret() {
         .operator_send(vec![Item::new(
             AgentId::from(leg.as_str()),
             json!({"type": "forward", "target": "creds",
-                   "payload": {"type": "get", "ref": REF},
-                   "forward_timeout": 30.0}),
+                   "payload": {"type": "get", "ref": REF}}),
         )
         .with_id("far-get-1")])
         .await
@@ -188,8 +187,7 @@ async fn forward_set_to_a_connected_credential_store_never_records_the_value_on_
         .operator_send(vec![Item::new(
             AgentId::from(leg.as_str()),
             json!({"type": "forward", "target": "creds",
-                   "payload": {"type": "set", "ref": REF, "fields": {"api_key": VALUE}},
-                   "forward_timeout": 30.0}),
+                   "payload": {"type": "set", "ref": REF, "fields": {"api_key": VALUE}}}),
         )
         .with_id("far-set-1")])
         .await

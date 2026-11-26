@@ -324,11 +324,22 @@ async fn fork_from(
             p.insert(k.into(), json!(v));
         }
     }
-    let out = kernel
-        .send(vec![Item::new(AgentId::from(from.agent.as_str()), Value::Object(p))])
-        .await
-        .remove(0);
-    out.result
+    // ASYNC (#795): this call defers its settle; the other agent's answer, a
+    // message to this one, settles it. Nothing waits.
+    let d = match kernel.defer() {
+        Ok(d) => d,
+        Err(refused) => return refused,
+    };
+    let k = Arc::clone(kernel);
+    let ack = kernel
+        .call(Item::new(AgentId::from(from.agent.as_str()), Value::Object(p)), move |out| async move {
+            k.settle_deferred(d.pid(), crate::helpers::own_reply(out));
+        })
+        .await;
+    if ack.status != fantastic_kernel::Status::Accepted {
+        kernel.settle_deferred(d.pid(), crate::helpers::own_reply(ack));
+    }
+    Value::Null
 }
 
 /// `mark {label, note?, version?}`: mark this agent's own history at a turn

@@ -424,6 +424,52 @@ fn settle(result: &Value, report: &Mutex<ProviderReport>, model: &Mutex<String>)
     Ok(())
 }
 
+/// What the chat's watch feeder is told: a request's live view starts, or the request
+/// settled (its queued tokens are fed, then its view leaves; the ack says so).
+enum Ctl {
+    Open(String, Arc<dyn crate::provider::Live>),
+    Close(String, tokio::sync::oneshot::Sender<()>),
+}
+
+/// A chat's one watch on its provider.
+struct ChatWatch {
+    provider: AgentId,
+    reader: AgentId,
+    ctl: tokio::sync::mpsc::UnboundedSender<Ctl>,
+}
+
+impl ChatWatch {
+    /// The watch ends: unwatched, its inbox gone, its feeder stops.
+    async fn release(self, kernel: &Kernel) {
+        kernel.unwatch(&self.provider, &self.reader).await;
+        kernel.remove_inbox(&self.reader);
+    }
+}
+
+/// Every chat's watch on its provider, by chat.
+fn chat_watches() -> &'static Mutex<std::collections::HashMap<AgentId, ChatWatch>> {
+    static W: std::sync::OnceLock<Mutex<std::collections::HashMap<AgentId, ChatWatch>>> =
+        std::sync::OnceLock::new();
+    W.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// The chat is gone: its watch on its provider ends ([`crate::verbs::on_delete`]).
+pub(crate) async fn forget_watch(chat: &AgentId, kernel: &Kernel) {
+    let w = chat_watches().lock().expect("watches poisoned").remove(chat);
+    if let Some(w) = w {
+        w.release(kernel).await;
+    }
+}
+
+/// One item of the chat's watch: a token goes to the live view its `rid` names.
+async fn feed(lives: &std::collections::HashMap<String, Arc<dyn crate::provider::Live>>, payload: &Value) {
+    let Some(rid) = payload.get("rid").and_then(Value::as_str) else { return };
+    let Some(live) = lives.get(rid) else { return };
+    if let Some(t) = token_of(payload, rid) {
+        live.token(&t).await;
+    }
+}
+
 fn token_of(item: &Value, rid: &str) -> Option<String> {
     (item.get("type").and_then(Value::as_str) == Some(TOKEN_EVENT)
         && item.get("rid").and_then(Value::as_str) == Some(rid))
@@ -465,6 +511,65 @@ impl RemoteProvider {
         Ok((reader, inbox))
     }
 
+    /// THE CHAT'S WATCH on its provider (#795): ONE reader per chat, made at its first
+    /// request and again only when the chat's provider changed — never one per pass.
+    /// Its feeder hands each `provider_token` to the live view of the request its `rid`
+    /// names; it holds no lock and wakes nothing. The feeder's control channel.
+    async fn chat_watch(&self) -> Result<tokio::sync::mpsc::UnboundedSender<Ctl>, ProviderError> {
+        if let Some(w) = chat_watches()
+            .lock()
+            .expect("watches poisoned")
+            .get(&self.chat)
+            .filter(|w| w.provider == self.provider && !w.ctl.is_closed())
+        {
+            return Ok(w.ctl.clone());
+        }
+        let old = chat_watches().lock().expect("watches poisoned").remove(&self.chat);
+        if let Some(old) = old {
+            old.release(&self.kernel).await;
+        }
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let (reader, mut inbox) = self.reader(n).await?;
+        let (ctl, mut rx) = tokio::sync::mpsc::unbounded_channel::<Ctl>();
+        // It carries the chat's identity (no `ps` row): the live view's events are the
+        // chat's own, and an emit outside any identity is dropped.
+        fantastic_kernel::spawn_inherit(async move {
+            let mut lives: std::collections::HashMap<String, Arc<dyn crate::provider::Live>> =
+                std::collections::HashMap::new();
+            loop {
+                tokio::select! {
+                    biased;
+                    c = rx.recv() => match c {
+                        Some(Ctl::Open(rid, live)) => {
+                            lives.insert(rid, live);
+                        }
+                        Some(Ctl::Close(rid, ack)) => {
+                            while let Some(it) = inbox.try_recv() {
+                                feed(&lives, &it.payload).await;
+                            }
+                            lives.remove(&rid);
+                            let _ = ack.send(());
+                        }
+                        None => break,
+                    },
+                    item = inbox.recv() => match item {
+                        Some(it) => feed(&lives, &it.payload).await,
+                        None => break,
+                    },
+                }
+            }
+        });
+        chat_watches().lock().expect("watches poisoned").insert(
+            self.chat.clone(),
+            ChatWatch {
+                provider: self.provider.clone(),
+                reader,
+                ctl: ctl.clone(),
+            },
+        );
+        Ok(ctl)
+    }
+
     /// THE CHAT'S REQUEST AS A MESSAGE (#795): the `complete` call goes out through
     /// [`Kernel::call`] and this returns its pid at once. The provider's tokens feed
     /// `live` from a watcher of its stream that holds no lock and wakes nothing; the
@@ -485,43 +590,17 @@ impl RemoteProvider {
             done(Err(e)).await;
             return None;
         }
-        let (reader, mut inbox) = match self.reader(n).await {
-            Ok(r) => r,
+        // THE CHAT'S ONE WATCH on its provider: this request's tokens feed `live`
+        // until its settle says it ended
+        let watch = match self.chat_watch().await {
+            Ok(w) => w,
             Err(e) => {
                 done(Err(e)).await;
                 return None;
             }
         };
-        let guard = Unwatch { kernel: Arc::clone(&self.kernel), provider: self.provider.clone(), reader, done: false };
-        // THE LIVE VIEW: the tokens of this request, until the settle says it ended;
-        // what is still queued then is fed first. It carries the chat's identity (no
-        // `ps` row): the live view's events are the chat's own, and an emit outside
-        // any identity is dropped
-        let (end_tx, mut end_rx) = tokio::sync::oneshot::channel::<()>();
+        let _ = watch.send(Ctl::Open(rid.clone(), live));
         let feed_rid = rid.clone();
-        let feeder = fantastic_kernel::spawn_inherit(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    item = inbox.recv() => match item {
-                        Some(it) => {
-                            if let Some(t) = token_of(&it.payload, &feed_rid) {
-                                live.token(&t).await;
-                            }
-                        }
-                        None => break,
-                    },
-                    _ = &mut end_rx => {
-                        while let Some(it) = inbox.try_recv() {
-                            if let Some(t) = token_of(&it.payload, &feed_rid) {
-                                live.token(&t).await;
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-        });
         let done = Arc::new(Mutex::new(Some(done)));
         let (within, ceiling) = deadline;
         let item = Item::new(self.provider.clone(), Value::Object(self.payload(&messages, max_tokens, &rid)))
@@ -531,10 +610,11 @@ impl RemoteProvider {
         let out = self
             .kernel
             .call(item, move |o| async move {
-                let _ = end_tx.send(());
-                let _ = feeder.await;
-                let mut guard = guard;
-                guard.release().await;
+                // what is still queued for this request is fed first
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                if watch.send(Ctl::Close(feed_rid, tx)).is_ok() {
+                    let _ = rx.await;
+                }
                 let read = answer_of(&o, &report, &model, &provider, ceiling);
                 let done = then_done.lock().expect("done poisoned").take();
                 if let Some(done) = done {
@@ -544,6 +624,10 @@ impl RemoteProvider {
             .await;
         if out.status == Status::Accepted {
             return out.pid;
+        }
+        if let Some(w) = chat_watches().lock().expect("watches poisoned").get(&self.chat) {
+            let (tx, _) = tokio::sync::oneshot::channel();
+            let _ = w.ctl.send(Ctl::Close(rid.clone(), tx));
         }
         // REFUSED AT LAUNCH (the gate, the target): the continuation never runs
         let done = done.lock().expect("done poisoned").take();

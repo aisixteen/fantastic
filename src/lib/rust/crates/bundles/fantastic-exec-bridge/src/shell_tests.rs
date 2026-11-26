@@ -484,7 +484,7 @@ async fn a_relative_cwd_runs_in_the_work_folder() {
     let r = call(
         &kernel,
         "rel",
-        json!({"type": "run", "command": "pwd", "wait_s": 30}),
+        json!({"type": "run", "command": "pwd"}),
     )
     .await;
     let want = std::fs::canonicalize(tmp.path()).unwrap();

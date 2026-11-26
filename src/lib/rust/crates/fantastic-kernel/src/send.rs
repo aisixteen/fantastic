@@ -1508,6 +1508,8 @@ impl Kernel {
             let _ = b.take(&mut payload_for_handler);
         }
 
+        // a deferred settle's own reply marks land where the handler's would
+        let deferred_marks = Arc::clone(&sink);
         let join = {
             let kernel = Arc::clone(self);
             let tgt = Arc::clone(target);
@@ -1639,8 +1641,14 @@ impl Kernel {
             }
         };
         let outcome = match outcome {
-            // the settle the deferring handler's answer brought, as given
-            Ran::Deferred(o) => return (o.result, o.status, o.body),
+            // the settle the deferring handler's answer brought, as given; its
+            // reply marks (a far store's `get` fields) are this reply's
+            Ran::Deferred(o) => {
+                if let Ok(mut m) = deferred_marks.lock() {
+                    m.extend(o.secret);
+                }
+                return (o.result, o.status, o.body);
+            }
             Ran::Handler(o) => o,
         };
 

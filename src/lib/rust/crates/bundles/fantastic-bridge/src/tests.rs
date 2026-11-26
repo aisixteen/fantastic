@@ -348,7 +348,6 @@ async fn forward_round_trip_over_memory() {
                 "type": "forward",
                 "target": file_id,
                 "payload": {"type": "reflect"},
-                "forward_timeout": 30.0,
             }),
         )])
         .await
@@ -404,7 +403,6 @@ async fn pending_futures_rejected_on_close() {
                 "type": "forward",
                 "target": "irrelevant_target",
                 "payload": {"type": "reflect"},
-                "forward_timeout": 30.0,
             }),
         )])
         .await
@@ -1042,7 +1040,7 @@ async fn password_gate_checks_inbound_and_presents_on_forward() {
     let fwd = tokio::spawn(async move {
         kc.operator_send(vec![Item::new(
             AgentId::from(bid2.as_str()),
-            json!({"type": "forward", "target": "remote", "payload": {"type": "reflect"}, "forward_timeout": 30.0}),
+            json!({"type": "forward", "target": "remote", "payload": {"type": "reflect"}}),
         )])
         .await
         .remove(0)
@@ -1143,7 +1141,7 @@ async fn asymmetric_ingress_egress_via_engine() {
     let fwd = tokio::spawn(async move {
         kc.operator_send(vec![Item::new(
             AgentId::from(bid2.as_str()),
-            json!({"type": "forward", "target": "remote", "payload": {"type": "reflect"}, "forward_timeout": 30.0}),
+            json!({"type": "forward", "target": "remote", "payload": {"type": "reflect"}}),
         )])
         .await
         .remove(0)
@@ -1214,11 +1212,11 @@ impl Handler for BouncerBundle {
                     "type": "forward",
                     "target": b.back_to,
                     "payload": {"type": "reflect"},
-                    // Short, so the OLD inline code fails this in seconds rather
-                    // than parking it for the 30s default.
-                    "forward_timeout": 3.0,
                 }),
-            )])
+            )
+            // Short, so the OLD inline code fails this in seconds rather than
+            // parking it.
+            .with_timeout(3.0)])
             .await
             .remove(0)
             .result;
@@ -1287,9 +1285,9 @@ async fn a_reentrant_forward_completes_instead_of_deadlocking() {
         ka.operator_send(vec![Item::new(
             AgentId::from(a_id.as_str()),
             json!({"type": "forward", "target": probe,
-                   "payload": {"type": "bounce", "bridge": b_id, "back_to": "kernel_state"},
-                   "forward_timeout": 10.0}),
-        )]),
+                   "payload": {"type": "bounce", "bridge": b_id, "back_to": "kernel_state"}}),
+        )
+        .with_timeout(10.0)]),
     )
     .await
     .expect("the round trip must not hang")
@@ -1783,30 +1781,35 @@ async fn forward_error_texts_match_python() {
     let bid = id_for("a715", &tmp);
     create_bridge(&kernel, &bid, "peer", "memory").await;
     // validation: the declaration names the missing argument.
-    let r = ask(&kernel, &bid, json!({"type": "forward", "target": "x", "forward_timeout": 30.0})).await;
+    let r = ask(&kernel, &bid, json!({"type": "forward", "target": "x"})).await;
     assert_eq!(r["error"], json!("forward: missing argument 'payload'"), "{r}");
     assert_eq!(r["reason"], json!("missing_arg"), "{r}");
     // pre-boot
     let r = ask(
         &kernel,
         &bid,
-        json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}, "forward_timeout": 30.0}),
+        json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}}),
     )
     .await;
     assert_eq!(r["error"], json!("bridge.forward: not connected"));
     assert_eq!(r["reason"], json!("not_connected"));
     assert_eq!(r["hint"], json!("call boot first"));
 
-    // timeout — python renders the float (`30.0s`, not `30s`).
+    // THE CALL'S OWN DEADLINE bounds a forward (#795): past it the call settles
+    // `timed_out`, and a reply frame after it is late.
     let peer = inject_one(&AgentId::from(bid.as_str()));
     let _ = ask(&kernel, &bid, json!({"type": "boot"})).await;
-    let r = ask(
-        &kernel,
-        &bid,
-        json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}, "forward_timeout": 0.05}),
-    )
-    .await;
-    assert_eq!(r, json!({"error": "bridge.forward: timeout after 0.05s"}));
+    let o = kernel
+        .operator_send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}}),
+        )
+        .with_timeout(0.05)])
+        .await
+        .remove(0);
+    assert_eq!(o.status, fantastic_kernel::Status::TimedOut, "{}", o.result);
+    let st = ask(&kernel, &bid, json!({"type": "reflect"})).await;
+    assert_eq!(st["pending_count"], 0, "a timed-out forward leaves the pending table: {st}");
 
     // an inbound `error` frame RESOLVES the forward with python's text.
     let call = peer
@@ -1828,11 +1831,63 @@ async fn forward_error_texts_match_python() {
     let r = ask(
         &kernel2,
         &bridge_id,
-        json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}, "forward_timeout": 5.0}),
+        json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}}),
     )
     .await;
     answer.await.unwrap();
     assert_eq!(r, json!({"error": "remote error: boom"}));
+}
+
+/// THE DEFERRED FORWARD (#795): the call is acked at once and the forward's handler
+/// has returned; the far side's reply frame, coming later, settles it — delivered
+/// to the caller as a message, with the far store's secret marks on its row.
+#[tokio::test]
+async fn a_forward_settles_from_the_remote_settle_frame() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_kernel(&tmp).await;
+    let bid = id_for("a_defer", &tmp);
+    create_bridge(&kernel, &bid, "peer", "memory").await;
+    let peer = inject_one(&AgentId::from(bid.as_str()));
+    let _ = ask(&kernel, &bid, json!({"type": "boot"})).await;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let ack = fantastic_kernel::send::as_operator(
+        kernel.call(
+            Item::new(
+                AgentId::from(bid.as_str()),
+                json!({"type": "forward", "target": "far", "payload": {"type": "reflect"}}),
+            ),
+            move |o| async move {
+                let _ = tx.send(o);
+            },
+        ),
+    )
+    .await;
+    assert_eq!(ack.status, fantastic_kernel::Status::Accepted, "{}", ack.result);
+    let frame = peer.recv_frame().await.expect("the call frame").into_value();
+    assert_eq!(frame["type"], "call", "{frame}");
+    // the forward is open — in `ps` terms its execution waits — until the frame
+    let st = ask(&kernel, &bid, json!({"type": "reflect"})).await;
+    assert_eq!(st["pending_count"], 1, "{st}");
+    let id = frame["id"].as_str().unwrap_or("").to_string();
+    peer.send_frame(json!({"type": "reply", "id": id, "data": {"far": true, "key": "s3cret"}, "secret": ["key"]}))
+        .await
+        .expect("the reply frame");
+    let o = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+        .await
+        .expect("the forward settled")
+        .expect("delivered");
+    assert_eq!(o.status, fantastic_kernel::Status::Completed, "{}", o.result);
+    assert_eq!(o.result, json!({"far": true, "key": "s3cret"}), "the caller gets it whole");
+    let pid = ack.pid.expect("pid").0;
+    let settle = kernel
+        .rows
+        .all()
+        .into_iter()
+        .find(|r| r.get("kind") == Some(&json!("settle")) && r.get("parent") == Some(&json!(pid)))
+        .expect("the settle row");
+    assert!(!serde_json::to_string(&settle).unwrap().contains("s3cret"), "{settle:?}");
+    let st = ask(&kernel, &bid, json!({"type": "reflect"})).await;
+    assert_eq!(st["pending_count"], 0, "{st}");
 }
 
 /// The directory replies are python's shapes.
@@ -2107,46 +2162,6 @@ async fn a_malformed_frame_is_skipped_and_the_reader_survives() {
     server.abort();
 }
 
-/// `forward_timeout` (and `list_timeout`) is a number: the declaration refuses
-/// `null` or a string by name, none is coerced to one.
-#[tokio::test]
-async fn forward_timeout_is_a_number() {
-    let tmp = TempDir::new().unwrap();
-    let kernel = mk_two_family_kernel(&tmp).await;
-    let leg = id_for("a739_leg", &tmp);
-    create_leg(
-        &kernel,
-        WS_HANDLER_MODULE,
-        &leg,
-        json!({"transport": "memory"}),
-    )
-    .await;
-    let fwd = |timeout: Value| {
-        json!({"type": "forward", "target": "x", "payload": {"type": "reflect"},
-               "forward_timeout": timeout})
-    };
-    // a `forward_timeout` that is not a number is refused by name — no string is
-    // coerced to one; an ABSENT one takes the declared 30 s default
-    let r = ask(&kernel, &leg, fwd(Value::Null)).await;
-    assert_eq!(r["reason"], "bad_arg", "{r}");
-    assert_eq!(r["arg"], "forward_timeout", "{r}");
-    let r = ask(
-        &kernel,
-        &leg,
-        json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}}),
-    )
-    .await;
-    assert_eq!(r["reason"], "not_connected", "{r}");
-    for bad in [json!("soon"), json!("5")] {
-        let r = ask(&kernel, &leg, fwd(bad.clone())).await;
-        assert_eq!(r["reason"], "bad_arg", "{bad}: {r}");
-        assert_eq!(r["arg"], "forward_timeout", "{bad}: {r}");
-    }
-    // a number reaches the connection check
-    let r = ask(&kernel, &leg, fwd(json!(5))).await;
-    assert_eq!(r["reason"], "not_connected", "{r}");
-}
-
 /// An unknown verb is refused by each leg's own entry, naming what the leg answers;
 /// the relay's directory verbs are not a ws leg's. The raw `type` is echoed back.
 #[tokio::test]
@@ -2319,8 +2334,7 @@ async fn a_binary_forward_ships_raw_bytes_and_returns_the_reply_body() {
             &k,
             &b,
             json!({"type": "forward", "target": "far_fb",
-                   "payload": {"type": "write_stream", "path": "x.bin"},
-                   "forward_timeout": 30.0}),
+                   "payload": {"type": "write_stream", "path": "x.bin"}}),
             vec![Step::from("payload"), Step::from("bytes")],
             vec![0x00, 0xFF, 0x10],
         )
@@ -2384,7 +2398,7 @@ async fn a_binary_forward_ships_raw_bytes_and_returns_the_reply_body() {
         send_bin(
             &k,
             &b,
-            json!({"type": "forward", "target": "far_fb", "payload": {"type": "stat"}, "forward_timeout": 30.0}),
+            json!({"type": "forward", "target": "far_fb", "payload": {"type": "stat"}}),
             vec![1],
         )
         .await
@@ -2413,7 +2427,7 @@ async fn a_binary_forward_before_boot_is_not_connected() {
     let out = send_bin(
         &kernel,
         &bid,
-        json!({"type": "forward", "target": "far", "payload": {"type": "x"}, "forward_timeout": 30.0}),
+        json!({"type": "forward", "target": "far", "payload": {"type": "x"}}),
         vec![1],
     )
     .await;
@@ -2459,7 +2473,7 @@ async fn both_family_shells_share_one_behaviour() {
         assert_eq!(out.body, None);
         let out = kernel.operator_send(vec![Item::new(
                 AgentId::from(id.as_str()),
-                json!({"type": "forward", "target": "far", "payload": {"type": "x"}, "forward_timeout": 30.0}),
+                json!({"type": "forward", "target": "far", "payload": {"type": "x"}}),
             )
             .with_binary_key("bytes", vec![1])])
             .await
@@ -2576,11 +2590,11 @@ async fn every_bridge_verb_is_checked_by_its_declaration() {
             "reconnect: unknown argument 'now'",
         ),
         (
-            json!({"type": "forward", "payload": {"type": "x"}, "forward_timeout": 30.0}),
+            json!({"type": "forward", "payload": {"type": "x"}}),
             "forward: missing argument 'target'",
         ),
         (
-            json!({"type": "forward", "target": "t", "payload": "x", "forward_timeout": 30.0}),
+            json!({"type": "forward", "target": "t", "payload": "x"}),
             "forward: argument 'payload' must be",
         ),
         (
@@ -2719,9 +2733,8 @@ async fn declared_timeout_defaults_show_in_reflect() {
     create_leg(&kernel, RELAY_HANDLER_MODULE, &id, json!({"transport": "memory"})).await;
     let r = ask(&kernel, &id, json!({"type": "reflect"})).await;
     let text = r.to_string();
-    for want in ["forward_timeout:number (default 30.0)", "list_timeout:number (default 30.0)"] {
-        assert!(text.contains(want), "{want}: {text}");
-    }
+    let want = "list_timeout:number (default 30.0)";
+    assert!(text.contains(want), "{want}: {text}");
     let schema = crate::record::relay::RECORD.schema().clone();
     assert_eq!(schema["properties"]["heartbeat"]["default"], json!(30.0), "{schema}");
     assert_eq!(schema["properties"]["reconnect"]["default"], json!(10.0), "{schema}");

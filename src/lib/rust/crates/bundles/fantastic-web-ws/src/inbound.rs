@@ -17,13 +17,13 @@ use fantastic_kernel::{AgentId, Blob, Item, Kernel};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-/// Send the item onward as the leg; the reply comes back with the raw body at its
-/// slot of the reply (an onward call answering a chunk).
-pub async fn call(
-    a: InboundCall,
-    body: Option<Blob>,
-    kernel: &Arc<Kernel>,
-) -> (Value, Option<Blob>) {
+/// Send the item onward as the leg (#795): the leg's call DEFERS its settle and
+/// the onward call goes out through [`Kernel::call`]; the onward settle — a
+/// message to the leg — settles it, the raw body at its slot of the reply (an
+/// onward call answering a chunk) and the onward reply's own secret paths (a
+/// credential store's `get` fields), which the leg's settle row hides too. Nothing
+/// waits. `None`: deferred; `Some`: the answer now (a dispatch that cannot defer).
+pub async fn call(a: InboundCall, body: Option<Blob>, kernel: &Arc<Kernel>) -> Option<(Value, Option<Blob>)> {
     let item = a.item;
     let mut inner = item.payload;
     // The body rode at `item.payload.<slot>`; onward it sits at `<slot>` of the
@@ -44,12 +44,35 @@ pub async fn call(
     if let Some(b) = onward_body {
         onward = onward.with_binary(b.path, b.bytes);
     }
-    let out = kernel.send(vec![onward]).await.remove(0);
-    // The onward reply's own secret paths (a credential store's `get` fields) are
-    // rooted at the reply, which IS this leg's reply: the leg's settle row hides
-    // them too, and the transport can tell the far side (`Outcome::secret`).
-    fantastic_kernel::note_reply_secret(out.secret.clone());
-    (out.result, out.body)
+    let d = match kernel.defer() {
+        Ok(d) => d,
+        Err(refused) => return Some((refused, None)),
+    };
+    let k = Arc::clone(kernel);
+    let ack = kernel
+        .call(onward, move |out| async move {
+            k.settle_deferred(d.pid(), as_reply(out));
+        })
+        .await;
+    if ack.status != fantastic_kernel::Status::Accepted {
+        // refused at launch: that refusal is the leg's answer
+        kernel.settle_deferred(d.pid(), as_reply(ack));
+    }
+    None
+}
+
+/// The onward outcome as the leg's own reply: its result, body and secret marks,
+/// settled as a handler's reply settles (`errored` when refusal-shaped).
+fn as_reply(out: fantastic_kernel::Outcome) -> fantastic_kernel::Outcome {
+    let status = if fantastic_kernel::is_refused(&out.result) {
+        fantastic_kernel::Status::Errored
+    } else {
+        fantastic_kernel::Status::Completed
+    };
+    let marks = out.secret.clone();
+    fantastic_kernel::Outcome::new(out.pid, status, out.result)
+        .with_body(out.body)
+        .with_secret(marks)
 }
 
 /// Emit the payload on the target as the leg.

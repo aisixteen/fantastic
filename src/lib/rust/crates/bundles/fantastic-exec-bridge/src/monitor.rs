@@ -288,25 +288,43 @@ fn deliver(cfg: &Cfg, key: &Key, lines: Vec<String>, ended: bool, kernel: &Arc<K
     let target = AgentId::from(cfg.notify.as_str());
     let key = key.clone();
     let (owner, job_id, notify) = (cfg.owner.clone(), cfg.job_id.get(), cfg.notify.clone());
+    // THE DELIVERY IS A CALL (#795): acked at once; its settle comes back as a
+    // message, and a refusal — at launch or in the settle — ends the monitor.
     kernel.spawn_task(&cfg.owner, "monitor_notify", async move {
-        let out = k
-            .send(vec![Item::new(
-                target,
-                json!({"type": "send", "text": text}),
-            )])
+        let judge = Judge { key, owner, id, job_id, notify, kernel: Arc::clone(&k) };
+        let later = judge.clone();
+        let ack = k
+            .call(
+                Item::new(target, json!({"type": "send", "text": text})),
+                move |o| async move { later.judge(&o.result).await },
+            )
             .await;
-        let got = out
-            .into_iter()
-            .next()
-            .map(|o| o.result)
-            .unwrap_or(Value::Null);
+        if ack.status != fantastic_kernel::Status::Accepted {
+            judge.judge(&ack.result).await;
+        }
+    });
+}
+
+/// What judges one delivery's answer: a refusal kills the monitor, loudly.
+#[derive(Clone)]
+struct Judge {
+    key: Key,
+    owner: AgentId,
+    id: i64,
+    job_id: i64,
+    notify: String,
+    kernel: Arc<Kernel>,
+}
+
+impl Judge {
+    async fn judge(&self, got: &Value) {
         let reason = got.get("reason").and_then(Value::as_str).unwrap_or("");
         if !REFUSED.contains(&reason) {
             return;
         }
         let why = {
             let mut g = monitors();
-            let Some(m) = g.get_mut(&key).filter(|m| m.error.is_none()) else {
+            let Some(m) = g.get_mut(&self.key).filter(|m| m.error.is_none()) else {
                 return;
             };
             let why = got
@@ -319,8 +337,8 @@ fn deliver(cfg: &Cfg, key: &Key, lines: Vec<String>, ended: bool, kernel: &Arc<K
             let _ = m.tx.send(Msg::Dead);
             why
         };
-        refused(&owner, id, job_id, &notify, reason, &why, &k).await;
-    });
+        refused(&self.owner, self.id, self.job_id, &self.notify, reason, &why, &self.kernel).await;
+    }
 }
 
 /// The monitor just died of a refused delivery: say so — python `_refused`, a

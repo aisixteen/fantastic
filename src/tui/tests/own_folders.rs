@@ -170,7 +170,7 @@ async fn exec_and_files_resolve_against_a_workdir_far_from_the_state() {
     assert!(!names.contains(&"agent.yaml"), "not the state folder: {listed}");
     #[cfg(unix)]
     {
-        let r = call(&k, "exec", json!({"type": "run", "command": "pwd", "wait_s": 30})).await;
+        let r = call(&k, "exec", json!({"type": "run", "command": "pwd"})).await;
         let want = std::fs::canonicalize(&work).unwrap().display().to_string();
         let ran_there = r["lines"].as_array().is_some_and(|l| l.iter().any(|row| row["line"].as_str() == Some(&want)));
         assert!(ran_there, "exec cwd `.` runs in the work folder: {r}");

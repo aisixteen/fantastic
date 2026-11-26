@@ -183,6 +183,25 @@ pub(crate) fn drain_verdict(p: &Value, owner: &AgentId) -> Option<Value> {
     Some(json!({"op": "inbox", "payload": p}))
 }
 
+/// The program's reply frame for one send: `{op: reply, rid, data}`, its chunk (if
+/// any) raw at `["data", …its slot]`.
+async fn push_reply(wr: &Arc<tokio::sync::Mutex<CtrlWriteHalf>>, rid: Value, out: fantastic_kernel::Outcome) {
+    let (data, body) = (out.result, out.body);
+    let env = json!({"op": "reply", "rid": rid, "data": data});
+    match body {
+        // The verb returned NO chunk — a plain text frame. `Some(b)` with `b` EMPTY
+        // is still a chunk (an empty file), so the test is the carrier, never the
+        // length.
+        None => push(wr, &env).await,
+        Some(body) => {
+            // A chunk rides raw at `["data", …its slot]` — `["data", "bytes"]` for a
+            // `read_stream` (python's reply dict holds it there natively).
+            let at = Blob::new(body.nested_in("data"), body.bytes);
+            push_binary(wr, env, &at).await;
+        }
+    }
+}
+
 /// Read one `[4-byte BE len | payload]` frame. `None` = the socket is finished:
 /// EOF, an error, or a length over [`MAX_FRAME`] — a wire violation the stream
 /// cannot be resynchronised after.
@@ -270,21 +289,17 @@ pub async fn serve(
                 if let Some(b) = payload_body(framed) {
                     item = item.with_binary(b.path, b.bytes);
                 }
-                let out = kernel.send(vec![item]).await.remove(0);
-                let (data, body) = (out.result, out.body);
-                let env = json!({"op": "reply", "rid": m.get("rid"), "data": data});
-                match body {
-                    // The verb returned NO chunk — a plain text frame. `Some(b)`
-                    // with `b` EMPTY is still a chunk (an empty file), so the
-                    // test is the carrier, never the length.
-                    None => push(&wr, &env).await,
-                    Some(body) => {
-                        // A chunk rides raw at `["data", …its slot]` — `["data",
-                        // "bytes"]` for a `read_stream` (python's reply dict
-                        // holds it there natively).
-                        let at = Blob::new(body.nested_in("data"), body.bytes);
-                        push_binary(&wr, env, &at).await;
-                    }
+                // NOTHING WAITS (#795): the call is acked, and its settle — a
+                // message to this relay — is the reply frame. The read loop goes on
+                // at once; the program matches each reply by its `rid`. A call
+                // refused at launch is answered with the refusal now.
+                let rid = m.get("rid").cloned().unwrap_or(Value::Null);
+                let (w, r) = (Arc::clone(&wr), rid.clone());
+                let ack = kernel
+                    .call(item, move |out| async move { push_reply(&w, r, out).await })
+                    .await;
+                if ack.status != fantastic_kernel::Status::Accepted {
+                    push_reply(&wr, rid, ack).await;
                 }
             }
             Some("emit") => {

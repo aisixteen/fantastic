@@ -23,7 +23,7 @@
 //! | `boot` | none | `{booted, transport}` or `{error, already}` |
 //! | `shutdown` | none | `{stopped:true}` (runs the `on_delete` cascade) |
 //! | `reconnect` | none | shutdown + boot (the manual redial; a dropped `ws` link redials by itself) |
-//! | `forward` | `{target, payload, forward_timeout}` | the unwrapped reply from the remote |
+//! | `forward` | `{target, payload}` | the unwrapped reply from the remote, as the call's deferred settle |
 //! | `watch_remote` | `{target}` | `{ok, watching}` — stream a remote agent's emits onto this bridge's inbox |
 //! | `unwatch_remote` | `{target}` | `{ok, unwatched}` |
 //!
@@ -42,10 +42,10 @@
 //!                                        — the far kernel judges it as the leg
 //!                                        that serves it there
 //! outbound  {type:"watch", src:target}  / {type:"unwatch", src:target}
-//! inbound   {type:"reply", id, data, secret?} — read loop routes to pending oneshot
+//! inbound   {type:"reply", id, data, secret?} — read loop settles the pending forward
 //!                                        (`secret`: dotted paths into `data`, noted
 //!                                        as the forward's reply marks)
-//! inbound   {type:"error", id, error}    — read loop fails the pending oneshot
+//! inbound   {type:"error", id, error}    — read loop settles the pending forward with it
 //! inbound   {type:"event", src, payload} — re-emitted (payload + `src`) on this bridge's
 //!                                        inbox ONLY for a subscribed `src`, else dropped
 //! inbound   {type:"call", id, target, payload} — served AS THE LEG, answered
@@ -75,7 +75,7 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
-use fantastic_bundle::{py_float_repr, py_repr};
+use fantastic_bundle::py_repr;
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::refusal::{refusal_hint, NOT_CONNECTED};
 use fantastic_kernel::{AgentId, Blob, Item, Kernel};
@@ -84,7 +84,7 @@ use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use tokio::sync::{oneshot, Mutex as AsyncMutex};
+use tokio::sync::Mutex as AsyncMutex;
 
 // The authorization rule registries live in the shared `fantastic-io-bridge` base
 // (every io derivation imports them).
@@ -148,12 +148,39 @@ impl OnceLockBridgeMap {
     }
 }
 
-/// A pending forward's reply channel — carries `(reply, body)` (the body is the
-/// reply frame's raw chunk AT ITS SLOT of the reply — `["bytes"]` for a
-/// `read_stream` forward, `["x.y"]` for a peer that answered at the key `"x.y"`
-/// — `None` for a text reply), plus the reply frame's `secret` marks (dotted
-/// paths into the reply, empty when the frame named none), or an error string.
-type PendingReply = oneshot::Sender<Result<(Value, Option<Blob>, Vec<String>), String>>;
+/// A pending forward (#795): the `forward` execution that DEFERRED its settle. The
+/// matching reply frame settles it — the reply, its raw chunk AT ITS SLOT of the
+/// reply (`["bytes"]` for a `read_stream` forward, `["x.y"]` for a peer that
+/// answered at the key `"x.y"`; none for a text reply) and the frame's `secret`
+/// marks. Nothing waits for it: the forward's handler has returned, and the call's
+/// own deadline (its `ps` row, `cancel`) bounds it.
+type PendingReply = fantastic_kernel::Deferred;
+
+/// Settle one pending forward with the far side's answer, as a handler's reply
+/// would settle: a refusal-shaped answer is `errored`. A forward that already ended
+/// (its deadline, a cancel) takes nothing.
+fn settle_forward(kernel: &Kernel, d: PendingReply, reply: Value, body: Option<Blob>, marks: Vec<String>) {
+    let status = if fantastic_kernel::is_refused(&reply) {
+        fantastic_kernel::Status::Errored
+    } else {
+        fantastic_kernel::Status::Completed
+    };
+    let out = fantastic_kernel::Outcome::new(Some(d.pid()), status, reply)
+        .with_body(body)
+        .with_secret(marks);
+    kernel.settle_deferred(d.pid(), out);
+}
+
+/// Settle every pending forward of `state` with the link's end (`why`).
+fn fail_pending(kernel: &Kernel, state: &BridgeState, why: &str) {
+    let drained: Vec<PendingReply> = {
+        let mut p = state.pending.lock().expect("pending poisoned");
+        p.drain().map(|(_k, v)| v).collect()
+    };
+    for d in drained {
+        settle_forward(kernel, d, json!({ "error": format!("bridge.forward: {why}") }), None, Vec::new());
+    }
+}
 
 /// Per-agent bridge runtime. Cloneable through an `Arc` so the read
 /// loop can hold one reference and the verb handlers can hold
@@ -331,20 +358,21 @@ async fn set_identity_reply(
 }
 
 /// `forward` — the one verb that carries bytes either way: the local caller sends
-/// `{type:forward, target, payload, forward_timeout}`, a request body (if any)
+/// `{type:forward, target, payload}`, a request body (if any)
 /// inside the INNER payload (`Item::with_binary(["payload", …], …)` — python's
 /// forward payload holds the bytes there); the bridge ships a `call` frame (binary
 /// when it carries that body, text otherwise) and returns `(reply, reply_body)` —
 /// the reply body at its slot of the reply (`["bytes"]` for a `read_stream`
 /// forward, the peer's own key otherwise), whenever the peer answered one,
 /// whatever verb it was. A body anywhere else is not part of the forwarded call,
-/// exactly as python's inner payload would not hold it.
+/// exactly as python's inner payload would not hold it. `None`: the call frame went
+/// out and the reply frame settles the call later.
 async fn forward_call(
     agent_id: &AgentId,
     a: verbs::Forward,
     body: Option<Blob>,
     kernel: &Arc<Kernel>,
-) -> (Value, Option<Blob>) {
+) -> Option<(Value, Option<Blob>)> {
     // A body INSIDE the forwarded `payload` — its path below the step `payload`.
     // One bound to the literal top-level key `payload.x` (the REST octet leg) is
     // a different key, never inside it: python's `payload[field] = body` puts it
@@ -356,7 +384,6 @@ async fn forward_call(
         &a.target,
         Value::Object(a.payload),
         carried,
-        a.forward_timeout,
     )
     .await
 }
@@ -444,8 +471,11 @@ macro_rules! bridge_handler {
                     verbs::$m::Call::Shutdown(_) => Value::Null,
                     verbs::$m::Call::Reconnect(_) => reconnect_reply(family, $agent, $kern).await,
                     verbs::$m::Call::Forward(a) => {
-                        let (v, b) = forward_call($agent, a, body, $kern).await;
-                        return Ok((Some(v), b));
+                        return Ok(match forward_call($agent, a, body, $kern).await {
+                            Some((v, b)) => (Some(v), b),
+                            // deferred: the reply frame settles the call
+                            None => (Some(Value::Null), None),
+                        });
                     }
                     verbs::$m::Call::WatchRemote(a) => {
                         watch_remote_reply($agent, &a.target, "watch").await
@@ -460,6 +490,25 @@ macro_rules! bridge_handler {
 
             async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
                 let _ = shutdown_reply(agent_id, kernel).await;
+                Ok(())
+            }
+
+            /// A forward that ended before its reply came (its deadline, a
+            /// `cancel`) leaves the pending table: a reply frame for it then is
+            /// late and settles nothing.
+            async fn on_cancel(
+                &self,
+                agent_id: &AgentId,
+                task_id: &fantastic_kernel::TaskId,
+                _kernel: &Arc<Kernel>,
+            ) -> Result<(), BundleError> {
+                if let Some(state) = BRIDGES.lock().get(agent_id).cloned() {
+                    state
+                        .pending
+                        .lock()
+                        .expect("pending poisoned")
+                        .retain(|_, d| d.pid() != *task_id);
+                }
                 Ok(())
             }
 
@@ -922,13 +971,7 @@ async fn shutdown_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     emit_bridge_down(agent_id, &state, kernel).await;
     // Reject every in-flight forward — same semantics as the
     // Python branch: callers see a ConnectionError flavour.
-    let pending: Vec<PendingReply> = {
-        let mut p = state.pending.lock().expect("pending poisoned");
-        p.drain().map(|(_k, v)| v).collect()
-    };
-    for tx in pending {
-        let _ = tx.send(Err("bridge shut down".to_string()));
-    }
+    fail_pending(kernel, &state, "bridge shut down");
     json!({"stopped": true})
 }
 
@@ -939,18 +982,17 @@ async fn reconnect_reply(family: Family, agent_id: &AgentId, kernel: &Arc<Kernel
 
 /// The shared forward engine — ships a raw `call` frame (text, or binary when
 /// `body` carries a request body at its path inside `inner`) to the remote's
-/// web_ws and awaits the correlated reply. Returns `(reply, body)`; `body` is
-/// `None` when the remote answered a TEXT frame (no chunk at all) and
-/// `Some(chunk)` at its slot of the reply when it answered a binary one — empty
-/// chunk included. Errors surface as `{error}` in the reply.
+/// web_ws, and DEFERS the call's settle (#795): the correlated reply frame settles
+/// it ([`settle_forward`]), as a message to the caller; nothing waits for it here.
+/// `None` once the frame is out; `Some` for an answer now (not connected, the send
+/// failed). A reply body rides at its slot of the reply; errors are `{error}`.
 async fn forward_core(
     kernel: &Arc<Kernel>,
     agent_id: &AgentId,
     target: &str,
     mut inner: Value,
     body: Option<Blob>,
-    timeout_secs: f64,
-) -> (Value, Option<Blob>) {
+) -> Option<(Value, Option<Blob>)> {
     let state = match BRIDGES
         .lock()
         .get(agent_id)
@@ -959,14 +1001,14 @@ async fn forward_core(
     {
         Some(s) => s,
         None => {
-            return (
+            return Some((
                 refusal_hint(
                     NOT_CONNECTED,
                     "bridge.forward: not connected",
                     "call boot first",
                 ),
                 None,
-            )
+            ))
         }
     };
     // The leg's EGRESS rule, off the live record per forward (never a boot-time
@@ -979,13 +1021,15 @@ async fn forward_core(
     // contain one. Fresh per forward AND per boot (the prefix's nonce), so each
     // forward is its own intent.
     let corr = format!("{}-{}", state.corr_prefix, n);
-
-    let (tx, rx) = oneshot::channel::<Result<(Value, Option<Blob>, Vec<String>), String>>();
+    let deferred = match kernel.defer() {
+        Ok(d) => d,
+        Err(refused) => return Some((refused, None)),
+    };
     state
         .pending
         .lock()
         .expect("pending poisoned")
-        .insert(corr.clone(), tx);
+        .insert(corr.clone(), deferred);
 
     // The body's slot in the inner payload is `null` on the wire, in python's
     // position (`encode_frame` nulls the bytes where they sat); the kernel
@@ -1018,43 +1062,22 @@ async fn forward_core(
         None => state.transport.send_frame(frame).await,
     };
     if let Err(e) = send_res {
-        state
+        let d = state
             .pending
             .lock()
             .expect("pending poisoned")
             .remove(&corr);
-        return (
-            json!({"error": format!("bridge.forward: send failed: {}", transport_error_text(&e))}),
-            None,
-        );
-    }
-
-    // Wait for the reply with a timeout. On EITHER timeout OR
-    // close-rejection we clean the pending slot so it doesn't leak.
-    let dur = std::time::Duration::from_secs_f64(timeout_secs.max(0.001));
-    let err = match tokio::time::timeout(dur, rx).await {
-        Ok(Ok(Ok((v, b, marks)))) => {
-            // The far store's reply marks, rooted at this reply: the calling
-            // kernel records the reply as `[secret]` there, the caller gets it
-            // whole (this runs inside the forward dispatch, `note_reply_secret`).
-            fantastic_kernel::note_reply_secret(marks);
-            return (v, b);
+        if let Some(d) = d {
+            settle_forward(
+                kernel,
+                d,
+                json!({"error": format!("bridge.forward: send failed: {}", transport_error_text(&e))}),
+                None,
+                Vec::new(),
+            );
         }
-        Ok(Ok(Err(e))) => format!("bridge.forward: {e}"),
-        // (the remote-error frame resolves the pending slot with a VALUE — see
-        // the read loop — so it returns through the `Ok(Ok(Ok(..)))` arm above)
-        Ok(Err(_canceled)) => "bridge.forward: pending dropped".to_string(),
-        Err(_elapsed) => format!(
-            "bridge.forward: timeout after {}s",
-            py_float_repr(timeout_secs)
-        ),
-    };
-    state
-        .pending
-        .lock()
-        .expect("pending poisoned")
-        .remove(&corr);
-    (json!({ "error": err }), None)
+    }
+    None
 }
 
 /// `watch_remote` / `unwatch_remote`: send `{type:"watch"|"unwatch",
@@ -1110,9 +1133,9 @@ async fn watch_remote_reply(agent_id: &AgentId, target: &str, kind: &str) -> Val
 /// ship its reply `{type:'reply', id, data}`. Sent AS THE LEG `leg`: this runs in
 /// a task the leg's own read loop spawned, so the gate judges the leg.
 ///
-/// Run as its own task (see the read loop): the local handler may itself
-/// `forward` back over this same bridge, and a read loop parked inside
-/// `kernel.send` cannot read the frame that would settle it.
+/// NOTHING WAITS (#795): the local call goes out through [`Kernel::call`] and its
+/// settle — a message to the leg — ships the reply frame. `open` holds the frame
+/// ids whose settle has not shipped yet, so the read loop's end can cancel them.
 ///
 /// Over WS the remote's `web_ws` calls this kernel's agents once the leg said
 /// `hello` (`<guid>|<agent>` there); the memory-paired tests and the symmetric
@@ -1129,6 +1152,7 @@ async fn serve_inbound_call(
     kernel: Arc<Kernel>,
     frame: Value,
     body: Option<Blob>,
+    open: Arc<Mutex<HashSet<String>>>,
 ) {
     // The frame is typed once: its id, target and the call's verb come from the
     // declaration, not from reads of the raw value. A frame that is not a call of
@@ -1188,32 +1212,49 @@ async fn serve_inbound_call(
         if let Some(b) = body.and_then(|b| b.under("payload")) {
             item = item.with_binary(b.path, b.bytes);
         }
-        let out = kernel.send(vec![item]).await.remove(0);
-        let _held = flush_served(&state).await;
-        // the reply's own secret paths ride the frame (absent when none), as
-        // `web_ws` sends them
-        let marks = out.secret.clone();
-        match out.body {
-            None => {
-                let mut env = json!({"type":"reply","id":corr_id,"data":out.result});
-                if !marks.is_empty() {
-                    env["secret"] = json!(marks);
-                }
-                let _ = state.transport.send_frame(env).await;
+        open.lock().expect("open calls poisoned").insert(corr_id.clone());
+        let (st, id, gone) = (Arc::clone(&state), corr_id.clone(), Arc::clone(&open));
+        let ack = kernel
+            .call(item, move |out| async move {
+                ship_reply(&st, &id, out).await;
+                gone.lock().expect("open calls poisoned").remove(&id);
+            })
+            .await;
+        if ack.status != fantastic_kernel::Status::Accepted {
+            // refused at launch: the refusal is the reply, now
+            ship_reply(&state, &corr_id, ack).await;
+            open.lock().expect("open calls poisoned").remove(&corr_id);
+        }
+    }
+}
+
+/// Ship one served call's reply frame — after every event the far side watches
+/// through this leg that is already queued.
+async fn ship_reply(state: &Arc<BridgeState>, corr_id: &str, out: fantastic_kernel::Outcome) {
+    let _held = flush_served(state).await;
+    // the reply's own secret paths ride the frame (absent when none), as
+    // `web_ws` sends them
+    let marks = out.secret.clone();
+    match out.body {
+        None => {
+            let mut env = json!({"type":"reply","id":corr_id,"data":out.result});
+            if !marks.is_empty() {
+                env["secret"] = json!(marks);
             }
-            Some(reply_body) => {
-                // Binary reply frame — the body rides raw at `["data", …its slot]`
-                // (`["data", "bytes"]` for a `read_stream` chunk), `null` there on
-                // the head in python's position (appended when the reply did not
-                // name the slot).
-                let mut env = json!({"type":"reply","id":corr_id,"data":out.result});
-                if !marks.is_empty() {
-                    env["secret"] = json!(marks);
-                }
-                let at = Blob::new(reply_body.nested_in("data"), reply_body.bytes);
-                let _ = fantastic_bundle::path::place(&mut env, &at.path, Value::Null);
-                let _ = state.transport.send_binary(env, at).await;
+            let _ = state.transport.send_frame(env).await;
+        }
+        Some(reply_body) => {
+            // Binary reply frame — the body rides raw at `["data", …its slot]`
+            // (`["data", "bytes"]` for a `read_stream` chunk), `null` there on
+            // the head in python's position (appended when the reply did not
+            // name the slot).
+            let mut env = json!({"type":"reply","id":corr_id,"data":out.result});
+            if !marks.is_empty() {
+                env["secret"] = json!(marks);
             }
+            let at = Blob::new(reply_body.nested_in("data"), reply_body.bytes);
+            let _ = fantastic_bundle::path::place(&mut env, &at.path, Value::Null);
+            let _ = state.transport.send_binary(env, at).await;
         }
     }
 }
@@ -1394,8 +1435,8 @@ async fn drop_served(state: &Arc<BridgeState>, kernel: &Arc<Kernel>) {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Wire {
-    /// A call for this leg to serve; `id` names its execution.
-    Call { id: Option<String> },
+    /// A call for this leg to serve (its frame is typed when it is served).
+    Call,
     /// An event for an agent this leg watches on the far side.
     Event { src: String, payload: Map<String, Value> },
     /// The reply to a call this leg forwarded.
@@ -1414,10 +1455,12 @@ async fn read_loop(
     kernel: Arc<Kernel>,
     family: Family,
 ) {
-    // In-flight inbound dispatches — one task per `call` frame (with the frame id
-    // that names its execution), ended together when the loop exits so nothing
-    // keeps running into a dead transport.
-    let mut calls: Vec<(String, tokio::task::JoinHandle<()>)> = Vec::new();
+    // Inbound calls — one short task per `call` frame (it launches the call), and
+    // the frame ids (each names its execution) whose settle has not shipped yet:
+    // ended together when the loop exits so nothing keeps running into a dead
+    // transport.
+    let mut calls: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    let open: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     loop {
         let frame = match state.transport.recv_frame().await {
             Ok(f) => f,
@@ -1437,27 +1480,21 @@ async fn read_loop(
             continue;
         };
         match kind {
-            Wire::Call { id: frame_id } => {
-                // TRACKED TASK, not an inline await. Serving the call here parked
-                // the loop inside `kernel.send`, so a handler that forwarded back
-                // over THIS bridge could never have its reply read — the round
-                // trip deadlocked until the 30s forward timeout. One task per
-                // call, each carrying THIS loop's identity — the leg's, since its
-                // own `boot` spawned the loop (`spawn_inherit`) — all aborted when
-                // the loop exits.
+            Wire::Call => {
+                // A TASK per call, carrying THIS loop's identity — the leg's, since
+                // its own `boot` spawned the loop (`spawn_inherit`). It launches the
+                // call and ends; the settle ships the reply.
                 let call_state = Arc::clone(&state);
                 let call_kernel = Arc::clone(&kernel);
-                calls.retain(|(_, h)| !h.is_finished());
-                calls.push((
-                    frame_id.unwrap_or_default(),
-                    fantastic_kernel::spawn_inherit(serve_inbound_call(
-                        agent_id.clone(),
-                        call_state,
-                        call_kernel,
-                        frame,
-                        body,
-                    )),
-                ));
+                calls.retain(|h| !h.is_finished());
+                calls.push(fantastic_kernel::spawn_inherit(serve_inbound_call(
+                    agent_id.clone(),
+                    call_state,
+                    call_kernel,
+                    frame,
+                    body,
+                    Arc::clone(&open),
+                )));
             }
             Wire::Event { src, payload } => {
                 // The `watch_remote` RETURN half: re-emitted on the bridge's OWN
@@ -1491,27 +1528,26 @@ async fn read_loop(
                     .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
                     .and_then(|m| fantastic_kernel::secret::check(&m).ok())
                     .unwrap_or_default();
-                let tx = state.pending.lock().expect("pending poisoned").remove(&id);
-                if let Some(tx) = tx {
+                let d = state.pending.lock().expect("pending poisoned").remove(&id);
+                if let Some(d) = d {
                     // Carry the reply body alongside, at its slot of the reply
                     // (`["data", …p]` on the frame is `p` in `data`). A TEXT reply
                     // frame carried no chunk at all (`None`); a binary one carries
                     // `Some`, even when the chunk is empty. A body the frame
-                    // put outside `data` is not part of the reply.
-                    let _ = tx.send(Ok((data, body.and_then(|b| b.under("data")), marks)));
+                    // put outside `data` is not part of the reply. The far
+                    // store's reply marks are rooted at this reply: the calling
+                    // kernel records it as `[secret]` there, the caller gets it
+                    // whole.
+                    settle_forward(&kernel, d, data, body.and_then(|b| b.under("data")), marks);
                 }
             }
             Wire::Error { id, error } => {
                 // python RESOLVES the pending future with this value — the
                 // forward returns it verbatim, with no `bridge.forward:` prefix.
                 let err = fantastic_kernel::refusal::error_text(&json!({ "error": error })).unwrap_or_default();
-                let tx = state.pending.lock().expect("pending poisoned").remove(&id);
-                if let Some(tx) = tx {
-                    let _ = tx.send(Ok((
-                        json!({ "error": format!("remote error: {err}") }),
-                        None,
-                        Vec::new(),
-                    )));
+                let d = state.pending.lock().expect("pending poisoned").remove(&id);
+                if let Some(d) = d {
+                    settle_forward(&kernel, d, json!({ "error": format!("remote error: {err}") }), None, Vec::new());
                 }
             }
             Wire::Watch => serve_watch(&agent_id, &state, &kernel, &frame).await,
@@ -1527,7 +1563,7 @@ async fn read_loop(
 
     // Read loop exit — the transport is gone, so every in-flight inbound dispatch
     // has nowhere to send its reply. End them, then emit bridge_down + fail
-    // every pending oneshot.
+    // every pending forward.
     //
     // THROUGH THE TABLE, not a raw abort: the frame id IS the execution id (the
     // pid), and a dropped dispatch frees none of what its handler holds — an AI
@@ -1536,23 +1572,18 @@ async fn read_loop(
     // stops the task, exactly as an operator's `cancel` would. The abort then
     // catches the serving task itself (its reply has nowhere to go) and a call
     // still before its dispatch (no execution yet).
-    for (frame_id, h) in &calls {
-        if !h.is_finished() {
-            if let Some(exec) = kernel.ledger.resolve_name(frame_id) {
-                kernel.cancel_task(&fantastic_kernel::TaskId(exec)).await;
-            }
+    let unshipped: Vec<String> = open.lock().expect("open calls poisoned").drain().collect();
+    for frame_id in &unshipped {
+        if let Some(exec) = kernel.ledger.resolve_name(frame_id) {
+            kernel.cancel_task(&fantastic_kernel::TaskId(exec)).await;
         }
+    }
+    for h in &calls {
         h.abort();
     }
     drop_served(&state, &kernel).await;
     emit_bridge_down(&agent_id, &state, &kernel).await;
-    let drained: Vec<PendingReply> = {
-        let mut p = state.pending.lock().expect("pending poisoned");
-        p.drain().map(|(_k, v)| v).collect()
-    };
-    for tx in drained {
-        let _ = tx.send(Err("bridge transport closed".to_string()));
-    }
+    fail_pending(&kernel, &state, "bridge transport closed");
     // A dialled `ws` link that dropped is dialled again. Any other end of this
     // loop is not a drop to heal: the memory transport is a test pair, and the
     // relay transport heals its own socket.
