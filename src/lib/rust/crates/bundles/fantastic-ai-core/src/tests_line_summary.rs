@@ -167,13 +167,15 @@ async fn a_turn_of_a_line_alone_is_a_turn_with_no_call() {
     );
     say(&kernel, &agent, "go").await;
     assert!(until_passes(&s, 2).await);
+    // re-asked inside the turn (#795): nothing of the attempt ran, its line included
     assert!(
-        s.request(1).contains("[no call was dispatched]"),
+        s.request(1)
+            .contains(&crate::tests::json_text(crate::model_format::default::REPORT_NO_CALL)),
         "{}",
         s.request(1)
     );
     let r = verb(&kernel, &agent, json!({"type": "reflect"})).await;
-    assert_eq!(r["line_summary"]["text"], "thinking it over", "{r}");
+    assert_eq!(r["line_summary"], Value::Null, "{r}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -187,7 +189,7 @@ async fn not_offered_the_call_is_refused_reflect_has_no_line_and_the_prompt_no_l
     );
     let s = script(
         &agent,
-        vec![pass(line("reading")), pass(DONE)],
+        vec![pass(format!("{}\n{DONE}", line("reading"))), pass(DONE)],
         Duration::ZERO,
     );
     let mut rx = rebind_backend_inbox(&kernel, &agent);
@@ -214,7 +216,11 @@ async fn a_call_with_no_line_is_told_so() {
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_kernel(&tmp, "ls_empty").await;
     offer(&kernel, &agent).await;
-    let s = script(&agent, vec![pass(line("  ")), pass(DONE)], Duration::ZERO);
+    let s = script(
+        &agent,
+        vec![pass(format!("{}\n{DONE}", line("  "))), pass(DONE)],
+        Duration::ZERO,
+    );
     say(&kernel, &agent, "go").await;
     assert!(until_passes(&s, 2).await);
     assert!(

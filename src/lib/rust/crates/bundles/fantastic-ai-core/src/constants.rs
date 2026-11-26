@@ -178,18 +178,8 @@ pub const KEEP_SUMMARY_MAX: usize = 300;
 /// than one level per cut.
 pub const FOLD_RUN: usize = 3;
 
-// ─── the no-call reminder (python core.py) ──────────────────────────────────
-
-/// A chain turn that dispatches no call is told to TRY AGAIN (emit a call, or end
-/// the chain with `done`/`await`). MAX_SILENT_TURNS in a row — prose-only turns
-/// and dead turns (only thinking) alike, reset by any call — and the chain GIVES
-/// UP: no more reminders, the caller is told the model could not answer (failing
-/// on the first dead turn would end long chains early; an unbounded reminder loop
-/// would never end).
-pub const MAX_SILENT_TURNS: usize = 10;
-
 /// How many times a turn re-asks its model after an answer with a malformed or foreign
-/// call (#766, Q1): at most `1 + CALL_RETRIES` attempts per sequence. After the last one
+/// call, or with no call (#766 Q1, #795): at most `1 + CALL_RETRIES` attempts per sequence. After the last one
 /// failed the harness stops the turn with the `stop` call; the model is not asked again.
 pub const CALL_RETRIES: usize = 2;
 

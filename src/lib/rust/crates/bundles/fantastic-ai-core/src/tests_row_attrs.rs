@@ -282,44 +282,43 @@ async fn a_stored_row_maps_the_same_on_every_request_and_no_message_opens_with_a
     }
 }
 
-/// A pass that dies keeps its incoming row with the ts taken for its request, so the
-/// reroll's request shows that row as the dead pass's request did.
+/// A thinking-only attempt is re-asked inside its pass (#795): the pass keeps ONE
+/// incoming row, with the ts taken for its first request, and the re-ask's request
+/// shows that row as the first request did.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dead_turn_keeps_the_ts_of_its_request() {
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_kernel(&tmp, "ra_dead_ts").await;
-    // each pass takes 150 ms, so a ts taken before the pass is told from one taken after
+    // each request takes 150 ms, so a ts taken before the first is told from one after
     let s = script(
         &agent,
         vec![pass("<think>hmm</think>\n\n"), pass(GO)],
         Duration::from_millis(150),
     );
+    let t0 = crate::helpers::now_secs();
     let r = ask(&kernel, &agent, json!({"type": "send", "text": "go"})).await;
-    assert_eq!(r["dead_turn"], json!(true), "{r}");
-    assert!(until_passes(&s, 2).await, "the dead turn was not rerolled");
+    assert_eq!(r["response"], json!(GO), "{r}");
+    assert_eq!(s.passes_served(), 2, "the thinking-only attempt was not re-asked");
     until_true("the chain to end", || {
         !crate::state::state_for(&agent).chain.lock().unwrap().alive
     })
     .await;
     let all = rows(&kernel, &agent).await;
     let users: Vec<&Value> = all.iter().filter(|r| r["role"] == "user").collect();
-    assert_eq!(users.len(), 2, "{all:#?}");
-    let (go, reroll) = (users[0], users[1]);
+    assert_eq!(users.len(), 1, "{all:#?}");
+    let go = users[0];
     assert_eq!(go["content"], "go");
-    // the dead pass's request ended with the row as it is stored now, and so does the
-    // reroll's request carry it
-    let dead = s.request_messages(0);
+    let first = s.request_messages(0);
     let shown = go["content"].clone();
-    assert_eq!(dead.last().unwrap()["content"], json!(shown));
+    assert_eq!(first.last().unwrap()["content"], json!(shown));
     let again = s.request_messages(1);
     assert!(
         again.iter().any(|m| m["content"] == json!(shown)),
         "{again:#?}"
     );
-    // its ts was taken when the dead request was built, a whole pass before the
-    // reroll's own
-    let ts = |r: &Value| r["attributes"]["ts"].as_f64().unwrap();
-    assert!(ts(reroll) - ts(go) >= 0.15, "{go} {reroll}");
+    // its ts was taken when the first request was built, before either request ran
+    let ts = go["attributes"]["ts"].as_f64().unwrap();
+    assert!(ts - t0 < 0.15, "{go}");
 }
 
 #[tokio::test]

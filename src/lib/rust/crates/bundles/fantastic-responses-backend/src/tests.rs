@@ -527,7 +527,7 @@ async fn send_streams_tokens_raw_on_both_channels() {
         json!({"type": "response.created", "response": {"status": "in_progress"}}),
         json!({"type": "response.reasoning_text.delta", "delta": "pondering"}),
         json!({"type": "response.output_text.delta", "delta": "hel"}),
-        json!({"type": "response.output_text.delta", "delta": "lo"}),
+        json!({"type": "response.output_text.delta", "delta": "lo <call name=\"done\"></call>"}),
         done("completed", None, 12),
     ]);
     Mock::given(method("POST"))
@@ -574,12 +574,12 @@ async fn send_streams_tokens_raw_on_both_channels() {
     }
     let r = join.await.unwrap();
     assert_eq!(
-        tokens, "<think>pondering</think>hello",
+        tokens, "<think>pondering</think>hello <call name=\"done\"></call>",
         "streamed raw, both channels"
     );
     // the reply is the answer: thinking never leaves the agent (ai-core's
     // business, not this provider's)
-    assert_eq!(r["response"], "hello", "{r}");
+    assert_eq!(r["response"], "hello <call name=\"done\"></call>", "{r}");
 }
 
 /// `endpoint` is REQUIRED on the record — refused AT THE WRITE (the kind's

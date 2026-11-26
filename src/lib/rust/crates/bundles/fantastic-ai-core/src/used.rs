@@ -236,7 +236,7 @@ pub(crate) fn task(state: &BackendState, report: &ProviderReport) {
 }
 
 /// THE ACCEPTED ATTEMPT'S COUNTS, held until its row is stored ([`land`] takes them).
-/// Dropped untaken (a dead turn, a cancel or a store failure before the row), they go
+/// Dropped untaken (a cancel or a store failure before the row), they go
 /// to `turn.rejected` of the next row, as every attempt of a turn that stored no row.
 pub(crate) struct Accepted {
     state: Arc<BackendState>,

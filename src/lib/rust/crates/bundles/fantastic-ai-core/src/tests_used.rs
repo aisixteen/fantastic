@@ -234,7 +234,6 @@ async fn generate(
 async fn answers(kernel: &Arc<Kernel>, agent: &AgentId, provider: &Arc<Metered>) {
     match generate(kernel, agent, provider).await {
         Ok(Generation::Answered { .. }) => {}
-        Ok(Generation::Dead { .. }) => panic!("a dead turn"),
         Ok(Generation::Stopped { reason, .. }) => panic!("stopped: {reason}"),
         Err(_) => panic!("the generation failed"),
     }
@@ -535,7 +534,7 @@ async fn running_survives_restart() {
 }
 
 // U8
-/// A dead turn, a link failure after a reported attempt and a cancelled turn store no
+/// A thinking-only attempt, a link failure after a reported attempt and a cancelled turn store no
 /// assistant row: their counts are `turn.rejected` of the next row's pass, and the sum
 /// over the rows is still the running sum.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -544,9 +543,8 @@ async fn pending_lands_on_next_row() {
     let (kernel, a) = mk_kernel(&tmp, "u_pending").await;
     let p = Metered::new(vec![
         Step::says(DONE, rep(10, 1, None, None)),
-        // a dead turn: only thinking
+        // a thinking-only attempt and a reported bad attempt, then the link fails
         Step::says("<think>hmm</think>", rep(20, 2, None, None)),
-        // a reported bad attempt, then the link fails
         Step::says(FOREIGN, rep(30, 3, None, None)),
         Step::link_fails(),
         // a reported bad attempt, then the turn is cancelled mid-stream
@@ -556,10 +554,6 @@ async fn pending_lands_on_next_row() {
         Step::says(DONE, rep(50, 5, None, None)),
     ]);
     answers(&kernel, &a, &p).await;
-    assert!(matches!(
-        generate(&kernel, &a, &p).await,
-        Ok(Generation::Dead { .. })
-    ));
     assert!(generate(&kernel, &a, &p).await.is_err(), "the link failed");
     let cancelled =
         tokio::time::timeout(Duration::from_millis(500), generate(&kernel, &a, &p)).await;
@@ -809,10 +803,12 @@ async fn calib_cleared_on_type_change() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp, "u_calib").await;
     let state = crate::state::state_for(&a);
+    // a hermes model's answer is its own form of `done` (#795: an answer has a call)
+    let h_done = crate::model_format::Renderer::render(&crate::model_format::hermes::Hermes, DONE);
     let p = Metered::new(vec![
         Step::says(DONE, no_usage()),
-        Step::says("All good.", no_usage()).named_model(QWEN),
-        Step::says("All good.", no_usage()).named_model("qwen3-14b"),
+        Step::says(&h_done, no_usage()).named_model(QWEN),
+        Step::says(&h_done, no_usage()).named_model("qwen3-14b"),
     ]);
     answers(&kernel, &a, &p).await;
     assert_eq!(
@@ -848,16 +844,14 @@ async fn pending_lost_on_crash() {
     let (kernel, a) = mk_kernel(&tmp, "u_crash").await;
     let p = Metered::new(vec![
         Step::says(DONE, rep(100, 10, None, None)),
-        // a dead turn: pending
+        // a thinking-only attempt, then the link fails: pending
         Step::says("<think>x</think>", rep(70, 7, None, None)),
+        Step::link_fails(),
         Step::says(DONE, rep(200, 20, None, None)),
         Step::says(DONE, rep(300, 30, None, None)),
     ]);
     answers(&kernel, &a, &p).await;
-    assert!(matches!(
-        generate(&kernel, &a, &p).await,
-        Ok(Generation::Dead { .. })
-    ));
+    assert!(generate(&kernel, &a, &p).await.is_err(), "the link failed");
     assert_ne!(
         *crate::state::state_for(&a).used_pending.lock().unwrap(),
         crate::used::Pending::default()

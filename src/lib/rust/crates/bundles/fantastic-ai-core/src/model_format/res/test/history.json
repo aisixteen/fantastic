@@ -31,7 +31,7 @@
   {
     "id": 4,
     "role": "assistant",
-    "content": "<call name=\"keep\"><of>11</of><summary>План записано в plan.md.</summary></call>\n<call name=\"await\"></call>",
+    "content": "<call name=\"keep\"><of>11</of><summary>План записано в plan.md.</summary></call>\n<call name=\"done\"></call>",
     "parent": 3,
     "attributes": {
       "ts": 1792800180,

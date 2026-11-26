@@ -73,7 +73,7 @@ fn stored() -> Vec<(i64, &'static str, String)> {
     let keep = format!(
         "{}\n{}",
         call("keep", json!({"of": "11", "summary": "План записано."})),
-        call("await", json!({}))
+        call("done", json!({}))
     );
     let correction = format!(
         "[reply to - · - -]\n[malformed call — nothing ran] line 1, col 1: not a call tag\n\
@@ -486,9 +486,9 @@ async fn reply_names_the_type() {
         None,
     )
     .await;
-    let p = Scripted::new(PLAIN, vec![Step::says("ok").named_model(QWEN)]);
+    let p = Scripted::new(PLAIN, vec![Step::says(super::tests_trace::DONE).named_model(QWEN)]);
     let (text, _) = answered(&kernel, &a, &p, "m15_a").await;
-    assert_eq!(text, "ok", "the default pass stands");
+    assert_eq!(text, super::tests_trace::DONE, "the default pass stands");
     let first = traces_of(&kernel, &a, "m15_a").await;
     assert!(
         first.iter().all(|r| r["type"] == json!(DEFAULT)),
@@ -751,7 +751,7 @@ fn mixed_rows_uniform() {
         (
             6,
             "assistant",
-            format!("D again. {}", call("await", json!({}))),
+            format!("D again. {}", call("done", json!({}))),
         ),
     ];
     let m = view(&rows, "go");

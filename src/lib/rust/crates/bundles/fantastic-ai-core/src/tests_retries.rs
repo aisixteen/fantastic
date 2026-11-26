@@ -36,12 +36,13 @@ async fn a_dropped_link_is_retried_and_the_turn_answers() {
         &agent,
         vec![
             vec![ScriptEvent::TransportFail("connect failed".into())],
-            pass("ANSWER"),
+            pass(r#"ANSWER <call name="done"></call>"#),
         ],
         Duration::ZERO,
     );
-    let _ = send_text(&kernel, &agent, "hello").await;
-    assert!(s.passes_served() >= 2, "passes: {}", s.passes_served());
+    let r = send_text(&kernel, &agent, "hello").await;
+    assert_eq!(r["response"], json!(r#"ANSWER <call name="done"></call>"#), "{r}");
+    assert_eq!(s.passes_served(), 2);
     assert!(s.request(1).contains("[retry 1/2]"), "{}", s.request(1));
 }
 
@@ -58,11 +59,12 @@ async fn retries_run_out_and_the_turn_fails() {
         ],
         Duration::ZERO,
     );
-    let _ = send_text(&kernel, &agent, "hello").await;
-    // the link retry ran out after 2 passes; the failed turn's own retry is the third (#533)
-    assert!(until_passes(&s, 3).await, "passes: {}", s.passes_served());
+    let r = send_text(&kernel, &agent, "hello").await;
+    // the link retry ran out after 2 requests, and the turn failed: nothing re-runs it (#795)
+    assert!(r["error"].as_str().unwrap_or_default().contains("connect failed again"), "{r}");
     assert!(s.request(1).contains("[retry 1/1]"), "{}", s.request(1));
-    assert!(!s.request(1).contains("[retry 2/"), "{}", s.request(1));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(s.passes_served(), 2, "the bounds stop it");
 }
 
 #[tokio::test]
@@ -77,11 +79,11 @@ async fn a_model_error_is_never_retried() {
         ],
         Duration::ZERO,
     );
-    let _ = send_text(&kernel, &agent, "hello").await;
-    // no link retry: the second pass is the failed turn's own retry turn (#533)
-    assert!(until_passes(&s, 2).await);
-    assert!(!s.request(0).contains("[retry"), "{}", s.request(0));
-    assert!(!s.request(1).contains("[retry"), "{}", s.request(1));
+    let r = send_text(&kernel, &agent, "hello").await;
+    // no link retry, and no retry turn (#795): one request, the turn failed
+    assert!(r["error"].as_str().unwrap_or_default().contains("boom"), "{r}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(s.passes_served(), 1, "a model error is never retried");
 }
 
 #[tokio::test]
@@ -92,34 +94,15 @@ async fn retries_are_off_by_default() {
         &agent,
         vec![
             vec![ScriptEvent::TransportFail("connect failed".into())],
-            pass("ANSWER"),
+            pass(r#"ANSWER <call name="done"></call>"#),
         ],
         Duration::ZERO,
     );
-    let _ = send_text(&kernel, &agent, "hello").await;
-    // no link retry: the second pass is the failed turn's own retry turn (#533)
-    assert!(until_passes(&s, 2).await);
-    assert!(!s.request(1).contains("[retry"), "{}", s.request(1));
-}
-
-/// A backend with `misfire_limit` set too.
-async fn mk_bounded(
-    tmp: &TempDir,
-    tag: &str,
-    retries: i64,
-    misfire: i64,
-) -> (Arc<Kernel>, AgentId) {
-    let (kernel, agent) = mk_retrying(tmp, tag, retries).await;
-    let r = kernel
-        .operator_send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({"type": "update_agent", "id": agent.as_str(), "misfire_limit": misfire}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert!(r.get("error").is_none(), "update_agent refused: {r}");
-    (kernel, agent)
+    let r = send_text(&kernel, &agent, "hello").await;
+    // no link retry by default: one request, the turn failed (#795)
+    assert!(r["error"].as_str().unwrap_or_default().contains("connect failed"), "{r}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(s.passes_served(), 1, "retries are off by default");
 }
 
 /// Every status that ends a call, in order.
@@ -128,7 +111,7 @@ fn ending_statuses(rx: &mut fantastic_kernel::inbox::InboxReceiver) -> Vec<Value
     while let Some(v) = rx.try_recv() {
         let p = v.payload;
         if p["type"] == json!("status")
-            && ["done", "failed", "stalled", "awaiting"]
+            && ["done", "failed"]
                 .contains(&p["phase"].as_str().unwrap_or_default())
         {
             out.push(p);
@@ -137,12 +120,12 @@ fn ending_statuses(rx: &mut fantastic_kernel::inbox::InboxReceiver) -> Vec<Value
     out
 }
 
-/// A REFUSED KEY IS ASKED ONCE: a 401 is never retried on the link, never nudged as a
-/// failed turn (#533); the chain gives up at once with the endpoint's error.
+/// A REFUSED KEY IS ASKED ONCE: a 401 is never retried on the link (#533); the chain
+/// gives up at once with the endpoint's error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_401_is_one_request_and_the_chain_gives_up() {
     let tmp = TempDir::new().unwrap();
-    let (kernel, agent) = mk_bounded(&tmp, "rt_401", 3, 10).await;
+    let (kernel, agent) = mk_retrying(&tmp, "rt_401", 3).await;
     let s = script(
         &agent,
         (0..12).map(|_| vec![ScriptEvent::HttpFail(401)]).collect(),
@@ -174,7 +157,7 @@ async fn a_401_is_one_request_and_the_chain_gives_up() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_404_is_one_request_and_the_chain_gives_up() {
     let tmp = TempDir::new().unwrap();
-    let (kernel, agent) = mk_bounded(&tmp, "rt_404", 3, 10).await;
+    let (kernel, agent) = mk_retrying(&tmp, "rt_404", 3).await;
     let s = script(
         &agent,
         (0..12).map(|_| vec![ScriptEvent::HttpFail(404)]).collect(),
@@ -193,12 +176,13 @@ async fn a_404_is_one_request_and_the_chain_gives_up() {
     );
 }
 
-/// A 503 IS TRANSIENT and its retries are BOUNDED: `1 + transport_retries` requests a
-/// turn, `misfire_limit` failed turns, then the chain gives up — nothing more is sent.
+/// A 503 IS TRANSIENT and its retries are BOUNDED: `1 + transport_retries` requests,
+/// then the turn fails (#795: no retry turn of its own) — nothing more is sent, and the
+/// call ends `failed` naming the endpoint's error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_503_is_retried_within_its_bounds() {
     let tmp = TempDir::new().unwrap();
-    let (kernel, agent) = mk_bounded(&tmp, "rt_503", 1, 2).await;
+    let (kernel, agent) = mk_retrying(&tmp, "rt_503", 1).await;
     let s = script(
         &agent,
         (0..12).map(|_| vec![ScriptEvent::HttpFail(503)]).collect(),
@@ -206,20 +190,18 @@ async fn a_503_is_retried_within_its_bounds() {
     );
     let mut rx = rebind_backend_inbox(&kernel, &agent);
     let _ = send_text(&kernel, &agent, "hello").await;
-    // (1 + transport_retries) x misfire_limit
-    assert!(until_passes(&s, 4).await, "passes: {}", s.passes_served());
+    // 1 + transport_retries
+    assert!(until_passes(&s, 2).await, "passes: {}", s.passes_served());
     assert!(s.request(1).contains("[retry 1/1]"), "{}", s.request(1));
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(s.passes_served(), 4, "the bounds stop the loop");
-    // The give-up ends the chain once; the delivery of the last retry turn then
-    // reports that turn's own raise (`reason: error`) after it.
+    assert_eq!(s.passes_served(), 2, "the bounds stop the loop");
     let ends = ending_statuses(&mut rx);
-    let gave_up: Vec<&Value> = ends
-        .iter()
-        .filter(|l| l["detail"]["reason"] == json!("gave_up"))
-        .collect();
-    assert_eq!(gave_up.len(), 1, "{ends:#?}");
-    assert_eq!(gave_up[0]["detail"]["silent_turns"], json!(2), "{ends:#?}");
+    let last = ends.last().expect("an ending status");
+    assert_eq!(last["phase"], json!("failed"), "{ends:#?}");
+    assert!(
+        last["detail"]["error"].as_str().unwrap_or_default().contains("HTTP 503"),
+        "{ends:#?}"
+    );
 }
 
 /// A key that cannot be read is permanent, as a refused one.

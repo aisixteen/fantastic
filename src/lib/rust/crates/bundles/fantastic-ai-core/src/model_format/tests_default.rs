@@ -1,5 +1,5 @@
 //! The `default` type (#766, W3): R1-R10, S9-S12, S14-S16, H9; with the `stop` call
-//! (W13): R8 `stop`, S25, and R9 and S16 with its seven tool names.
+//! (W13): R8 `stop`, S25, and R9 and S16 with its six tool names.
 //!
 //! The goldens compare the adapter with what `4fd5bb4d` did for the same text: the
 //! stream checker's cut (`agent_loop::stream_cut`, restated here as [`today_cut`]), then
@@ -258,7 +258,6 @@ fn roundtrip_several_calls() {
 fn roundtrip_control_calls() {
     for (name, args) in [
         ("done", json!({})),
-        ("await", json!({})),
         ("inquiry_answer", json!({"answer": "yes, \"both\""})),
         ("keep", json!({"why": "the plan", "ids": ["4", "5"]})),
         ("line_summary", json!({"line": "read a.md: 3 sections"})),
@@ -304,10 +303,10 @@ fn golden_tool_list() {
         r.contains(&format!("the tools are {}.", TOOLS.join(", "))),
         "{r}"
     );
-    assert_eq!(TOOLS.len(), 7);
+    assert_eq!(TOOLS.len(), 6);
     assert_eq!(TOOLS.last(), Some(&"stop"));
     assert!(
-        r.contains("the tools are send, done, await, inquiry_answer, keep, line_summary, stop."),
+        r.contains("the tools are send, done, inquiry_answer, keep, line_summary, stop."),
         "{r}"
     );
 }
@@ -527,19 +526,19 @@ fn stop_needs_reason() {
     assert_eq!(joined(run(&[good])), vec![Out::Text(good.to_string())]);
 }
 
-// The how-to teaches `stop` in its Turns section, next to `done` (1.8).
+// The how-to teaches `stop` in its section on ending an answer, next to `done` (1.8).
 #[test]
 fn howto_teaches_stop() {
     let turns = HOWTO_SEND
-        .split("## Turns")
+        .split("## Ending an answer")
         .nth(1)
         .and_then(|s| s.split("\n## ").next())
-        .expect("a Turns section");
+        .expect("an Ending an answer section");
     let flat = turns.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
         flat.contains(
-            "or with <call name=\"stop\"><reason>WHY</reason></call> (the work cannot be \
-             done: say why)"
+            "When the work cannot be done, end it with \
+             <call name=\"stop\"><reason>WHY</reason></call> and say why."
         ),
         "{flat}"
     );

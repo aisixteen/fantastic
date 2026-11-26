@@ -1,5 +1,5 @@
-//! #306: an `await` waits for the agent's own running exec job, and the job's end
-//! wakes its owner once with `job_done`. Self-contained like `tests_pause.rs`.
+//! #306: an agent that starts an exec job ends its answer with `done` (#795), and the
+//! job's end wakes its owner once with `job_done`. Self-contained like `tests_pause.rs`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -66,7 +66,7 @@ impl Provider for Mock {
             let text = if reqs.is_empty() {
                 self.first.clone()
             } else {
-                r#"<call name="await"></call>"#.to_string()
+                r#"<call name="done"></call>"#.to_string()
             };
             reqs.push(messages.to_vec());
             text
@@ -80,7 +80,7 @@ impl Provider for Mock {
 }
 
 /// The first pass of an agent. A `_job` agent starts a job on its `_exec` agent and
-/// awaits; any other agent just awaits.
+/// is done for now; any other agent is just done.
 fn first_pass(agent: &str) -> String {
     match agent.strip_suffix("_job") {
         Some(base) => {
@@ -88,11 +88,11 @@ fn first_pass(agent: &str) -> String {
             args.insert("target_id".into(), json!(format!("{base}_exec")));
             args.insert("payload".into(), json!({"type": "start", "command": "job"}));
             format!(
-                "{}<call name=\"await\"></call>",
+                "{}<call name=\"done\"></call>",
                 crate::tool_parse::render_call("send", &args)
             )
         }
-        None => r#"<call name="await"></call>"#.to_string(),
+        None => r#"<call name="done"></call>"#.to_string(),
     }
 }
 
@@ -370,24 +370,15 @@ fn status_is(e: &Value, phase: &str, reason: &str) -> bool {
         && e.pointer("/detail/reason").and_then(Value::as_str) == Some(reason)
 }
 
-/// An `awaiting` status that counted at least one pending piece of work.
-fn awaiting_with_pending(seen: &[Value]) -> bool {
-    seen.iter().any(|e| {
-        status_is(e, "awaiting", "awaiting")
-            && e.pointer("/detail/pending")
-                .and_then(Value::as_u64)
-                .unwrap_or(0)
-                >= 1
-    })
+/// The pass ended visibly: a `done` status with `reason: ok`.
+fn ended_done(seen: &[Value]) -> bool {
+    seen.iter().any(|e| status_is(e, "done", "ok"))
 }
 
-fn nothing_to_await(seen: &[Value]) -> bool {
-    seen.iter()
-        .any(|e| status_is(e, "done", "nothing_to_await"))
-}
-
+/// `done` with a job running: the pass ends, the job stays recorded, and nothing wakes
+/// the owner before the job ends.
 #[tokio::test]
-async fn await_with_a_running_job_waits_for_it() {
+async fn done_with_a_running_job_ends_and_the_job_stays_recorded() {
     let tmp = TempDir::new().unwrap();
     let (owner, exec) = ("st306_w1_job", "st306_w1_exec");
     let kernel = setup(&tmp, &[owner], exec).await;
@@ -401,18 +392,15 @@ async fn await_with_a_running_job_waits_for_it() {
     )
     .await;
     let waiting = poll_events(&mut rx, &mut seen, |seen| {
-        owns_job(owner) && awaiting_with_pending(seen)
+        owns_job(owner) && ended_done(seen)
     })
     .await;
     assert!(
         waiting,
-        "the await did not count the running job: recorded={} events={seen:?}",
+        "the pass did not end with the job recorded: recorded={} events={seen:?}",
         owns_job(owner)
     );
-    assert!(
-        !nothing_to_await(&seen),
-        "the await ended as nothing to wait for"
-    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(
         last_request_with(&served, WAKE).is_none(),
         "the owner was woken before its job ended"
@@ -454,8 +442,9 @@ async fn a_finished_job_wakes_its_owner_once() {
     assert!(!owns_job(owner), "a finished job is still recorded");
 }
 
+/// `done` with nothing running ends visibly, and nothing wakes the agent again.
 #[tokio::test]
-async fn await_with_no_job_and_nothing_pending_still_ends_visibly() {
+async fn done_with_no_job_ends_visibly_and_nothing_wakes_it() {
     let tmp = TempDir::new().unwrap();
     let (idle, exec) = ("st306_w3_idle", "st306_w3_exec");
     let kernel = setup(&tmp, &[idle], exec).await;
@@ -468,16 +457,13 @@ async fn await_with_no_job_and_nothing_pending_still_ends_visibly() {
         json!({"type": "send", "text": "wait for nothing", "client_id": CLIENT}),
     )
     .await;
-    let ended = poll_events(&mut rx, &mut seen, nothing_to_await).await;
-    assert!(
-        ended,
-        "a bare await with nothing pending did not end visibly: {seen:?}"
-    );
+    let ended = poll_events(&mut rx, &mut seen, ended_done).await;
+    assert!(ended, "a bare done did not end visibly: {seen:?}");
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
         served.requests.lock().unwrap().len(),
         1,
-        "an await with nothing pending woke the agent again"
+        "a done with nothing running woke the agent again"
     );
     assert!(!owns_job(idle), "an idle agent has a job recorded");
 }
@@ -506,8 +492,8 @@ async fn a_job_started_by_another_agent_does_not_wake_this_one() {
         json!({"type": "send", "text": "wait for nothing", "client_id": CLIENT}),
     )
     .await;
-    let ended = poll_events(&mut rx, &mut seen, nothing_to_await).await;
-    assert!(ended, "the bystander's await did not end visibly: {seen:?}");
+    let ended = poll_events(&mut rx, &mut seen, ended_done).await;
+    assert!(ended, "the bystander's done did not end visibly: {seen:?}");
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(
         wakes(&served_for(other)),
@@ -518,7 +504,7 @@ async fn a_job_started_by_another_agent_does_not_wake_this_one() {
 }
 
 #[tokio::test]
-async fn a_deleted_owner_stops_counting_its_job() {
+async fn a_deleted_owner_stops_recording_its_job() {
     let tmp = TempDir::new().unwrap();
     let (owner, exec) = ("st306_w5_job", "st306_w5_exec");
     let kernel = setup(&tmp, &[owner], exec).await;
@@ -531,7 +517,7 @@ async fn a_deleted_owner_stops_counting_its_job() {
     )
     .await;
     let waiting = poll_events(&mut rx, &mut seen, |seen| {
-        owns_job(owner) && awaiting_with_pending(seen)
+        owns_job(owner) && ended_done(seen)
     })
     .await;
     assert!(waiting, "the job was never recorded: {seen:?}");
@@ -545,6 +531,6 @@ async fn a_deleted_owner_stops_counting_its_job() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(
         !owns_job(owner),
-        "a deleted owner still counts its job as pending"
+        "a deleted owner still has its job recorded"
     );
 }

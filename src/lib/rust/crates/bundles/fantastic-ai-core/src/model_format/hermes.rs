@@ -122,6 +122,9 @@ pub(crate) const REPORT_OTHER: &str = include_str!("res/hermes/report_other.txt"
 /// The reason of the `stop` the harness writes after the last malformed attempt: `{n}`,
 /// the number of attempts (1.8). It holds no text of any attempt.
 pub(crate) const STOP_REASON: &str = include_str!("res/hermes/stop_reason.txt");
+/// The report that re-asks an answer with no call (#795): nothing ran, write the call in
+/// the answer, or end with `done`.
+pub(crate) const REPORT_NO_CALL: &str = include_str!("res/hermes/report_no_call.txt");
 
 /// The call opener and closer.
 pub(crate) const CALL_OPEN: &str = "<tool_call>";
@@ -157,6 +160,7 @@ pub(crate) fn texts(s: Section) -> &'static str {
         Section::Async => HOWTO_ASYNC,
         Section::Working => HOWTO_WORKING,
         Section::StopReason => STOP_REASON,
+        Section::NoCall => REPORT_NO_CALL,
         shared => super::shared_text(shared).expect("a shared section"),
     }
 }

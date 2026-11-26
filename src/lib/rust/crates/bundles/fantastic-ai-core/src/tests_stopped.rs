@@ -77,7 +77,7 @@ fn last_end(rx: &mut fantastic_kernel::inbox::InboxReceiver) -> Value {
     while let Some(v) = rx.try_recv() {
         let p = v.payload;
         if p["type"] == json!("status")
-            && ["done", "failed", "stalled", "awaiting"]
+            && ["done", "failed"]
                 .contains(&p["phase"].as_str().unwrap_or_default())
         {
             ends.push(p);
@@ -87,18 +87,13 @@ fn last_end(rx: &mut fantastic_kernel::inbox::InboxReceiver) -> Value {
 }
 
 /// The status of a chain the model stopped with `why`: `failed`, `gave_up`, the reason
-/// as `error`, the given silent streak, the key set of today's give-up status.
-fn assert_model_stop(st: &Value, why: &str, streak: usize) {
+/// as `error`, the key set of the give-up status.
+fn assert_model_stop(st: &Value, why: &str) {
     assert_eq!(st["phase"], json!("failed"), "{st}");
     assert_eq!(st["detail"]["reason"], json!("gave_up"), "{st}");
     assert_eq!(st["detail"]["error"], json!(why), "{st}");
-    assert_eq!(st["detail"]["silent_turns"], json!(streak), "{st}");
     let keys: Vec<&String> = st["detail"].as_object().unwrap().keys().collect();
-    assert_eq!(
-        keys,
-        vec!["reason", "error", "silent_turns", "queue_depth"],
-        "{st}"
-    );
+    assert_eq!(keys, vec!["reason", "error", "queue_depth"], "{st}");
 }
 
 /// `a` answers a peer's inquiry with `passes`; what it ended with.
@@ -109,13 +104,13 @@ async fn run_chain(tag: &str, model: Option<&str>, passes: Vec<Vec<ScriptEvent>>
         set_model(&kernel, &a, m).await;
     }
     let b = add_peer(&kernel, &tmp, &a).await;
-    // b asks a and waits; it then gets the inquiry's close, then a's hand-off
+    // b asks a and is done for now; it then gets the inquiry's close, then a's hand-off
     let ask = call_envelope(a.as_str(), json!({"type": "inquiry", "text": "go"}), None);
     let fb = script(
         &b,
         vec![
             pass(ask),
-            pass(r#"<call name="await"></call>"#),
+            pass(DONE),
             pass(DONE),
             pass(DONE),
         ],
@@ -141,7 +136,7 @@ async fn run_chain(tag: &str, model: Option<&str>, passes: Vec<Vec<ScriptEvent>>
     while let Some(v) = rx.try_recv() {
         let p = v.payload;
         if p["type"] == json!("status")
-            && ["done", "failed", "stalled", "awaiting"]
+            && ["done", "failed"]
                 .contains(&p["phase"].as_str().unwrap_or_default())
         {
             ends.push(p);
@@ -177,9 +172,8 @@ async fn run_chain(tag: &str, model: Option<&str>, passes: Vec<Vec<ScriptEvent>>
 
 // T9
 /// The harness stops the turn: status `failed`, `reason: gave_up`, `error` the reason,
-/// `silent_turns` the number of malformed attempts, the key set of today's give-up
-/// status; the asker's inquiry is closed with it; the chain ends with no nudge and
-/// nothing routed.
+/// the key set of the give-up status; the asker's inquiry is closed with it; the chain
+/// ends with nothing more asked and nothing routed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn harness_stop_fails_turn() {
     let (reason, n) = harness_reason();
@@ -189,13 +183,8 @@ async fn harness_stop_fails_turn() {
     assert_eq!(st["phase"], json!("failed"), "{st}");
     assert_eq!(st["detail"]["reason"], json!("gave_up"), "{st}");
     assert_eq!(st["detail"]["error"], json!(reason), "{st}");
-    assert_eq!(st["detail"]["silent_turns"], json!(n), "{st}");
     let keys: Vec<&String> = st["detail"].as_object().unwrap().keys().collect();
-    assert_eq!(
-        keys,
-        vec!["reason", "error", "silent_turns", "queue_depth"],
-        "{st}"
-    );
+    assert_eq!(keys, vec!["reason", "error", "queue_depth"], "{st}");
     assert!(out.closed.contains(&reason), "{}", out.closed);
 }
 
@@ -349,21 +338,14 @@ async fn next_turn_after_stop() {
 }
 
 // T10
-/// The silent-turn give-up, now that `give_up` is `pub(crate)` and shared with both
-/// stops: the status bytes are today's.
+/// The no-call give-up (#795) is the harness stop: answers with no call, `1 +
+/// CALL_RETRIES` attempts, then the give-up status with the harness's reason, byte for
+/// byte.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn give_up_status_unchanged() {
+    let (reason, n) = harness_reason();
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp, "st_t10").await;
-    let r = kernel
-        .operator_send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({"type": "update_agent", "id": a.as_str(), "misfire_limit": 3}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert!(r.get("error").is_none(), "update_agent refused: {r}");
     let s = script(
         &a,
         (0..8).map(|_| pass("just prose")).collect(),
@@ -376,31 +358,27 @@ async fn give_up_status_unchanged() {
             json!({"type": "send", "text": "go", "client_id": "tab1"}),
         )])
         .await;
-    assert!(
-        until_passes(&s, 3).await,
-        "the chain stalled before the limit"
-    );
+    assert!(until_passes(&s, n).await, "the pass stalled before its last attempt");
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(s.passes_served(), 3, "no reminder after the limit");
+    assert_eq!(s.passes_served(), n, "nothing is asked after the stop");
     let st = last_end(&mut rx);
     assert_eq!(st["phase"], json!("failed"), "{st}");
     let want = format!(
-        r#"{{"reason":"gave_up","error":{},"silent_turns":3,"queue_depth":{}}}"#,
-        json!(crate::route::gave_up_text(3)),
+        r#"{{"reason":"gave_up","error":{},"queue_depth":{}}}"#,
+        json!(reason),
         st["detail"]["queue_depth"]
     );
     assert_eq!(st["detail"].to_string(), want);
     assert_eq!(
-        crate::route::gave_up_text(3),
-        "The LLM was not able to answer — 3 turns in a row produced no call. \
-         Reiterate the inquiry."
+        reason,
+        "3 attempts in a row wrote malformed calls or no call, so the harness stopped the turn."
     );
 }
 
 // T24 (D in W13, H in W7)
 /// A model writes `stop` with a reason: the provider is called once, the row is stored
-/// as written, and the chain ends through the give-up with the model's reason and the
-/// chain's silent streak; the inquiry closed with it; `send_to` told; no nudge.
+/// as written, and the chain ends through the give-up with the model's reason; the
+/// inquiry closed with it; `send_to` told; nothing more asked.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn model_stop_fails_chain() {
     let why = "the file it names does not exist";
@@ -408,7 +386,7 @@ async fn model_stop_fails_chain() {
     let out = run_chain("st_t24d", None, vec![pass(stop_call(why)), pass(DONE)]).await;
     assert_eq!(out.passes, 1, "no retry, no nudge");
     assert_eq!(out.row, stop_call(why));
-    assert_model_stop(&out.status, why, 0);
+    assert_model_stop(&out.status, why);
     assert!(out.closed.contains(why), "{}", out.closed);
 
     // D: `send_to` is told the model's reason
@@ -441,20 +419,16 @@ async fn model_stop_fails_chain() {
     assert_eq!(st["phase"], json!("failed"), "{st}");
     assert_eq!(st["detail"]["reason"], json!("gave_up"), "{st}");
     assert_eq!(st["detail"]["error"], json!(why), "{st}");
-    assert_eq!(st["detail"]["silent_turns"], json!(0), "{st}");
     assert!(out.closed.contains(why), "{}", out.closed);
 }
 
 // T25
-/// `stop` beside `done` and beside `await`: `stop` wins, and the chain ends as in T24.
+/// `stop` beside `done`: `stop` wins, and the chain ends as in T24.
 /// Beside a `send`, the `send` is dispatched, as it is beside `done` (section 5, item 5).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stop_beside_other_calls() {
     let why = "the task names a repository that is not there";
-    for (tag, other) in [
-        ("st_t25d", DONE),
-        ("st_t25a", r#"<call name="await"></call>"#),
-    ] {
+    for (tag, other) in [("st_t25d", DONE)] {
         for (i, answer) in [
             format!("{}\n{other}", stop_call(why)),
             format!("{other}\n{}", stop_call(why)),
@@ -466,13 +440,8 @@ async fn stop_beside_other_calls() {
             let out = run_chain(&tag, None, vec![pass(answer.clone()), pass(DONE)]).await;
             assert_eq!(out.passes, 1, "{answer}");
             assert_eq!(out.row, answer);
-            assert_model_stop(&out.status, why, 0);
+            assert_model_stop(&out.status, why);
             assert!(out.closed.contains(why), "{answer}: {}", out.closed);
-            assert!(
-                !out.closed.contains("ended its run without answering"),
-                "{answer}: {}",
-                out.closed
-            );
         }
     }
 
@@ -509,12 +478,12 @@ async fn stop_beside_other_calls() {
         fb.request(0)
     );
     assert_eq!(s.passes_served(), 1, "the chain ended");
-    assert_model_stop(&last_end(&mut rx), why, 0);
+    assert_model_stop(&last_end(&mut rx), why);
 }
 
 // T26
 /// The harness's stop and a model's stop with the same reason text end alike: the same
-/// `reason`, `error`, inquiry close and stored call; `silent_turns` is each one's own.
+/// `reason`, `error`, inquiry close and stored call.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_writers_same_outcome() {
     let (reason, n) = harness_reason();
@@ -529,8 +498,6 @@ async fn two_writers_same_outcome() {
     assert_eq!(harness.status["phase"], model.status["phase"]);
     assert_eq!(harness.row, model.row);
     assert!(harness.closed.contains(&reason) && model.closed.contains(&reason));
-    assert_eq!(harness.status["detail"]["silent_turns"], json!(n));
-    assert_eq!(model.status["detail"]["silent_turns"], json!(0));
     // the `stop` trace rows differ by `errors` only: the harness's lists every attempt's
     assert_eq!(harness.stops.len(), 1, "{:?}", harness.stops);
     assert_eq!(model.stops.len(), 1, "{:?}", model.stops);

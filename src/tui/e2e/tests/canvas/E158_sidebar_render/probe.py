@@ -38,9 +38,9 @@ DONE = '<call name="done"></call>'
 ASK = ("<call name=\"send\"><routing><target_id>user</target_id></routing><payload><type>inquiry</type>"
        "<text>Which colour?</text><kind>single</kind><options><item>red</item><item>blue</item></options></payload></call>")
 A, B = "c714a", "c714b"  # the two chats: A drives the states, B is the work A waits on
-# A hands B a slow message and waits on its answer: A is awaiting (Working, "waiting"), B thinking
-AWAIT = (f"<call name=\"send\"><routing><target_id>{B}</target_id></routing><payload><type>send</type><text>S_SLOWB</text></payload></call>"
-         "<call name=\"await\"></call>")
+# A hands B a slow message and ends its answer (#795: `done`, B's answer wakes it), B thinking
+HANDOFF = (f"<call name=\"send\"><routing><target_id>{B}</target_id></routing><payload><type>send</type><text>S_SLOWB</text></payload></call>"
+           "<call name=\"done\"></call>")
 
 
 def responder(req: dict, _raw: bytes):
@@ -56,25 +56,25 @@ def responder(req: dict, _raw: bytes):
         return {"stall": 6, "text": "slow " + DONE}
     if "S_WRITE" in last:
         return {"stall_mid": 6, "text": "line one\nthe rest " + DONE}
-    # the chain hands the model its failed / dead call back once: it fails / stays dead again
-    if "S_RETRY" in last or last.startswith("[turn failed]"):
+    # the link retry re-sends the same request: it dies again
+    if "S_RETRY" in last:
         return {"cut": True, "text": "a stream that dies"}
-    if "S_DEAD" in last or last.startswith("[no answer]"):
+    # an empty answer is re-asked inside its turn (#795): it stays empty
+    if "S_DEAD" in last or last.startswith("[no call was dispatched]"):
         return ""
-    if "S_AWAIT" in last:
-        return AWAIT
+    if "S_HANDOFF" in last:
+        return HANDOFF
     if "S_ASK" in last:
         return ASK
     return "ok " + DONE
 
 
-def chat_record(cid: str, stub_url: str, can_call: dict, misfire: int = 10) -> dict:
+def chat_record(cid: str, stub_url: str, can_call: dict) -> dict:
     """A vllm chat on the stub. `transport_retries` 1: a dropped stream is retried once
-    (Working, retrying). `misfire_limit` 2 (the least) on A: its second failed or dead call in
-    a row gives the chain up (Failed), so the badge stays to be looked at."""
+    (Working, retrying), then the call fails (Failed), so the badge stays to be looked at."""
     return {"id": cid, "handler_module": "vllm_backend.tools", "endpoint": stub_url, "model": "stub",
             "context_window": 32768, "max_tokens": 4096, "kv_slots": 4, "kv_overflow": "evict",
-            "transport_retries": 1, "misfire_limit": misfire, "can_call": can_call}
+            "transport_retries": 1, "can_call": can_call}
 
 
 class _Rec:
@@ -229,7 +229,7 @@ async def states(pg, r: dict, info: dict) -> None:
             await click(pg, sw)
     # the chats, made as the canvas makes every AI (`canvas_root create`); A may hand B work
     made = [await host_call(port, "canvas_root", {"type": "create", "record": chat_record(B, rig.stub_url, {"user": ["inquiry", "inquiries"]})}),
-            await host_call(port, "canvas_root", {"type": "create", "record": chat_record(A, rig.stub_url, {"user": ["inquiry", "inquiries"], B: ["send"]}, misfire=2)})]
+            await host_call(port, "canvas_root", {"type": "create", "record": chat_record(A, rig.stub_url, {"user": ["inquiry", "inquiries"], B: ["send"]})})]
     info["made"] = made
     row = f"#tree [data-id=\"{A}\"]"
     r["8a the two chats are rows of the tree, at rest: no badge, no word"] = await until(pg, f"!!document.querySelector('{row}') && !!document.querySelector('#tree [data-id=\"{B}\"]') && getComputedStyle(document.querySelector('{row} .badge')).display==='none' && !document.querySelector('{row} .sub') && !document.querySelector('{row} .gl').classList.contains('ol') && getComputedStyle(document.querySelector('{row} .gl'),'::before').content==='none'", 30)
@@ -302,35 +302,28 @@ async def states(pg, r: dict, info: dict) -> None:
     retry = asyncio.create_task(fire(port, A, {"type": "send", "text": "S_RETRY"}))
     r["8f Working: the spinner, the word retrying (a dropped stream)"] = await state("!!b && b.classList.contains('active') && s && s.textContent==='retrying'")
     await shot(pg, "5-working-retrying", info)
-    # the failed call is handed back to the model once (misfire_limit 2); it fails again, the chain gives up
-    r["8g Failed: the retry died too, the cross on error"] = await ends(n, "active:retrying", "failed:failed", "active:retrying", "failed:failed", secs=45)
+    # the link retry dies too: the call fails, and nothing re-runs it (#795)
+    r["8g Failed: the retry died too, the cross on error"] = await ends(n, "active:retrying", "failed:failed", secs=45)
     info["retry"] = await retry
     await asyncio.sleep(1)
     r["8g2 kept after the call: the cross on error, the word failed"] = look(await now("failed"), "failed", "\u00d7", "error", "accent_on", "failed")
     await shot(pg, "6-failed", info, light=True)
 
-    # Stalled: a call that ended with no reply; the chain rerolls it at once (a fresh call),
-    # so the badge is drawn between two calls: the row's drawn states show it
+    # An empty answer is no call: re-asked inside its turn (Working, retrying), then the
+    # harness stops the turn (Failed, #795)
     n = len(await seen())
     dead = asyncio.create_task(fire(port, A, {"type": "send", "text": "S_DEAD"}))
-    r["8h Stalled: the dead call drew the ! badge, the word stalled; the chain then gave up (Failed)"] = await ends(n, "active:thinking", "stalled:stalled", "active:thinking", "stalled:stalled", "failed:failed")
+    r["8h an empty answer is re-asked (Working, retrying), then the turn is stopped (Failed)"] = await ends(n, "active:thinking", "active:retrying", "failed:failed")
     info["dead"] = await dead
-    info["stalled_drawn"] = await seen()
-    st = json.loads(await side(pg, "document.documentElement.dataset.stall || 'null'") or "null")
-    info["stalled_look"] = st
-    r["8h2 Stalled drawn in its own colour (warn 40% into error): the ! badge, a dashed ring"] = bool(st) and st["bg"] == st["stall"] \
-        and "ol" in st["gl"].split() and "dash" in st["gl"].split() and st["ol_img"].startswith("repeating-conic-gradient") and st["stall"] in st["ol_img"]
-    r["8h3 the word stalled in the same colour"] = bool(st) and st["sub"] == st["stall"]
 
-    # Working, waiting: A hands B a slow message and calls `await`. The chain runs its calls
-    # first (B thinks meanwhile; A's own call has ended: done), then waits on the reply that is
-    # on its way: `awaiting` is drawn between B's answer and the call that answer wakes
+    # A hands B a slow message and ends its answer with `done` (#795): B thinks meanwhile,
+    # A's own call has ended (Done); B's answer wakes A: Working, then Done
     n = len(await seen())
-    wait = asyncio.create_task(fire(port, A, {"type": "send", "text": "S_AWAIT"}))
+    wait = asyncio.create_task(fire(port, A, {"type": "send", "text": "S_HANDOFF"}))
     r["8i the chat it handed work to is Working, thinking"] = await until(pg, f"document.querySelector('#tree [data-id=\"{B}\"] .sub')?.textContent==='thinking'", 20)
     await shot(pg, "7-b-thinking", info)
-    info["await"] = await wait
-    r["8i2 Working, waiting: A drew the spinner and the word waiting, then the answer woke it: Done"] = await ends(n, "active:waiting", "done:done")
+    info["handoff"] = await wait
+    r["8i2 A ended its answer (Done), then B's answer woke it: Working, then Done"] = await ends(n, "done:done", "active:thinking", "done:done")
 
     # Asks you: the chat's question to the person; the answer takes the badge away
     n = len(await seen())

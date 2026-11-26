@@ -93,7 +93,7 @@ KNOBS = ("temperature", "top_p", "top_k", "min_p", "reasoning_effort", "thinking
          "seed", "stop", "max_tokens")
 #: the fields every chat takes (ai_core's record): the CHAT's alone too
 CHAT_ONLY = KNOBS + ("output_reserve", "context_strategy", "recent_n", "cache_primer_until",
-                     "transport_retries", "misfire_limit", "system_prompt", "file_bridge_id",
+                     "transport_retries", "system_prompt", "file_bridge_id",
                      "system_prompt_file", "pre_system_prompt", "post_system_prompt",
                      "image_max_bytes", "image_max_pixels")
 #: record fields that are the PROVIDER's only, wherever a probe puts them
@@ -267,9 +267,7 @@ async def connect(
         retries run out (`gave_up`); `done{reason:"cancelled"}` is a cancel.
         `detail.error` alone is not enough: without this, a chain that died at the
         ceiling and a model that chose to stop write the identical transcript.
-        Not an end: `stalled` (`dead_turn`, an empty answer the kernel REROLLS with
-        the no-call nudge — capping on it would cancel live chains) and `awaiting`
-        (the model's explicit wait: the next delivery wakes it).
+        An answer with no call is re-asked inside its turn (#795) and ends nothing.
         """
         if ev.get("type") != "status":
             return False
@@ -480,7 +478,6 @@ TICK = 0.5
 PS_EVERY = 2.0
 #: The model's `done` call, in its last turn.
 _DONE_CALL = re.compile(r'<call\s+name="done"')
-_AWAIT_CALL = re.compile(r'<call\s+name="await"')
 #: Kernel service work and the driver's own calls — never a peer still working.
 _QUIET_VERBS = {"ps", "persist_writer", "flush_executions", "ws_drain", "inbound_call"}
 #: Messages a test has SCHEDULED for an agent (`facts_arm.send_later`) and not yet
@@ -528,9 +525,10 @@ class ChainEnd:
     in flight — or, once its last turn called `done`, after DONE_QUIET seconds
     and nothing in flight ANYWHERE (no sub-AI turn, job or tick of a peer), so a
     test whose peers still report back keeps the 30 s rule. A chain whose last turn
-    called `await` stays open while any peer has work in flight (the 15-min hard
-    stop still bounds it). Waiting the 30 s window after the model has already
-    called done would add that much to every test's wall.
+    called `done` stays open while any peer has work in flight (#795: `done` is
+    "nothing more from me now", a peer's report wakes it; the 15-min hard stop still
+    bounds it). Waiting the 30 s window after the model has already called done would
+    add that much to every test's wall.
 
     `check` is called only while no new turn has landed; it reads `ps` at most
     every PS_EVERY seconds. Returns (cap, busy): `cap` is the CHAIN ENDED
@@ -543,9 +541,9 @@ class ChainEnd:
 
     async def check(self, transcript: list[str], idle: float) -> tuple[str, bool]:
         said_done = bool(transcript) and bool(_DONE_CALL.search(transcript[-1] or ""))
-        # AWAITING: the AI asked to be woken by what is in flight — an inquiry's
-        # later answer, a peer's report. While a peer works, its chain is not over.
-        awaited = bool(transcript) and bool(_AWAIT_CALL.search(transcript[-1] or ""))
+        # DONE FOR NOW: the AI is woken by what is in flight — an inquiry's later
+        # answer, a peer's report. While a peer works, its chain is not over.
+        waiting = said_done
         if LATER.get(self.aid):
             said_done = False  # the test still has a message to send this agent
         if not (idle >= 30 or (said_done and idle >= DONE_QUIET)):
@@ -571,8 +569,8 @@ class ChainEnd:
             for t in rows
             if t.get("agent") != self.aid and t.get("verb") not in _QUIET_VERBS
         ]
-        if (idle < 30 or awaited) and peers:
-            return "", False  # said done / awaiting, and a peer is still working
+        if (idle < 30 or waiting) and peers:
+            return "", False  # said done, and a peer is still working
         # DUMP THE TABLE. "no turn and nothing in flight" is a conclusion; the
         # rows are the evidence. Without them a chain that ended and a detector
         # that fired too early look identical from the transcript.

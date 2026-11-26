@@ -1,16 +1,16 @@
-"""kernel/failed_turn_retry — a failed turn is retried as the chain's own next turn
-(#533). NO MODEL.
+"""kernel/failed_turn_retry — a failed pass is retried only by `transport_retries`,
+inside the pass (#533, #795). NO MODEL.
 
 A scripted OpenAI-compatible server fails the way a provider does, for the kernel's
-own `vllm_backend` agent (ai_core) on the PACKAGED rust host:
+own `vllm_backend` agent (ai_core) on the PACKAGED rust host; the chat has
+`transport_retries: 1`:
 
-  1. an HTTP 500 error reply, then a plain `done`: request 2 is the agent's own next
-     turn, its last user turn carries `[turn failed]` and the error; the history
-     holds one `error` row; the chain settles;
-  2. a stream cut at `max_tokens` (`finish_reason: length`), then `done`: the same,
-     and the text names `max_tokens`;
-  3. HTTP 500 on every turn: exactly MAX_SILENT_TURNS (10) requests, then the chain
-     stops (`gave_up`) — the agent goes idle and no further request arrives.
+  1. an HTTP 500 error reply, then a plain `done`: request 2 is the same pass retried
+     on the link, it answers, and the history holds no `error` row; the chain settles;
+  2. a stream cut at `max_tokens` (`finish_reason: length`): no link failure, so one
+     request; the history holds an `error` row naming `max_tokens`; the chain settles;
+  3. HTTP 500 on every request: exactly 1 + transport_retries (2) requests, then the
+     pass fails — the agent goes idle and no further request arrives.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ REPO = E2E.parent
 RUNTIME = os.environ.get("RUNTIME", "")
 AI, PROV = "ai", "prov"
 MODEL = "mock-failing"
-MAX_SILENT_TURNS = 10
+RETRIES = 1
 CUT = "<cut>"
 
 
@@ -119,49 +119,48 @@ def main() -> int:
         need(rec.get("id") == PROV, f"create {PROV}: {str(rec)[:200]}")
         rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=AI,
                         provider_id=PROV, model=MODEL, max_tokens=8192,
+                        transport_retries=RETRIES,
                         context_window=262144, memory_store_id="memory",
                         can={"memory": ALL, PROV: PROVIDER})
         need(rec.get("id") == AI, f"create {AI}: {str(rec)[:200]}")
 
-        # ── 1 · an error reply ────────────────────────────────────────────
+        # ── 1 · an error reply, retried on the link inside the pass ──────
         m.error(500, times=1).reply("Recovered.\n" + DONE)
         say("first")
-        turns = turns_at_least(2)
+        turns_at_least(2)
         need(idle(), "1: the chain settles")
+        time.sleep(0.5)
         turns = m.turns()
-        need(len(turns) == 2, f"1: the failed turn and its own retry: {len(turns)} requests")
-        u = last_user(turns[1]["body"]) if len(turns) > 1 else ""
-        need("[turn failed]" in u, f"1: the next request carries [turn failed]: {u[:200]!r}")
+        need(len(turns) == 2, f"1: the failed request and its link retry: {len(turns)} requests")
         need(bool(turns) and turns[0]["answered"] == 500, "1: the first request was answered with the error")
-        need(len(error_rows()) == 1, f"1: the history holds one error row: {error_rows()}")
+        need(not error_rows(), f"1: the retried pass answered, no error row: {error_rows()}")
 
         # ── 2 · a stream cut at max_tokens ────────────────────────────────
         m.clear()
         m.reply(CUT + "a long answer that never finishes", "Recovered.\n" + DONE)
         say("second")
-        turns_at_least(2)
+        turns_at_least(1)
         need(idle(), "2: the chain settles")
+        time.sleep(1.0)
         turns = m.turns()
-        need(len(turns) == 2, f"2: the cut turn and its own retry: {len(turns)} requests")
-        u = last_user(turns[1]["body"]) if len(turns) > 1 else ""
-        need("[turn failed]" in u and "max_tokens" in u,
-             f"2: the next request carries [turn failed] and max_tokens: {u[:240]!r}")
-        need(len(error_rows()) == 2, f"2: a second error row: {len(error_rows())}")
+        need(len(turns) == 1, f"2: a cut is no link failure, one request: {len(turns)} requests")
+        rows = error_rows()
+        need(len(rows) == 1 and "max_tokens" in str(rows[0]),
+             f"2: one error row naming max_tokens: {rows}")
 
-        # ── 3 · failures in a row end the chain ───────────────────────────
+        # ── 3 · failures on every request end the pass ────────────────────
         m.clear()
         m.error(500, times=None)
         say("third")
-        turns_at_least(MAX_SILENT_TURNS)
-        need(idle(), "3: the chain ends (the agent has no task in `ps`)")
+        turns_at_least(1 + RETRIES)
+        need(idle(), "3: the pass ends (the agent has no task in `ps`)")
         time.sleep(1.0)
         n = len(m.turns())
-        need(n == MAX_SILENT_TURNS,
-             f"3: exactly MAX_SILENT_TURNS ({MAX_SILENT_TURNS}) requests, no hang: {n}")
+        need(n == 1 + RETRIES,
+             f"3: exactly 1 + transport_retries ({1 + RETRIES}) requests, no hang: {n}")
         m.error(None)
-        need(idle(5) and len(m.turns()) == n, "3: no request follows (gave_up)")
-        print(f"  ── last request of the run: {last_user(m.turns()[-1]['body'])[:200]!r}"
-              if m.turns() else "  (no requests)", flush=True)
+        need(idle(5) and len(m.turns()) == n, "3: no request follows (the pass failed)")
+        need(len(error_rows()) == 2, f"3: the failed pass wrote its error row: {len(error_rows())}")
     finally:
         hk.close()
         m.stop()

@@ -1,8 +1,8 @@
 //! An inquiry whose recipient's turn fails tells the asker (#722): every failed
 //! turn that is not retried closes the inquiry its chain is answering with
 //! `{error: "<agent>'s turn failed: <reason>"}`, and the asker reads it as an
-//! ordinary `[reply to <pid> · <agent> inquiry]`. A provider failure is retried
-//! (#533) and leaves the inquiry open for the retry; the give-up closes it.
+//! ordinary `[reply to <pid> · <agent> inquiry]`. A provider failure is retried only
+//! by `transport_retries` inside the pass (#795); past them the turn has failed.
 //!
 //! A child of `tests`, so it drives the same harness: the mock provider, a real
 //! `ram_store` and `mk_kernel` backends.
@@ -10,7 +10,6 @@
 use super::*;
 
 const DONE: &str = r#"<call name="done"></call>"#;
-const AWAIT: &str = r#"<call name="await"></call>"#;
 
 /// The asker's `inquiry` to `target`, in the routing form.
 fn ask(target: &AgentId) -> String {
@@ -21,9 +20,9 @@ fn ask(target: &AgentId) -> String {
     )
 }
 
-/// The asker's three passes: ask, wait, and read the answer.
+/// The asker's three passes: ask, done for now, and read the answer.
 fn asker_passes(target: &AgentId) -> Vec<Vec<ScriptEvent>> {
-    vec![pass(ask(target)), pass(AWAIT), pass(DONE)]
+    vec![pass(ask(target)), pass(DONE), pass(DONE)]
 }
 
 /// Start the asker's run: its first pass sends the inquiry.
@@ -136,45 +135,19 @@ async fn a_timed_out_turn_tells_the_asker() {
     told(&fb, &a, "send: timeout after 0.5s").await;
 }
 
-/// A provider failure is retried, so the inquiry stays open for the retry; when the
-/// retries give up, the asker is told the give-up and its last failure.
+/// A provider failure fails the turn (#795: no retry turn of its own), and the asker is
+/// told it; nothing more is asked of the provider.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_provider_failure_that_gives_up_tells_the_asker() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp, "iq_provider").await;
     let fb = asker(&kernel, &tmp, &a).await;
-    let _ = kernel.operator_send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({"type": "update_agent", "id": a.as_str(), "misfire_limit": 2}),
-        )])
-        .await;
     let fail = || vec![ScriptEvent::Fail("provider exploded".into())];
     let s = script(&a, vec![fail(), fail()], Duration::ZERO);
     start(&kernel, &peer_of(&a)).await;
-    let gave_up = "The LLM was not able to answer — 2 turns in a row failed or produced \
-                   no call. Last failure: provider exploded";
-    for _ in 0..400 {
-        let seen = fb
-            .requests
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|m| Value::Array(m.clone()).to_string())
-            .find(|t| t.contains(gave_up));
-        if let Some(t) = seen {
-            assert!(
-                t.contains("[reply to ") && t.contains(&format!(" · {a} inquiry]")),
-                "{t}"
-            );
-            assert_eq!(s.passes_served(), 2);
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    panic!(
-        "the asker was never told the give-up: {:?}",
-        fb.requests.lock().unwrap()
-    );
+    told(&fb, &a, "provider exploded").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(s.passes_served(), 1, "a failed turn is not re-run");
 }
 
 /// A fold-strategy agent over a small window with a goal and six closed chains:

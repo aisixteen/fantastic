@@ -18,8 +18,8 @@ iframe: the probe reads it through CDP, as the chat probes read a chat). Seeded:
 7. no page error is logged;
 8. agent states (#714): two `vllm_backend` chats `c714a`, `c714b` on the parity OpenAI chat stub
    (a scripted model, no GPU; the newest message's marker picks the answer), made as the canvas
-   makes every AI (`canvas_root create`). A has `transport_retries: 1` and `misfire_limit: 2`
-   (the least), so its second failed or dead call in a row gives the chain up. Each state comes
+   makes every AI (`canvas_root create`). A has `transport_retries: 1`, so a stream that dies
+   twice fails the call. Each state comes
    from the chat's real path and is checked on A's row (badge class, glyph, colours against the
    skin tokens, the word under the name, the face's filter, the outline round the tile: a 1.5px
    ring 3px outside it in the state's colour, drawn by the tile's `::before`):
@@ -28,16 +28,12 @@ iframe: the probe reads it through CDP, as the chat probes read a chat). Seeded:
      `writing` (the answer's first line, then a hold), `retrying` (a stream that dies); its
      outline is a ray running round the tile (the accent over the faint selected line);
    - Done: a call that completed: ✓ on ok, kept after the call;
-   - Failed: the retried stream dies again, the failed call handed back dies too, the chain
-     gives up: × on error, kept;
-   - Stalled: an empty answer (a dead call), twice: `!` in the stall colour (warn 40% into
-     error), the word in it too, a dashed ring, is drawn between the dead call
-     and the next one (the chain rerolls at once, then gives up), so it is read from the row's
-     drawn states (a MutationObserver, which keeps the first Stalled row's look), not from a
-     still row;
-   - Working, waiting: A hands B a slow message and calls `await`; the chain runs its calls
-     first (B thinking, A's own call already done), then waits on the reply: `waiting` is drawn
-     between B's answer and the call it wakes, read from the drawn states;
+   - Failed: the retried stream dies again: × on error, kept (#795: nothing re-runs it);
+   - an empty answer is no call: re-asked inside its turn (Working, `retrying`), every
+     attempt empty, then the harness stops the turn (Failed), read from the row's drawn
+     states (a MutationObserver);
+   - a hand-off: A sends B a slow message and ends its answer with `done` (#795): B thinking,
+     A's own call done; B's answer wakes A: Working, then Done, read from the drawn states;
    - Asks you: A's inquiry to the person: `?` on warn; answered, the badge goes;
    - Paused: the `pause` verb: II on muted, the face greyed; then the host stops and starts
      again (the page reopened): the sidebar boots before the chats, so A's own `paused` at its

@@ -17,8 +17,10 @@ one turn of three attempts, re-asked inside it (#766, `CALL_RETRIES = 2`): a cal
 wrong (it fails at its first foreign tag; the re-ask is the same messages plus the attempt
 as written and the compiler-style report; nothing after the tag is read; nothing runs),
 then an envelope with text outside a tag (the second re-ask adds it and its fault), then a
-call only inside the thought (accepted, not dispatched; the no-call reminder comes back;
-the stored history has no thought) → a plain answer with `done` (no further request). After
+call inside the thought beside a real one in the answer (accepted; the thought's call is
+not dispatched; the stored history has no thought) → one turn of two attempts (#795): an
+answer with no call, re-asked inside the turn with the no-call report, then a plain answer
+with `done` (no further request). After
 the accepted attempt no request and no stored row holds either failed attempt or a report.
 A thought shows in the next request as its autofold marker (`<thought id="N" tokens="…"/>`,
 #556, map-once) at the top of the next user-side message, never in an assistant message. The checks are listed in `probe.py`'s docstring.

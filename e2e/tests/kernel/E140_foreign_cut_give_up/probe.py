@@ -52,11 +52,10 @@ MODEL = "mock-scripted"
 TOKEN = "E140-" + secrets.token_hex(4)
 FOREIGN = 'Sending it.\n<invoke name="send">\n' + '</invoke>\n' * 400
 DONE = '<call name="done"></call>'
-AWAIT = '<call name="await"></call>'
 ATTEMPTS = 3  # 1 + CALL_RETRIES (src/lib/rust/crates/bundles/fantastic-ai-core/src/constants.rs)
 # res/default/stop_reason.txt filled with ATTEMPTS
-STOP_REASON = (f"{ATTEMPTS} attempts in a row wrote malformed calls, so the harness "
-               "stopped the turn.")
+STOP_REASON = (f"{ATTEMPTS} attempts in a row wrote malformed calls or no call, so the "
+               "harness stopped the turn.")
 # the stored row is `render_call("stop", {reason})` = `<call name="stop">\n<reason>…</reason>\n</call>`
 # (tool_parse/render.rs); the history digest's `head` flattens `\n` to a space and
 # caps at 120 code points (verbs.rs `digest`), which this 111-char prefix fits
@@ -168,7 +167,7 @@ def main() -> int:
 
         # ── A · three failed attempts: the harness stops the turn ─────────────
         m.reply(*[FOREIGN] * 12)
-        mb.reply(ask, AWAIT, DONE)
+        mb.reply(ask, DONE, DONE)
         out = hk.send(BOSS, {"type": "send", "text": "go A"})
         need(not out.get("error"), f"the send is accepted: {str(out)[:200]}")
         turns_at_least(m, ATTEMPTS)
@@ -185,7 +184,10 @@ def main() -> int:
              "A: no attempt is read past the delta that held the foreign tag")
         hist = history()
         rows = [r for r in hist if r.get("role") == "assistant"]
-        need(len(rows) == 1 and str(rows[0].get("head")).startswith(STOP_HEAD),
+        # a history head is capped (120 chars): it is the stop call's opening
+        head = str(rows[0].get("head")).rstrip("…") if rows else ""
+        need(len(rows) == 1 and len(head) >= 40
+             and (head.startswith(STOP_HEAD) or STOP_HEAD.startswith(head)),
              f"A: the one stored assistant row is the harness's stop call: "
              f"{[str(r.get('head'))[:120] for r in rows]}")
         need(not any("<invoke" in str(r.get("head")) or REPORT in str(r.get("head"))

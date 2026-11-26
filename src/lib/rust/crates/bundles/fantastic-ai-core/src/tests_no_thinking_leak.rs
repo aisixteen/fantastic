@@ -1,5 +1,5 @@
-//! Thinking never leaves the agent that produced it: a peer's `send` reply, an
-//! awaited reply and the delivered reply row carry its answer only, never its
+//! Thinking never leaves the agent that produced it: a peer's `send` reply, a
+//! reply that wakes an agent after its `done` and the delivered reply row carry its answer only, never its
 //! `<think>` text nor its rows' stored `thinking`; the producer's own `recall` of
 //! its own row still returns it (E37: a solver read a peer's deliberation off a
 //! send reply).
@@ -10,7 +10,6 @@
 use super::*;
 
 const DONE: &str = r#"<call name="done"></call>"#;
-const AWAIT: &str = r#"<call name="await"></call>"#;
 
 /// Every row of `agent`'s store, as one string.
 async fn stored(kernel: &Arc<Kernel>, agent: &AgentId) -> String {
@@ -38,16 +37,16 @@ fn ask(target: &AgentId, payload: Value) -> String {
     call_envelope(target.as_str(), payload, None)
 }
 
-/// An asker sends its peer a message (then awaits, when `wait`); the peer answers
+/// An asker sends its peer a message (and ends with `done`, when `done`); the peer answers
 /// with thinking. The asker's next request — the reply batch — and its stored rows
 /// hold the peer's answer, and none of the peer's thinking.
-async fn a_peer_answer_reaches_the_asker_without_its_thinking(tag: &str, wait: bool) {
+async fn a_peer_answer_reaches_the_asker_without_its_thinking(tag: &str, done: bool) {
     let tmp = TempDir::new().unwrap();
     let (kernel, peer) = mk_kernel(&tmp, tag).await;
     let asker = add_peer(&kernel, &tmp, &peer).await;
     let question = ask(&peer, json!({"type": "send", "text": "how many lamps?"}));
-    let first = if wait {
-        format!("{question}\n{AWAIT}")
+    let first = if done {
+        format!("{question}\n{DONE}")
     } else {
         question
     };
@@ -80,8 +79,8 @@ async fn a_peers_send_reply_holds_no_thinking() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_awaited_peer_reply_holds_no_thinking() {
-    a_peer_answer_reaches_the_asker_without_its_thinking("nl_await", true).await;
+async fn a_peer_reply_after_done_holds_no_thinking() {
+    a_peer_answer_reaches_the_asker_without_its_thinking("nl_done", true).await;
 }
 
 /// The send reply itself, as its caller gets it: the answer, no `<think>` span.

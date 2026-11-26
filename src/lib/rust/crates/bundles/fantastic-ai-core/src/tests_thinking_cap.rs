@@ -9,6 +9,9 @@ use crate::think::{ThinkMeter, THINK_CLOSE, THINK_OPEN};
 use futures_util::StreamExt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// What the thinker answers after its thinking: a call, so the answer stands (#795).
+const ANSWER: &str = "the answer <call name=\"done\"></call>";
+
 fn knobs(meta: Value) -> Map<String, Value> {
     crate::record::knobs_of(meta.as_object().unwrap())
 }
@@ -137,7 +140,7 @@ impl Handler for ThinkerProvider {
             };
             Arc::new(Thinker {
                 enforces: m.get("enforces").and_then(Value::as_bool).unwrap_or(false),
-                answer: "the answer".into(),
+                answer: ANSWER.into(),
                 n: if nth < runaway { 100 } else { 3 },
                 pulled: Arc::default(),
             })
@@ -245,7 +248,7 @@ async fn a_cut_thinking_is_re_asked_once_and_answers() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r["response"], json!("the answer"), "{r}");
+    assert_eq!(r["response"], json!(ANSWER), "{r}");
     let retries = retries(&kernel, &chat).await;
     assert_eq!(retries.len(), 1, "{retries:?}");
     let note = crate::model_format::NOTICE_THINKING_CUT.replace("{budget}", "10");
@@ -263,7 +266,7 @@ async fn a_second_cut_stops_the_turn() {
         .await
         .remove(0)
         .result;
-    assert_ne!(r["response"], json!("the answer"), "{r}");
+    assert_ne!(r["response"], json!(ANSWER), "{r}");
     assert_eq!(served_by("thinker_twice"), 2, "two passes, then the stop: {r}");
     assert_eq!(retries(&kernel, &chat).await.len(), 2);
     let stops = traces(&kernel, &chat, "stop").await;
@@ -282,6 +285,6 @@ async fn an_enforcing_server_is_not_cut() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r["response"], json!("the answer"), "{r}");
+    assert_eq!(r["response"], json!(ANSWER), "{r}");
     assert!(retries(&kernel, &chat).await.is_empty());
 }

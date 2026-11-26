@@ -41,6 +41,8 @@ pub(super) const CFG: BackendConfig = BackendConfig {
 pub(super) const FOREIGN: &str = "Sending.\n<invoke name=\"send\">";
 /// The internal form, foreign to a `hermes` model.
 pub(super) const DONE: &str = r#"<call name="done"></call>"#;
+/// An answer with prose and a call (#795: an answer with no call is re-asked).
+const ANSWER: &str = r#"the answer <call name="done"></call>"#;
 /// A model id of the `default` type.
 pub(super) const PLAIN: &str = "test-model";
 /// A model id of the `hermes` type.
@@ -61,6 +63,8 @@ pub(super) struct Step {
     hang: bool,
     /// The request itself never returns: only a drop ends it.
     stall: bool,
+    /// Its text is sent as written, never in the request's type's form.
+    raw: bool,
 }
 
 impl Step {
@@ -71,6 +75,15 @@ impl Step {
             report: Some(ProviderReport::default()),
             hang: false,
             stall: false,
+            raw: false,
+        }
+    }
+
+    /// `text` as written, whatever type the request is: a call form foreign to it.
+    pub(super) fn raw(text: &str) -> Self {
+        Self {
+            raw: true,
+            ..Self::says(text)
         }
     }
 
@@ -144,12 +157,19 @@ impl Provider for Scripted {
         _max_tokens: Option<i64>,
     ) -> Result<ProviderStream, ProviderError> {
         self.asked.lock().unwrap().push(messages.to_vec());
-        let step = self
+        let mut step = self
             .steps
             .lock()
             .unwrap()
             .pop_front()
-            .unwrap_or_else(|| Step::says("ok"));
+            .unwrap_or_else(|| Step::says(DONE));
+        // A STEP IS INTERNAL TEXT, written in the form of the type its request was made
+        // under (the model before this step names another): `DONE` is a hermes chat's
+        // own `done` (#795: an answer has a call). Text of no call form is unchanged.
+        if !step.raw {
+            let kind = super::rules::type_of(super::rules::shipped(), &self.model.lock().unwrap());
+            step.text = super::of(kind).calls.render(&step.text);
+        }
         if !step.model.is_empty() {
             *self.model.lock().unwrap() = step.model.to_string();
         }
@@ -362,7 +382,6 @@ pub(super) async fn answered(
         Ok(Generation::Answered {
             text, message_id, ..
         }) => (text, message_id),
-        Ok(Generation::Dead { .. }) => panic!("{client}: a dead turn"),
         Ok(Generation::Stopped { reason, .. }) => panic!("{client}: stopped: {reason}"),
         Err(_) => panic!("{client}: the generation failed"),
     }
@@ -532,8 +551,9 @@ async fn each_event_has_ids() {
         PLAIN,
         vec![
             Step::says(FOREIGN).reports(rep(1000, 30, Some(200), None)),
-            Step::says("ok").reports(rep(1100, 5, Some(900), None)),
+            Step::says(DONE).reports(rep(1100, 5, Some(900), None)),
             Step::says("<think>only thinking</think>"),
+            Step::says(DONE),
         ],
     );
     let (_, mid) = answered(&kernel, &a, &p, "e1_a").await;
@@ -551,17 +571,15 @@ async fn each_event_has_ids() {
         assert_eq!(r["content"], json!(""), "{r}");
         assert!(r.get("role").is_none(), "{r}");
     }
-    // a dead turn stored no assistant row: its rows name none
-    assert!(matches!(
-        generate(&kernel, &a, &p, "e1_dead").await,
-        Ok(Generation::Dead { .. })
-    ));
-    let dead = traces_of(&kernel, &a, "e1_dead").await;
-    // its pass mapped the two rows the first turn stored, none of them cached yet
-    assert_eq!(names(&dead), ["render_cold"], "{dead:?}");
-    assert_eq!(dead[0]["rows"], json!(2), "{dead:?}");
-    assert!(dead[0].get("row").is_none(), "{}", dead[0]);
-    assert_eq!(dead[0]["mode"], json!("turn"));
+    // a thinking-only attempt is re-asked inside its turn (#795): a `retry`, and every
+    // row names the row the turn stored
+    let (_, mid) = answered(&kernel, &a, &p, "e1_think").await;
+    let think = traces_of(&kernel, &a, "e1_think").await;
+    assert!(names(&think).contains(&"retry".to_string()), "{think:?}");
+    for r in &think {
+        assert_eq!(r["row"], json!(mid), "{r}");
+        assert_eq!(r["mode"], json!("turn"), "{r}");
+    }
 }
 
 // E2
@@ -571,7 +589,7 @@ async fn each_event_has_ids() {
 async fn traces_never_in_view() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp, "tr_e2").await;
-    let p = Scripted::new(PLAIN, vec![Step::says("ok")]);
+    let p = Scripted::new(PLAIN, vec![Step::says(DONE)]);
     answered(&kernel, &a, &p, "e2_a").await;
     set_model(&kernel, &a, QWEN).await;
     p.set_model(QWEN);
@@ -882,15 +900,15 @@ async fn refused_trace_never_fails_turn() {
     store_agent(&kernel, "tr_e7_np", "refuse_prune.tools", json!({})).await;
 
     let a = chat_on(&kernel, "tr_e7_append", "tr_e7_na", Some(PLAIN)).await;
-    let p = Scripted::new(PLAIN, vec![Step::says(FOREIGN), Step::says("the answer")]);
+    let p = Scripted::new(PLAIN, vec![Step::says(FOREIGN), Step::says(ANSWER)]);
     let (text, mid) = answered(&kernel, &a, &p, "e7_a").await;
-    assert_eq!(text, "the answer");
+    assert_eq!(text, ANSWER);
     let rows = store(&kernel, &a).await;
     let row = rows
         .iter()
         .find(|r| r["id"] == json!(mid))
         .expect("the assistant row");
-    assert_eq!(row["content"], json!("the answer"));
+    assert_eq!(row["content"], json!(ANSWER));
     assert!(traces(&kernel, &a).await.is_empty());
 
     let b = chat_on(&kernel, "tr_e7_prune", "tr_e7_np", Some(PLAIN)).await;
@@ -898,7 +916,7 @@ async fn refused_trace_never_fails_turn() {
     let p = Scripted::new(PLAIN, vec![]);
     for i in 0..3 {
         let (text, _) = answered(&kernel, &b, &p, &format!("e7_p{i}")).await;
-        assert_eq!(text, "ok");
+        assert_eq!(text, DONE);
     }
     assert_eq!(traces(&kernel, &b).await.len(), 3, "nothing pruned");
     assert_eq!(ram_count(&b), Some(3));
@@ -914,9 +932,9 @@ async fn prefix_cache_only_when_reported() {
     let p = Scripted::new(
         PLAIN,
         vec![
-            Step::says("ok").reports(rep(100, 5, Some(40), Some(10))),
-            Step::says("ok").reports(rep(100, 5, None, None)),
-            Step::says("ok").reports(rep(100, 5, Some(70), None)),
+            Step::says(DONE).reports(rep(100, 5, Some(40), Some(10))),
+            Step::says(DONE).reports(rep(100, 5, None, None)),
+            Step::says(DONE).reports(rep(100, 5, Some(70), None)),
         ],
     );
     answered(&kernel, &a, &p, "e8_both").await;
@@ -956,7 +974,7 @@ async fn zero_cap_writes_nothing() {
         PLAIN,
         vec![
             Step::says(FOREIGN).reports(rep(10, 1, Some(5), None)),
-            Step::says("ok").reports(rep(10, 1, Some(5), None)),
+            Step::says(DONE).reports(rep(10, 1, Some(5), None)),
         ],
     );
     answered(&kernel, &a, &p, "e9_a").await;
@@ -986,7 +1004,7 @@ async fn first_pass_no_switch() {
 async fn cancelled_turn_writes_no_rows() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp, "tr_e11").await;
-    let p = Scripted::new(PLAIN, vec![Step::says("ok")]);
+    let p = Scripted::new(PLAIN, vec![Step::says(DONE)]);
     answered(&kernel, &a, &p, "e11_a").await;
     let before = traces(&kernel, &a).await;
     p.push(vec![
@@ -1108,7 +1126,7 @@ async fn retry_and_stop_rows() {
         vec![
             Step::says(FOREIGN).unreported(),
             Step::says(FOREIGN).reports(rep(1000, 30, Some(200), None)),
-            Step::says("ok").reports(rep(1000, 5, None, None)),
+            Step::says(DONE).reports(rep(1000, 5, None, None)),
         ],
     );
     answered(&kernel, &a, &p, "e13_r").await;
@@ -1323,10 +1341,10 @@ async fn task_rows_carry_mode() {
     let p = Scripted::new(
         PLAIN,
         vec![
-            Step::says("ok"),
+            Step::says(DONE),
             // the owed recall's compose, then attempt 1
             Step::says("{}").reports(rep(300, 30, Some(100), None)),
-            Step::says("ok").reports(rep(1000, 10, None, None)),
+            Step::says(DONE).reports(rep(1000, 10, None, None)),
         ],
     );
     answered(&kernel, &a, &p, "e18_a").await;
@@ -1374,7 +1392,7 @@ async fn task_rows_carry_mode() {
 async fn crashed_pass_writes_no_rows() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp, "tr_e19").await;
-    let p = Scripted::new(PLAIN, vec![Step::says("ok")]);
+    let p = Scripted::new(PLAIN, vec![Step::says(DONE)]);
     answered(&kernel, &a, &p, "e19_ok").await;
     let before = traces(&kernel, &a).await;
     assert_eq!(before.len(), 1);
@@ -1445,7 +1463,7 @@ async fn clean_turn_exact_rows_cap_across_restarts() {
         "no entry of the type was hit yet"
     );
     // a warm turn with one retry: the internal form is foreign to hermes
-    p.push(vec![Step::says(DONE), Step::says("ok")]);
+    p.push(vec![Step::raw(DONE), Step::says(DONE)]);
     answered(&kernel, &a, &p, "e20_retry").await;
     let rows = traces_of(&kernel, &a, "e20_retry").await;
     assert_eq!(names(&rows), ["retry", "render_warm"], "{rows:?}");
@@ -1527,7 +1545,7 @@ async fn switch_seen_after_restart() {
     .await;
     // no record model, nothing seen yet: the first pass is `default`; the endpoint then
     // names a hermes model, and the stored row keeps it
-    let p = Scripted::new(PLAIN, vec![Step::says("ok").named_model(QWEN)]);
+    let p = Scripted::new(PLAIN, vec![Step::says(DONE).named_model(QWEN)]);
     answered(&kernel, &a, &p, "m19_a").await;
     let first = traces_of(&kernel, &a, "m19_a").await;
     assert_eq!(first[0]["type"], json!("default"), "{first:?}");

@@ -11,8 +11,8 @@ request unchanged plus one `{attempt as written, report}` pair per failed attemp
 - A: the BOSS asks the AI; a foreign `<invoke name="send">` followed by a loop of closers
   on every attempt: 3 requests (requests 2-3 the re-asks, none after though the script
   holds more); the one stored assistant row is the harness's
-  `<call name="stop"><reason>3 attempts in a row wrote malformed calls, so the harness
-  stopped the turn.</reason></call>`; no attempt, loop or report is stored; the BOSS is
+  `<call name="stop"><reason>3 attempts in a row wrote malformed calls or no call, so the
+  harness stopped the turn.</reason></call>`; no attempt, loop or report is stored; the BOSS is
   told that reason.
 - B: nine turns in a row that each fail twice and then answer with a real call, then
   one that fails twice and ends with `done`: 30 requests, no stop (no count runs across

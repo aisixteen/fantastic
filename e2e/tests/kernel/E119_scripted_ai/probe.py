@@ -28,13 +28,16 @@ The script, one model answer per request:
   4. attempt 2, an envelope with text outside a tag: not dispatched; request 5 is
      request 4's messages, then this attempt and its fault (`call NOT dispatched:
      text outside a tag`);
-  5. attempt 3, a call INSIDE the thought (`reasoning_content`), an answer with
-     none: accepted (a call-less answer is not a malformed one); nothing is
-     dispatched (no file); request 6 carries the no-call reminder (`[no call was
-     dispatched]`), its history holds the answer without the thought (stripped
-     before the turn is stored, shown as its `<thought …/>` marker on the next user-side message) and
-     NOTHING of attempts 1 and 2: neither attempt nor report is stored or re-sent;
-  6. a plain answer + `done`: the chain ends — no further request reaches the
+  5. attempt 3, a call INSIDE the thought (`reasoning_content`) and a real call in
+     the answer (`reflect` on the files): accepted; the call in the thought is not
+     dispatched (no file); request 6 carries the reflect reply, its history holds the
+     answer without the thought (stripped before the turn is stored, shown as its
+     `<thought …/>` marker on the next user-side message) and NOTHING of attempts 1
+     and 2: neither attempt nor report is stored or re-sent;
+  6-7 are ONE turn (#795): 6. an answer with no call (prose only): re-asked inside
+     the turn — request 7 is request 6's messages, then the answer and the no-call
+     report (`[no call was dispatched]`); nothing of it is stored;
+  7. a plain answer + `done`: the chain ends — no further request reaches the
      server once the agent has nothing in flight.
 
 Across the run: every request is a streamed chat completion naming the record's
@@ -125,11 +128,14 @@ def main() -> int:
          '</target_id><type>write</type><path>bad.txt</path></function></tool_call>'),
         # 4 · attempt 2: an envelope with text outside a tag
         f'<call name="send">oops<routing><target_id>{FILES}</target_id></routing><payload><type>reflect</type></payload></call>',
-        # 5 · attempt 3: a call inside the thought only (accepted: no call)
+        # 5 · attempt 3: a call inside the thought, a real one in the answer (accepted)
         (f'<think>I could run <call name="send"><routing><target_id>{FILES}</target_id></routing><payload>'
          '<type>write</type><path>think.txt</path><bytes>x</bytes></payload></call> but I will not.'
-         '</think>Thinking it over.'),
-        # 6 · a plain answer, and the chain ends
+         f'</think>Thinking it over.\n<call name="send"><routing><target_id>{FILES}</target_id></routing>'
+         '<payload><type>reflect</type></payload></call>'),
+        # 6 · attempt 1 of the next turn: prose only, no call (re-asked inside the turn)
+        'Let me look at that reply first.',
+        # 7 · a plain answer, and the chain ends
         'All finished: the file is written.\n<call name="done"></call>',
     ]
     req2 = ""
@@ -222,8 +228,16 @@ def main() -> int:
                          for m in turns[5]["body"]["messages"] if m.get("role") == "assistant"),
              "request 6 shows the thought as its marker, at the top of the next user-side "
              "message and in no assistant message")
-        need("[no call was dispatched]" in u[5],
-             f"request 6 carries the no-call reminder: {u[5][:160]!r}")
+        need("[reply to " in u[5] and f"{FILES} reflect" in u[5],
+             f"request 6 carries the reflect reply of the accepted attempt: {u[5][:160]!r}")
+        # 6 → 7: one turn, the call-less answer re-asked inside it (#795)
+        need(u[6].startswith("[no call was dispatched]"),
+             f"request 7 carries the no-call report: {u[6][:160]!r}")
+        need(len(msgs[6]) == len(msgs[5]) + 2 and msgs[6][:-2] == msgs[5]
+             and msgs[6][-2] == ("assistant", "Let me look at that reply first."),
+             "request 7 is the re-ask: request 6's messages, then the answer and the report")
+        need("Let me look at that reply first." not in json.dumps(history()),
+             "the call-less answer is not stored")
         # across the run
         bodies = [t["body"] for t in turns]
         need(all(b.get("stream") is True and b.get("model") == MODEL and "tools" not in b

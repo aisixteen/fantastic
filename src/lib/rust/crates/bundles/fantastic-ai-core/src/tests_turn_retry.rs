@@ -408,7 +408,6 @@ async fn generate(
 fn answered(g: Result<Generation, GenFailure>) -> (String, bool) {
     match g {
         Ok(Generation::Answered { text, cut, .. }) => (text, cut),
-        Ok(Generation::Dead { .. }) => panic!("a dead turn"),
         Ok(Generation::Stopped { reason, .. }) => panic!("stopped: {reason}"),
         Err(_) => panic!("the generation failed"),
     }
@@ -861,17 +860,14 @@ async fn transport_error_unchanged() {
 }
 
 // T7
-/// A re-ask answered with nothing, reasoning only or prose only is accepted: the
-/// provider is called twice in that send, and the dead-turn or nudge path follows.
+/// A re-ask answered with nothing, reasoning only or prose only is no call either
+/// (#795): it is re-asked again in the same turn, its report the no-call text, and the
+/// third request still carries the first attempt's re-ask pair.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn callless_reask_is_accepted() {
-    for (i, (answer, next)) in [
-        ("", "[no answer]"),
-        ("<think>only a thought</think>", "[no answer]"),
-        ("just prose", "[no call was dispatched]"),
-    ]
-    .into_iter()
-    .enumerate()
+    for (i, answer) in ["", "<think>only a thought</think>", "just prose"]
+        .into_iter()
+        .enumerate()
     {
         let tmp = TempDir::new().unwrap();
         let (kernel, backend) = mk_kernel(&tmp, &format!("tr_t7_{i}")).await;
@@ -881,13 +877,13 @@ async fn callless_reask_is_accepted() {
             vec![pass(FOREIGN), pass(answer), pass(DONE)],
         );
         send_go(&kernel, &backend).await;
-        assert!(until_passes(&s, 3).await, "{answer:?}: no next turn");
+        assert!(until_passes(&s, 3).await, "{answer:?}: no third attempt");
         let last = last_in(&s, 2);
-        assert!(last.starts_with(next), "{answer:?}: {last}");
-        // the third request is a new turn: no re-ask pair in it
+        assert_eq!(last, crate::model_format::default::REPORT_NO_CALL, "{answer:?}");
+        // the third request is the same turn: the first re-ask pair is in it
         let report = default_report(FOREIGN).expect("bad");
         assert!(
-            !s.request_messages(2)
+            s.request_messages(2)
                 .iter()
                 .any(|m| m["content"] == json!(report)),
             "{answer:?}"
@@ -1340,11 +1336,9 @@ async fn bad_attempt_read_unseen() {
 /// stored offset (1.13) adds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn default_turn_same_as_before() {
+    // (`prose` is gone from the list: an answer with no call is re-asked now, #795, so
+    // its turn is not the recording's; the re-ask has its own units)
     for (name, recorded) in [
-        (
-            "prose",
-            include_str!("model_format/res/test/default_turn_prose.txt"),
-        ),
         (
             "reasoning",
             include_str!("model_format/res/test/default_turn_reasoning.txt"),
@@ -1381,9 +1375,12 @@ async fn default_turn_same_as_before() {
             .and_then(|a| a.remove("used"));
         assert!(used.is_some(), "{name}: the row carries `used`");
         let mut want_row = want["row"].clone();
-        let grown = i64::try_from(turns_of(crate::model_format::default::HOWTO_SEND).len())
-            .unwrap()
-            - i64::try_from(turns_of(BASE_TURNS).len()).unwrap();
+        let howto = crate::model_format::default::HOWTO_SEND;
+        assert!(howto.contains(INQUIRY_WAIT), "{name}: the inquiry's wait line");
+        let grown = i64::try_from(turns_of(howto).len()).unwrap()
+            - i64::try_from(turns_of(BASE_TURNS).len()).unwrap()
+            + i64::try_from(INQUIRY_WAIT.len()).unwrap()
+            - i64::try_from(BASE_INQUIRY_WAIT.len()).unwrap();
         assert!(grown > 0, "{name}: the stop wording is in the how-to");
         let attrs = &mut want_row["attributes"];
         for p in attrs["parts"]["list"].as_array_mut().into_iter().flatten() {
@@ -1438,9 +1435,18 @@ is pending) or with `<call name="done"></call>` (the work is done, checked as un
 no call is rerolled.
 "#;
 
-/// The Turns section of a how-to: from its heading to the next one.
+/// The inquiry's wait, as the how-to on `4fd5bb4d` wrote it, and as it reads now that
+/// a pass ends with `done` (#795).
+const BASE_INQUIRY_WAIT: &str = "work on, or `<call name=\"await\"></call>`\nfor it.";
+const INQUIRY_WAIT: &str = "work on, or end your answer with\n`<call name=\"done\"></call>` until it comes.";
+
+/// The section of a how-to on ending an answer (`## Turns` on `4fd5bb4d`): from its
+/// heading to the next one.
 fn turns_of(howto: &str) -> &str {
-    let at = howto.find("## Turns").expect("a Turns section");
+    let at = howto
+        .find("## Turns")
+        .or_else(|| howto.find("## Ending an answer"))
+        .expect("a section on ending an answer");
     let rest = &howto[at..];
     // through the newline that ends its last line, the blank line before the next aside
     let end = rest[2..].find("\n## ").map_or(rest.len(), |i| i + 2);
@@ -1784,7 +1790,7 @@ async fn retry_leaves_cache() {
     for (tag, retry) in [("tr_k36a", false), ("tr_k36b", true)] {
         let tmp = TempDir::new().unwrap();
         let (kernel, backend) = mk_hermes(&tmp, tag).await;
-        let first = Steps::new(vec![Step::says("hello", QWEN)]);
+        let first = Steps::new(vec![Step::says(&hermes(DONE), QWEN)]);
         answered(generate(&kernel, &backend, &first).await);
         let mut second = Vec::new();
         if retry {
@@ -1807,7 +1813,7 @@ async fn retry_leaves_cache() {
 async fn cancel_keeps_pure_entries() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_hermes(&tmp, "tr_k37").await;
-    let first = Steps::new(vec![Step::says("hello", QWEN)]);
+    let first = Steps::new(vec![Step::says(&hermes(DONE), QWEN)]);
     answered(generate(&kernel, &backend, &first).await);
     let state = crate::state::state_for(&backend);
     let cache = &state.render_cache;
@@ -1849,7 +1855,7 @@ async fn cancel_keeps_pure_entries() {
 async fn pins_released_on_drop() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_hermes(&tmp, "tr_k41").await;
-    let first = Steps::new(vec![Step::says("hello", QWEN)]);
+    let first = Steps::new(vec![Step::says(&hermes(DONE), QWEN)]);
     answered(generate(&kernel, &backend, &first).await);
     let pins = || crate::state::state_for(&backend).render_cache.stats().pins;
 
@@ -2009,7 +2015,7 @@ async fn a_harness_stop_is_told_to_the_asker() {
         &b,
         vec![
             pass(ask),
-            pass(r#"<call name="await"></call>"#),
+            pass(r#"<call name="done"></call>"#),
             pass(r#"<call name="done"></call>"#),
         ],
         Duration::ZERO,

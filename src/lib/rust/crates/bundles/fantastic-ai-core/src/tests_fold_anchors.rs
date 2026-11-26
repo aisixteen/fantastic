@@ -801,7 +801,7 @@ async fn folds_at_a_small_window_and_every_turn_answers() {
     let per_turn = crate::context::estimate_one(
         &json!({"role": "user", "content": format!("turn 0 {}", &long[..300])}),
     ) + crate::context::estimate_one(
-        &json!({"role": "assistant", "content": format!("S8-turn-0 {long}")}),
+        &json!({"role": "assistant", "content": format!("S8-turn-0 {long} <call name=\"done\"></call>")}),
     );
     assert!(
         4 * per_turn < S8_BODY_ROOM && S8_BODY_ROOM < 8 * per_turn,
@@ -811,7 +811,7 @@ async fn folds_at_a_small_window_and_every_turn_answers() {
     while k < 8 || (recalls.load(Ordering::SeqCst) == 0 && k < S8_TURNS_MAX) {
         turn(
             format!("turn {k} {}", &long[..300]),
-            format!("S8-turn-{k} {long}"),
+            format!("S8-turn-{k} {long} <call name=\"done\"></call>"),
         )
         .await;
         assert!(
@@ -829,7 +829,11 @@ async fn folds_at_a_small_window_and_every_turn_answers() {
         recalls.load(Ordering::SeqCst) >= 1,
         "the folds made a context_recall due, and it ran inside a turn"
     );
-    turn("still there?".to_string(), "S8-after-fold".to_string()).await;
+    turn(
+        "still there?".to_string(),
+        "S8-after-fold <call name=\"done\"></call>".to_string(),
+    )
+    .await;
     assert!(
         answered("S8-after-fold".to_string()).await,
         "the turn after the folds was never answered"

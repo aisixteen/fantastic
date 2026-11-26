@@ -534,10 +534,10 @@ async fn crash_mid_retry() {
         };
         let dead = ["streaming the re-ask", form];
         for m in [2, 3] {
-            let mut streams: Vec<Step> = (1..m).map(|_| Step::says(b)).collect();
+            let mut streams: Vec<Step> = (1..m).map(|_| Step::raw(b)).collect();
             streams.push(Step::hangs("streaming the re-ask"));
             crash_at(kind, model, streams, &format!("retry{m}_stream"), &dead).await;
-            let mut asks: Vec<Step> = (1..m).map(|_| Step::says(b)).collect();
+            let mut asks: Vec<Step> = (1..m).map(|_| Step::raw(b)).collect();
             asks.push(Step::stalls());
             crash_at(kind, model, asks, &format!("retry{m}_request"), &dead).await;
         }

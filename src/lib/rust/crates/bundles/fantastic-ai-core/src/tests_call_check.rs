@@ -262,10 +262,10 @@ fn the_verbs_own_arguments_carry_into_the_form_to_write() {
 #[test]
 fn a_call_opener_that_lost_its_lt_is_named_as_that() {
     assert_eq!(
-        check(r#"call name="await"></call>"#, 0),
+        check(r#"call name="done"></call>"#, 0),
         vec![format!(
-            "[malformed call — nothing ran] line 1, col 1:\n  call name=\"await\">‹/call›\n  \
-             ^~~~~~~~~~~~~~~~~~ the opening `<` is missing\nwrite it as:\n<call name=\"await\"></call>\n{TAIL}"
+            "[malformed call — nothing ran] line 1, col 1:\n  call name=\"done\">‹/call›\n  \
+             ^~~~~~~~~~~~~~~~~ the opening `<` is missing\nwrite it as:\n<call name=\"done\"></call>\n{TAIL}"
         )]
     );
 }
@@ -638,7 +638,7 @@ fn a_correct_or_quoted_call_is_not_cut() {
         "use `<invoke name=\"x\">` never, and the word invoke is fine",
         "```\n<invoke name=\"x\">\n```\nok",
         "a < b and c > d",
-        "call name=\"await\">more",
+        "call name=\"done\">more",
     ];
     for text in ok {
         assert_eq!(streamed_cut(text), None, "{text}");

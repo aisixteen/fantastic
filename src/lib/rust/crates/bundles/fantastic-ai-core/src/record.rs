@@ -62,10 +62,6 @@ fn default_transport_retries() -> Option<i64> {
     Some(0)
 }
 
-fn default_misfire_limit() -> Option<i64> {
-    Some(crate::constants::MAX_SILENT_TURNS as i64)
-}
-
 /// The fields EVERY ai_core agent takes, whatever its backend.
 #[derive(Debug, JsonSchema)]
 pub struct AiRecord {
@@ -86,9 +82,6 @@ pub struct AiRecord {
     /// How many times a turn whose link dropped is retried before it fails, with a 2 s, 4 s, 8 s backoff; 0 = off.
     #[schemars(range(min = 0, max = 5), default = "default_transport_retries")]
     pub transport_retries: Option<i64>,
-    /// Answers in a row that ran nothing before the chain gives up.
-    #[schemars(range(min = 2, max = 50), default = "default_misfire_limit")]
-    pub misfire_limit: Option<i64>,
     /// A system block that REPLACES the default one on every turn; null = the default.
     #[schemars(length(min = 1), regex(pattern = r"\S"))]
     pub system_prompt: Option<String>,

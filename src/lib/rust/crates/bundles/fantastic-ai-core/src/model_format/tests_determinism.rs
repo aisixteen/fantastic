@@ -1294,7 +1294,7 @@ impl Seeded {
     fn control(&mut self) -> String {
         let (name, args) = match self.below(6) {
             0 => ("done", json!({})),
-            1 => ("await", json!({})),
+            1 => ("done", json!({})),
             2 => ("inquiry_answer", json!({"answer": self.scalar()})),
             3 => (
                 "keep",
