@@ -155,7 +155,6 @@ async def scenario(name: str, own: bool) -> bool:
             "handler_module": "file_bridge.tools", "allow": ["."],
             "id": "kernel_store",
             "root": ".",  # the run dir — main.py lands beside readings/ and in runner cwd
-            "ingress_rule": "allow_all_ingress",
         }}]))[0]["result"]
     os.makedirs("readings", exist_ok=True)
     for fname, val in readings.items():
@@ -167,7 +166,6 @@ async def scenario(name: str, own: bool) -> bool:
             "handler_module": "file_bridge.tools", "allow": ["."],
             "id": "readings",
             "root": "readings",
-            "ingress_rule": "allow_all_ingress",
         }}]))[0]["result"]
     mem = (await root.send([{"target": root.id, "payload": {
             "type": "create_agent",
@@ -175,7 +173,6 @@ async def scenario(name: str, own: bool) -> bool:
             "handler_module": "file_bridge.tools", "allow": ["."],
             "id": "totals",
             "root": ".",
-            "ingress_rule": "allow_all_ingress",
             # the running program's writes arrive from EITHER leg: each holds its own
             # line on `totals` (`wire_executor_leg`, and OWN_LEG below)
         }}]))[0]["result"]
@@ -194,7 +191,6 @@ async def scenario(name: str, own: bool) -> bool:
                 "id": OWN_LEG,
                 "cwd": os.getcwd(),
                 "inherit_env": ["PATH", "HOME"],
-                "ingress_rule": "allow_all_ingress",
                 # the SHELL-JOINED line: a path that needs quoting (Windows') is quoted
                 "allowed": [rf"{re.escape(shlex.quote(sys.executable))} \S+"],
                 "can": {"totals": lines.call("write", "read")},

@@ -12,8 +12,8 @@
 //! THE DEFAULT VIEW (design decision): what the agent IS and WHO IT TALKS TO —
 //! header (id, open or sealed, its sentence), the last call, its LINES (`can`:
 //! one line per target, as the kernel wrote it; its own tree it reaches by
-//! position, never written), its `ingress_rule` (or "sealed"), its verbs, and its
-//! rows.
+//! position, never written), a wire leg's `ingress_rule` (or "sealed" to external
+//! clients), its verbs, and its rows.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -154,11 +154,12 @@ impl GenericPanel {
             )));
         }
         // SEALED is the agent's own word (its reflect says so), never an
-        // inference from a missing rule: sealed-by-default is a property of
-        // IO legs, not of every agent.
+        // inference from a missing rule: sealed-by-default is a property of the
+        // wire legs' outside door (HTTP/WS clients), not of every agent; in-kernel
+        // callers are judged by their lines alone.
         if sealed {
             out.push(Line::from(Span::styled(
-                "    sealed — only reflect and boot answer until a rule opens it",
+                "    sealed — external HTTP/WS clients are refused; agents call by their lines",
                 Style::default().fg(theme::DIM),
             )));
         }
@@ -363,7 +364,6 @@ mod tests {
         let r = json!({
             "sentence": "reads and writes files under a root",
             "can": {"exec": {"call": ["read_stream"]}, "memory": {"call": ["append", "read"]}},
-            "ingress_rule": "allow_all_ingress",
             "verbs": {"read_stream": "args: path", "list": "args: path?"},
         });
         let p = GenericPanel::new("files".into());
@@ -372,7 +372,7 @@ mod tests {
         let a: AgentId = "files".into();
         let cx = Cx { agent: &a, store: &store, tasks: &[], seen: &seen, reflect: Some(&r), provider: None };
         let t = text(&p.lines(&cx));
-        for want in ["files  ● open", "LINES · may reach", "ingress_rule  allow_all_ingress", "read_stream", "VERBS"] {
+        for want in ["files  ● open", "LINES · may reach", "read_stream", "VERBS"] {
             assert!(t.contains(want), "default view lacks {want:?}:\n{t}");
         }
         assert!(t.contains("exec          call: read_stream"), "a line shows its level and verbs:\n{t}");
@@ -389,7 +389,7 @@ mod tests {
         let a: AgentId = "leg".into();
         let cx = Cx { agent: &a, store: &store, tasks: &[], seen: &seen, reflect: Some(&r), provider: None };
         let t = text(&p.lines(&cx));
-        assert!(t.contains("○ sealed") && t.contains("sealed — only reflect and boot answer"), "{t}");
+        assert!(t.contains("○ sealed") && t.contains("sealed — external HTTP/WS clients are refused"), "{t}");
     }
 
     #[test]

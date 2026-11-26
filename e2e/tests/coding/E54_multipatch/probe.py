@@ -61,7 +61,6 @@ async def main():
                 "id": FB,
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "root": ".",
-                "ingress_rule": "allow_all_ingress",
             },
         )
         assert not r.get("error"), f"create {FB}: {r}"
@@ -74,7 +73,6 @@ async def main():
                 "id": "editor",
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "root": ".",
-                "ingress_rule": "allow_all_ingress",
             },
         )
         assert not r.get("error"), f"create editor: {r}"

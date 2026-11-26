@@ -2,9 +2,8 @@
 //! `file_agent.py` and `folder_agent.py`, ported verb for verb. Read those first.
 //!
 //! A view is a record of this bundle carrying `view: file|folder`, a child of its
-//! bridge. This bundle's handler answers it before the bridge's own gate: a view is
-//! not sealed, its gate is its line on the bridge (`$parent: {call: GRANTS}`) and its
-//! own `path` field. Every disk operation is a send to the bridge AS THE VIEW, for
+//! bridge. This bundle's handler answers it before the bridge's own verbs: its gate
+//! is its line on the bridge (`$parent: {call: GRANTS}`) and its own `path` field. Every disk operation is a send to the bridge AS THE VIEW, for
 //! the view's own path; a verb naming another path is refused here, before the bridge
 //! is asked. The bridge pushes a view its watch changes (`watch::relay_to_views`), so
 //! the view is never a kernel watcher of its bridge.

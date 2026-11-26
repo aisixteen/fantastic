@@ -806,7 +806,6 @@ async fn binary_call_round_trips_raw_bytes_over_the_bridge() {
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "id": "fb",
                 "root": tmp.path().to_string_lossy(),
-                "ingress_rule": "allow_all_ingress",
             }),
         )])
         .await

@@ -20,7 +20,6 @@ async fn watched_agent(kernel: &Arc<Kernel>, tmp: &TempDir, leg: &str, grant: bo
         "handler_module": "file_bridge.tools", "allow": ["."],
         "id": "files",
         "root": tmp.path().join("served").to_string_lossy(),
-        "ingress_rule": "allow_all_ingress",
     });
     let r = call(kernel, "kernel", rec).await;
     assert_eq!(r["id"], json!("files"), "{r}");

@@ -20,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-from families import ALL, OPEN, VLLM, ai, ai_pair, call, save_kernel_log, vllm
+from families import ALL, VLLM, ai, ai_pair, call, save_kernel_log, vllm
 
 NAME = "bundle_verbs"
 
@@ -35,10 +35,6 @@ def fixtures(work: Path, interp: str) -> list:
         ("files_ro", "file_bridge.tools", dict(allow=["."], root="sub", readonly=True)),
         ("files_escape", "file_bridge.tools", dict(allow=["."], root="../outside")),
         ("files_symroot", "file_bridge.tools", dict(allow=["."], root="symroot")),
-        ("files_env_rule", "file_bridge.tools", dict(allow=["."], root=".", ingress_rule={"env": "X"})),
-        ("files_null_rule", "file_bridge.tools", dict(allow=["."], root=".", ingress_rule=None,
-                                                      auth_token="tok")),
-        ("files_auth_stem", "file_bridge.tools", dict(allow=["."], root=".", ingress_rule="password")),
         # ── the text verbs, on a second bridge over the same root ──
         ("editor", "file_bridge.tools", dict(allow=["."], root=".")),
         # ── exec_bridge ──
@@ -46,8 +42,6 @@ def fixtures(work: Path, interp: str) -> list:
         ("runner_badre", "exec_bridge.tools", dict(cwd=".", allowed=["(unclosed"])),
         ("runner_named", "exec_bridge.tools", dict(cwd=".", allowed=[r"(?P<n>\S+) .*"])),
         ("runner_alt", "exec_bridge.tools", dict(cwd=".", allowed=[r"/bin/echo a|/bin/echo ab"])),
-        ("runner_rulename", "exec_bridge.tools", dict(cwd=".", allowed=["x"],
-                                                      ingress_rule="no_such_rule")),
         # the child's own shell: SHELL passed down + the `shell` permission; and
         # the same permission with nothing passed down
         ("term_shell", "exec_bridge.tools", dict(cwd=".", env={"SHELL": "/bin/sh"}, shell=True)),
@@ -76,17 +70,14 @@ def fixtures(work: Path, interp: str) -> list:
 
 def file_bridge_cases(interp: str) -> list:
     return [
-        ("validate_meta_env_rule", "files_env_rule", {"type": "reflect"}),
-        ("validate_meta_null_rule_auth", "files_null_rule", {"type": "reflect"}),
-        ("auth_stem_only", "files_auth_stem", {"type": "reflect"}),
         ("root_dotdot", "files_escape", {"type": "list", "path": ""}),
         ("root_symlink_outside", "files_symroot", {"type": "list", "path": ""}),
         ("list_missing_path", "files", {"type": "list"}),
         ("list_not_a_dir", "files", {"type": "list", "path": "hello.txt"}),
         ("list_escape_middle", "files", {"type": "list", "path": "sub/../../x"}),
-        ("unknown_verb_sealed_leg", "files_null_rule", {"type": "nope"}),
-        ("boot_on_sealed_leg", "files_null_rule", {"type": "boot"}),
-        ("shutdown_on_sealed_leg", "files_null_rule", {"type": "shutdown"}),
+        ("unknown_verb_on_bridge", "files", {"type": "nope"}),
+        ("boot_on_bridge", "files", {"type": "boot"}),
+        ("shutdown_on_bridge", "files", {"type": "shutdown"}),
         ("readonly_write", "files_ro", {"type": "write_stream", "path": "x.txt", "offset": 0,
                                         "bytes": "nope"}),
         ("readonly_escape", "files_ro", {"type": "read_stream", "path": "../hello.txt",
@@ -152,7 +143,6 @@ def exec_cases(interp: str) -> list:
                                                "args": ["x"]}),
         ("fullmatch_alternation", "runner_alt", {"type": "start", "command": "/bin/echo",
                                                  "args": ["ab"]}),
-        ("unknown_rule_name", "runner_rulename", {"type": "reflect"}),
         ("long_line_65537", "runner", {"type": "start", "command": interp,
                                        "args": ["-c", "print('x' * 65537)"]}),
         ("cr_and_invalid_bytes", "runner", {"type": "start", "command": interp,
@@ -299,7 +289,7 @@ def run(ctx) -> None:
         for aid, hm, meta in fx:
             rec.json(f"create/{aid}", k.create(
                 **{"parent_id": k.home, "handler_module": hm, "id": aid,
-                   **OPEN, **meta}))
+                   **meta}))
         time.sleep(1.0)
 
         groups = [

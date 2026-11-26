@@ -49,17 +49,6 @@ pub(crate) fn declare_reply(owner: &AgentId, a: &verbs::DeclareVerbs) -> Value {
     }
 }
 
-/// The mail as the program receives it and the ledger of refusals keys it: the verb
-/// and its checked arguments.
-pub(crate) fn payload_of(c: &DynCall) -> Value {
-    let mut out = match &c.args {
-        Value::Object(m) => m.clone(),
-        _ => serde_json::Map::new(),
-    };
-    out.insert("type".to_string(), json!(c.name));
-    Value::Object(out)
-}
-
 /// What the entry makes of a queued payload for `owner`'s agent: the mail it is — a
 /// call of a verb the program declared, checked — or `None` (a verb the agent
 /// answers itself, telemetry, a call the entry refuses).

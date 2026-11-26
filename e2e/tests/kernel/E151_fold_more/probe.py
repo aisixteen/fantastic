@@ -243,10 +243,10 @@ def main() -> int:
         # ── wiring ────────────────────────────────────────────────────────────
         # every line is the caller's own: the chats', and each provider's
         rec = hk.create(parent_id="rest", handler_module="file_bridge.tools", id=FILES,
-                        root="files", allow=["."], ingress_rule="allow_all_ingress")
+                        root="files", allow=["."])
         need(rec.get("id") == FILES, f"create {FILES}: {str(rec)[:200]}")
         rec = hk.create(parent_id="rest", handler_module="exec_bridge.tools", id=EXEC,
-                        ingress_rule="allow_all_ingress", cwd=str(work / "run"),
+                        cwd=str(work / "run"),
                         env=oslayer.child_env(), allowed=ALLOWED)
         need(rec.get("id") == EXEC, f"create {EXEC}: {str(rec)[:200]}")
         can = {"memory": ALL, FILES: ALL, EXEC: ALL}

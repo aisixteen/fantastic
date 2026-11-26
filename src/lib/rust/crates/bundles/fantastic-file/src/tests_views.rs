@@ -32,8 +32,7 @@ async fn kernel(tmp: &tempfile::TempDir) -> Arc<Kernel> {
     let r = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE,
-                   "id": "fb", "root": tmp.path().join("served").display().to_string(),
-                   "ingress_rule": "allow_all_ingress", "allow": ["."]}),
+                   "id": "fb", "root": tmp.path().join("served").display().to_string(), "allow": ["."]}),
         )])
         .await
         .remove(0)
@@ -364,8 +363,7 @@ async fn open_view_refuses_a_path_the_bridge_does_not_expose() {
     let made = k.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE,
-                   "id": "fb_docs", "root": served(&tmp).display().to_string(),
-                   "ingress_rule": "allow_all_ingress", "allow": ["docs"]}),
+                   "id": "fb_docs", "root": served(&tmp).display().to_string(), "allow": ["docs"]}),
         )])
         .await
         .remove(0)

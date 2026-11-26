@@ -63,7 +63,6 @@ def exec_record(port: int) -> dict:
         "allowed": ["^" + re.escape(shlex.join(a)) + "$" for a in (build_argv(), run_argv(port))],
         "cwd": ".",
         "inherit_env": ["*"],
-        "ingress_rule": "allow_all_ingress",
     }
 
 

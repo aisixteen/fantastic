@@ -651,14 +651,13 @@ async fn a_call_from_b_is_gated_by_the_legs_seal_and_lines() {
     for wire in WIRES {
         let p = pair(wire, false, false).await;
         let echo = json!({"type": "echo", "text": "x"});
-        // sealed by default: the teaching denial
+        // sealed by default: the seal's denial
         let sealed = p.call("probe", echo.clone()).await.result;
         assert_eq!(
-            sealed["reason"],
-            json!("unauthorized"),
+            sealed,
+            json!({"error": "edge sealed by policy", "reason": "unauthorized"}),
             "{wire:?}: {sealed}"
         );
-        assert!(sealed.get("hint").is_some(), "{wire:?}: {sealed}");
         // opened, but no line: the leg may not call the probe (the unknown answer)
         p.patch_leg("ingress_rule", json!("allow_all_ingress"));
         let ungranted = p.call("probe", echo.clone()).await.result;

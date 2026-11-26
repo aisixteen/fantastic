@@ -57,9 +57,9 @@ def roster(stub_url: str, interp: str) -> list:
         ("cli", "cli.tools", {}),
         ("runner", "exec_bridge.tools", dict(cwd=".", allowed=[rf"{re.escape(interp)} .*"])),
         ("sched", "scheduler.tools", dict(can={"cli": ALL})),
-        ("wsb", "ws_bridge.tools", dict(transport="ws", host="127.0.0.1", port=9,
+        ("wsb", "ws_bridge.tools", dict(**OPEN, transport="ws", host="127.0.0.1", port=9,
                                         peer_id="nowhere")),
-        ("relay", "relay_connector.tools", dict(url="ws://127.0.0.1:9/nowhere",
+        ("relay", "relay_connector.tools", dict(**OPEN, url="ws://127.0.0.1:9/nowhere",
                                                 relay_url="ws://127.0.0.1:9/nowhere",
                                                 guid="wirecap-guid", partner_guid="wirecap-partner",
                                                 reconnect=3)),
@@ -99,11 +99,9 @@ def seed_extra(k, w, port):
     put("agents/web2/agents/rests", {"id": "rests", "handler_module": "web_rest.tools",
                                      "parent_id": "web2", "can": {**reach, **docs}})
     put("agents/outsider", {"id": "outsider", "handler_module": "file_bridge.tools",
-                            "parent_id": k.root_id, "allow": ["."], "root": ".",
-                            "ingress_rule": "allow_all_ingress"})
+                            "parent_id": k.root_id, "allow": ["."], "root": "."})
     put("agents/private", {"id": "private", "handler_module": "file_bridge.tools",
-                           "parent_id": k.root_id, "allow": ["."], "root": ".",
-                           "ingress_rule": "allow_all_ingress"})
+                           "parent_id": k.root_id, "allow": ["."], "root": "."})
     put("agents/web3", {"id": "web3", "handler_module": "web.tools", "parent_id": k.root_id,
                         "port": k.port3, "can": {**reach, **docs}})
     put("agents/web3/agents/wss", {"id": "wss", "handler_module": "web_ws.tools",
@@ -488,7 +486,7 @@ def run(ctx) -> None:  # noqa: C901 - one family, one shape; splitting it hides 
 
         W.mark("scheduler fire: create store")
         PROBES["store_create"] = {"harness": {"t": W.rel()}, "reply": k.create(
-            parent_id=k.home, handler_module="file_bridge.tools", allow=["."], id="store", **OPEN,
+            parent_id=k.home, handler_module="file_bridge.tools", allow=["."], id="store",
             root=".fantastic")}
         await asyncio.sleep(1.0)
         W.mark("scheduler fire")
@@ -796,8 +794,7 @@ def run(ctx) -> None:  # noqa: C901 - one family, one shape; splitting it hides 
         setup = {"web2_up": wait_port(port2), "web3_up": wait_port(port3), "creates": {}}
         for aid, hm, meta in agents:
             setup["creates"][aid] = k.create(
-                **{"parent_id": k.home, "handler_module": hm, "id": aid,
-                   **OPEN, **meta})
+                **{"parent_id": k.home, "handler_module": hm, "id": aid, **meta})
         rec.json("setup", setup)
         time.sleep(1.5)
         asyncio.run(main())

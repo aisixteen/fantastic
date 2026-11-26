@@ -177,7 +177,6 @@ async def build(root):
                         "parent_id": home(root),
                         "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "kernel_store",
-                        "ingress_rule": "allow_all_ingress",
                         "root": ".fantastic",
                     },
                 }
@@ -195,7 +194,6 @@ async def build(root):
                 "id": "notes",
                 # a DATA store — the records under `.fantastic` stay the loader's
                 "root": ".fantastic/data",
-                "ingress_rule": "allow_all_ingress",
                 "description": "Shared text documents. The team's answer goes to `answer.txt`.",
             },
         },

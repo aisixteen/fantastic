@@ -187,8 +187,6 @@ pub mod declared_fixtures {
         pub root: Option<String>,
         /// The paths it may touch.
         pub allow: Option<Vec<String>>,
-        /// How calls reach it.
-        pub ingress_rule: Option<String>,
     }
 
     /// Install the record writer, once.
@@ -540,7 +538,6 @@ pub async fn wire_fake_store(kernel: &Arc<Kernel>, store_root: &Path) {
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "id": "store",
                 "root": store_root.to_string_lossy(),
-                "ingress_rule": "allow_all_ingress",
             }),
         )])
         .await;

@@ -50,13 +50,12 @@ fn seed(dir: &std::path::Path) {
     );
     write(
         &a.join("store").join("agent.yaml"),
-        &json!({"id":"store","handler_module":"file_bridge.tools","root":".fantastic","allow":["."],
-                "ingress_rule":"allow_all_ingress"}),
+        &json!({"id":"store","handler_module":"file_bridge.tools","root":".fantastic","allow":["."]}),
     );
     write(
         &a.join("docs").join("agent.yaml"),
         &json!({"id":"docs","handler_module":"file_bridge.tools","root":"docs","readonly":true,
-                "allow":["a.txt"],"ingress_rule":"allow_all_ingress"}),
+                "allow":["a.txt"]}),
     );
     write(
         &a.join("term").join("agent.yaml"),

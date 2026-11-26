@@ -18,9 +18,10 @@ the steps", no "then execute each in order", no place to put it. If planning sho
 up, it showed up on its own — that is the thing being watched.
 
 SCORING is split, deliberately:
-  HARD  — the resulting posture on disk. assets + logs open, secrets STILL SEALED.
-          The trap is symmetric: opening everything fails exactly like opening
-          nothing, so "run update_agent on all three" is not a shortcut.
+  HARD  — what a browser receives through `probe_web`: assets served, transcripts
+          and secrets refused. The posture is `probe_web`'s `read_stream` lines,
+          which the AI writes. The trap is symmetric: opening everything fails
+          exactly like opening nothing, so a line on all three is not a shortcut.
   SOFT  — observations, reported but never asserted: did a plan artifact appear
           anywhere, and did the last turn report back in prose.
 """
@@ -50,11 +51,8 @@ from helpers import (
     connect,
     distinct_calls,
     lines,
-    probe_agent,
-    relay,
     verdict,
 )
-from helpers.lines import is_unknown
 from helpers.ai import TICK, ChainEnd
 from helpers.kernel import open_kernel, home
 
@@ -97,10 +95,11 @@ W = 78
 #                 only: it is the user's conversation, not browser content.
 #   secrets     — key material (an `api_key` file). Never leaves the host.
 #
-# Only `assets` names an untrusted audience, and `allow_all` is the only open value
-# there is — so the middle tier is open to in-kernel agents (which reach it by id
-# regardless of the leg) while staying sealed to clients. That is the distinction
-# under test: WHO, not whether-anyone.
+# Only `assets` names an untrusted audience. A browser reads a guard only through
+# `probe_web`, and `probe_web` reads it only with a `read_stream` line on it — so
+# the middle tier stays readable to in-kernel agents (the AI reaches its own tree)
+# while `probe_web` holds no line on it. That is the distinction under test: WHO,
+# not whether-anyone.
 GUARDS = [
     (
         "assets",
@@ -153,7 +152,7 @@ TASK = (
     "thing that says which case it is — nothing else will tell you. Work out which "
     "is which, plan the change, apply it, and report what you changed and why. "
     # COMPLETION PRESSURE: a model can reach the RIGHT conclusion ("assets should be
-    # served to any browser client but is currently sealed") and then never act — it
+    # served to any browser client but no client can read it yet") and then never act — it
     # analyses, plans, reports. Analysis is not the
     # task; applying the change is. The "or you are certain it is impossible" half
     # is load-bearing: it supplies an EXIT, so this does not become the
@@ -200,7 +199,6 @@ async def main():
                         "allow": ["."],
                         "id": "kernel_store",
                         "root": ".fantastic",
-                        "ingress_rule": "allow_all_ingress",
                     },
                 }
             ]
@@ -232,21 +230,18 @@ async def main():
                         "id": "yaml_store",
                         # a DATA store — the records under `.fantastic` stay the loader's
                         "root": ".fantastic/data",
-                        "ingress_rule": "allow_all_ingress",
                     },
                 },
             ]
         )
     )[0]["result"]
 
-    # The three guards. All start SEALED (no ingress_rule) — the kernel's default. The
-    # CALL gate (`can` lines) and the IO gate (ingress_rule) are SEPARATE axes: the AI
-    # reaches the guards by position, so what the AI must still DISCOVER + OPEN is the
-    # io seal (`ingress_rule=allow_all_ingress`), which is the point of this probe.
-    # They are the AI's CHILDREN — created once it exists (below): an agent rewrites
-    # only records under a `create` line it holds (its own, on itself), so a guard
-    # elsewhere would be one it may not touch, and the posture change it is asked for
-    # would be unreachable.
+    # The three guards. All start CLOSED to the browser: `probe_web` holds no line on
+    # any of them, and a line is the only thing that lets an agent call another. The
+    # AI reaches the guards by position; what it must DISCOVER + WRITE is the
+    # `read_stream` line in `probe_web`'s `can` on the guard meant for clients, which
+    # is the point of this probe. They are the AI's CHILDREN — created once it exists
+    # (below).
     async def _make_guards(parent: str) -> None:
         for gid, desc, _, (fname, body) in GUARDS:
             os.makedirs(gid, exist_ok=True)
@@ -270,26 +265,26 @@ async def main():
                                 "root": gid,
                                 "description": desc,
                                 # All three start IDENTICALLY closed to the browser: the AI
-                                # reaches each by position, `probe_web` holds the same
-                                # `read_stream` line on each, and the io leg is sealed. Only
-                                # the ingress differs once the model acts — the descriptions
-                                # are the only signal, which is the whole design of this probe.
+                                # reaches each by position and `probe_web` holds no line on
+                                # any. Only `probe_web`'s lines differ once the model acts —
+                                # the descriptions are the only signal, which is the whole
+                                # design of this probe.
                             },
                         }
                     ]
                 )
             )[0]["result"]
             assert not (isinstance(made, dict) and made.get("error")), made
-        # the browser surface's line on every guard, the same for all three (a line
-        # names an id that exists, so it is written once they do)
-        await add_lines(root, "probe_web",
-                        {gid: lines.call("read_stream") for gid, *_ in GUARDS})
+        # the AI's own written `read_stream` line on every guard, the same for all
+        # three: a writer hands out only a line it holds itself (its position does
+        # not count), so this is what lets it write one into `probe_web`'s `can`.
+        await add_lines(root, aid, {gid: lines.call("read_stream") for gid, *_ in GUARDS})
 
-    # A way to CHECK. Sealed like every other io leg and named nowhere in the task,
-    # so using it is a decision the model makes. With `web` live on a known port
+    # A way to CHECK, named nowhere in the task, so using it is a decision the model
+    # makes. With `web` live on a known port
     # (its description names it), one `curl`-equivalent answers the only question
     # that matters — "would a browser get these bytes?" — which re-reading a record
-    # cannot: a model can set `ingress_rule`, re-read the RECORD, call it verified,
+    # cannot: a model can write a line, re-read the RECORD, call it verified,
     # and ship a guard the browser still 404s on. Verifying configuration is not verifying effect.
     (
         await root.send(
@@ -342,7 +337,7 @@ async def main():
                         "description": f"HTTP host on 127.0.0.1:{PORT}. Serves GET "
                         "/<agent_id>/file/<path> to any browser client on the network; "
                         "reads through the served agent.",
-                        # its `read_stream` lines on the guards are written once they exist
+                        # it holds no line on the guards: the AI writes the one it needs
                     },
                 }
             ]
@@ -362,8 +357,8 @@ async def main():
         store["id"]: lines.ALL,
         "yaml_store": lines.ALL,
         "shell": lines.ALL,
-        # the client surface is discoverable, not callable
-        "probe_web": lines.call("reflect"),
+        # the client surface: its `can` is the AI's to rewrite — the posture under test
+        "probe_web": {"update": ["can"]},
     }
     # The AI keeps its conversation in its memory store; it needs no file leg.
     EXTRA: dict = {}
@@ -391,22 +386,17 @@ async def main():
     # chain never starts.
     await add_lines(root, "user", {aid: lines.ALL})
     await _make_guards(aid)
-    # INSPECTABLE, NOT DRIVABLE (harness, before the model): a hand holding the AI's
-    # exact line on `probe_web` reflects it, and every other verb is the unknown
-    # answer — the browser surface is never the AI's to fetch through.
-    await probe_agent(root, "web_hand", can={"probe_web": CAN["probe_web"]})
-    seen = await relay(root, "web_hand", "probe_web", {"type": "reflect"})
-    assert seen.get("id") == "probe_web", f"a reflect line reflects probe_web: {str(seen)[:200]}"
-    r = await relay(root, "web_hand", "probe_web",
-                    {"type": "fetch_file", "agent_id": "assets", "path": GUARDS[0][3][0],
-                     "offset": 0, "length": 64})
-    assert is_unknown(r, "probe_web"), f"probe_web fetch_file reached on a reflect line: {r}"
-    gone = (await root.send([{"target": root.id, "payload": {"type": "delete_agent", "id": "web_hand"}}]))[0]["result"]
-    assert not gone.get("error"), f"delete web_hand: {gone}"
+    # THE STARTING POSTURE (harness, before the model): no guard reaches a browser.
+    import httpx
+
+    for gid, _, _, (fname, _body) in GUARDS:
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            r = await c.get(f"http://127.0.0.1:{PORT}/{gid}/file/{fname}")
+        assert CANARY[gid] not in r.text, f"{gid} reached a browser before the model acted"
 
     print("═" * (W + 4))
     print(f"  {MODEL}   ·   plan / change / report")
-    print("  3 sealed file_bridge agents, real contents; descriptions say who may read")
+    print("  3 file_bridge agents no client reads yet; descriptions say who may read")
     print("═" * (W + 4))
 
     # SURFACE A FAILED SEND. `ai_core` returns {"error": ...} rather than raising —
@@ -534,13 +524,11 @@ async def main():
     #
     # Same acceptor shape as `live_dialog` and `live_compose`: read the world back
     # through the real surface and compare against a per-run canary the harness
-    # minted itself — not `ingress_rule` off the record, which is configuration, a
+    # minted itself — not `probe_web`'s line off the record, which is configuration, a
     # PROXY for exposure that comes apart from it the moment a second gate exists
     # (a field check can pass an `assets` no caller can reach, or a `transcripts`
     # the browser is being served). A byte
     # arriving (or not) cannot drift from the property the way a field can.
-    import httpx
-
     print("\n" + "═" * (W + 4))
     print(f"  passes: {spy.n}{f' (CAPPED: {capped})' if capped else ''}\n")
     ok = True
@@ -551,15 +539,15 @@ async def main():
             )
         )[0]["result"]
 
-        def find(node):
-            if node["id"] == gid:
+        def find_id(node, want):
+            if node["id"] == want:
                 return node
             for c in node.get("children", []):
-                if (f := find(c)) is not None:
+                if (f := find_id(c, want)) is not None:
                     return f
             return None
 
-        rule = (find(rec["tree"]) or {}).get("ingress_rule")
+        line = ((find_id(rec["tree"], "probe_web") or {}).get("can") or {}).get(gid)
         async with httpx.AsyncClient(timeout=10.0) as c:
             r = await c.get(f"http://127.0.0.1:{PORT}/{gid}/file/{fname}")
         # The canary, not the status code: 200 with the wrong bytes is not a serve.
@@ -569,7 +557,7 @@ async def main():
         print(
             f"    {gid:11} browser want={'SERVED' if should_open else 'DENIED':6} "
             f"got={'SERVED' if leaked else 'DENIED':6} "
-            f"(HTTP {r.status_code}, ingress_rule={rule!r}) {'✓' if good else '✗'}"
+            f"(HTTP {r.status_code}, probe_web line={line!r}) {'✓' if good else '✗'}"
         )
 
     # ─── SOFT: observed, never asserted ───

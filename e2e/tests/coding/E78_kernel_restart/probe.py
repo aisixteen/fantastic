@@ -47,17 +47,14 @@ async def _fixture(root, ids):
     # THE STORE: a file_bridge rooted at `.fantastic` — what the loader discovers as its
     # provider (records, ledger and now the message log). Created BEFORE the root boots.
     r = await call(root, root.id, {"type": "create_agent", "parent_id": home(root), "id": FB,
-                                    "handler_module": "file_bridge.tools", "allow": ["."], "root": ".fantastic",
-                                    "ingress_rule": "allow_all_ingress"})
+                                    "handler_module": "file_bridge.tools", "allow": ["."], "root": ".fantastic"})
     assert not r.get("error"), f"create {FB}: {r}"
     # the editor the agents read through (its own bridge over the run dir)
     r = await call(root, root.id, {"type": "create_agent", "parent_id": home(root), "id": "work_fb",
-                                    "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-                                    "ingress_rule": "allow_all_ingress"})
+                                    "handler_module": "file_bridge.tools", "allow": ["."], "root": "."})
     assert not r.get("error"), f"create work_fb: {r}"
     r = await call(root, root.id, {"type": "create_agent", "parent_id": home(root), "id": "notes",
-                                    "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-                                    "ingress_rule": "allow_all_ingress"})
+                                    "handler_module": "file_bridge.tools", "allow": ["."], "root": "."})
     assert not r.get("error"), f"create notes: {r}"
     # THE ORDER: hydrated (boot_root did it, cold) → the root boots and the pump
     # subscribes → only now the agents that will talk.

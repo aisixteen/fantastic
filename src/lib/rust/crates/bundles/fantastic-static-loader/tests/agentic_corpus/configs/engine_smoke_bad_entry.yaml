@@ -9,14 +9,12 @@ loaders:
         - id: good
           handler_module: file_bridge.tools
           allow: ['.']
-          ingress_rule: allow_all_ingress
-        # A rule name the bundle does not declare: the child bundle refuses it at
+        # A field value the bundle does not declare: the child bundle refuses it at
         # its own write, and the loader's boot returns on the first failed create.
         - id: bogus
           handler_module: file_bridge.tools
           allow: ['.']
-          ingress_rule: allow_all
+          readonly: maybe
         - id: never
           handler_module: file_bridge.tools
           allow: ['.']
-          ingress_rule: allow_all_ingress

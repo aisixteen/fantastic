@@ -45,15 +45,13 @@ async def main():
     try:
         r = await _call(root, root.id, {
             "type": "create_agent", "parent_id": home(root), "id": FB,
-            "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-            "ingress_rule": "allow_all_ingress"})
+            "handler_module": "file_bridge.tools", "allow": ["."], "root": "."})
         assert not r.get("error"), f"create {FB}: {r}"
         # THE VAULT, made by the operator's leg (`rest`) under itself: no agent reaches
         # it but by a line in its own `can`.
         r = await _call(root, root.id, {
             "type": "create_agent", "parent_id": home(root), "id": "vault",
             "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-            "ingress_rule": "allow_all_ingress",
             "description": "The gated editor: write needs a line from the reviewer."})
         assert not r.get("error"), f"create vault: {r}"
 

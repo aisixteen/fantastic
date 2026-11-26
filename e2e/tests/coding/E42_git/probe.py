@@ -76,7 +76,6 @@ async def main():
                 "id": STORE,
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "root": ".",
-                "ingress_rule": "allow_all_ingress",
             },
             {
                 "type": "create_agent",
@@ -85,7 +84,6 @@ async def main():
                 "handler_module": "exec_bridge.tools",
                 "cwd": str(repo),
                 "inherit_env": ["PATH", "HOME"],
-                "ingress_rule": "allow_all_ingress",
                 "allowed": ["git .*"],
                 "description": lines.runs(["git .*"]),
             },

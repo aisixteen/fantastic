@@ -297,11 +297,10 @@ const REQUEST_VIEW: &str = include_str!("request_view.html");
 pub const VIEW_CALLS: [&str; 2] = ["reflect", "watch"];
 
 /// python `_browser_reachable` — which agents a browser could actually fetch
-/// through this host, RIGHT NOW. Asks the REAL gates (the kernel's own check of
-/// `read_stream` for the reader the file proxy sends as, plus the io leg's own
-/// resolved ingress rule) rather than re-deriving them: a reimplementation here
-/// would be a second truth that silently drifts, which is the exact bug this field
-/// exists to expose.
+/// through this host, RIGHT NOW. Asks the REAL gate (the kernel's own check of
+/// `read_stream` for the reader the file proxy sends as) rather than re-deriving
+/// it: a reimplementation here would be a second truth that silently drifts, which
+/// is the exact bug this field exists to expose.
 fn browser_reachable(web_id: &AgentId, kernel: &Kernel) -> Vec<String> {
     if !kernel.exists(web_id.as_str()) {
         return Vec::new();
@@ -332,30 +331,12 @@ fn browser_reachable(web_id: &AgentId, kernel: &Kernel) -> Vec<String> {
         if !servable {
             continue;
         }
-        if !kernel.may_call(web_id, "read_stream", &agent.id) {
-            continue;
-        }
-        if leg_admits(&meta, agent.id.as_str(), "read_stream") {
+        if kernel.may_call(web_id, "read_stream", &agent.id) {
             out.push(agent.id.0.clone());
         }
     }
     out.sort();
     out
-}
-
-/// The io leg's own resolved ingress rule (python `gate_inbound(resolve_ingress(rec), …)`).
-fn leg_admits(meta: &Map<String, Value>, target: &str, verb: &str) -> bool {
-    use fantastic_io_bridge::authorizer::{ingress, Action, Decision, Rules};
-    let rules = Rules::of(meta).unwrap_or_default();
-    matches!(
-        ingress::resolve(&rules).authorize(&Action {
-            kind: "call",
-            target,
-            verb,
-            token: None,
-        }),
-        Decision::Allow
-    )
 }
 
 /// python `_boot` — build the host on `rec.port`, mount every child's surface,

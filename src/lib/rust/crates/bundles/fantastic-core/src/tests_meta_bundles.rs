@@ -22,7 +22,7 @@ fn write_bundle(tmp: &TempDir, name: &str, yaml: &str) {
     std::fs::write(folder.join("bundle.yaml"), yaml).unwrap();
 }
 
-const NOTES: &str = "base: file_bridge.tools\nsentence: A notes folder.\nrecord:\n  root: notes\n  allow: ['.']\n  ingress_rule: allow_all_ingress\n";
+const NOTES: &str = "base: file_bridge.tools\nsentence: A notes folder.\nrecord:\n  root: notes\n  allow: ['.']\n  readonly: true\n";
 
 async fn create(kernel: &Arc<Kernel>, extra: serde_json::Value) -> serde_json::Value {
     let mut p = json!({"type": "create_agent", "parent_id": "kernel"});
@@ -90,7 +90,7 @@ async fn a_meta_bundle_extends_a_meta_bundle_the_nearest_field_wins() {
     create(&kernel, json!({"id": "d1", "handler_module": "drafts"})).await;
     let m = meta(&kernel, "d1");
     assert_eq!(m["root"], json!("drafts"), "the nearer bundle wins");
-    assert_eq!(m["ingress_rule"], json!("allow_all_ingress"), "the farther one fills the rest");
+    assert_eq!(m["readonly"], json!(true), "the farther one fills the rest");
     assert_eq!(kernel.bundles.meta_chain("drafts"), ["drafts", "notes"]);
 }
 
@@ -109,7 +109,7 @@ async fn a_reload_rewrites_the_inherited_fields_and_keeps_an_instances_own() {
     assert_eq!(r["reloaded"], json!("notes"), "{r}");
     let (m1, m2) = (meta(&kernel, "i1"), meta(&kernel, "i2"));
     assert_eq!(m1["root"], json!("notes2"), "an inherited field takes the new value");
-    assert!(!m1.contains_key("ingress_rule"), "a field the bundle dropped goes");
+    assert!(!m1.contains_key("readonly"), "a field the bundle dropped goes");
     assert_eq!(m2["root"], json!("mine"), "the instance's own field stays");
     assert_eq!(r["instances"], json!(["i1", "i2"]), "{r}");
 }
@@ -225,5 +225,5 @@ async fn an_embedded_meta_bundle_extends_an_embedded_one() {
     create(&kernel, json!({"id": "e4", "handler_module": "drafts"})).await;
     let m = meta(&kernel, "e4");
     assert_eq!(m["root"], json!("drafts"), "the nearer wins");
-    assert_eq!(m["ingress_rule"], json!("allow_all_ingress"), "the farther fills the rest");
+    assert_eq!(m["readonly"], json!(true), "the farther fills the rest");
 }

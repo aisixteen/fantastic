@@ -65,14 +65,13 @@ fn seed(dir: &std::path::Path) {
         &under.join("exec").join("agent.yaml"),
         &json!({
             "id":"exec","handler_module":"exec_bridge.tools",
-            "allowed":[".*"],"cwd":dir.to_string_lossy(),"inherit_env":["PATH","HOME","LANG"],"ingress_rule":"allow_all_ingress"
+            "allowed":[".*"],"cwd":dir.to_string_lossy(),"inherit_env":["PATH","HOME","LANG"]
         }),
     );
     write(
         &under.join("files").join("agent.yaml"),
         &json!({
-            "id":"files","handler_module":"file_bridge.tools","root":".","allow":["."],
-            "ingress_rule":"allow_all_ingress"
+            "id":"files","handler_module":"file_bridge.tools","root":".","allow":["."]
         }),
     );
 }

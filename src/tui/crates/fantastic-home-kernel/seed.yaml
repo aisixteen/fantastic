@@ -8,4 +8,3 @@ agents:
     handler_module: file_bridge.tools
     root: "@state"
     allow: ["."]
-    ingress_rule: allow_all_ingress

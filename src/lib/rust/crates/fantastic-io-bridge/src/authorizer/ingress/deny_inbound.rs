@@ -1,22 +1,12 @@
-//! `deny_inbound` — the SEAL: refuse every inbound action, and teach how to open.
+//! `deny_inbound` — the SEAL of a wire leg: refuse every inbound action an
+//! EXTERNAL client (an HTTP/WS client, a remote kernel's frame) asks for.
 //!
-//! A sealed edge denies ALL inbound kinds (`call` / `watch` / `state_subscribe` /
-//! `emit` / `open`), not only `call` — a sealed leg leaks neither dispatch nor
-//! telemetry. Every denial carries a teaching pointer (`hint`) so an automated
-//! builder hitting the locked door learns to open it (set an `ingress_rule`, read
-//! the io_bridge readme) instead of dead-ending. Discovery-through-denial is the
-//! design.
+//! A sealed leg denies ALL inbound kinds (`call` / `watch` / `state_subscribe` /
+//! `emit` / `open`), not only `call` — it leaks neither dispatch nor telemetry.
+//! It never answers an in-kernel agent: who may call an agent inside the kernel
+//! is the kernel's `can` lines alone, so the denial teaches no record edit.
 
 use super::super::{Action, Decision, Denial, IngressRule};
-
-/// The repair, WORD FOR WORD as python's `DenyInbound` states it
-/// (`io_bridge/ingress_rules/deny_inbound.py`). The same locked door has to say
-/// the same thing in every runtime: a model taught the python hint got nothing
-/// it could act on from the ports, which had `inbound calls denied by policy`
-/// and no hint at all.
-const OPEN_IT: &str = "this edge is sealed — open it: update_agent <id> \
-     ingress_rule=allow_all_ingress (or password); `reflect` on this agent \
-     lists its verbs and record fields";
 
 /// Refuse every inbound action (the peer can't `call`/`reflect` us): the SEAL.
 pub struct DenyInbound;
@@ -29,7 +19,7 @@ impl IngressRule for DenyInbound {
         // its caller believes is a closed edge. A seal that filters by kind is a
         // second truth about what "sealed" means.
         let _ = action;
-        Decision::Deny(Denial::new("edge sealed by policy").with_hint(OPEN_IT))
+        Decision::Deny(Denial::new("edge sealed by policy"))
     }
 }
 
@@ -46,23 +36,15 @@ mod tests {
         }
     }
 
-    /// The SEALED denial reaches the caller with python's words — reason AND the
-    /// repair. Asserted verbatim: the whole point of #71/#115 is that the same
-    /// locked door says the same thing in every runtime, so a paraphrase here is
-    /// the regression.
+    /// The SEALED denial reaches the external caller as one reason, the same
+    /// words in every runtime.
     #[test]
-    fn sealed_leg_teaches_python_s_repair() {
+    fn a_sealed_leg_states_its_reason() {
         let Decision::Deny(d) = DenyInbound.authorize(&act("call")) else {
             panic!("a sealed leg must deny");
         };
         assert_eq!(d.reason, "edge sealed by policy");
-        assert_eq!(
-            d.hint,
-            "this edge is sealed — open it: update_agent <id> \
-             ingress_rule=allow_all_ingress (or password); `reflect` on this agent \
-             lists its verbs and record fields"
-        );
-        assert_eq!(d.see, "");
+        assert_eq!(d.to_refusal(), serde_json::json!({"error": "edge sealed by policy", "reason": "unauthorized"}));
     }
 
     /// EVERY kind, not just `call` — a seal that filters by kind is a second
