@@ -150,15 +150,6 @@ pub(crate) fn job_ended(owner: &AgentId, job_id: TaskId) {
     }
 }
 
-/// Ends the job's monitors on EVERY way out of its pump — a return or an abort.
-pub(crate) struct EndOnDrop(pub AgentId, pub TaskId);
-
-impl Drop for EndOnDrop {
-    fn drop(&mut self) {
-        job_ended(&self.0, self.1);
-    }
-}
-
 struct RemoveOnDrop(Key);
 
 impl Drop for RemoveOnDrop {

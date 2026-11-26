@@ -469,12 +469,14 @@ def h(s,f):
     print("CAUGHT"); sys.stdout.flush(); sys.exit(0)
 # the OS's interrupt: SIGINT, or SIGBREAK (a Windows pipe job's CTRL_BREAK)
 signal.signal(getattr(signal, "SIGBREAK", signal.SIGINT), h)
+print("READY"); sys.stdout.flush()
 for _ in range(300):
     time.sleep(0.1)
 "#;
     let r = started(&kernel, &pid.clone(), py_start(&py, code, false)).await;
     assert!(r["job_id"].is_i64(), "start failed: {r}");
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    // the handler is in once the job says so: an interrupt before it kills python
+    ready(&mut rx).await;
 
     let n = kernel.operator_send(vec![Item::new(pid.clone(), json!({"type": "interrupt"}))])
         .await
@@ -506,9 +508,9 @@ async fn stop_sigkills_the_job() {
     let tmp = TempDir::new().unwrap();
     let (kernel, pid) = mk_kernel(&tmp).await;
     let mut rx = inbox(&kernel, &pid);
-    let r = started(&kernel, &pid.clone(), py_start(&py, "import time; time.sleep(30)", false)).await;
+    let r = started(&kernel, &pid.clone(), py_start(&py, SAY_READY_THEN_SLEEP, false)).await;
     assert!(r["job_id"].is_i64(), "start failed: {r}");
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    ready(&mut rx).await;
 
     let n = kernel.operator_send(vec![Item::new(pid.clone(), json!({"type": "stop"}))])
         .await
@@ -662,6 +664,16 @@ fn inbox(kernel: &Arc<Kernel>, id: &AgentId) -> fantastic_kernel::inbox::InboxRe
     kernel.ensure_inbox(id)
 }
 
+/// A job that says `READY` once it runs, then sleeps.
+const SAY_READY_THEN_SLEEP: &str = "import sys, time\nprint('READY')\nsys.stdout.flush()\ntime.sleep(30)\n";
+
+/// Until the job printed its `READY` line: it runs, its setup done.
+async fn ready(rx: &mut fantastic_kernel::inbox::InboxReceiver) {
+    until(rx, |v| v["type"] == "progress" && v["line"] == "READY", 20)
+        .await
+        .expect("the job never said READY");
+}
+
 async fn until(
     rx: &mut fantastic_kernel::inbox::InboxReceiver,
     pred: impl Fn(&Value) -> bool,
@@ -679,21 +691,23 @@ async fn until(
     None
 }
 
-/// Waits until the running program's `_xbself_` drain is a live task row. `serve`
-/// registers `inbox_drain` only after `ensure_inbox` and `kernel.watch` both
-/// succeeded, so its presence proves mail sent now reaches the program.
-async fn wait_inbox_ready(kernel: &Arc<Kernel>, owner: &AgentId, secs: u64) {
+/// Waits until each of the running program's `drains` (`inbox_drain` for its
+/// `_xbself_` proxy, `watch_drain` for a watch) is a live task row. `serve` registers
+/// a drain only after `ensure_inbox` and `kernel.watch` both succeeded, so its
+/// presence proves what is sent now reaches the program — a proxy INBOX alone does
+/// not (it is registered before the watch).
+async fn wait_drains(kernel: &Arc<Kernel>, owner: &AgentId, drains: &[&str], secs: u64) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
     loop {
         let rows = kernel.tasks.rows();
-        if rows
-            .iter()
-            .any(|r| r["verb"] == "inbox_drain" && r["agent"] == owner.as_str())
-        {
+        if drains.iter().all(|d| {
+            rows.iter()
+                .any(|r| r["verb"] == *d && r["agent"] == owner.as_str())
+        }) {
             return;
         }
         if tokio::time::Instant::now() >= deadline {
-            panic!("inbox_drain never registered for {owner}: {rows:?}");
+            panic!("{drains:?} never all registered for {owner}: {rows:?}");
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -862,7 +876,7 @@ kernel.on_message(_on)
 threading.Event().wait()
 "#;
     let _ = started(&kernel, &a.clone(), py_start(&py, code, true)).await;
-    wait_inbox_ready(&kernel, &a, 30).await;
+    wait_drains(&kernel, &a, &["inbox_drain"], 30).await;
     let ack = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "ping"}))])
         .await
         .remove(0)
@@ -1436,12 +1450,8 @@ async fn stopping_a_watching_program_leaves_no_proxy_or_watcher() {
         AgentId::from(format!("_xbw_9002_{a}").as_str()),
         AgentId::from("_xbself_9002"),
     ];
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while tokio::time::Instant::now() < deadline
-        && !proxies.iter().all(|p| kernel.inboxes.contains_key(p))
-    {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    // both subscriptions fully up (their drains run), not just their inboxes
+    wait_drains(&kernel, &a, &["watch_drain", "inbox_drain"], 5).await;
     for p in &proxies {
         assert!(kernel.inboxes.contains_key(p), "{p} was never registered");
     }
@@ -1475,13 +1485,11 @@ async fn mail_without_a_line_never_reaches_the_program() {
     crate::mail::declare_for_test(&a, &["probe_mail", "after"]);
     let (mut child, stop, relay) = wire(&kernel, &a, 9006);
     wire_write(&mut child, &json!({"op": "onmessage"})).await;
-    let proxy = AgentId::from("_xbself_9006");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while tokio::time::Instant::now() < deadline && !kernel.inboxes.contains_key(&proxy) {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    // the owner proxy's drain runs: mail sent from here reaches the program (its
+    // inbox alone is registered before the watch that feeds it)
+    wait_drains(&kernel, &a, &["inbox_drain"], 5).await;
     assert!(
-        kernel.inboxes.contains_key(&proxy),
+        kernel.inboxes.contains_key(&AgentId::from("_xbself_9006")),
         "the owner proxy never registered"
     );
     let unknown = fantastic_kernel::refusal::unknown_agent(a.as_str());
@@ -1577,13 +1585,11 @@ async fn the_inbox_hands_the_program_only_its_declared_mail() {
     crate::mail::declare_for_test(&a, &["mail"]);
     let (mut child, stop, relay) = wire(&kernel, &a, 9008);
     wire_write(&mut child, &json!({"op": "onmessage"})).await;
-    let proxy = AgentId::from("_xbself_9008");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while tokio::time::Instant::now() < deadline && !kernel.inboxes.contains_key(&proxy) {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    // the owner proxy's drain runs: mail sent from here reaches the program (its
+    // inbox alone is registered before the watch that feeds it)
+    wait_drains(&kernel, &a, &["inbox_drain"], 5).await;
     assert!(
-        kernel.inboxes.contains_key(&proxy),
+        kernel.inboxes.contains_key(&AgentId::from("_xbself_9008")),
         "the owner proxy never registered"
     );
     for p in [
@@ -1720,6 +1726,85 @@ async fn a_cancelled_job_finalises_to_stopped_and_clear_removes_it() {
     assert_eq!(st["jobs"].as_array().map(Vec::len), Some(0), "{st}");
 }
 
+/// A `cancel` that lands before the job's pump first RUNS: the kernel's task body
+/// picks the cancel first and drops the pump unpolled. The job's end guards (its row
+/// finalised to `stopped`, its monitors told it ended) belong to the pump FROM ITS
+/// FORK, so they hold on that path too — never a row stuck at `stopping`.
+/// Deterministic: a current-thread runtime runs no other task until this one waits,
+/// and nothing between the fork and the cancel does.
+#[tokio::test(flavor = "current_thread")]
+async fn a_job_cancelled_before_its_pump_first_runs_still_finalises() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let (job_id, _) = crate::start_job(
+        &a,
+        Some(&py.to_string_lossy()),
+        Some(vec!["-c".to_string(), "import time; time.sleep(30)".to_string()]),
+        None,
+        &kernel,
+    )
+    .await
+    .expect("started");
+    let c = kernel.cancel_task(&job_id).await;
+    assert_eq!(c["cancelled"], true, "{c}");
+    // the dropped pump's guards write the row: wait on that (the deadline only
+    // bounds a failure)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while jobs::jobs()[&(a.clone(), job_id)].status == "stopping" {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the row never left `stopping`"
+        );
+        tokio::task::yield_now().await;
+    }
+    let (status, code, closed) = {
+        let g = jobs::jobs();
+        let j = &g[&(a.clone(), job_id)];
+        (j.status.clone(), j.exit_code, j.monitors_closed)
+    };
+    assert_eq!(
+        (status.as_str(), code, closed),
+        ("stopped", Some(crate::sys::KILLED_EXIT_CODE), true)
+    );
+}
+
+/// `job_started` is the first thing a job's watchers hear of it: the pump reads no
+/// byte before the announcement is out. A shell on a PTY prints at once, and its
+/// output used to land on the inbox ahead of its own `job_started` (the pump was
+/// told its id first, and runs on another worker).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn job_started_comes_before_the_jobs_first_output() {
+    let tmp = TempDir::new().unwrap();
+    let sh = crate::sys::fake_shell(tmp.path(), "fakesh");
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let mut rx = inbox(&kernel, &a);
+    let of_a_job = |v: &Value| {
+        ["job_started", "progress", "output", "job_done"].contains(&v["type"].as_str().unwrap_or(""))
+    };
+    for _ in 0..100 {
+        let (k, item) = (
+            Arc::clone(&kernel),
+            Item::new(
+                a.clone(),
+                json!({"type": "start", "command": sh.to_string_lossy(), "pty": {"cols": 80, "rows": 24}}),
+            ),
+        );
+        let settle = tokio::spawn(async move { k.operator_send(vec![item]).await });
+        let first = until(&mut rx, of_a_job, 20).await.expect("an event of the job");
+        assert_eq!(first["type"], "job_started", "{first}");
+        let jid = first["job_id"].clone();
+        let w = json!({"type": "write", "job_id": jid, "data": format!("x{}", crate::sys::ENTER)});
+        kernel.operator_send(vec![Item::new(a.clone(), w)]).await;
+        until(&mut rx, |v| v["type"] == "job_done" && v["job_id"] == jid, 20)
+            .await
+            .expect("its job_done");
+        settle.await.expect("the start settled");
+    }
+}
+
 /// `kernel.args` / FANTASTIC_ARGS was set by no spawner: a command runner takes its
 /// arguments as ARGV, and the connector source names no such thing.
 #[test]
@@ -1750,12 +1835,8 @@ async fn stop_releases_the_proxies_a_real_job_held() {
         AgentId::from(format!("_xbw_{job_id}_{a}").as_str()),
         AgentId::from(format!("_xbself_{job_id}").as_str()),
     ];
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    while tokio::time::Instant::now() < deadline
-        && !proxies.iter().all(|p| kernel.inboxes.contains_key(p))
-    {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    // both subscriptions fully up (their drains run), not just their inboxes
+    wait_drains(&kernel, &a, &["watch_drain", "inbox_drain"], 20).await;
     for p in &proxies {
         assert!(kernel.inboxes.contains_key(p), "{p} was never registered");
     }
@@ -2198,8 +2279,8 @@ async fn a_killed_job_reports_negative_signal_exit_code() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let mut rx = inbox(&kernel, &a);
-    let _ = started(&kernel, &a.clone(), py_start(&py, "import time; time.sleep(30)", false)).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let _ = started(&kernel, &a.clone(), py_start(&py, SAY_READY_THEN_SLEEP, false)).await;
+    ready(&mut rx).await;
     let _ = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
         .await
         .remove(0)

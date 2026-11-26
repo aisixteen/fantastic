@@ -303,25 +303,91 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
     }
 }
 
-/// Finalise the job row on EVERY way out of the pump — including the one that is
-/// not a return.
+/// The pump's end of `start`'s hand-off — and the job's END GUARD, held by the
+/// pump's future FROM ITS FORK.
 ///
-/// `cancel` ABORTS the pump task, which drops its future at the current await
-/// point: `child.wait()` never returns and the finalisation below it never runs.
-/// The row then kept the label [`teardown`] left on it — `stopping`, with
-/// `exit_code: None` — forever, and `clear` refuses `stopping` rows BY DESIGN, so
-/// the row was immortal and the job could never be forgotten. Python's pump
-/// catches `CancelledError` and finalises to `stopped`; this guard is the same
-/// guarantee, spelled as a `Drop`.
-pub(crate) struct FinalizeRow {
-    key: JobKey,
+/// The job's id is the pump's own task id, so it exists only after `spawn_task` has
+/// forked the pump — and a forked task may already be running on another worker by
+/// then. `start` files the row FIRST, announces the job, and only then hands the id
+/// over ([`Filed`]), so the pump never looks for a row that is not there yet (python's
+/// `ready`) and never emits before `job_started`.
+///
+/// On EVERY way out of the pump — a return, an abort at an await point, or a cancel
+/// that lands before the pump ever RAN (the kernel's task body takes a pending
+/// cancel first and drops the future unpolled) — this guard is dropped, and once the
+/// row was filed it tells the job's monitors the job ended and, unless the pump wrote
+/// the real outcome itself ([`Ready::disarm`]), finalises the row. Without it the row
+/// kept the label [`teardown`] left on it — `stopping`, with `exit_code: None` —
+/// forever, and `clear` refuses `stopping` rows BY DESIGN, so the row was immortal and
+/// the job could never be forgotten. Python's pump catches `CancelledError` and
+/// finalises to `stopped`; this guard is the same guarantee, spelled as a `Drop`.
+/// It lives in the pump's ARGUMENTS, never in its body: a body that never ran made
+/// no guard.
+pub struct Ready {
+    rx: Option<tokio::sync::oneshot::Receiver<TaskId>>,
+    id: Arc<OnceLock<TaskId>>,
+    owner: AgentId,
     armed: bool,
 }
 
-impl FinalizeRow {
-    /// Armed until the pump writes the real outcome itself.
-    pub(crate) fn new(key: JobKey) -> Self {
-        Self { key, armed: true }
+/// `start`'s end of the hand-off: the id, given once the row is filed. Dropped
+/// before [`Filed::go`] (the `start` dispatch died), the pump kills its child and
+/// ends — finalising the row when [`Filed::filed`] named it.
+pub(crate) struct Filed {
+    tx: tokio::sync::oneshot::Sender<TaskId>,
+    id: Arc<OnceLock<TaskId>>,
+}
+
+/// The hand-off between `start` and the pump of `owner`'s next job.
+pub(crate) fn hand_off(owner: &AgentId) -> (Filed, Ready) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let id = Arc::new(OnceLock::new());
+    (
+        Filed {
+            tx,
+            id: Arc::clone(&id),
+        },
+        Ready {
+            rx: Some(rx),
+            id,
+            owner: owner.clone(),
+            armed: true,
+        },
+    )
+}
+
+impl Filed {
+    /// The row `job_id` exists: the pump's end guard covers it from here.
+    pub(crate) fn filed(&self, job_id: TaskId) {
+        let _ = self.id.set(job_id);
+    }
+
+    /// The pump may run now: it looks for the row [`Filed::filed`] named.
+    pub(crate) fn go(self) {
+        if let Some(&id) = self.id.get() {
+            let _ = self.tx.send(id);
+        }
+    }
+}
+
+impl Ready {
+    /// Wait for the job's id. `None` only if `start` dropped its [`Filed`] before
+    /// [`Filed::go`] — it has no refusal path after the fork, so that means the
+    /// dispatch itself died. Nobody may then hold the process's id, so it is killed
+    /// here rather than left running unowned (a child is spawned with
+    /// `kill_on_drop(false)`); a row already filed is finalised by this guard's drop.
+    pub(crate) async fn id(&mut self, child: &crate::sys::Child) -> Option<TaskId> {
+        let id = if let Some(rx) = self.rx.take() {
+            rx.await.ok()
+        } else {
+            None
+        };
+        if id.is_none() {
+            if let Some(pid) = child.id() {
+                crate::spawn::kill_session(pid as i32);
+            }
+        }
+        id
     }
 
     /// The pump reached the end and wrote the REAL outcome itself.
@@ -330,14 +396,19 @@ impl FinalizeRow {
     }
 }
 
-impl Drop for FinalizeRow {
+impl Drop for Ready {
     fn drop(&mut self) {
+        let Some(&job_id) = self.id.get() else {
+            return; // no row was filed: nothing to finalise, no monitor to tell
+        };
+        crate::monitor::job_ended(&self.owner, job_id);
         if !self.armed {
             return;
         }
+        let key = (self.owner.clone(), job_id);
         {
             let mut g = jobs();
-            if let Some(j) = g.get_mut(&self.key) {
+            if let Some(j) = g.get_mut(&key) {
                 if j.exit_code.is_none() {
                     // `on_cancel` SIGKILLed the child before the abort; say so, and
                     // leave a label `clear` accepts.
@@ -347,40 +418,15 @@ impl Drop for FinalizeRow {
             }
         }
         // a `run` of the job is told it ended
-        settle_run(&self.key.0, self.key.1);
+        settle_run(&key.0, key.1);
     }
-}
-
-/// The job's id, handed to its pump once the row exists (python's `ready`).
-///
-/// The id IS the pump's own task id, so it exists only after `spawn_task` has
-/// forked the pump — and a forked task may already be running on another worker
-/// by then. `start` files the row FIRST and only then sends the id, so the pump
-/// never looks for a row that is not there yet.
-pub type Ready = tokio::sync::oneshot::Receiver<TaskId>;
-
-/// Wait for the job's id. `None` only if `start` dropped the sender without
-/// filing the row — it has no refusal path after the fork, so that means the
-/// dispatch itself died. There is then no row to report into and nobody who can
-/// reach the process, so it is killed here rather than left running unowned
-/// (a child is spawned with `kill_on_drop(false)`).
-pub(crate) async fn await_id(ready: Ready, child: &crate::sys::Child) -> Option<TaskId> {
-    let id = ready.await.ok();
-    if id.is_none() {
-        if let Some(pid) = child.id() {
-            crate::spawn::kill_session(pid as i32);
-        }
-    }
-    id
 }
 
 /// The job's task-table body: drain both pipes, await exit, emit `job_done`.
-pub async fn pump(owner: AgentId, ready: Ready, mut child: crate::sys::Child, kernel: Arc<Kernel>) {
-    let Some(job_id) = await_id(ready, &child).await else {
+pub async fn pump(owner: AgentId, mut ready: Ready, mut child: crate::sys::Child, kernel: Arc<Kernel>) {
+    let Some(job_id) = ready.id(&child).await else {
         return;
     };
-    let mut finalize = FinalizeRow::new((owner.clone(), job_id));
-    let _monitors = crate::monitor::EndOnDrop(owner.clone(), job_id);
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     // ONE counter across both pipes, held by the PUMP: `n` is a single monotonic
@@ -428,7 +474,7 @@ pub async fn pump(owner: AgentId, ready: Ready, mut child: crate::sys::Child, ke
     };
     // py `code = await process.wait()`: a signal death is `-signal`, not `None`.
     let code = child.wait().await.ok().and_then(exit_code);
-    finalize.disarm();
+    ready.disarm();
     let (lines, last_line) = {
         let mut g = jobs();
         match g.get_mut(&(owner.clone(), job_id)) {

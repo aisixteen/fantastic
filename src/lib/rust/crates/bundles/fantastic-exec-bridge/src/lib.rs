@@ -801,7 +801,7 @@ async fn start_job(
     // running on another worker, so the pump learns its id through `ready` — sent
     // only after the row is filed below. The pump takes everything else BY VALUE:
     // it never reads its own row before it is told the row exists.
-    let (ready_tx, ready) = tokio::sync::oneshot::channel();
+    let (filed, ready) = jobs::hand_off(agent_id);
     let owner = agent_id.clone();
     let k = Arc::clone(kernel);
     let job_id = match &pty_state {
@@ -856,17 +856,20 @@ async fn start_job(
             run_end: None,
         },
     );
-    // The row exists: the pump may look for it now. It cannot have gone away —
-    // nothing drops a pump before it has received its id.
-    let _ = ready_tx.send(job_id);
+    // The row exists: the pump's end guard covers it from here.
+    filed.filed(job_id);
     // The RESOLVED invocation rides the announcement: a client that let the
     // kernel pick the shell learns which one ran, and can re-issue it verbatim.
+    // It goes out BEFORE the pump reads a byte, so `job_started` is the first thing
+    // the job's watchers hear of it — never its output (the pump runs on another
+    // worker the moment it is told its id).
     kernel
         .emit(
             agent_id,
             json!({"type": "job_started", "job_id": job_id.get(), "command": command, "args": args}),
         )
         .await;
+    filed.go();
     Ok((job_id, pty_state.is_some()))
 }
 

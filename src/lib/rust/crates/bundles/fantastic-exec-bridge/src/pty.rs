@@ -107,17 +107,15 @@ impl Pty {
 /// at EOF with `job_done`.
 pub async fn pump(
     owner: AgentId,
-    ready: jobs::Ready,
+    mut ready: jobs::Ready,
     mut child: sys::Child,
     pty: Arc<Pty>,
     kernel: Arc<Kernel>,
 ) {
     // The job's id is this task's own id, sent once `start` has filed the row.
-    let Some(job_id) = jobs::await_id(ready, &child).await else {
+    let Some(job_id) = ready.id(&child).await else {
         return;
     };
-    let mut finalize = jobs::FinalizeRow::new((owner.clone(), job_id));
-    let _monitors = crate::monitor::EndOnDrop(owner.clone(), job_id);
     let mut buf = vec![0u8; 4096];
     loop {
         let paused = {
@@ -171,7 +169,7 @@ pub async fn pump(
             .await;
     }
     let code = child.wait().await.ok().and_then(jobs::exit_code);
-    finalize.disarm();
+    ready.disarm();
     {
         let mut g = jobs::jobs();
         if let Some(j) = g.get_mut(&(owner.clone(), job_id)) {
