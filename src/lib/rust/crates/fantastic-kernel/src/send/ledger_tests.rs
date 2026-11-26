@@ -441,6 +441,7 @@ async fn only_the_originator_joins_its_execution() {
             retries: None,
             binary: None,
             secret: Vec::new(),
+            reply_to: crate::outcome::ReplyTo::Caller,
         }])
         .await
         .remove(0)
@@ -461,6 +462,7 @@ async fn only_the_originator_joins_its_execution() {
             retries: None,
             binary: None,
             secret: Vec::new(),
+            reply_to: crate::outcome::ReplyTo::Caller,
         }])
         .await
         .remove(0)
@@ -483,6 +485,7 @@ async fn only_the_originator_joins_its_execution() {
             retries: None,
             binary: None,
             secret: Vec::new(),
+            reply_to: crate::outcome::ReplyTo::Caller,
         }])
         .await
         .remove(0)
@@ -633,6 +636,7 @@ async fn a_joiner_other_than_the_originator_gets_the_unknown_answer() {
             retries: None,
             binary: None,
             secret: Vec::new(),
+            reply_to: crate::outcome::ReplyTo::Caller,
         }])
         .await
         .remove(0)
@@ -652,6 +656,7 @@ async fn a_joiner_other_than_the_originator_gets_the_unknown_answer() {
             retries: None,
             binary: None,
             secret: Vec::new(),
+            reply_to: crate::outcome::ReplyTo::Caller,
         }])
         .await
         .remove(0)

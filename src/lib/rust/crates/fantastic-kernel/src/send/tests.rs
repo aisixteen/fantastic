@@ -979,8 +979,8 @@ async fn a_dispatch_writes_a_call_row_with_outcome() {
     assert_eq!(
         call.keys().map(String::as_str).collect::<Vec<_>>(),
         vec![
-            "id", "kind", "verb", "parent", "caller", "payload", "named", "retries", "attempts",
-            "timeout", "name", "agent", "ts", "outcome"
+            "id", "kind", "verb", "parent", "caller", "payload", "named", "reply_to", "retries",
+            "attempts", "timeout", "name", "agent", "ts", "outcome"
         ],
         "…and `outcome` is stamped onto the end at settle"
     );

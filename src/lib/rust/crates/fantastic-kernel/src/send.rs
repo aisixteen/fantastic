@@ -148,48 +148,6 @@ tokio::task_local! {
     pub(crate) static STATE_QUIET: bool;
 }
 
-/// A one-shot "it happened" flag: `fire` is idempotent, `wait` returns once fired
-/// (immediately when it already has).
-#[derive(Default)]
-pub struct Signal {
-    fired: std::sync::atomic::AtomicBool,
-    notify: tokio::sync::Notify,
-}
-
-impl Signal {
-    /// Mark it happened and wake every waiter.
-    pub fn fire(&self) {
-        self.fired.store(true, std::sync::atomic::Ordering::SeqCst);
-        self.notify.notify_waiters();
-    }
-
-    /// Wait until [`Self::fire`] has run.
-    pub async fn wait(&self) {
-        loop {
-            let notified = self.notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if self.fired.load(std::sync::atomic::Ordering::SeqCst) {
-                return;
-            }
-            notified.await;
-        }
-    }
-}
-
-tokio::task_local! {
-    /// BATCH LAUNCHED: set around a
-    /// `send`, it is called once EVERY item of that batch has reached its target
-    /// (fanned out on its inbox) — before any of them has settled. An AI's router
-    /// uses it so the `send` that spawned the route returns only after the routed
-    /// calls landed: python's event loop gives that order for free (the spawned
-    /// route runs up to its dispatch before the caller resumes). Not inherited by
-    /// the items' own nested sends.
-    pub static ON_BATCH_LAUNCHED: Option<std::sync::Arc<dyn Fn() + Send + Sync>>;
-    /// One item's half of [`ON_BATCH_LAUNCHED`]: fired at its fanout.
-    static ON_FANOUT: Option<std::sync::Arc<Signal>>;
-}
-
 /// Is this inside the kernel's own ledger flush?
 pub(crate) fn state_quiet() -> bool {
     STATE_QUIET.try_with(|v| *v).unwrap_or(false)
@@ -338,6 +296,9 @@ fn own_deadline_refusal(target: &AgentId, verb: &str, d: &Deadline, task_id: Val
 enum Launched {
     /// Nothing entered the task table — `pid` stays `None`.
     Settled(Outcome),
+    /// A named execution that ALREADY SETTLED: its recorded outcome is the answer
+    /// and nothing runs (the dedup contract).
+    Recorded(Outcome),
     /// Boxed because a `Dispatch` is much larger than an `Outcome`, and a fat
     /// enum variant would be paid for on every refusal too.
     Dispatched(Box<Dispatch>),
@@ -384,6 +345,10 @@ struct Dispatch {
     caller: Option<AgentId>,
     /// The item's `secret` marks (`crate::secret`), carried to every attempt.
     marks: Arc<Vec<String>>,
+    /// WHO RECEIVES THE SETTLE, resolved from the item's `reply_to` at launch:
+    /// the caller (`None` for the operator), another agent, or `None` for the
+    /// row only. Recorded on the call row.
+    recipient: Option<AgentId>,
     /// A caller-NAMED `kernel` reflect — python's flags-done fast path: the
     /// FIRST attempt is a bare identity read with the flags applied (no task
     /// row, no fanout, no `_in_flight`, and no enforced deadline: `cancel_task`
@@ -499,51 +464,7 @@ impl Kernel {
         // task-locals (`CURRENT_SENDER`/`CURRENT_TASK`/`CURRENT_ORIGIN`) — the
         // spawn happens INSIDE `run_dispatch`, which re-establishes them by
         // hand. A `tokio::spawn` here would silently drop all three.
-        let mut out: Vec<Outcome> = Vec::with_capacity(launched.len());
-        let hook = ON_BATCH_LAUNCHED.try_with(Clone::clone).ok().flatten();
-        let settled = if let Some(hook) = hook {
-            let signals: Vec<std::sync::Arc<Signal>> = launched
-                .iter()
-                .map(|_| std::sync::Arc::new(Signal::default()))
-                .collect();
-            let items = launched
-                .into_iter()
-                .zip(signals.iter().cloned())
-                .map(|(l, sig)| {
-                    async move {
-                        let o = ON_BATCH_LAUNCHED
-                            .scope(
-                                None,
-                                ON_FANOUT.scope(Some(std::sync::Arc::clone(&sig)), self.settle(l)),
-                            )
-                            .await;
-                        // an item that settled without a fanout (a refusal) has landed too
-                        sig.fire();
-                        o
-                    }
-                });
-            let all_landed = async {
-                for s in &signals {
-                    s.wait().await;
-                }
-                hook();
-            };
-            futures_util::future::join(futures_util::future::join_all(items), all_landed)
-                .await
-                .0
-        } else if ON_FANOUT.try_with(|_| ()).is_ok() {
-            // nested inside an item of a hooked batch: its own items fire nothing
-            ON_FANOUT
-                .scope(
-                    None,
-                    futures_util::future::join_all(launched.into_iter().map(|l| self.settle(l))),
-                )
-                .await
-        } else {
-            futures_util::future::join_all(launched.into_iter().map(|l| self.settle(l))).await
-        };
-        out.extend(settled);
-        out
+        futures_util::future::join_all(launched.into_iter().map(|l| self.settle(l))).await
     }
 
     /// THE OPERATOR'S SEND: [`Self::send`] with the origin scoped to `None` (the
@@ -729,6 +650,12 @@ impl Kernel {
         };
         // 6. retries — a non-negative int, never defaulted otherwise.
         let retries = item.retries.unwrap_or(0);
+        // 6a. reply_to — who the settle is delivered to.
+        let recipient = match &item.reply_to {
+            crate::outcome::ReplyTo::Caller => caller.clone(),
+            crate::outcome::ReplyTo::Agent(id) => Some(id.clone()),
+            crate::outcome::ReplyTo::Row => None,
+        };
         // 6b. secret marks — paths into the payload, shown as `[secret]`.
         let marks = match crate::secret::check(&item.secret) {
             Ok(m) => Arc::new(m),
@@ -874,7 +801,7 @@ impl Kernel {
                 if let Some(d) = self.join_denial(&caller, execution_id, &target) {
                     return Launched::Settled(Outcome::refused(d));
                 }
-                return Launched::Settled(*o);
+                return Launched::Recorded(*o);
             }
             // IN FLIGHT — join it. A joiner's own `timeout` bounds only ITS
             // wait: it does not own the execution and must not kill it.
@@ -927,6 +854,10 @@ impl Kernel {
                     ),
                 );
                 row.insert("named".to_string(), Value::from(name.is_some()));
+                row.insert(
+                    "reply_to".to_string(),
+                    Value::from(recipient.as_ref().map(|r| r.0.clone())),
+                );
                 row.insert("retries".to_string(), Value::from(retries));
                 row.insert("attempts".to_string(), Value::from(1));
                 row.insert(
@@ -954,6 +885,7 @@ impl Kernel {
             binary: item.binary,
             caller,
             marks,
+            recipient,
             // A JOIN never reaches here; a fresh NAMED `kernel` reflect does.
             named_fast_reflect: kernel_reflect,
         }))
@@ -967,9 +899,23 @@ impl Kernel {
     /// ledger, so a joiner or a re-sender never sees an attempt that was later
     /// retried away.
     async fn settle(self: &Arc<Self>, launched: Launched) -> Outcome {
+        let (out, owed) = self.settle_core(launched, false).await;
+        self.finish(owed, &out, None, None).await;
+        out
+    }
+
+    /// [`Self::settle`]'s run and record: the outcome, and — for an execution
+    /// this item ran — what its settle still owes ([`deliver::Owed`]). `has_then`:
+    /// a continuation ([`Self::call`]) takes the settle, not the receiver's
+    /// `reply` verb.
+    async fn settle_core(
+        self: &Arc<Self>,
+        launched: Launched,
+        has_then: bool,
+    ) -> (Outcome, Option<deliver::Owed>) {
         let d = match launched {
-            Launched::Settled(o) => return o,
-            Launched::Joining(j) => return self.join_execution(*j).await,
+            Launched::Settled(o) | Launched::Recorded(o) => return (o, None),
+            Launched::Joining(j) => return (self.join_execution(*j).await, None),
             Launched::KernelReflectFast(fr) => {
                 let FastReflect {
                     target,
@@ -1016,7 +962,7 @@ impl Kernel {
                         }
                     }
                 };
-                return Outcome::new(None, status, reply);
+                return (Outcome::new(None, status, reply), None);
             }
             Launched::Dispatched(d) => *d,
         };
@@ -1030,6 +976,7 @@ impl Kernel {
             binary,
             caller,
             marks,
+            recipient,
             named_fast_reflect,
         } = d;
 
@@ -1042,6 +989,8 @@ impl Kernel {
             kernel: Arc::clone(self),
             execution_id,
             target: target.id.clone(),
+            verb: verb.clone(),
+            recipient: recipient.clone(),
         };
         let mut next_pid = task_id;
         let mut fast_first = named_fast_reflect;
@@ -1175,9 +1124,20 @@ impl Kernel {
                 .with_body(body)
                 .with_secret(reply_marks),
         );
-        // A SETTLE IS A ROW — see `stamp_call`.
-        self.stamp_call(pid, &out, &target.id).await;
-        out
+        // A SETTLE IS A ROW — see `stamp_call` — and then a MESSAGE: delivered to
+        // the call's receiver (a continuation, else its `reply` verb). A settle
+        // owed to nobody is its row alone.
+        let reply_verb = !has_then && recipient.as_ref().is_some_and(|r| self.declares_reply(r));
+        let owes = has_then || reply_verb;
+        let settle_row = self.stamp_call(pid, &out, &target.id).await;
+        let owed = deliver::Owed {
+            pid: execution_id,
+            target: target.id.clone(),
+            verb,
+            recipient: reply_verb.then_some(recipient).flatten(),
+            settle_row: settle_row.filter(|_| owes),
+        };
+        (out, Some(owed))
     }
 
     /// The kernel's OWN dispatch of one payload — python `_run_dispatch`, kept
@@ -1319,22 +1279,34 @@ impl Kernel {
     /// KERNEL bookkeeping; `settled` names the target. A dead ending (failed /
     /// timed_out / cancelled) is ANNOUNCED — `on_deadletter` — because nothing
     /// retries it on its own: someone has to look.
-    async fn stamp_call(self: &Arc<Self>, pid: Option<TaskId>, out: &Outcome, target: &AgentId) {
-        if let Some(pid) = self.stamp_call_rows(pid, out, target) {
+    ///
+    /// Answers the settle row's id: once its delivery ran, a `delivered` row
+    /// naming it is appended ([`Self::finish`]); the settle row is never touched.
+    async fn stamp_call(
+        self: &Arc<Self>,
+        pid: Option<TaskId>,
+        out: &Outcome,
+        target: &AgentId,
+    ) -> Option<i64> {
+        let (dead, row) = self.stamp_call_rows(pid, out, target);
+        if let Some(pid) = dead {
             self.announce_deadletter(pid.get(), out, out.attempts).await;
         }
+        row
     }
 
     /// The rows half of [`Self::stamp_call`], synchronous: the call row's
     /// `outcome` and the root's settle row. `Some(pid)` when the outcome is a
-    /// dead letter still to be announced.
+    /// dead letter still to be announced, and the settle row's id.
     fn stamp_call_rows(
         &self,
         pid: Option<TaskId>,
         out: &Outcome,
         target: &AgentId,
-    ) -> Option<TaskId> {
-        let pid = pid?;
+    ) -> (Option<TaskId>, Option<i64>) {
+        let Some(pid) = pid else {
+            return (None, None);
+        };
         let mut stamp = Map::new();
         stamp.insert("status".to_string(), Value::from(out.status.as_str()));
         // review bug 3: the error text is read from the SHOWN result, so a value the
@@ -1362,6 +1334,7 @@ impl Kernel {
             .ledger
             .info(pid.get())
             .map_or_else(|| target.clone(), |(t, _, _)| t);
+        let mut row = None;
         if let Some(root) = self.root() {
             let mut settle = Map::new();
             settle.insert("kind".to_string(), Value::from("settle"));
@@ -1372,9 +1345,9 @@ impl Kernel {
                 crate::ledger::stored_outcome(out, named, crate::jsonsafe::BodyAs::Len),
             );
             settle.insert("attempts".to_string(), Value::from(out.attempts));
-            let _ = self.rows_put(&root.id, settle);
+            row = self.rows_put(&root.id, settle).ok();
         }
-        crate::ledger::is_dead(out.status).then_some(pid)
+        (crate::ledger::is_dead(out.status).then_some(pid), row)
     }
 
     /// Wait for an execution someone else owns.
@@ -1522,12 +1495,6 @@ impl Kernel {
             };
             self.fanout(target, "send", &item, caller.as_ref()).await;
         }
-        // The item has reached its target (a hooked batch counts it launched).
-        let _ = ON_FANOUT.try_with(|s| {
-            if let Some(s) = s {
-                s.fire();
-            }
-        });
         // ONE DISPATCH, whatever the call carries — python's one `handle`. A
         // request body IS the payload's value at its path (python's
         // `payload[field] = body` / `set_path` overwrites the slot), so the
@@ -1612,10 +1579,36 @@ impl Kernel {
         // dropped — a `select!` loser, a timeout, its own cancellation), the
         // dispatch it spawned goes with it, exactly as when dispatch ran inline.
         // Also the row's self-cleaner: dropped on every exit path.
+        let stop = handle.cancel_signal();
         let _guard = DispatchGuard {
             kernel: Arc::clone(self),
             id: task_id,
             handle,
+        };
+
+        // THE HANDLER, then — when it DEFERRED its settle ([`Self::defer`]) — the
+        // settle another agent's answer brings ([`Self::settle_deferred`]). The
+        // handler's own task has ended by then; what stays is this execution's
+        // row (`ps` shows it, `cancel` and the deadline reach it).
+        let work = async {
+            let ran = join.await;
+            if !matches!(ran, Ok(Some(Ok(_)))) {
+                self.defers.forget(task_id);
+                return Ran::Handler(ran);
+            }
+            let Some(rx) = self.defers.waiting(task_id) else {
+                return Ran::Handler(ran);
+            };
+            let settled = tokio::select! {
+                biased;
+                _ = stop.notified() => None,
+                o = rx => o.ok(),
+            };
+            self.defers.forget(task_id);
+            match settled {
+                Some(o) => Ran::Deferred(o),
+                None => Ran::Handler(Ok(None)),
+            }
         };
 
         // THE ITEM'S OWN DEADLINE. Expiry kills through the FRONT DOOR
@@ -1626,14 +1619,16 @@ impl Kernel {
         //
         // The race is reported honestly: a handler that finishes during the
         // grace window COMPLETES — `cancel_task` no-ops on a finished id and
-        // the join below yields its real reply.
+        // the join below yields its real reply. A deferred settle that arrives
+        // after the deadline is LATE: nothing waits for it any more.
         let outcome = match timeout {
-            None => join.await,
+            None => work.await,
             Some(d) => {
                 let dur = std::time::Duration::from_secs_f64(d.secs);
-                match tokio::time::timeout(dur, &mut Box::pin(&mut { join })).await {
+                match tokio::time::timeout(dur, work).await {
                     Ok(j) => j,
                     Err(_) => {
+                        self.defers.forget(task_id);
                         self.cancel_task(&task_id).await;
                         // PYTHON'S PROSE, verbatim: target id RAW, verb
                         // `py_repr`-quoted, the timeout as given, plus `task_id`.
@@ -1642,6 +1637,11 @@ impl Kernel {
                     }
                 }
             }
+        };
+        let outcome = match outcome {
+            // the settle the deferring handler's answer brought, as given
+            Ran::Deferred(o) => return (o.result, o.status, o.body),
+            Ran::Handler(o) => o,
         };
 
         match outcome {
@@ -2140,6 +2140,9 @@ struct SettleOnDrop {
     kernel: Arc<Kernel>,
     execution_id: i64,
     target: AgentId,
+    /// The call's verb and receiver: the `cancelled` settle is delivered like any.
+    verb: String,
+    recipient: Option<AgentId>,
 }
 
 impl Drop for SettleOnDrop {
@@ -2152,15 +2155,28 @@ impl Drop for SettleOnDrop {
             self.execution_id,
             Outcome::new(pid, Status::Cancelled, json!({ "cancelled": true })),
         );
-        if let Some(pid) = self.kernel.stamp_call_rows(pid, &out, &self.target) {
-            if let Ok(rt) = tokio::runtime::Handle::try_current() {
-                let kernel = Arc::clone(&self.kernel);
-                rt.spawn(async move {
+        let recipient = self
+            .recipient
+            .take()
+            .filter(|r| self.kernel.declares_reply(r));
+        let (dead, row) = self.kernel.stamp_call_rows(pid, &out, &self.target);
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            let kernel = Arc::clone(&self.kernel);
+            let owed = deliver::Owed {
+                pid: self.execution_id,
+                target: self.target.clone(),
+                verb: std::mem::take(&mut self.verb),
+                settle_row: row.filter(|_| recipient.is_some()),
+                recipient,
+            };
+            rt.spawn(async move {
+                if let Some(pid) = dead {
                     kernel
                         .announce_deadletter(pid.get(), &out, out.attempts)
                         .await;
-                });
-            }
+                }
+                kernel.finish(Some(owed), &out, None, None).await;
+            });
         }
     }
 }
@@ -2315,6 +2331,20 @@ fn taped_payload(value: &Value, body: Option<&crate::outcome::Blob>) -> Value {
     out
 }
 
+/// How one attempt's handler ended: it answered (or was stopped, or raised),
+/// or it deferred and a later settle answered for it ([`Ran::Deferred`]).
+type HandlerRun =
+    Result<Option<Result<(Value, Option<crate::outcome::Blob>), Value>>, tokio::task::JoinError>;
+
+/// How one attempt's run ended (see [`HandlerRun`] for the handler's own).
+enum Ran {
+    Handler(HandlerRun),
+    Deferred(Outcome),
+}
+
+mod deliver;
+pub use deliver::Deferred;
+pub(crate) use deliver::DeferTable;
 pub(crate) mod gate;
 mod kernel_verbs;
 use kernel_verbs::{handle_kernel_verb, is_kernel_verb};
@@ -2329,3 +2359,7 @@ mod batch_tests;
 #[cfg(test)]
 #[path = "send/ledger_tests.rs"]
 mod ledger_tests;
+
+#[cfg(test)]
+#[path = "send/delivery_tests.rs"]
+mod delivery_tests;

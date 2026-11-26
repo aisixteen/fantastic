@@ -643,6 +643,34 @@ pub async fn as_agent<F: std::future::Future>(agent: impl Into<AgentId>, work: F
         .await
 }
 
+/// THE OPERATOR WATCHING THE SETTLES, test side: each item is called as the
+/// operator ([`Kernel::call`]) and its settle, delivered to a continuation, is
+/// handed back in item order. A launch refusal comes back as the ack that carried
+/// it. A test driver, never a product path: product code gets acks and later
+/// messages.
+pub async fn send_settled(kernel: &Arc<Kernel>, items: Vec<crate::outcome::Item>) -> Vec<crate::outcome::Outcome> {
+    let mut waits = Vec::with_capacity(items.len());
+    for item in items {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let ack = crate::send::as_operator(kernel.call(item, move |o| async move {
+            let _ = tx.send(o);
+        }))
+        .await;
+        waits.push((ack, rx));
+    }
+    let mut out = Vec::with_capacity(waits.len());
+    for (ack, rx) in waits {
+        if ack.status != crate::outcome::Status::Accepted {
+            out.push(ack);
+            continue;
+        }
+        out.push(rx.await.unwrap_or_else(|_| {
+            crate::outcome::Outcome::refused(json!({"error": "send_settled: the settle was never delivered"}))
+        }));
+    }
+    out
+}
+
 /// A symlink at `link` pointing at `target`, on every OS — the fixture a test of
 /// the clamp plants (on Windows a typed link, see the kernel's `sys`).
 pub fn symlink(target: impl AsRef<Path>, link: impl AsRef<Path>) -> std::io::Result<()> {

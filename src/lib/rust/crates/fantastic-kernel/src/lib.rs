@@ -70,13 +70,13 @@ pub use kernel::{
     Kernel, StateSubscriber, SubscriberToken, DEFAULT_INBOX_BOUND, SELF_PLACEHOLDER,
     STATE_PLACEHOLDER,
 };
-pub use outcome::{body_at, Blob, Item, Outcome, Status, Step};
+pub use outcome::{body_at, Blob, Item, Outcome, ReplyTo, Status, Step};
 pub use paging::page;
 pub use peers::{PeerCallFuture, PeerEmitFuture, PeerReply, PeerRoute};
 pub use refusal::{error_text, is_refused, not_here, refusal, refusal_hint, unknown_agent};
 pub use rows::{Row, RowStore, RowTail};
 pub use secret::{current_secret, note_reply_secret};
-pub use send::{current_origin, current_sender, Signal, ON_BATCH_LAUNCHED};
+pub use send::{current_origin, current_sender, Deferred};
 pub use send::gate::Held;
 pub use state::KernelState;
 pub use storage::StorageMode;

@@ -366,6 +366,10 @@ impl Kernel {
                 }
             }
         }
+        // SETTLES NOT YET DELIVERED — the cut calls above, and any a stopped
+        // process flushed before its delivery ran — go to their receivers once,
+        // now that the receivers are up.
+        self.redeliver().await;
         crate::await_set::resume(self, due_waits);
         json!({"started": true, "store": store.id.0, "booted": booted})
     }
@@ -549,7 +553,7 @@ impl Kernel {
         let gone: HashSet<i64> = doomed_calls.iter().copied().collect();
         let mut doomed: HashSet<i64> = gone.clone();
         for r in &rows {
-            if matches!(kind_of(r), Some("settle" | "ack"))
+            if matches!(kind_of(r), Some("settle" | "ack" | "delivered"))
                 && r.get("parent")
                     .and_then(Value::as_i64)
                     .is_some_and(|p| gone.contains(&p))

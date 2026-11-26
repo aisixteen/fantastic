@@ -48,6 +48,10 @@ pub enum Status {
     Cancelled,
     /// The item's own deadline expired; killed through the front door.
     TimedOut,
+    /// THE ACK, never a settle: [`crate::Kernel::call`] launched the item (its pid
+    /// minted, its call row written) and the handler runs as its own task. The
+    /// settle comes later, delivered to the item's `reply_to`.
+    Accepted,
 }
 
 impl Status {
@@ -61,6 +65,7 @@ impl Status {
             Status::Failed => "failed",
             Status::Cancelled => "cancelled",
             Status::TimedOut => "timed_out",
+            Status::Accepted => "accepted",
         }
     }
 
@@ -223,6 +228,23 @@ pub struct Item {
     /// SECRET MARKS (`crate::secret`): dotted paths into the payload whose values
     /// the kernel keeps and shows only as `[secret]`.
     pub secret: Vec<String>,
+    /// WHO RECEIVES THE SETTLE: delivered as a `reply` message once the call
+    /// settles ([`ReplyTo`]). The call row records the receiver.
+    pub reply_to: ReplyTo,
+}
+
+/// Who receives a call's settle. The kernel delivers it as a `reply` message
+/// (`{type: reply, re, target, verb, status, result}`) to that agent when its
+/// bundle declares `reply`; any other receiver gets the settle row only.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ReplyTo {
+    /// The agent that made the call (the default). The operator gets the row only.
+    #[default]
+    Caller,
+    /// Another agent.
+    Agent(AgentId),
+    /// Nobody: the settle row only (the wire's `null`).
+    Row,
 }
 
 impl Item {
@@ -237,7 +259,15 @@ impl Item {
             retries: None,
             binary: None,
             secret: Vec::new(),
+            reply_to: ReplyTo::Caller,
         }
+    }
+
+    /// Send the settle to `to` ([`ReplyTo`]) instead of the caller.
+    #[must_use]
+    pub fn with_reply_to(mut self, to: ReplyTo) -> Self {
+        self.reply_to = to;
+        self
     }
 
     /// Mark payload paths SECRET (`crate::secret`): the handler gets them as
@@ -371,6 +401,13 @@ impl Outcome {
     #[must_use]
     pub fn body_bytes(&self) -> Option<&[u8]> {
         self.body.as_ref().map(|b| b.bytes.as_slice())
+    }
+
+    /// THE ACK of a launched call ([`Status::Accepted`]): its pid (`None` only for
+    /// the unnamed `kernel` reflect, which has none), no result yet.
+    #[must_use]
+    pub fn accepted(pid: Option<TaskId>) -> Self {
+        Self::new(pid, Status::Accepted, Value::Null)
     }
 
     /// The item never reached the task table: a gate denial, an unknown agent,

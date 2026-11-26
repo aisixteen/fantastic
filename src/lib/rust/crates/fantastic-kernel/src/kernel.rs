@@ -186,6 +186,9 @@ pub struct Kernel {
     /// The kernel's memory store: which one (`kernel_start`), the flusher, the
     /// flush bookkeeping. See [`crate::executions`].
     pub(crate) exec: crate::executions::ExecState,
+    /// The executions whose handlers DEFERRED their settle ([`Self::defer`]),
+    /// waiting for [`Self::settle_deferred`].
+    pub(crate) defers: crate::send::DeferTable,
     /// Per-KERNEL state a bundle keeps ON the kernel's context, by key — python's
     /// `ctx._ai_memory` attribute: two kernels in one process (tests, a
     /// multi-kernel host) never share it. See [`Self::extension`].
@@ -276,6 +279,7 @@ impl Kernel {
             ledger: crate::ledger::Ledger::default(),
             rows: crate::rows::RowStore::new(),
             exec: crate::executions::ExecState::default(),
+            defers: crate::send::DeferTable::default(),
             extensions: DashMap::new(),
             peers: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             peer_watches: std::sync::Mutex::new(std::collections::BTreeMap::new()),

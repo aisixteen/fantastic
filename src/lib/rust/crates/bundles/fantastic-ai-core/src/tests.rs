@@ -2760,7 +2760,6 @@ async fn every_model_call_carries_the_layer_default_timeout() {
             None,
             Vec::new(),
             false,
-            None,
         ),
     )
     .await;
@@ -2821,7 +2820,6 @@ async fn a_malformed_timeout_arg_is_refused_by_name() {
             None,
             Vec::new(),
             false,
-            None,
         ),
     )
     .await;
@@ -2872,7 +2870,6 @@ async fn a_reply_to_naming_no_agent_dispatches_nothing_and_says_so() {
             None,
             Vec::new(),
             false,
-            None,
         ),
     )
     .await;
@@ -3540,7 +3537,6 @@ async fn a_batch_of_calls_without_reply_to_all_come_back() {
             None,
             Vec::new(),
             false,
-            None,
         ),
     )
     .await;
