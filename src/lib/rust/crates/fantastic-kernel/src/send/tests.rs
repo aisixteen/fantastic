@@ -661,10 +661,10 @@ async fn watch_on_a_node_needs_a_watch_line() {
         kernel.authorize_state_watch(&leaf_id, &node)
     })
     .await;
-    assert_eq!(
-        denial.expect("a line naming another verb covered the node's stream"),
-        crate::refusal::unknown_agent("canvas_root")
-    );
+    // the leaf sees the node (its `ping` line), so the refusal names `watch`
+    let denial = denial.expect("a line naming another verb covered the node's stream");
+    assert_eq!(denial["reason"], "not_allowed", "{denial}");
+    assert_eq!(denial["arg"], "watch", "{denial}");
     crate::test_support::grant(&kernel, "leaf", "canvas_root", json!({"call": ["watch"]}));
     let granted_tap = crate::test_support::as_agent(leaf_id.clone(), async {
         kernel.authorize_state_watch(&leaf_id, &node)
@@ -672,7 +672,15 @@ async fn watch_on_a_node_needs_a_watch_line() {
     .await;
     assert!(granted_tap.is_none(), "{granted_tap:?}");
 
-    // A missing node is the same unknown answer.
+    // An agent holding nothing on the node gets the unknown answer, as for a
+    // missing node.
+    kernel.register(granted("stranger", Some("kernel_state"), json!({})));
+    let stranger = AgentId::from("stranger");
+    let hidden = crate::test_support::as_agent(stranger.clone(), async {
+        kernel.authorize_state_watch(&stranger, &node)
+    })
+    .await;
+    assert_eq!(hidden, Some(crate::refusal::unknown_agent("canvas_root")));
     let missing = AgentId::from("nowhere");
     let gone = crate::test_support::as_agent(leaf_id.clone(), async {
         kernel.authorize_state_watch(&leaf_id, &missing)

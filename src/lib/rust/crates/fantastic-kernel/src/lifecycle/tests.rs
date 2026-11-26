@@ -1161,13 +1161,16 @@ async fn a_field_no_line_names_is_refused_at_create_and_update() {
     let r = send_as(&k, "maker", "kernel", json!({"type": "create_agent", "parent_id": "maker",
         "handler_module": "counting.tools", "id": "c1", "description": "ok"})).await;
     assert_eq!(r["id"], "c1", "{r}");
-    // the same at an update: the freed field changes, the unnamed one answers unknown
+    // the same at an update: the freed field changes; the unnamed one is named
+    // back to the creator, which sees its child
     let r = send_as(&k, "maker", "kernel",
         json!({"type": "update_agent", "id": "c1", "description": "again"})).await;
     assert_eq!(r["updated"], true, "{r}");
     let r = send_as(&k, "maker", "kernel",
         json!({"type": "update_agent", "id": "c1", "display_name": "x"})).await;
-    assert_eq!(r, crate::refusal::unknown_agent("c1"));
+    assert_eq!(r["reason"], "not_allowed", "{r}");
+    assert_eq!(r["arg"], "display_name", "{r}");
+    assert!(meta_of(&k, "c1").get("display_name").is_none_or(|v| v != "x"), "{r}");
 }
 
 #[tokio::test]
@@ -1198,9 +1201,13 @@ async fn a_forced_field_is_changed_only_by_the_operator() {
         "handler_module": "chatlike", "id": "c1"})).await;
     assert_eq!(r["id"], "c1", "{r}");
     let model = json!({"type": "update_agent", "id": "c1", "model": "other"});
-    // neither the creator nor the agent itself
-    assert_eq!(send_as(&k, "maker", "kernel", model.clone()).await, crate::refusal::unknown_agent("c1"));
-    assert_eq!(send_as(&k, "c1", "kernel", model.clone()).await, crate::refusal::unknown_agent("c1"));
+    // neither the creator nor the agent itself: both see c1, so the field is named
+    for who in ["maker", "c1"] {
+        let r = send_as(&k, who, "kernel", model.clone()).await;
+        assert_eq!(r["reason"], "not_allowed", "{who}: {r}");
+        assert_eq!(r["arg"], "model", "{who}: {r}");
+        assert_eq!(meta_of(&k, "c1")["model"], "f", "{who}");
+    }
     // a free field the creator may change, and the agent its own
     let r = send_as(&k, "c1", "kernel",
         json!({"type": "update_agent", "id": "c1", "temperature": 0.1})).await;
@@ -1227,7 +1234,8 @@ async fn a_bundle_writes_its_own_non_can_fields() {
     // never its own `can`
     let r = send_as(&k, "self_w", "kernel", json!({"type": "update_agent", "id": "self_w",
         "can": {"kernel_state": {"call": ["*"]}}})).await;
-    assert_eq!(r, crate::refusal::unknown_agent("self_w"));
+    assert_eq!(r["reason"], "not_allowed", "{r}");
+    assert_eq!(r["arg"], "can", "{r}");
     assert!(meta_of(&k, "self_w").get("can").is_none());
 }
 
@@ -1262,10 +1270,19 @@ async fn an_uninstalled_bundle_and_a_bundle_outside_what_answer_the_same() {
     }))
     .await;
     let mk = |hm: &str| json!({"type": "create_agent", "parent_id": "maker", "handler_module": hm, "id": "c1"});
+    // the same refusal, naming only the bundle asked for: an agent is never told
+    // which bundles are installed beyond its lines
     let uninstalled = send_as(&k, "maker", "kernel", mk("ghost.tools")).await;
     let outside = send_as(&k, "maker", "kernel", mk("chatlike")).await;
-    assert_eq!(uninstalled, outside);
-    assert_eq!(outside, crate::refusal::unknown_agent("maker"));
+    for r in [&uninstalled, &outside] {
+        assert_eq!(r["reason"], "not_allowed", "{r}");
+        assert_eq!(r["arg"], "handler_module", "{r}");
+    }
+    let named = |r: &Value, b: &str| {
+        crate::refusal::error_text(r).map(|t| t.replace(b, "<b>"))
+    };
+    assert_eq!(named(&uninstalled, "ghost.tools"), named(&outside, "chatlike"));
+    assert!(!k.exists("c1"));
     // the operator is told the bundle is not installed
     let r = k
         .operator_send(vec![Item::new(AgentId::from("kernel"), mk("ghost.tools"))])
@@ -1339,15 +1356,19 @@ async fn a_verb_acting_for_an_asker_is_checked_as_the_asker() {
         assert_eq!(r["id"], id, "{verb}: {r}");
         assert_eq!(k.resolve_target(id).unwrap().parent_id, Some(AgentId::from("asker")));
     }
-    // the helper's own position does not count: nothing under the helper
+    // the helper's own position does not count: nothing under the helper (the
+    // asker sees the helper, so the create is named back)
     for verb in ["make", "make_direct"] {
         let r = send_as(&k, "asker", "helper", json!({"type": verb, "parent": "helper", "id": "h1"})).await;
-        assert_eq!(r, crate::refusal::unknown_agent("helper"), "{verb}");
+        assert_eq!(r["reason"], "not_allowed", "{verb}: {r}");
+        assert_eq!(r["arg"], "handler_module", "{verb}: {r}");
+        assert!(!k.exists("h1"), "{verb}");
     }
-    // rule 5 included: not its own `can`, not itself, not an ancestor
+    // rule 5 included: not its own `can`, not itself, not an ancestor (hidden)
     let r = send_as(&k, "asker", "helper", json!({"type": "touch", "id": "asker",
         "field": "can", "value": {"kernel_state": {"call": ["*"]}}})).await;
-    assert_eq!(r, crate::refusal::unknown_agent("asker"));
+    assert_eq!(r["reason"], "not_allowed", "{r}");
+    assert_eq!(r["arg"], "can", "{r}");
     let r = send_as(&k, "asker", "helper", json!({"type": "touch", "id": "boss",
         "field": "description", "value": "x"})).await;
     assert_eq!(r, crate::refusal::unknown_agent("boss"));
@@ -2060,9 +2081,11 @@ async fn the_asker_check_holds_the_asker_to_its_own_lines_beside_the_creators() 
     let r = asker_check(&kernel, Some("asker"), "canvas", "canvas", rec(json!({"id": "x3", "can": {"keys": {"call": ["get"]}}}))).await;
     assert!(r.is_ok(), "{r:?}");
 
-    // the asker's `who`: an id outside it is the unknown answer; no id mints from it
+    // the asker's `who`: an id outside it is named back (the asker sees canvas, and
+    // its line makes that bundle under other ids); no id mints from it
     let r = asker_check(&kernel, Some("narrow"), "canvas", "canvas", rec(json!({"id": "x4"}))).await.expect_err("outside who");
-    assert_eq!(r, crate::refusal::unknown_agent("canvas"));
+    assert_eq!(r["reason"], "not_allowed", "{r}");
+    assert_eq!(r["arg"], "id", "{r}");
     let minted = asker_check(&kernel, Some("narrow"), "canvas", "canvas", rec(json!({}))).await.expect("minted");
     assert!(minted.id.starts_with("n_"), "{minted:?}");
     // a field the asker's line does not name is refused, though the creator frees it
@@ -2087,4 +2110,122 @@ async fn the_asker_check_holds_the_asker_to_its_own_lines_beside_the_creators() 
     for id in ["x1", "x2", "x3", "n_1", "n_2", "x5", "x7"] {
         assert!(!kernel.exists(id), "{id}");
     }
+}
+
+/// #783: a caller that sees the target is told what its lines lack, by the one
+/// `not_allowed` shape naming the verb, field or create; a caller that sees
+/// nothing still gets the unknown answer, with no id beyond the one it named.
+async fn seen_kernel(tmp: &tempfile::TempDir) -> Arc<Kernel> {
+    let k = mk_v9_kernel(tmp);
+    op_create(&k, "kernel", "hub", "counting.tools", Value::Null).await;
+    op_create(&k, "kernel", "w", "counting.tools", json!({
+        "hub": create_line(json!(["*"]), json!({"asker.tools": {}})),
+    }))
+    .await;
+    op_create(&k, "kernel", "stranger", "counting.tools", Value::Null).await;
+    let r = send_as(&k, "w", "kernel", json!({"type": "create_agent", "parent_id": "hub",
+        "handler_module": "asker.tools", "id": "c1"})).await;
+    assert_eq!(r["id"], "c1", "{r}");
+    // the creator's lines are then narrowed: one verb on its child, and a create
+    // line that no longer selects it
+    let r = op_send(&k, json!({"type": "update_agent", "id": "w", "can": {
+        "c1": {"call": ["make"]},
+        "hub": create_line(json!(["*"]), json!({"counting.tools": {}})),
+    }})).await;
+    assert_eq!(r["updated"], true, "{r}");
+    k
+}
+
+#[tokio::test]
+async fn a_creator_calling_a_verb_its_line_lacks_on_its_child_is_told_the_verb() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = seen_kernel(&tmp).await;
+    let r = send_as(&k, "w", "c1", json!({"type": "zap", "id": "x"})).await;
+    assert_eq!(r["reason"], "not_allowed", "{r}");
+    assert_eq!(r["arg"], "zap", "{r}");
+    assert_eq!(r["error"], "'w' holds no call 'zap' on 'c1'", "{r}");
+    assert!(r["hint"].as_str().is_some_and(|h| h.contains("wider line")), "{r}");
+    // a verb c1 does not answer at all keeps the dispatch's named answer, listing
+    // only the verbs w may call there
+    let r = send_as(&k, "w", "c1", json!({"type": "nope"})).await;
+    assert_eq!(r["reason"], "unhandled", "{r}");
+    assert_eq!(r["verb"], "nope", "{r}");
+    let text = crate::refusal::error_text(&r).unwrap_or_default();
+    assert!(text.contains("make"), "{r}");
+    for hidden in ["zap", "touch", "make_direct", "reflect"] {
+        assert!(!text.contains(hidden), "{hidden} leaked: {r}");
+    }
+    // a kernel verb sent to c1 is answered where it lives
+    let r = send_as(&k, "w", "c1", json!({"type": "create_agent", "parent_id": "c1",
+        "handler_module": "asker.tools"})).await;
+    assert_eq!(r["reason"], "not_here", "{r}");
+}
+
+#[tokio::test]
+async fn an_update_of_a_structure_field_names_the_field() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = seen_kernel(&tmp).await;
+    for (who, field, value) in [
+        ("w", "handler_module", json!("counting.tools")),
+        ("c1", "handler_module", json!("counting.tools")),
+        ("w", "parent", json!("kernel")),
+    ] {
+        let r = send_as(&k, who, "kernel",
+            json!({"type": "update_agent", "id": "c1", field: value})).await;
+        assert_eq!(r["reason"], "not_allowed", "{who} {field}: {r}");
+        assert_eq!(r["arg"], field, "{who} {field}: {r}");
+        assert_eq!(
+            r["error"],
+            format!("update_agent: '{field}' can never be updated"),
+            "{who} {field}: {r}"
+        );
+    }
+    assert_eq!(k.resolve_target("c1").unwrap().handler_module.as_deref(), Some("asker.tools"));
+}
+
+#[tokio::test]
+async fn a_stranger_still_gets_the_unknown_answer_with_no_id_leak() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = seen_kernel(&tmp).await;
+    let unknown = crate::refusal::unknown_agent("c1");
+    for payload in [
+        json!({"type": "zap", "id": "x"}),
+        json!({"type": "nope"}),
+    ] {
+        assert_eq!(send_as(&k, "stranger", "c1", payload.clone()).await, unknown, "{payload}");
+    }
+    for field in ["handler_module", "description", "can"] {
+        let r = send_as(&k, "stranger", "kernel",
+            json!({"type": "update_agent", "id": "c1", field: "x"})).await;
+        assert_eq!(r, unknown, "{field}");
+    }
+    let r = send_as(&k, "stranger", "kernel", json!({"type": "create_agent", "parent_id": "hub",
+        "handler_module": "asker.tools", "id": "c9"})).await;
+    assert_eq!(r, crate::refusal::unknown_agent("hub"));
+    // and the creator, past its line, is named the part it lacks
+    let r = send_as(&k, "w", "kernel", json!({"type": "create_agent", "parent_id": "hub",
+        "handler_module": "asker.tools", "id": "c9"})).await;
+    assert_eq!(r["reason"], "not_allowed", "{r}");
+    assert_eq!(r["arg"], "handler_module", "{r}");
+    assert!(!k.exists("c9"));
+}
+
+#[tokio::test]
+async fn a_delete_past_the_line_is_named_to_a_caller_that_sees_the_target() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = seen_kernel(&tmp).await;
+    let del = json!({"type": "delete_agent", "id": "c1"});
+    // the creator sees c1 (its `make` line) but no create line selects it now
+    for who in ["w", "c1"] {
+        let r = send_as(&k, who, "kernel", del.clone()).await;
+        assert_eq!(r["reason"], "not_allowed", "{who}: {r}");
+        assert_eq!(r["arg"], "delete", "{who}: {r}");
+        assert_eq!(r["deleted"], false, "{who}: {r}");
+    }
+    // a stranger: the unknown answer, as for a missing id
+    let r = send_as(&k, "stranger", "kernel", del).await;
+    let mut unknown = crate::refusal::unknown_agent("c1");
+    crate::refusal::with(&mut unknown, "deleted", json!(false));
+    assert_eq!(r, unknown);
+    assert!(k.exists("c1"));
 }

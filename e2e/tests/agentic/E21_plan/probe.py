@@ -54,7 +54,7 @@ from helpers import (
     relay,
     verdict,
 )
-from helpers.lines import is_unknown
+from helpers.lines import is_not_allowed
 from helpers.ai import TICK, ChainEnd
 from helpers.kernel import open_kernel, home
 
@@ -302,7 +302,8 @@ async def main():
                         "handler_module": "exec_bridge.tools",
                         "id": "shell",
                         # the COMMAND runner's gate: regexes over the full line, named in
-                        # its description too (a `call` line shows no fields)
+                        # its description too (a `call` line shows the fields but never
+                        # sets one)
                         "allowed": [f"{sys.executable} -c .*"],
                         "description": lines.runs([f"{sys.executable} -c .*"]),
                         # where and with what it runs: the operator's, on the record
@@ -392,15 +393,15 @@ async def main():
     await add_lines(root, "user", {aid: lines.ALL})
     await _make_guards(aid)
     # INSPECTABLE, NOT DRIVABLE (harness, before the model): a hand holding the AI's
-    # exact line on `probe_web` reflects it, and every other verb is the unknown
-    # answer — the browser surface is never the AI's to fetch through.
+    # exact line on `probe_web` reflects it, and every other verb is `not_allowed`
+    # naming the verb — the browser surface is never the AI's to fetch through.
     await probe_agent(root, "web_hand", can={"probe_web": CAN["probe_web"]})
     seen = await relay(root, "web_hand", "probe_web", {"type": "reflect"})
     assert seen.get("id") == "probe_web", f"a reflect line reflects probe_web: {str(seen)[:200]}"
     r = await relay(root, "web_hand", "probe_web",
                     {"type": "fetch_file", "agent_id": "assets", "path": GUARDS[0][3][0],
                      "offset": 0, "length": 64})
-    assert is_unknown(r, "probe_web"), f"probe_web fetch_file reached on a reflect line: {r}"
+    assert is_not_allowed(r, "fetch_file"), f"probe_web fetch_file reached on a reflect line: {r}"
     gone = (await root.send([{"target": root.id, "payload": {"type": "delete_agent", "id": "web_hand"}}]))[0]["result"]
     assert not gone.get("error"), f"delete web_hand: {gone}"
 

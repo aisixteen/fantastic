@@ -800,20 +800,23 @@ impl Kernel {
         //   when it passes, dispatch answers `not_here`;
         // - `reflect` passes when the caller holds anything on the target;
         // - every other verb takes the gate.
-        // Every denial is the unknown answer, byte-identical to a missing id.
+        // A caller that holds nothing on the target gets the unknown answer,
+        // byte-identical to a missing id; one that sees it is told what its lines
+        // lack ([`Kernel::call_denial`]).
         if let Some(orig) = caller.as_ref() {
             let on_root = self.root().is_some_and(|r| r.id == target.id);
-            let denied = if is_kernel_verb(&verb) && on_root {
-                false
+            let denial = if is_kernel_verb(&verb) && on_root {
+                None
             } else if verb == "reflect" {
-                self.held(orig, &target.id) == gate::Held::Nothing
+                (self.held(orig, &target.id) == gate::Held::Nothing)
+                    .then(|| crate::refusal::unknown_agent(item.target.as_str()))
+            } else if self.allowed(orig, &crate::authz::solver::Act::Call(verb.clone()), &target) {
+                None
             } else {
-                self.gate(orig, &verb, &target).is_some()
+                Some(self.call_denial(orig, &verb, &target, item.target.as_str()))
             };
-            if denied {
-                return Launched::Settled(Outcome::refused(crate::refusal::unknown_agent(
-                    item.target.as_str(),
-                )));
+            if let Some(denial) = denial {
+                return Launched::Settled(Outcome::refused(denial));
             }
         }
 
@@ -1838,12 +1841,7 @@ impl Kernel {
         let Some(n) = self.agents.get(node).map(|e| Arc::clone(&e)) else {
             return Some(crate::refusal::unknown_agent(node.as_str()));
         };
-        let watch = crate::authz::solver::Act::Call("watch".to_string());
-        if self.allowed(watcher, &watch, &n) {
-            None
-        } else {
-            Some(crate::refusal::unknown_agent(node.as_str()))
-        }
+        self.gate(watcher, "watch", &n)
     }
 
     /// Does `watcher`, watching `node`, cover agent `id`: `id` is in `node`'s

@@ -6,8 +6,9 @@
 //! task it spawned, is that agent's. An AGENT send passes only when the CALLER's
 //! own `can` lines allow it (its own tree it reaches by position) and every
 //! ancestor of the caller whose tree does not hold the target allows it too. The
-//! target keeps no list of callers. Every denial is the unknown answer,
-//! byte-identical to a missing id.
+//! target keeps no list of callers. A denial on a target the caller holds
+//! nothing on is the unknown answer, byte-identical to a missing id; on one it
+//! sees, `not_allowed` naming what its lines lack ([`Kernel::lacks`]).
 
 use super::*;
 use crate::authz::solver::{lines_of, Act, Basis, Slot};
@@ -340,19 +341,93 @@ impl Kernel {
 
     /// The call gate for an agent-originated send: `sender` may call `verb` on
     /// `target` when its lines and the ancestor cap allow it
-    /// ([`Self::allowed`]). Returns the unknown answer for the target when it is
-    /// refused, else `None`. A remote target is always refused to an agent: no
-    /// line can name one.
+    /// ([`Self::allowed`]). Returns the refusal when it is refused
+    /// ([`Self::lacks`]), else `None`. A remote target is always refused to an
+    /// agent: no line can name one.
     pub(crate) fn gate(
-        self: &Arc<Self>,
+        &self,
         sender_id: &AgentId,
         verb: &str,
         target: &Arc<Agent>,
     ) -> Option<Value> {
         if self.allowed(sender_id, &Act::Call(verb.to_string()), target) {
-            None
-        } else {
-            Some(crate::refusal::unknown_agent(target.id.as_str()))
+            return None;
         }
+        Some(self.lacks(sender_id, &target.id, target.id.as_str(), verb, || {
+            format!("holds no call {} on", fantastic_bundle::py_repr(verb))
+        }))
+    }
+
+    /// THE ONE REFUSAL of an act `caller`'s lines do not hold on `target`
+    /// (`shown` is the address the caller used). A caller that holds nothing on
+    /// the target (a missing or remote one included) gets the unknown answer for
+    /// `shown`, byte-identical to a missing id. A caller that sees it gets
+    /// `not_allowed` naming `arg` (the verb, the field, what a create lacked):
+    /// `<caller> <what> <target>`, and whom to ask.
+    pub(crate) fn lacks(
+        &self,
+        caller: &AgentId,
+        target: &AgentId,
+        shown: &str,
+        arg: &str,
+        what: impl FnOnce() -> String,
+    ) -> Value {
+        if self.held(caller, target) == Held::Nothing {
+            return crate::refusal::unknown_agent(shown);
+        }
+        let t = fantastic_bundle::py_repr(target.as_str());
+        crate::refusal::not_allowed(
+            arg,
+            format!("{} {} {t}", fantastic_bundle::py_repr(caller.as_str()), what()),
+            format!("your lines on {t} do not hold it; ask whoever holds a wider line"),
+        )
+    }
+
+    /// The refusal of a CALL of `verb` the gate denied `caller` on `target`
+    /// (`shown` is the address used). Hidden: the unknown answer. Seen, and the
+    /// target does not answer `verb` at all: the answer its dispatch gives (a
+    /// kernel verb off the root `not_here`; an agent with no bundle here its
+    /// handler refusal; else `unknown verb`, listing only the verbs the caller may
+    /// call). Seen and answered: `not_allowed` with `arg` the verb.
+    pub(crate) fn call_denial(
+        &self,
+        caller: &AgentId,
+        verb: &str,
+        target: &Arc<Agent>,
+        shown: &str,
+    ) -> Value {
+        if self.held(caller, &target.id) == Held::Nothing {
+            return crate::refusal::unknown_agent(shown);
+        }
+        let on_root = target.parent_id.is_none();
+        if is_kernel_verb(verb) && !on_root {
+            return crate::refusal::not_here(verb, target.id.as_str());
+        }
+        let bundle = target
+            .handler_module
+            .as_deref()
+            .and_then(|hm| self.bundles.get(hm));
+        if bundle.is_none() && !on_root {
+            return match target.handler_module.as_deref() {
+                None => no_handler_module_refusal(target.id.as_str(), verb),
+                Some(hm) => not_installed_refusal(target.id.as_str(), hm, verb),
+            };
+        }
+        let dynamic = bundle
+            .as_ref()
+            .map(|b| b.dynamic_verbs(target))
+            .unwrap_or_default();
+        let lists = crate::reflect::verb_lists(target, bundle.as_deref());
+        let names = crate::verbs::names(&lists, &dynamic);
+        if !names.contains(&verb) {
+            let callable: Vec<&str> = names
+                .into_iter()
+                .filter(|n| self.allowed(caller, &Act::Call((*n).to_string()), target))
+                .collect();
+            return crate::verbs::unknown_verb(target.id.as_str(), &json!(verb), &callable);
+        }
+        self.lacks(caller, &target.id, shown, verb, || {
+            format!("holds no call {} on", fantastic_bundle::py_repr(verb))
+        })
     }
 }

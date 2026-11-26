@@ -40,8 +40,12 @@ action delete appliesTo { principal: Agent, resource: Agent };
 const POSITION: &str =
     "permit(principal, action == Action::\"call\", resource) when { resource in principal };\n";
 
+/// The structure of a record: set once, by `create_agent`, never updated
+/// ([`FORBIDS`] names the same three).
+pub(crate) const STRUCTURE: [&str; 3] = ["id", "parent", "handler_module"];
+
 /// Never upward (nothing changes or deletes its own record or an ancestor's), and
-/// structure (`id`, `parent` and `handler_module` are not fields).
+/// structure ([`STRUCTURE`] are not fields).
 const FORBIDS: &str = "forbid(principal, action in [Action::\"update\", Action::\"delete\"], resource) when { principal in resource };\n\
 forbid(principal, action == Action::\"update\", resource) when { [\"id\",\"parent\",\"handler_module\"].contains(context.field) };\n";
 

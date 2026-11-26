@@ -980,3 +980,12 @@ fn held_on_a_missing_or_remote_id_does_not_panic() {
         );
     }
 }
+
+/// The structure fields `update_agent` names "never updated" are exactly the ones
+/// the generic forbid refuses for every principal.
+#[test]
+fn the_structure_fields_are_the_forbidden_ones() {
+    let generic = solver::generic();
+    let listed = solver::STRUCTURE.map(|f| format!("\"{f}\"")).join(",");
+    assert!(generic.contains(&format!("[{listed}].contains(context.field)")), "{generic}");
+}

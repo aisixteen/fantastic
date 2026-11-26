@@ -9,8 +9,9 @@ passes, the target's record unchanged; one-way), the levels (`call: [reflect]`,
 `call: [*]`, `update` includes `call`), position (own tree, no line), `$parent`
 (the parent needs a written line), siblings, a line reaching the target's tree, the writer subset (`rest` hands out only what it holds),
 the cap (an ancestor that does not hold the target cuts the call), the REST leg
-as an agent (no covering line → unknown, no `create` line on the root → unknown),
-never upward (no write of one's own `can` nor of the parent's record), the
+as an agent (a verb its line lacks → `not_allowed` naming it, no `create` line on
+the root → `not_allowed` naming `handler_module`), never upward (no write of
+one's own `can`, `not_allowed`, nor of the parent's record, unknown), the
 line shape at the write (`invalid_meta`; a missing id written by an agent →
 unknown), and ids reusable (a line survives its target's delete, a new line on
 an absent id is refused, a re-created id is reached with no write, a delete

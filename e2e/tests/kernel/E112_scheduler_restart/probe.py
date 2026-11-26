@@ -11,8 +11,8 @@ AS ITSELF at the `slow` probe agent `tgt`, by one line on the caller (`sch`'s
      returns within the bound with a `timed_out` error and no result; the same
      schedule firing on its own records `timed_out` in `history` while the 1 s
      schedule keeps firing beside it;
-  3. A SCHEDULE OF A VERB ITS LINE DOES NOT COVER is refused with the unknown
-     answer for the target and recorded;
+  3. A SCHEDULE OF A VERB ITS LINE DOES NOT COVER is refused `not_allowed`
+     naming the verb (the scheduler sees the target) and recorded;
   4. RESTART (SIGTERM, boot the same directory): every schedule comes back with
      its target, payload, interval, fire_timeout and paused flag, run counts never
      go backwards, the history from before is still there; a schedule created just
@@ -136,10 +136,10 @@ def main() -> int:
                           payload={"type": "started"}, interval_seconds=3600)
         d = hk.send("sch", {"type": "tick_now", "schedule_id": denied})
         need(d.get("result") is None and str(d.get("error") or "").startswith("failed")
-             and "no agent 'tgt'" in str(d.get("error")),
-             f"the gate refuses the fire with the unknown answer, and tick_now says so: {str(d)[:200]}")
+             and "'sch' holds no call 'started' on 'tgt'" in str(d.get("error")),
+             f"the gate refuses the fire naming the verb (sch sees tgt), and tick_now says so: {str(d)[:200]}")
         dh = history(hk, denied)
-        need(len(dh) == 1 and "no agent 'tgt'" in str(dh[0].get("error")),
+        need(len(dh) == 1 and "'sch' holds no call 'started' on 'tgt'" in str(dh[0].get("error")),
              f"history records the refused fire: {str(dh)[:200]}")
 
         # 4 · restart
