@@ -75,8 +75,12 @@ impl Ear {
     }
 }
 
-const PRINTER: &str = "import sys, time\n\
-n, gap, fatal, hold = int(sys.argv[1]), float(sys.argv[2]), set(sys.argv[3].split(',')), float(sys.argv[4])\n\
+/// Prints nothing until its GATE file exists: a monitor matches only the lines that
+/// arrive after it is filed, so a test opens the gate ([`go`]) once its monitors
+/// are in — never a race between the job's first lines and the `monitor` call.
+const PRINTER: &str = "import os, sys, time\n\
+n, gap, fatal, hold, gate = int(sys.argv[1]), float(sys.argv[2]), set(sys.argv[3].split(',')), float(sys.argv[4]), sys.argv[5]\n\
+while not os.path.exists(gate):\n    time.sleep(0.005)\n\
 for k in range(n):\n    print(('FATAL step %d' if str(k) in fatal else 'INFO step %d') % k, flush=True)\n    time.sleep(gap)\n\
 time.sleep(hold)\n";
 
@@ -146,11 +150,23 @@ async fn setup(tmp: &TempDir) -> (Arc<Kernel>, Ear) {
     (kernel, ear)
 }
 
-async fn printer(k: &Arc<Kernel>, rn: &str, n: u32, gap: f64, fatal: &str, hold: f64) -> i64 {
+/// The file [`PRINTER`] waits for.
+fn gate(tmp: &TempDir) -> PathBuf {
+    tmp.path().join("printer.go")
+}
+
+/// Open the printer's gate: its output starts now.
+fn go(tmp: &TempDir) {
+    std::fs::write(gate(tmp), b"").expect("open the printer's gate");
+}
+
+async fn printer(k: &Arc<Kernel>, tmp: &TempDir, n: u32, gap: f64, fatal: &str, hold: f64) -> i64 {
+    let (rn, _) = ids(tmp);
     // the job as its `job_started` names it, at once (#795: the start settles at exit)
-    let r = crate::start_announced(k, &AgentId::from(rn), json!({"type": "start", "command": python().to_string_lossy(),
+    let r = crate::start_announced(k, &AgentId::from(rn.as_str()), json!({"type": "start", "command": python().to_string_lossy(),
         "args": ["-c", PRINTER, n.to_string(), gap.to_string(),
-                 if fatal.is_empty() { "-" } else { fatal }, hold.to_string()]}))
+                 if fatal.is_empty() { "-" } else { fatal }, hold.to_string(),
+                 gate(tmp).to_string_lossy()]}))
     .await
     .unwrap_or_else(|e| panic!("{e}"));
     r["job_id"].as_i64().unwrap_or_else(|| panic!("{r}"))
@@ -177,7 +193,7 @@ async fn a_match_is_sent_with_its_header_and_nothing_else() {
     let tmp = TempDir::new().unwrap();
     let (k, ear) = setup(&tmp).await;
     let (rn, en) = ids(&tmp);
-    let jid = printer(&k, &rn, 6, 0.05, "2,4", 5.0).await;
+    let jid = printer(&k, &tmp, 6, 0.05, "2,4", 5.0).await;
     let r = call(
         &k,
         &rn,
@@ -186,6 +202,7 @@ async fn a_match_is_sent_with_its_header_and_nothing_else() {
     )
     .await;
     let mid = r["monitor_id"].as_i64().unwrap_or_else(|| panic!("{r}"));
+    go(&tmp);
     assert_eq!(
         r,
         json!({"monitor_id": mid, "job_id": jid, "notify": en, "match": "FATAL",
@@ -228,9 +245,9 @@ async fn every_throttles_and_tail_caps() {
     let tmp = TempDir::new().unwrap();
     let (k, ear) = setup(&tmp).await;
     let (rn, en) = ids(&tmp);
-    // ~4 s of output: the monitor attaches mid-stream however late it starts, and
-    // a window holds more than `tail` lines however slow the runner's sleeps are
-    let jid = printer(&k, &rn, 400, 0.01, "", 5.0).await;
+    // ~4 s of output once the gate opens: a window holds more than `tail` lines
+    // however slow the runner's sleeps are
+    let jid = printer(&k, &tmp, 400, 0.01, "", 5.0).await;
     let r = call(
         &k,
         &rn,
@@ -239,6 +256,7 @@ async fn every_throttles_and_tail_caps() {
     )
     .await;
     assert!(r["monitor_id"].is_i64(), "{r}");
+    go(&tmp);
     // waited ON the deliveries, not on a clock: a loaded runner starts the
     // printer late, and a fixed sleep then sees too little of its output
     until(
@@ -285,7 +303,7 @@ async fn without_match_every_is_required_and_args_are_checked() {
     let tmp = TempDir::new().unwrap();
     let (k, _ear) = setup(&tmp).await;
     let (rn, en) = ids(&tmp);
-    let jid = printer(&k, &rn, 1, 0.01, "", 3.0).await;
+    let jid = printer(&k, &tmp, 1, 0.01, "", 3.0).await;
     let cases = [
         (json!({"notify": en}), "missing_arg", "match | every"),
         (
@@ -333,7 +351,7 @@ async fn cancel_and_unmonitor_end_a_monitor_and_the_job_keeps_running() {
     let tmp = TempDir::new().unwrap();
     let (k, ear) = setup(&tmp).await;
     let (rn, en) = ids(&tmp);
-    let jid = printer(&k, &rn, 400, 0.02, "", 2.0).await;
+    let jid = printer(&k, &tmp, 400, 0.02, "", 2.0).await;
     let a = call(
         &k,
         &rn,
@@ -352,6 +370,7 @@ async fn cancel_and_unmonitor_end_a_monitor_and_the_job_keeps_running() {
     .await["monitor_id"]
         .as_i64()
         .unwrap();
+    go(&tmp);
     let listed = call(&k, &rn, json!({"type": "monitors"})).await;
     let ids: Vec<i64> = listed["monitors"]
         .as_array()
@@ -386,9 +405,22 @@ async fn cancel_and_unmonitor_end_a_monitor_and_the_job_keeps_running() {
     assert_eq!(out["cancelled"], true, "{out}");
     let out = call(&k, &rn, json!({"type": "unmonitor", "monitor_id": b})).await;
     assert_eq!(out, json!({"unmonitored": true, "monitor_id": b}));
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let listed = call(&k, &rn, json!({"type": "monitors"})).await;
-    assert_eq!(listed["monitors"], json!([]), "{listed}");
+    // both monitors gone, and no delivery of theirs still in flight (each is its
+    // own `monitor_notify` task): waited on that state, not on time
+    let mut settled = false;
+    for _ in 0..250 {
+        let listed = call(&k, &rn, json!({"type": "monitors"})).await;
+        let ps = call(&k, "kernel", json!({"type": "ps"})).await;
+        let in_flight = ps["tasks"]
+            .as_array()
+            .is_some_and(|t| t.iter().any(|t| t["verb"] == "monitor_notify"));
+        if listed["monitors"] == json!([]) && !in_flight {
+            settled = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(settled, "the monitors never left, or a delivery stayed in flight");
     let before = ear.texts().len();
     tokio::time::sleep(Duration::from_millis(800)).await;
     assert_eq!(
@@ -411,7 +443,7 @@ async fn a_monitor_ends_with_its_job_delivering_what_waited() {
     let tmp = TempDir::new().unwrap();
     let (k, ear) = setup(&tmp).await;
     let (rn, en) = ids(&tmp);
-    let jid = printer(&k, &rn, 3, 0.01, "1", 0.3).await;
+    let jid = printer(&k, &tmp, 3, 0.01, "1", 0.3).await;
     let r = call(
         &k,
         &rn,
@@ -419,6 +451,8 @@ async fn a_monitor_ends_with_its_job_delivering_what_waited() {
     )
     .await;
     assert!(r["monitor_id"].is_i64(), "{r}");
+    // its output starts only now that the monitor is filed: it sees every line
+    go(&tmp);
     // each delivery is its own call (#795): no order across them, so both are awaited
     until(
         || {
@@ -454,7 +488,7 @@ async fn the_end_is_delivered_when_nothing_waits_any_more() {
     let tmp = TempDir::new().unwrap();
     let (k, ear) = setup(&tmp).await;
     let (rn, en) = ids(&tmp);
-    let jid = printer(&k, &rn, 0, 0.0, "", 30.0).await;
+    let jid = printer(&k, &tmp, 0, 0.0, "", 30.0).await;
     let r = call(
         &k,
         &rn,
@@ -500,7 +534,7 @@ async fn a_monitor_is_refused_once_its_jobs_end_went_out() {
     let tmp = TempDir::new().unwrap();
     let (k, _ear) = setup(&tmp).await;
     let (rn, en) = ids(&tmp);
-    let jid = printer(&k, &rn, 0, 0.0, "", 30.0).await;
+    let jid = printer(&k, &tmp, 0, 0.0, "", 30.0).await;
     let key = (AgentId::from(rn.as_str()), TaskId(jid));
     // the pump's own mark, made while the process is still alive (not reaped yet)
     crate::jobs::jobs()
@@ -541,7 +575,7 @@ async fn a_refused_delivery_ends_the_monitor_and_monitors_says_why() {
     )
     .await;
     assert_eq!(r["updated"], json!(true), "{r}");
-    let jid = printer(&k, &rn, 30, 0.05, "", 5.0).await;
+    let jid = printer(&k, &tmp, 30, 0.05, "", 5.0).await;
     let r = call(
         &k,
         &rn,
@@ -549,6 +583,7 @@ async fn a_refused_delivery_ends_the_monitor_and_monitors_says_why() {
     )
     .await;
     let mid = r["monitor_id"].as_i64().unwrap_or_else(|| panic!("{r}"));
+    go(&tmp);
     let listed = || async { call(&k, &rn, json!({"type": "monitors"})).await["monitors"].clone() };
     let mut rows = Value::Null;
     for _ in 0..300 {
