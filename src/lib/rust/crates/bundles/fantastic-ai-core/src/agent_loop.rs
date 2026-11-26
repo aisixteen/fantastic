@@ -532,9 +532,9 @@ pub async fn run_generation(
     // APPEND this send's user + assistant turns to the memory store so context
     // management (compaction/recall) has the FULL conversation next turn.
     //
-    // STRIPPED — the deliberation is not part of the conversation. The RAW
-    // text (thinking included) is what the caller receives; the router parses
-    // only the answer, and durable history loses the `<think>` spans, because a
+    // STRIPPED — the deliberation is not part of the conversation. Neither the
+    // caller's reply nor the router gets it (the send reply carries the answer
+    // only), and durable history loses the `<think>` spans, because a
     // reasoning model re-fed its own prior deliberation drowns in it. A pass
     // the model stopped with a block open leaves the CUT MARKER instead, on top
     // of the context.

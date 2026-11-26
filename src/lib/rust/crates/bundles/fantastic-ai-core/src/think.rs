@@ -137,6 +137,44 @@ pub fn without_thinking(text: &str) -> String {
     out.trim().to_string()
 }
 
+/// The keys [`thinking_fields`] writes on a row.
+const THINKING_KEYS: [&str; 2] = ["thinking", "thinking_cut"];
+
+/// `reply` as ANOTHER agent may read it: every stored [`thinking_fields`] key
+/// dropped, at any depth (a `recall` reply nests rows under `messages`, a `rows`
+/// reply under `rows`). `None` when it holds none. Thinking never leaves the agent
+/// that produced it; only that agent's own read of its own rows returns it.
+#[must_use]
+pub fn without_thinking_fields(reply: &serde_json::Value) -> Option<serde_json::Value> {
+    fn holds(v: &serde_json::Value) -> bool {
+        match v {
+            serde_json::Value::Object(m) => {
+                THINKING_KEYS.iter().any(|k| m.contains_key(*k)) || m.values().any(holds)
+            }
+            serde_json::Value::Array(a) => a.iter().any(holds),
+            _ => false,
+        }
+    }
+    fn strip(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::Object(m) => {
+                for k in THINKING_KEYS {
+                    m.shift_remove(k);
+                }
+                m.values_mut().for_each(strip);
+            }
+            serde_json::Value::Array(a) => a.iter_mut().for_each(strip),
+            _ => {}
+        }
+    }
+    if !holds(reply) {
+        return None;
+    }
+    let mut out = reply.clone();
+    strip(&mut out);
+    Some(out)
+}
+
 /// Per-TURN reasoning wrapper state, threaded through a provider's chunk decoder.
 ///
 /// The span opens on the FIRST reasoning chunk and closes when content starts or
@@ -381,5 +419,19 @@ mod thinking_fields_tests {
         );
         let long = format!("<think>{}</think>", "z".repeat(super::THINKING_CAP + 5));
         assert_eq!(thinking_fields(&long)["thinking_cut"], json!(5));
+    }
+
+    /// a reply for another agent: every stored thinking key dropped, at any depth;
+    /// none → `None`, so the reply is not copied.
+    #[test]
+    fn without_thinking_fields_drops_them_at_any_depth() {
+        use super::without_thinking_fields;
+        let r = json!({"messages": [{"content": "a", "thinking": "t", "thinking_cut": 2}],
+                       "total": 1});
+        assert_eq!(
+            without_thinking_fields(&r),
+            Some(json!({"messages": [{"content": "a"}], "total": 1}))
+        );
+        assert_eq!(without_thinking_fields(&json!({"rows": [{"content": "a"}]})), None);
     }
 }

@@ -321,8 +321,8 @@ fn a_thinking_only_chunk_is_not_an_empty_completion() {
 
 #[tokio::test]
 async fn thinking_streams_wrapped_and_persists_stripped() {
-    // End-to-end over the real NDJSON transport: the caller gets the wrapped raw
-    // text, the durable turn keeps only the conclusion.
+    // End-to-end over the real NDJSON transport: the caller gets the answer, the
+    // durable turn keeps only the conclusion.
     let tmp = TempDir::new().unwrap();
     let server = MockServer::start().await;
     let body = ndjson_body(&[
@@ -344,10 +344,8 @@ async fn thinking_streams_wrapped_and_persists_stripped() {
         .await
         .remove(0)
         .result;
-    assert_eq!(
-        reply["response"],
-        json!(format!("{THINK_OPEN}deliberating{THINK_CLOSE}ack"))
-    );
+    // the reply is the answer: thinking never leaves the agent
+    assert_eq!(reply["response"], json!("ack"), "{reply}");
     let h = kernel.operator_send(vec![Item::new(
             pair_chat(&kernel, &backend).await,
             json!({"type": "history"}),
@@ -907,12 +905,22 @@ async fn a_final_ndjson_line_without_a_newline_still_counts() {
         .await;
     let tmp2 = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp2, "eofthink", &server.uri()).await;
-    let _rx = rebind_backend_inbox(&kernel, &backend);
+    let chat = pair_chat(&kernel, &backend).await;
+    let mut rx = rebind_backend_inbox(&kernel, &chat);
     let r = send_once(&kernel, &backend, "c_eof2").await;
-    assert_eq!(
-        r["response"],
-        json!(format!("{THINK_OPEN}hm{THINK_CLOSE}")),
-        "{r}"
+    // a thinking-only turn is dead: its reply is the empty answer (thinking never
+    // leaves the agent); the chat's own stream shows the span, closed once
+    assert_eq!(r["response"], json!(""), "{r}");
+    assert_eq!(r["dead_turn"], json!(true), "{r}");
+    let streamed: String = drain(&mut rx)
+        .await
+        .iter()
+        .filter(|e| e.get("type").and_then(Value::as_str) == Some("token"))
+        .filter_map(|e| e.get("text").and_then(Value::as_str))
+        .collect();
+    assert!(
+        streamed.starts_with(&format!("{THINK_OPEN}hm{THINK_CLOSE}")),
+        "{streamed:?}"
     );
 }
 

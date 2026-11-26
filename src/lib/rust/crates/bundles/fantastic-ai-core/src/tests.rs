@@ -723,8 +723,8 @@ async fn send_streams_tokens_and_emits_done() {
     assert!(phases.contains("done"), "missing done: {phases:?}");
 }
 
-/// A reasoning turn: the RAW completion (thinking included) is what the caller gets
-/// and what streams; the ROUTER dispatches only the ANSWER's calls and the DURABLE
+/// A reasoning turn: the RAW completion (thinking included) is what streams; the
+/// caller's reply is the ANSWER only (thinking never leaves the agent); the ROUTER dispatches only the ANSWER's calls and the DURABLE
 /// turn is the answer (only the answer acts). A call written
 /// mid-thought is thinking — it never runs and is never stored. The answer ends with
 /// `done`, so no reminder starts a second turn.
@@ -762,18 +762,19 @@ async fn thinking_is_streamed_raw_but_neither_dispatched_nor_persisted() {
         .remove(0)
         .result;
 
-    // The REPLY is raw — markers intact.
-    let raw = reply["response"].as_str().expect("response text");
-    assert!(raw.contains(crate::think::THINK_OPEN), "raw reply: {raw:?}");
+    // The REPLY is the answer — no marker, no deliberation.
+    let answer = reply["response"].as_str().expect("response text");
+    assert_eq!(answer, "the answer <call name=\"done\"></call>", "{reply}");
 
-    // The token stream is raw too — it concatenates to the reply.
+    // The token stream (the agent's own inbox) is raw — markers intact.
     let events = drain(&mut rx).await;
     let streamed: String = events
         .iter()
         .filter(|e| e.get("type").and_then(Value::as_str) == Some("token"))
         .filter_map(|e| e.get("text").and_then(Value::as_str))
         .collect();
-    assert_eq!(streamed, raw);
+    assert!(streamed.contains(crate::think::THINK_OPEN), "{streamed:?}");
+    assert_eq!(crate::think::without_thinking(&streamed), answer);
 
     // …and the mid-thought call NEVER RAN: it was thinking.
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -7357,6 +7358,9 @@ mod deadline;
 /// An inquiry whose recipient's turn fails tells the asker (#722).
 #[path = "tests_inquiry_fail.rs"]
 mod inquiry_fail;
+/// Thinking never leaves the agent that produced it.
+#[path = "tests_no_thinking_leak.rs"]
+mod no_thinking_leak;
 #[path = "tests_line_summary.rs"]
 mod line_summary;
 /// A chain in flight across a kernel restart (#726).
