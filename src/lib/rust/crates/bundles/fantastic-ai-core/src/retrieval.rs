@@ -291,11 +291,9 @@ pub async fn context_clear(
     crate::strategies::strip::forget(agent_id.as_str());
     *st.folds_since.lock().expect("folds_since poisoned") = 0;
     *st.recall_due.lock().expect("recall_due poisoned") = false;
-    // ONE CHAIN PER AGENT (#227): a new thread starts a new chain (Bug 2).
-    st.chain
-        .lock()
-        .expect("chain poisoned")
-        .reset("send: the context was cleared before a turn read this message");
+    // A NEW THREAD: the messages not read yet belong to the old one, and wake nothing.
+    st.life.lock().expect("life poisoned").unread.clear();
+    st.changed();
     *st.view_source.lock().expect("view_source poisoned") = None;
     Ok(json!({"cleared": rid, "rows": members.len()}))
 }
@@ -345,16 +343,14 @@ pub(crate) async fn context_fold(
     use crate::memory::load_view;
     use fantastic_kernel::refusal::{bad, refusal_hint, with, BAD_ARG, LOCKED};
     let verb = "context_fold";
-    // A turn holds the FIFO lock for its whole run: the view must not move under it.
-    let st = crate::state::state_for(agent_id);
-    let lock = Arc::clone(&st.lock);
-    let Ok(_turn) = lock.try_lock() else {
+    // A pass in flight reads the view: it must not move under it.
+    if crate::state::state_for(agent_id).life.lock().expect("life poisoned").running {
         return Ok(refusal_hint(
             LOCKED,
             format!("{verb}: a turn is running for {agent_id}"),
             "fold once the running turn has answered",
         ));
-    };
+    }
     // The view is rendered as the next turn renders it, so the fold
     // persists exactly the view the next turn will send. A primer pins its prefix.
     let meta = agent_meta(agent_id, kernel);
@@ -487,7 +483,7 @@ pub(crate) async fn context_fold(
 
 /// `context_forget`: compact this agent's OWN store — drop the rows the model can
 /// no longer see and keep every fold. Python `_context_forget`, rule for rule:
-/// under the turn lock, ONE `prune {ids}`, and the head cache read again from
+/// refused while a pass runs, ONE `prune {ids}`, and the head cache read again from
 /// the store (the prune cascaded each pruned member out of every fold's refs).
 ///
 /// # Errors
@@ -499,9 +495,14 @@ pub async fn context_forget(
 ) -> MemResult<Value> {
     use crate::folds::{chains, is_fold, is_open, own_anchor, refs_of};
     use crate::memory::{refresh_head, rows_of, BOOKKEEPING, TURN_ROLES};
-    let st = crate::state::state_for(agent_id);
-    let lock = Arc::clone(&st.lock);
-    let _turn = lock.lock().await;
+    // A pass in flight reads the store: it must not move under it.
+    if crate::state::state_for(agent_id).life.lock().expect("life poisoned").running {
+        return Ok(fantastic_kernel::refusal::refusal_hint(
+            fantastic_kernel::refusal::LOCKED,
+            format!("context_forget: a turn is running for {agent_id}"),
+            "compact once the running turn has answered",
+        ));
+    }
     let kind = |r: &Value| r.get("kind").and_then(Value::as_str).map(str::to_string);
     let head_rows = refresh_head(agent_id, kernel).await?;
     let everything = rows_of(
@@ -663,6 +664,9 @@ pub(crate) fn standing(view: &[Value]) -> Vec<usize> {
 /// args: `dry?` (mechanical fit only — no model call). Returns
 /// `{kept, expanded, dropped, folded, budget, why, degraded}`. `pass`: the chat's pass
 /// path, for the folds' summaries and the choice (task passes); none, no model call.
+/// `unread`: the rows of the messages the pass that owes the recall reads (#795) —
+/// stored, but not yet history: the recall is over the rows before the first of them,
+/// and they follow its view.
 pub(crate) async fn context_recall(
     agent_id: &AgentId,
     dry: bool,
@@ -670,9 +674,15 @@ pub(crate) async fn context_recall(
     pass: Option<&Pass>,
     model_window: i64,
     client_id: Option<&str>,
+    unread: &[i64],
 ) -> Result<Value, crate::assembly::BlockFail> {
     let meta = agent_meta(agent_id, kernel);
     let mut rows = load_history(agent_id, kernel, false).await?;
+    // the history BEFORE the pass's messages: they, and whatever landed after them
+    // (another message meanwhile), follow the view
+    if let Some(first) = unread.iter().copied().min() {
+        rows.retain(|r| row_id(r).is_none_or(|id| id < first));
+    }
     if rows.is_empty() {
         return Ok(
             json!({"kept": 0, "expanded": 0, "dropped": 0, "folded": 0, "why": "empty store", "degraded": false}),
@@ -889,7 +899,7 @@ pub(crate) async fn context_recall(
             }
         }
     }
-    let ids: Vec<Value> = head
+    let mut ids: Vec<Value> = head
         .iter()
         .map(|&i| {
             let r = &view[i];
@@ -904,6 +914,10 @@ pub(crate) async fn context_recall(
             json!({"id": id, "res": res})
         })
         .collect();
+    // THE MESSAGES THE PASS READS stay in the view, whole and last (#795): a row stored
+    // after them (a resume row, a late reply) must not leave them before its place
+    let kept = ids.len();
+    ids.extend(unread.iter().map(|id| json!({"id": id, "res": "full"})));
     save_view(agent_id, kernel, &folds, &ids, body_budget, &why).await?;
     let folded = folds.len();
     // the decision is a ROW — the next reload reads why the last recall chose as it did
@@ -933,7 +947,7 @@ pub(crate) async fn context_recall(
             "title": why,
             "content": format!(
                 "[recall {rid} · kept {} rows, {} in full] {why}{live_txt}",
-                ids.len(), expand.len()
+                kept, expand.len()
             ),
         })],
     )
@@ -955,8 +969,8 @@ pub(crate) async fn context_recall(
                 "detail": {
                     "strategy": "fold",
                     "recall": true,
-                    "dropped_messages": view.len() - ids.len(),
-                    "kept_messages": ids.len(),
+                    "dropped_messages": view.len() - kept,
+                    "kept_messages": kept,
                     "summarized": false,
                     "pinned_facts": 0,
                     "stripped": 0,
@@ -968,9 +982,9 @@ pub(crate) async fn context_recall(
         .await;
     }
     Ok(json!({
-        "kept": ids.len(),
+        "kept": kept,
         "expanded": expand.len(),
-        "dropped": view.len() - ids.len(),
+        "dropped": view.len() - kept,
         "folded": folded,
         "budget": body_budget,
         "why": why,

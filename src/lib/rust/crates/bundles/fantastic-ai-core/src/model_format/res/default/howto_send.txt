@@ -32,13 +32,17 @@ cannot be done, end it with
 <call name="stop"><reason>WHY</reason></call> and say why.
 
 ## Replies
-Every call runs under a pid; its reply comes back tagged `[reply to <pid> · <agent>
-<verb>]`. The calls of one turn run CONCURRENTLY (no order — if B needs A, send B after
-A's reply) and are answered TOGETHER in one later message, one block each (`N of M in
-batch …`). An unseen reply is in flight — never re-issue it; send `kernel` `<type>ps</type>`
-to check. A message to an
-agent has a deadline (600 s unless set otherwise); past it you are told of a dead letter —
-resend it, or drop it with `kernel` `<type>ack_deadletter</type>`.
+Every call is accepted at once and runs under a pid; its reply comes back LATER, as its own
+message tagged `[reply to <pid> · <agent> <verb>]`. The calls of one answer run CONCURRENTLY
+(no order — if B needs A, send B after A's reply); each reply wakes you when it lands
+(`k of M in batch …` says how much of the batch it is), and replies that land while you
+work arrive in your next message. An unseen reply is in flight — never re-issue it; send
+`kernel` `<type>ps</type>` to check. A message to another AI agent is only accepted
+(`accepted`, `re` its row); its answer, if it gives one, comes later as its own message
+`[from <agent> · msg N · re M]`. To answer a message, `send` its sender a message with
+`<re>N</re>` (its `msg`) in `<routing>`. A call has a deadline (600 s unless set otherwise);
+past it you are told of a dead letter — resend it, or drop it with `kernel`
+`<type>ack_deadletter</type>`.
 
 ## How to call an agent — `reflect` with a `tier`
 Send `reflect` to the agent you ask about (`kernel` for create_agent, update_agent, ps, …)

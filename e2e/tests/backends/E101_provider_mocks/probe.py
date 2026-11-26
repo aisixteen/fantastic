@@ -39,6 +39,7 @@ from pathlib import Path
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
 sys.path.insert(0, str(E2E))
 
+from helpers.host.passes import run_pass
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
 from helpers.host.ws import WSWatcher
 from helpers.lines import ALL, GET, PROVIDER, is_unknown
@@ -173,17 +174,10 @@ def main() -> int:
             word = f"MOCK-{p.upper()}-{secrets.token_hex(3)}"
             m.reply(word + DONE)
             m.prompt_tokens, m.completion_tokens = 1234, 56
-            events, stop = watch(hk.port, aid)
-            # a browser-style client: its events reach the agent's watchers
-            out = hk.send(aid, {"type": "send", "text": "say the word", "client_id": "tab1"})
-            # the done status follows the reply on its own stream: waited for, not
-            # a fixed sleep (a loaded runner delivers it later than half a second)
-            end = time.monotonic() + 10
-            while time.monotonic() < end and not any(
-                e.get("type") == "status" and e.get("phase") == "done" for e in list(events)
-            ):
-                time.sleep(0.05)
-            stop.set()
+            # a browser-style client: its events reach the agent's watchers; the send is
+            # acked, and the pass is followed to its `done` (#795)
+            out = run_pass(hk, aid, {"type": "send", "text": "say the word", "client_id": "tab1"})
+            events = out["events"]
             need(word in str(out.get("response")) and not out.get("error"),
                  f"{p}: the turn answers the mock's text: {str(out)[:200]}")
             # THE RECORD as stored: a backend's own reflect reply does not carry every
@@ -236,20 +230,20 @@ def main() -> int:
 
             before = len(m.turns())
             m.error(500, times=None)
-            out = hk.send(aid, {"type": "send", "text": "again"})
+            out = run_pass(hk, aid, {"type": "send", "text": "again"})
             idle(aid)
             m.error(None)
             need(bool(out.get("error")) and "500" in json.dumps(out),
                  f"{p}: HTTP 500 → the turn fails naming it "
                  f"({len(m.turns()) - before} tries): {str(out)[:240]}")
             m.reply("BACK" + DONE)
-            out = hk.send(aid, {"type": "send", "text": "again"})
+            out = run_pass(hk, aid, {"type": "send", "text": "again"})
             need("BACK" in str(out.get("response")) and not out.get("error"),
                  f"{p}: the next turn works: {str(out)[:160]}")
 
             # 4 · a refused key fails the turn loud
             m.require_key("not-" + KEY)
-            out = hk.send(aid, {"type": "send", "text": "again"})
+            out = run_pass(hk, aid, {"type": "send", "text": "again"})
             need(bool(out.get("error")) and "401" in json.dumps(out),
                  f"{p}: a refused key (401) → the turn fails: {str(out)[:240]}")
             m.require_key(KEY)

@@ -1801,17 +1801,17 @@ async fn a_stalled_api_stream_ends_the_turn_with_an_error_row() {
         json!({"type": "send", "text": "hi", "client_id": "t"}),
     )
     .await;
+    assert_eq!(r["accepted"], json!(true), "{r}");
+    assert!(
+        fantastic_ai_core::state::settle(&kernel, Duration::from_secs(20)).await,
+        "the agents never went quiet"
+    );
     server.abort();
     assert!(
         started.elapsed() < Duration::from_secs(30),
         "{:?}",
         started.elapsed()
     );
-    assert_eq!(r["raised"], json!(true), "{r}");
-    let err = r["error"].as_str().unwrap_or_default();
-    assert!(err.contains("stream_stalled"), "{err}");
-    assert!(err.contains("sent no bytes for 0.2s"), "{err}");
-    assert!(err.contains(&ep), "{err}");
     let rows = call(&kernel, STALL_AGENT, json!({"type": "rows"})).await;
     let errors: Vec<&Value> = rows["rows"]
         .as_array()
@@ -1824,6 +1824,8 @@ async fn a_stalled_api_stream_ends_the_turn_with_an_error_row() {
     assert_eq!(errors.len(), 1, "{rows}");
     let content = errors[0]["content"].as_str().unwrap_or_default();
     assert!(content.contains("stream_stalled"), "{content}");
+    assert!(content.contains("sent no bytes for 0.2s"), "{content}");
+    assert!(content.contains(&ep), "{content}");
     // nothing is generating
     let mut status = json!({});
     for _ in 0..500 {

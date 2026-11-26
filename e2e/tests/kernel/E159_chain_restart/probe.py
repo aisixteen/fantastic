@@ -7,20 +7,18 @@ slow job. The kernel's memory store (its ledger and the AIs' rows) is a `sqlite_
 (`stores/memory.db`: the `memory` record is rewritten while the kernel is stopped), so
 what was flushed outlives the process.
 
-  1. the LEAD's chain: it runs a 30 s job on `ex` (`run`): the call is out, its route
-     waits on it;
-  2. the WORKER sends the lead a message: the lead's chain is alive, so it is HELD;
-     `status` names the worker in `pending_from`;
+  1. the LEAD's work: it runs a 30 s job on `ex` (`run`): the call is out;
+  2. the WORKER sends the lead a message: acked at once once stored (#795), and the
+     lead reads it in a pass of its own while the job runs — nothing is held;
   3. the kernel process group is KILLED (SIGKILL: no hook, no drain) and a NEW kernel
      booted on the same folder.
 
-Checks: the kernel's own rows in the store hold a `settle` for both cut calls
-(`cancelled`, the restart's error: dead letters) and every call of the first life is
-settled; the lead's first request after the
-restart tells it its job's reply will not come (`[reply to <pid> · ex run] … dead letter
-<pid>; resend or drop`) and that the worker's held message was cut; the worker's tells
-it its message to the lead died (`[reply to <pid> · lead send] …`, the same pid); the
-lead's chain goes on: it resends the job and its next request carries the job's output.
+Checks: the kernel's own rows in the store hold a `settle` for the cut call
+(`cancelled`, the restart's error: a dead letter) and every call of the first life is
+settled; the lead's first request after the restart tells it its job's reply will not
+come (`[reply to <pid> · ex run] … dead letter <pid>; resend or drop`); the worker's
+message was not cut (its ack is stored, and the worker is told nothing); the lead's work
+goes on: it resends the job and its next request carries the job's output.
 """
 
 from __future__ import annotations
@@ -168,7 +166,7 @@ def main() -> int:
 
         need(until("the slow job", job_running), "the lead's slow job is running on ex")
 
-        # 2 · the worker's message to the lead is held on the lead's chain
+        # 2 · the worker's message to the lead: acked, and read by the lead at once
         work_m.responder = lambda req: (
             "The head is fine as it is." if RECALL_MARK in last_user(req)
             else (f'<call name="send">\n<routing><target_id>{LEAD}</target_id></routing>\n'
@@ -176,9 +174,8 @@ def main() -> int:
             if f"Ask the lead ({TOKEN})" in last_user(req) else None)
         r = hk.send(WORKER, {"type": "send", "text": f"Ask the lead ({TOKEN})."}, timeout=60)
         need(not r.get("error"), f"the worker takes the task: {str(r)[:200]}")
-        need(until("the held message", lambda: WORKER in (
-            hk.send(LEAD, {"type": "status"}).get("pending_from") or [])),
-             "the worker's message is held on the lead's chain (status names it)")
+        need(bool(asked(lead_m, f"QUESTION-{TOKEN}", 30)),
+             "the lead reads the worker's message in a pass of its own while its job runs")
         # the flusher writes the call rows a beat after they are made
         time.sleep(1.5)
 
@@ -210,22 +207,15 @@ def main() -> int:
         hk.boot()
         need((work / DB).is_file(), f"the ledger file is on disk: {DB}")
 
-        # the lead is told: its job's reply will not come, the held message was cut
+        # the lead is told: its job's reply will not come
         lead_told = asked(lead_m, "[restart]")
         print(f"  lead was told: {lead_told[:600]!r}", flush=True)
         job = re.search(r"\[reply to (\d+) · ex run\] no reply will come → dead letter (\d+); resend or drop",
                         lead_told)
         need(job is not None and job.group(1) == job.group(2),
              "the lead is told its job's reply will not come: a dead letter to resend or drop")
-        held = re.search(rf"\[from {WORKER} · dead letter (\d+)\] a message to you was cut", lead_told)
-        need(held is not None, "the lead is told the worker's held message was cut")
-        # the held sender is told
-        work_told = asked(work_m, "[restart]")
-        print(f"  worker was told: {work_told[:400]!r}", flush=True)
-        sent = re.search(rf"\[reply to (\d+) · {LEAD} send\] no reply will come → dead letter (\d+)",
-                         work_told)
-        need(sent is not None and held is not None and sent.group(1) == held.group(1),
-             "the worker (the held sender) is told its message died, under the same id")
+        need(f"from {WORKER} · dead letter" not in lead_told,
+             "the worker's message was not cut: it was stored and read before the kill")
 
         # THE RECORDS (the `ledger` verb is scoped to its caller, here the `rest` leg): the
         # kernel's own rows in the store hold a `settle` for both cut calls, `cancelled`
@@ -235,12 +225,12 @@ def main() -> int:
         krows = [r.get("row") or {} for r in tables.get("rows") or []
                  if str(r.get("owner", "")).endswith("|kernel")]
         settles = {r.get("parent"): r for r in krows if r.get("kind") == "settle"}
-        for what, m in (("the job", job), ("the held message", held)):
+        for what, m in (("the job", job),):
             st = settles.get(int(m.group(1))) if m else None
             oc = (st or {}).get("outcome") or {}
             need(oc.get("status") == "cancelled" and "cut by the restart" in str(oc.get("error")),
                  f"{what} is a dead letter on the kernel's records: {str(st)[:300]}")
-        first_ids = [int(m.group(1)) for m in (job, held) if m]
+        first_ids = [int(m.group(1)) for m in (job,) if m]
         stale = [r.get("id") for r in krows
                  if r.get("kind") == "call" and not r.get("internal") and "attempts" in r
                  and first_ids and r.get("id", 0) <= max(first_ids) and r.get("id") not in settles]
@@ -257,7 +247,8 @@ def main() -> int:
         need(sum("[restart]" in u for u in after_l) == 1, "the lead is told once")
         after_w = [u for u in (last_user(t["body"]) for t in work_m.turns()[n_work:])
                    if RECALL_MARK not in u]
-        need(sum("[restart]" in u for u in after_w) == 1, "the worker is told once")
+        need(sum("[restart]" in u for u in after_w) == 0,
+             "the worker is told nothing: its message was acked and read")
     finally:
         hk.close()
         lead_m.stop()

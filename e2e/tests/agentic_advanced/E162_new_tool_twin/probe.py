@@ -52,6 +52,7 @@ from pathlib import Path
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
 sys.path.insert(0, str(E2E))
 
+from helpers.host.passes import scripted, since_answer
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
 from helpers.host.wire import WireCtx
 from helpers.lines import ALL, PROVIDER, ROOT, call as line_call, create as line_create
@@ -206,22 +207,32 @@ def main() -> int:
         need((before.get(AI) or {}).get("can") == {**can, **own},
              f"the AI holds exactly its lines: {short((before.get(AI) or {}).get('can'))}")
 
-        m.reply(*script)
+        # one scripted answer per whole set of replies: a batch's replies are each their
+        # own message (#795), and a pass woken before the last one answers WAIT
+        m.responder, served = scripted(script)
         out = hk.send(AI, {"type": "send",
                            "text": f"You need a verb that computes the SHA-256 hex digest "
                                    f"of a text; no such agent exists. Answer with the "
                                    f"SHA-256 of {TOKEN}."})
-        need(not out.get("error"), f"the send is accepted: {short(out)}")
+        need(out.get("accepted") is True, f"the send is accepted: {short(out)}")
         turns_at_least(len(script))
+        end = time.monotonic() + 60
+        while time.monotonic() < end and len(served) < len(script):
+            time.sleep(0.05)
         need(idle(), "the chain settles (no AI task left in `ps`)")
-        turns = m.turns()
-        for i, t in enumerate(turns):
-            print(f"  ── request {i + 1}: last user turn ──\n"
-                  + "\n".join("     " + ln for ln in last_user(t["body"])[:400].splitlines()),
-                  flush=True)
-        need(len(turns) == len(script),
-             f"one request per scripted answer, none after `done`: {len(turns)} for {len(script)}")
-        u = [last_user(t["body"]) for t in turns] + [""] * len(script)
+        turns = list(served)
+        for i, t in enumerate(m.turns()):
+            tail = (t["body"].get("messages") or [])[-5:]
+            print(f"  ── request {i + 1}: its last messages ──\n" + "\n".join(
+                f"     {x.get('role')}: " + str(x.get("content"))[:150].replace("\n", " ⏎ ")
+                for x in tail), flush=True)
+        all_turns = [t["body"] for t in m.turns()]
+        last_at = max((i for i, b in enumerate(all_turns) if turns and b == turns[-1]), default=-1)
+        after_done = len(all_turns) - 1 - last_at
+        need(len(turns) == len(script) and after_done == 0,
+             f"one scripted answer per whole set of replies, none after `done`: "
+             f"{len(turns)} for {len(script)}, {after_done} after")
+        u = ["\n".join(since_answer(t)) for t in turns] + [""] * len(script)
 
         # 1 · the files
         for p, b in files.items():

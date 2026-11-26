@@ -121,11 +121,11 @@ async fn run_chain(tag: &str, model: Option<&str>, passes: Vec<Vec<ScriptEvent>>
         *s.model.lock().unwrap() = m.to_string();
     }
     let mut rx = rebind_backend_inbox(&kernel, &a);
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             b.clone(),
             json!({"type": "send", "text": "ask", "client_id": "probe"}),
-        )])
+        )]))
         .await;
     assert!(
         until_passes(&fb, 3).await,
@@ -188,29 +188,6 @@ async fn harness_stop_fails_turn() {
     assert!(out.closed.contains(&reason), "{}", out.closed);
 }
 
-/// `send_to` is told the harness's reason, and nothing of the attempts.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn harness_stop_tells_send_to() {
-    let (reason, n) = harness_reason();
-    let tmp = TempDir::new().unwrap();
-    let (kernel, a) = mk_kernel(&tmp, "st_t9b").await;
-    let b = add_peer(&kernel, &tmp, &a).await;
-    let fb = script(&b, vec![pass(DONE)], Duration::ZERO);
-    let s = script(&a, (0..12).map(|_| pass(FOREIGN)).collect(), Duration::ZERO);
-    let _ = kernel
-        .operator_send(vec![Item::new(
-            a.clone(),
-            json!({"type": "send", "text": "go", "client_id": "tab1", "send_to": b.as_str()}),
-        )])
-        .await;
-    assert!(until_passes(&fb, 1).await, "send_to was never told");
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(s.passes_served(), n);
-    let told = last_in(&fb, 0);
-    assert!(told.contains(&reason), "{told}");
-    assert!(!told.contains("invoke"), "{told}");
-}
-
 // T17
 /// The stored row of a harness-stopped turn is exactly the `stop` call with the reason;
 /// the reason is `stop_reason.txt` filled with the attempt count and holds no byte of any
@@ -231,11 +208,11 @@ async fn stopped_row_is_a_stop_call() {
         ],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
+        )]))
         .await;
     let rows = assistant_rows(&kernel, &a).await;
     let content = rows[0]["content"].as_str().expect("the stop row");
@@ -250,11 +227,11 @@ async fn stopped_row_is_a_stop_call() {
     assert_eq!(calls[0].arguments["reason"], json!(reason));
 
     // D: the next request shows it as stored
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "send", "text": "again", "client_id": "probe"}),
-        )])
+        )]))
         .await;
     let seen = s.request_messages(3);
     let shown = seen
@@ -268,11 +245,11 @@ async fn stopped_row_is_a_stop_call() {
     // H: the same row in the hermes form
     set_model(&kernel, &a, QWEN).await;
     *s.model.lock().unwrap() = QWEN.to_string();
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "send", "text": "once more", "client_id": "probe"}),
-        )])
+        )]))
         .await;
     let seen = s.request_messages(4);
     let shown = seen
@@ -303,28 +280,28 @@ async fn next_turn_after_stop() {
         ],
         Duration::ZERO,
     );
-    let first = kernel
+    let _first = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
-    assert!(first["response"]
+    assert!(json!(crate::tests::last_answer(&kernel, &a).await)
         .as_str()
         .is_some_and(|r| r.starts_with("<call name=\"stop\">")));
     let mut rx = rebind_backend_inbox(&kernel, &a);
-    let second = kernel
+    let second = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "send", "text": "next", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
     assert_eq!(
-        second["response"],
+        json!(crate::tests::last_answer(&kernel, &a).await),
         json!("All good.\n<call name=\"done\"></call>"),
         "{second}"
     );
@@ -352,11 +329,11 @@ async fn give_up_status_unchanged() {
         Duration::ZERO,
     );
     let mut rx = rebind_backend_inbox(&kernel, &a);
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "send", "text": "go", "client_id": "tab1"}),
-        )])
+        )]))
         .await;
     assert!(until_passes(&s, n).await, "the pass stalled before its last attempt");
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -378,7 +355,7 @@ async fn give_up_status_unchanged() {
 // T24 (D in W13, H in W7)
 /// A model writes `stop` with a reason: the provider is called once, the row is stored
 /// as written, and the chain ends through the give-up with the model's reason; the
-/// inquiry closed with it; `send_to` told; nothing more asked.
+/// inquiry closed with it; nothing more asked.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn model_stop_fails_chain() {
     let why = "the file it names does not exist";
@@ -388,23 +365,6 @@ async fn model_stop_fails_chain() {
     assert_eq!(out.row, stop_call(why));
     assert_model_stop(&out.status, why);
     assert!(out.closed.contains(why), "{}", out.closed);
-
-    // D: `send_to` is told the model's reason
-    let tmp = TempDir::new().unwrap();
-    let (kernel, a) = mk_kernel(&tmp, "st_t24s").await;
-    let b = add_peer(&kernel, &tmp, &a).await;
-    let fb = script(&b, vec![pass(DONE)], Duration::ZERO);
-    let s = script(&a, vec![pass(stop_call(why)), pass(DONE)], Duration::ZERO);
-    let _ = kernel
-        .operator_send(vec![Item::new(
-            a.clone(),
-            json!({"type": "send", "text": "go", "client_id": "tab1", "send_to": b.as_str()}),
-        )])
-        .await;
-    assert!(until_passes(&fb, 1).await, "send_to was never told");
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(s.passes_served(), 1, "the chain ended");
-    assert!(last_in(&fb, 0).contains(why), "{}", last_in(&fb, 0));
 
     // H
     let out = run_chain(
@@ -461,11 +421,11 @@ async fn stop_beside_other_calls() {
         Duration::ZERO,
     );
     let mut rx = rebind_backend_inbox(&kernel, &a);
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
+        )]))
         .await;
     assert!(
         until_passes(&fb, 1).await,

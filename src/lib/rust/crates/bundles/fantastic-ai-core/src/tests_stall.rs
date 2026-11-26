@@ -1,6 +1,6 @@
-//! A turn that ends in a failure says so in the history (#177): a failed pass
-//! stores an ERROR ROW, and the FIFO lock it held is released, so the queue moves
-//! on.
+//! A pass that ends in a failure says so in the history (#177): a failed pass
+//! stores an ERROR ROW and says so in its `failed` status; the messages it did not
+//! read are read by the next pass (#795: they were acked when they were stored).
 
 use super::*;
 use fantastic_kernel::inbox::InboxReceiver;
@@ -23,9 +23,9 @@ fn error_rows(rows: &[Value]) -> Vec<&Value> {
         .collect()
 }
 
-/// A pass that FAILS (a stalled stream, say) ends its turn with an ERROR ROW: the
-/// incoming message and a row naming the failure. The FIFO lock is released, so the
-/// next message runs and reads the row (#533, #795).
+/// A pass that FAILS (a stalled stream, say) ends with an ERROR ROW after the message it
+/// read, naming the failure; the next message runs its own pass and reads the row
+/// (#533, #795).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failed_pass_stores_an_error_row_and_the_queue_moves_on() {
     let tmp = TempDir::new().unwrap();
@@ -40,14 +40,14 @@ async fn a_failed_pass_stores_an_error_row_and_the_queue_moves_on() {
         ],
         Duration::ZERO,
     );
-    let first = kernel.operator_send(vec![Item::new(
+    let first = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "one", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
-    assert_eq!(first["raised"], json!(true), "{first}");
+    assert_eq!(first["accepted"], json!(true), "{first}");
     let rows = stored_rows(&kernel, &backend).await;
     let errors = error_rows(&rows);
     assert_eq!(errors.len(), 1, "{rows:#?}");
@@ -61,15 +61,15 @@ async fn a_failed_pass_stores_an_error_row_and_the_queue_moves_on() {
         rows.iter().any(|r| r["content"] == json!("one")),
         "{rows:#?}"
     );
-    // the lock is free: the next message runs its own pass, and it reads the error row
-    let second = kernel.operator_send(vec![Item::new(
+    // the next message runs its own pass, and it reads the error row
+    let second = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "two", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
-    assert_eq!(second["response"], json!(r#"<call name="done"></call>"#), "{second}");
+    assert_eq!(json!(crate::tests::last_answer(&kernel, &backend).await), json!(r#"<call name="done"></call>"#), "{second}");
     assert_eq!(s.passes_served(), 2);
     assert!(s.request(1).contains("stream_stalled"), "{}", s.request(1));
 }
@@ -103,10 +103,10 @@ fn status_of<'a>(events: &'a [Value], client: &str, phase: &str) -> Option<&'a V
 
 const ENDPOINT: &str = "https://api.example/v1/messages";
 
-/// THE READ CLOCK ENDS A STALLED TURN (#177): a pass whose stream goes silent fails
-/// once its window passes, naming the stall. While that turn holds the FIFO lock,
-/// a send that arrives is `queued`; it runs the moment the window ends the first
-/// turn. The first turn's `status` is `done` with `reason='error'`.
+/// THE READ CLOCK ENDS A STALLED PASS (#177): a pass whose stream goes silent fails
+/// once its window passes, naming the stall. A message that arrives meanwhile is
+/// stored and acked at once (#795); it is read by the next pass, the moment the window
+/// ends the first. The first pass's `status` is `failed` with `reason='error'`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_queued_send_waits_behind_a_stalled_turn_and_runs_when_the_window_ends() {
     // the send ceiling is process-wide: hold the lock a ceiling test takes, so this
@@ -130,10 +130,10 @@ async fn a_queued_send_waits_behind_a_stalled_turn_and_runs_when_the_window_ends
     let k = Arc::clone(&kernel);
     let b = backend.clone();
     let first = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, k.operator_send(vec![Item::new(
             b,
             json!({"type": "send", "text": "one", "client_id": "probe_a"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result
@@ -142,32 +142,24 @@ async fn a_queued_send_waits_behind_a_stalled_turn_and_runs_when_the_window_ends
     let k = Arc::clone(&kernel);
     let b = backend.clone();
     let second = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, k.operator_send(vec![Item::new(
             b,
             json!({"type": "send", "text": "two", "client_id": "probe_b"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result
     });
-    // queued behind the stalled turn: no second pass has started, the first is still out
-    events_until(&mut rx, &mut seen, |ev| {
-        status_of(ev, "probe_b", "queued").is_some()
-    })
-    .await;
-    assert_eq!(s.passes_served(), 1, "the queued send waited for the lock");
-    assert!(
-        !first.is_finished(),
-        "the stalled turn still holds the lock"
-    );
-    // the window passes: the first turn fails visibly, and the queued send runs
+    // stored behind the stalled pass: no second pass has started, the first is still out
+    until_unread(&backend, 1).await;
+    assert_eq!(s.passes_served(), 1, "no pass beside the stalled one");
+    assert!(crate::state::is_generating(&backend), "the stalled pass is still out");
+    // the window passes: the first pass fails visibly, and the message is read
     let first_out = first.await.expect("first send");
-    assert_eq!(first_out["raised"], json!(true), "{first_out}");
+    assert_eq!(first_out["accepted"], json!(true), "{first_out}");
     let second_out = second.await.expect("second send");
-    assert!(second_out.get("raised").is_none(), "{second_out}");
-    // ONE CHAIN PER AGENT (#227): the second send is held; the wake turn that
-    // answers it runs once the stalled chain has ended.
-    assert_eq!(s.passes_served(), 2, "the queued send ran");
+    assert_eq!(second_out["accepted"], json!(true), "{second_out}");
+    assert_eq!(s.passes_served(), 2, "the message was read");
     // status: the first call FAILED with reason='error', naming the stall
     events_until(&mut rx, &mut seen, |ev| {
         status_of(ev, "probe_a", "failed").is_some()
@@ -198,12 +190,11 @@ async fn a_queued_send_waits_behind_a_stalled_turn_and_runs_when_the_window_ends
 
 // ─── a failed turn settles its sender and tells its watchers (#496) ─────────
 
-/// A send whose turn outlives the ceiling settles with the kernel's refusal shape,
-/// `reason: timeout` (a sender branching on `reason` settles on it), carrying the
-/// same text the error row holds. The agent emits `done {reason: timeout}`, and the
-/// turn is NOT retried: one pass served, however long the caller waits.
+/// A pass that outlives the ceiling fails with `status(failed, reason: timeout)` and an
+/// error row naming the ceiling, and it is NOT retried: one pass served, however long
+/// one waits. The message was acked when it was stored (#795).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_timed_out_turn_settles_its_sender_with_reason_timeout_and_is_not_retried() {
+async fn a_timed_out_pass_says_timeout_and_is_not_retried() {
     let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
     let _ceiling = Ceiling::set("0.1");
     let tmp = TempDir::new().unwrap();
@@ -215,17 +206,15 @@ async fn a_timed_out_turn_settles_its_sender_with_reason_timeout_and_is_not_retr
     );
     let mut rx = rebind_backend_inbox(&kernel, &backend);
     let mut seen: Vec<Value> = Vec::new();
-    let out = kernel.operator_send(vec![Item::new(
+    let out = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
-    assert_eq!(out["reason"], json!("timeout"), "{out}");
+    assert_eq!(out["accepted"], json!(true), "{out}");
     assert_eq!(out["client_id"], json!("probe"), "{out}");
-    let error = out["error"].as_str().unwrap_or_default();
-    assert!(error.starts_with("send: timeout after 0.1s"), "{out}");
     events_until(&mut rx, &mut seen, |ev| {
         status_of(ev, "probe", "failed").is_some()
     })
@@ -233,16 +222,21 @@ async fn a_timed_out_turn_settles_its_sender_with_reason_timeout_and_is_not_retr
     let done = status_of(&seen, "probe", "failed").expect("failed");
     assert_eq!(done["detail"]["reason"], json!("timeout"), "{done}");
     let rows = stored_rows(&kernel, &backend).await;
-    assert_eq!(error_rows(&rows).len(), 1, "{rows:#?}");
+    let errors = error_rows(&rows);
+    assert_eq!(errors.len(), 1, "{rows:#?}");
+    assert!(
+        errors[0]["content"].as_str().unwrap_or_default().contains("send: timeout after 0.1s"),
+        "{rows:#?}"
+    );
     // nothing retries it: the agent is idle and no second pass starts
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(s.passes_served(), 1, "the failed turn was run again");
 }
 
-/// A provider failure that is not a timeout also emits `done {reason: error}` and
-/// leaves the sender with an error reply (a raised failure, as ever), once.
+/// A provider failure that is not a timeout emits `failed {reason: error}` once, and its
+/// error row names it; the sender had its ack (#795).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_failed_provider_turn_settles_its_sender_and_emits_done_error_once() {
+async fn a_failed_provider_pass_emits_failed_error_once() {
     let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_fail_done").await;
@@ -256,15 +250,19 @@ async fn a_failed_provider_turn_settles_its_sender_and_emits_done_error_once() {
     );
     let mut rx = rebind_backend_inbox(&kernel, &backend);
     let mut seen: Vec<Value> = Vec::new();
-    let out = kernel.operator_send(vec![Item::new(
+    let out = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
-    assert_eq!(out["raised"], json!(true), "{out}");
-    assert!(out["error"].as_str().unwrap_or_default().contains("boom"));
+    assert_eq!(out["accepted"], json!(true), "{out}");
+    let rows = stored_rows(&kernel, &backend).await;
+    assert!(
+        error_rows(&rows).iter().any(|r| r["content"].as_str().unwrap_or_default().contains("boom")),
+        "{rows:#?}"
+    );
     events_until(&mut rx, &mut seen, |ev| {
         status_of(ev, "probe", "failed").is_some()
     })
@@ -288,26 +286,26 @@ async fn a_failed_provider_turn_settles_its_sender_and_emits_done_error_once() {
     assert_eq!(s.passes_served(), 1, "the failed turn was run again");
 }
 
-/// A message held behind a chain is answered by the pass that reads it. When that
-/// pass times out, the held sender settles with the same `reason: timeout` reply
-/// (under its own `client_id`), not a bare error.
+/// A message that lands during a pass that times out was acked at once (#795): no sender
+/// waits on the pass. It is read by the next pass, which times out too here; each failed
+/// pass leaves its error row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_held_sender_settles_with_reason_timeout_when_the_turn_that_reads_it_times_out() {
+async fn a_message_during_a_timed_out_pass_is_read_by_the_next_pass() {
     let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
     let _ceiling = Ceiling::set("0.5");
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_held_to").await;
     let s = script(
         &backend,
-        vec![pass("never arrives")],
+        vec![pass("never arrives"), pass("never arrives")],
         Duration::from_millis(1500),
     );
     let (k, b) = (Arc::clone(&kernel), backend.clone());
     let first = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, k.operator_send(vec![Item::new(
             b,
             json!({"type": "send", "text": "one", "client_id": "o"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result
@@ -315,23 +313,26 @@ async fn a_held_sender_settles_with_reason_timeout_when_the_turn_that_reads_it_t
     assert!(until_passes(&s, 1).await, "the first pass never started");
     let (k, b) = (Arc::clone(&kernel), backend.clone());
     let second = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, k.operator_send(vec![Item::new(
             b,
             json!({"type": "send", "text": "two", "client_id": "t"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result
     });
-    until_held(&backend, 1).await;
+    until_unread(&backend, 1).await;
     let one = first.await.expect("first");
-    assert_eq!(one["reason"], json!("timeout"), "{one}");
+    assert_eq!(one["accepted"], json!(true), "{one}");
     let two = tokio::time::timeout(Duration::from_secs(5), second)
         .await
-        .expect("the held sender was left waiting")
+        .expect("the sender was left waiting")
         .expect("second");
-    assert_eq!(two["reason"], json!("timeout"), "{two}");
+    assert_eq!(two["accepted"], json!(true), "{two}");
     assert_eq!(two["client_id"], json!("t"), "{two}");
+    assert_eq!(s.passes_served(), 2, "the message was read by the next pass");
+    let rows = stored_rows(&kernel, &backend).await;
+    assert_eq!(error_rows(&rows).len(), 2, "{rows:#?}");
 }
 
 /// A `send` call carrying its own `<timeout>`: the parent's wait outlasts the child's
@@ -345,11 +346,11 @@ fn send_with_deadline(target: &str, text: &str, secs: u64) -> String {
     crate::tool_parse::render_call("send", &args)
 }
 
-/// A parent that sent to a child and awaits its reply reads the child's failure:
-/// the child's send settles with `reason: timeout` and the parent's next turn is
-/// handed that reply, not silence.
+/// A parent that sends to a child AI is handed the child's ACK at once (#795), however
+/// long the child's pass takes; the child's timed-out pass is the child's own, said in
+/// its error row. Nothing of the parent waits on it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_parent_awaiting_a_child_that_times_out_is_handed_the_timeout() {
+async fn a_parent_sending_to_a_child_that_times_out_gets_its_ack_at_once() {
     let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
     let _ceiling = Ceiling::set("0.5");
     let tmp = TempDir::new().unwrap();
@@ -368,29 +369,32 @@ async fn a_parent_awaiting_a_child_that_times_out_is_handed_the_timeout() {
         ],
         Duration::ZERO,
     );
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(
             parent.clone(),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
     assert!(until_passes(&cs, 1).await, "the child never started");
+    let replies = reply_rows(&kernel, &parent).await;
     assert!(
-        until_passes(&ps, 2).await,
-        "the parent was never handed the child's failure"
+        replies.iter().any(|r| r.contains("<accepted>true</accepted>")),
+        "the parent holds the child's ack: {replies:#?}"
     );
-    let seen = ps.request(1);
+    assert_eq!(ps.passes_served(), 1, "an ack wakes nothing");
+    let rows = stored_rows(&kernel, &child).await;
     assert!(
-        seen.contains("[reply to ") && seen.contains("send: timeout after 0.5s"),
-        "{seen}"
+        error_rows(&rows).iter().any(|r| r["content"].as_str().unwrap_or_default().contains("send: timeout after 0.5s")),
+        "{rows:#?}"
     );
 }
 
-/// A held sender whose answering pass fails on the provider settles with the
-/// existing `transport_error` code under its own `client_id`.
+/// A message that lands during a pass that fails on the provider was acked at once
+/// (#795); the next pass reads it, and fails too here: each failure is its own error row
+/// naming the provider's words.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_held_sender_settles_with_transport_error_when_the_turn_that_reads_it_fails() {
+async fn a_message_during_a_failed_pass_is_read_by_the_next_pass() {
     let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_held_fail").await;
@@ -405,10 +409,10 @@ async fn a_held_sender_settles_with_transport_error_when_the_turn_that_reads_it_
     );
     let (k, b) = (Arc::clone(&kernel), backend.clone());
     let first = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, k.operator_send(vec![Item::new(
             b,
             json!({"type": "send", "text": "one", "client_id": "o"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result
@@ -416,24 +420,28 @@ async fn a_held_sender_settles_with_transport_error_when_the_turn_that_reads_it_
     assert!(until_passes(&s, 1).await, "the first pass never started");
     let (k, b) = (Arc::clone(&kernel), backend.clone());
     let second = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, k.operator_send(vec![Item::new(
             b,
             json!({"type": "send", "text": "two", "client_id": "t"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result
     });
-    until_held(&backend, 1).await;
+    until_unread(&backend, 1).await;
     let one = first.await.expect("first");
-    assert_eq!(one["raised"], json!(true), "{one}");
+    assert_eq!(one["accepted"], json!(true), "{one}");
     let two = tokio::time::timeout(Duration::from_secs(5), second)
         .await
-        .expect("the held sender was left waiting")
+        .expect("the sender was left waiting")
         .expect("second");
-    assert_eq!(two["reason"], json!("transport_error"), "{two}");
+    assert_eq!(two["accepted"], json!(true), "{two}");
     assert_eq!(two["client_id"], json!("t"), "{two}");
-    assert!(two["error"].as_str().unwrap_or_default().contains("boom"));
+    assert_eq!(s.passes_served(), 2, "the message was read by the next pass");
+    let rows = stored_rows(&kernel, &backend).await;
+    let errors = error_rows(&rows);
+    assert_eq!(errors.len(), 2, "{rows:#?}");
+    assert!(errors.iter().all(|r| r["content"].as_str().unwrap_or_default().contains("boom")));
 }
 
 fn status_reason<'a>(events: &'a [Value], reason: &str) -> Option<&'a Value> {
@@ -463,14 +471,14 @@ async fn a_failed_pass_ends_with_its_error_row_and_no_turn_of_its_own() {
     );
     let mut rx = rebind_backend_inbox(&kernel, &backend);
     let mut seen: Vec<Value> = Vec::new();
-    let out = kernel.operator_send(vec![Item::new(
+    let out = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
-    assert_eq!(out["raised"], json!(true), "{out}");
+    assert_eq!(out["accepted"], json!(true), "{out}");
     events_until(&mut rx, &mut seen, |ev| status_reason(ev, "error").is_some()).await;
     let failed = status_reason(&seen, "error").expect("a failed status");
     assert_eq!(failed["phase"], json!("failed"), "{failed}");
@@ -501,17 +509,14 @@ async fn a_pass_cut_at_max_tokens_fails_naming_the_cut() {
         )]],
         Duration::ZERO,
     );
-    let out = kernel.operator_send(vec![Item::new(
+    let out = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
-    assert!(
-        out["error"].as_str().unwrap_or_default().contains("cut at max_tokens=16384"),
-        "{out}"
-    );
+    assert_eq!(out["accepted"], json!(true), "{out}");
     assert_eq!(s.passes_served(), 1);
     let rows = stored_rows(&kernel, &backend).await;
     let errors = error_rows(&rows);
@@ -539,10 +544,10 @@ async fn a_cancelled_turn_is_not_retried() {
     );
     let (k, b) = (Arc::clone(&kernel), backend.clone());
     let first = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, k.operator_send(vec![Item::new(
             b,
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result
@@ -574,10 +579,10 @@ async fn a_held_message_is_answered_after_the_failed_pass() {
     );
     let (k, b) = (Arc::clone(&kernel), backend.clone());
     let first = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, k.operator_send(vec![Item::new(
             b,
             json!({"type": "send", "text": "one", "client_id": "probe_a"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result
@@ -585,24 +590,21 @@ async fn a_held_message_is_answered_after_the_failed_pass() {
     assert!(until_passes(&s, 1).await, "the first pass never started");
     let (k, b) = (Arc::clone(&kernel), backend.clone());
     let second = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, k.operator_send(vec![Item::new(
             b,
             json!({"type": "send", "text": "two", "client_id": "probe_b"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result
     });
-    until_held(&backend, 1).await;
+    until_unread(&backend, 1).await;
     let first_out = first.await.expect("first send");
-    assert_eq!(first_out["raised"], json!(true), "{first_out}");
+    assert_eq!(first_out["accepted"], json!(true), "{first_out}");
     let second_out = second.await.expect("second send");
     assert!(second_out.get("error").is_none(), "{second_out}");
     assert!(
-        second_out["response"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("HELD-ANSWER"),
+        crate::tests::last_answer(&kernel, &backend).await.contains("HELD-ANSWER"),
         "{second_out}"
     );
     assert_eq!(s.passes_served(), 2);

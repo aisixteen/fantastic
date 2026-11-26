@@ -2,30 +2,27 @@
 //! ([`crate::declared::chat::Call`]). The chat bundle builds its provider from the
 //! record and hands it to [`handle`]; the provider is the seam, constructed per call.
 
-use crate::agent_loop::{run_generation, BackendConfig, GenFailure, Generation};
+use crate::agent_loop::BackendConfig;
 use crate::constants::MAX_CALL_DEPTH;
 use crate::context::{budget as agent_budget, output_reserve, resolve_context_window};
 use crate::declared::{History, Inquiry, Recall, Rows, Status, Unwatch, Watch};
 use crate::events::emit_status;
-use crate::helpers::{agent_meta, mint_send_id, now_secs, safe_client};
+use crate::helpers::{agent_meta, safe_client};
 use crate::memory::{load_history, MemResult};
 use crate::model_format::pass::Pass;
 use crate::projection::{derive_reaction, round3, TRIGGER};
 use crate::provider::Provider;
-use crate::state::{state_for, status_snapshot, CurrentEntry, QueuedEntry};
+use crate::state::{state_for, status_snapshot, CurrentEntry};
 use crate::stream_parts::{Part, PartKind};
-use fantastic_bundle::{
-    py_float_repr, py_json_dumps, py_repr, py_strip,
-};
+use fantastic_bundle::{py_json_dumps, py_repr};
 use fantastic_kernel::bundle::BundleError;
 use fantastic_kernel::call_guard::{check_call_stack, CallStackRefusal};
 use fantastic_kernel::refusal::{
     refusal, refusal_hint, with, BAD_ARG, MISSING_ARG, NOT_FOUND, NO_CONSUMER, UNAUTHORIZED,
 };
-use fantastic_kernel::{current_task, AgentId, Kernel, TaskId};
+use fantastic_kernel::{AgentId, Kernel, TaskId};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
-use std::time::Duration;
 
 /// The reflect body EVERY ai_core backend answers with — python's
 /// `_make_reflect`, key for key and in its order: `id, sentence, model,
@@ -77,8 +74,7 @@ pub fn reflect_base(
         "credentials".to_string(),
         meta.get("credentials").cloned().unwrap_or(Value::Null),
     );
-    // A generation IS its kernel dispatch task — the backend holds no task
-    // handle of its own. An in-flight entry present ⇔ generating.
+    // A pass in flight ⇔ generating.
     out.insert(
         "generating".to_string(),
         json!(crate::state::is_generating(agent_id)),
@@ -92,7 +88,7 @@ pub fn reflect_base(
 /// A reply that answers a call of a chain that is over — a previous incarnation's,
 /// or one a stop / clear / lost wake ended — is kept as a `late` row in this
 /// agent's own store and wakes nothing.
-async fn save_late(
+pub(crate) async fn save_late(
     agent_id: &AgentId,
     kernel: &Arc<Kernel>,
     raw: &str,
@@ -141,56 +137,23 @@ pub async fn on_delete(agent_id: &AgentId, kernel: &Arc<Kernel>) {
 }
 
 /// The `on_cancel` bundle hook, shared by every backend: the kernel is killing
-/// `task_id` and will DROP this generation's future the moment we return.
-///
-/// A dropped future frees the HTTP request (the provider stream) and the FIFO
-/// guard on its own — what it does NOT do is close the turn out for the caller.
-/// So that is exactly what happens here, while the task is still alive: clear
-/// the in-flight entry (`status` would otherwise report a phantom generation
-/// forever) and emit the final `status(done, reason=cancelled)` + `done` the
-/// client is waiting on. No-op when the cancelled task is some OTHER dispatch on
-/// this agent (a `history`, a `reflect`).
-///
-/// THE CUT: every open part ABORTS for its watchers, and the
-/// turn leaves the incoming message + a marker row — never a half answer — so the
-/// model's next turn knows what it was asked, what it had visibly said, and who
-/// stopped it. Nothing of a stopped pass was dispatched. A store that refuses
-/// the rows fails the hook (python raises out of `on_cancel`; the kernel logs it
-/// and the kill still happens).
+/// `task_id`, one of this agent's own tasks. Nothing of a pass needs closing here: a
+/// pass is no task, and a cancel of its request (the provider's `complete`, or the task
+/// that reads an in-process provider) settles that request as cancelled, which ends
+/// the pass as stopped ([`crate::agent_loop`]).
 pub async fn on_cancel(
-    agent_id: &AgentId,
-    task_id: &str,
-    kernel: &Arc<Kernel>,
+    _agent_id: &AgentId,
+    _task_id: &str,
+    _kernel: &Arc<Kernel>,
 ) -> Result<(), BundleError> {
-    let Some(entry) = crate::state::take_current_for_cancel(agent_id, task_id) else {
-        // Not the running pass: a message HELD on this chain whose sender's
-        // deadline passed is withdrawn, and a marker row tells the next pass
-        // not to answer it. (A held message a running wake pass already took
-        // is not here: the kernel still settles it, its answer goes nowhere.)
-        if let Some(h) = crate::state::withdraw_held(agent_id, task_id) {
-            let row = json!({
-                "role": "user",
-                "kind": "withdrawn",
-                "content": format!(
-                    "[withdrawn] the message above from {} passed its sender's deadline and went to dead letter {task_id}; do not answer it.",
-                    h.origin
-                ),
-                "id": kernel.mint_id(),
-                "parent": h.row_id,
-            });
-            crate::memory::save_history(agent_id, kernel, &[row])
-                .await
-                .map_err(|e| BundleError::from(e.0))?;
-        }
-        return Ok(());
-    };
-    close_stopped(agent_id, entry, kernel).await
+    Ok(())
 }
 
-/// Close out a turn that was STOPPED — by the kernel's cancel ([`on_cancel`]) or by
-/// `stop` — from its in-flight entry, which the caller has taken. The open parts
-/// abort, the turn keeps its incoming message and a `[stopped by …]` marker row,
-/// and `status` goes to `done` with `reason='cancelled'`.
+/// Close out a pass that was STOPPED — by a cancel of its request or by `stop` — from
+/// its in-flight entry, which the caller has taken. The open parts abort, the pass
+/// leaves what it had visibly said and a `[stopped by …]` marker row after the messages
+/// it read (stored when they arrived), and `status` goes to `done` with
+/// `reason='cancelled'`.
 pub async fn close_stopped(
     agent_id: &AgentId,
     entry: CurrentEntry,
@@ -219,17 +182,9 @@ pub async fn close_stopped(
         .clone()
         .filter(|w| !w.is_empty())
         .unwrap_or_else(|| "cancel".to_string());
-    let in_id = kernel.mint_id();
-    let in_parent = crate::agent_loop::incoming_parent(&entry.text);
     let (shown, notice) = crate::stream_parts::stop_rows(&entry.text_so_far, &who, &unsent);
-    let mut rows = vec![crate::row_attrs::with_source(
-        crate::images::stamped(
-            crate::agent_loop::incoming_row(&entry.text, in_id, in_parent, entry.notice),
-            entry.attached.as_ref(),
-        ),
-        &entry.origin,
-    )];
-    let mut prev = in_id;
+    let mut rows = Vec::new();
+    let mut prev = entry.answers;
     if let Some(text) = shown {
         let answer_id = kernel.mint_id();
         let mut row = json!({
@@ -267,23 +222,19 @@ pub async fn close_stopped(
     Ok(())
 }
 
-/// `stop` — python `_stop`. args: `stream_id:str?` (a part of the generation in
-/// flight). STOP this agent's in-flight generation — how a receiver of its
-/// streaming parts stops it: the provider stream closes, open parts abort, the
-/// turn keeps a `[stopped by <you>]` marker. Returns `{stopped:bool}`:
-/// `false` when nothing is in flight or `stream_id` is not one of this pass's
-/// parts.
+/// `stop` — python `_stop`. args: `stream_id:str?` (a part of the pass in flight).
+/// STOP this agent's pass in flight — how a receiver of its streaming parts stops it:
+/// the request is cancelled (its stream closes), open parts abort, the pass keeps a
+/// `[stopped by <you>]` marker. Stop means stop: the messages not read yet stay
+/// stored and wake nothing. Returns `{stopped:bool}`: `false` when nothing is in flight
+/// or `stream_id` is not one of this pass's parts.
 pub async fn stop(agent_id: &AgentId, stream_id: Option<&str>, kernel: &Arc<Kernel>) -> Value {
     let state = state_for(agent_id);
-    let (task_id, parts) = {
+    let parts = {
         let cur = state.current_meta.lock().expect("current poisoned");
         match cur.as_ref() {
-            Some(CurrentEntry {
-                task_id: Some(t),
-                parts,
-                ..
-            }) => (t.clone(), parts.clone()),
-            _ => return json!({"stopped": false}),
+            Some(c) => c.parts.clone(),
+            None => return json!({"stopped": false}),
         }
     };
     if let Some(sid) = stream_id {
@@ -305,117 +256,26 @@ pub async fn stop(agent_id: &AgentId, stream_id: Option<&str>, kernel: &Arc<Kern
         .map(|a| a.0)
         .filter(|w| !w.is_empty())
         .unwrap_or_else(|| "operator".to_string());
-    let pid = task_id
-        .parse::<i64>()
-        .expect("the in-flight task id is the kernel's TaskId number");
-    // The kernel's cancel first: its task walk runs `on_cancel`, which closes the
-    // turn (marker row, `status` done), and drops the dispatch with its stream.
-    // THE CAUSE OF A STOP THAT LEAVES A TURN GENERATING (#177): the walk finds the
-    // turn only by the task id it recorded, which is the id of its own dispatch row
-    // (`current_task()`). When that id is not in the kernel's task table the walk
-    // answers `{cancelled:false}` and runs no `on_cancel`, so nothing closes the
-    // turn. A reply-woken turn is not that case: its send is a dispatch row nested
-    // under the `deliver_reply` task, and the walk reaches it (pinned by
-    // `stop_reaches_a_reply_woken_turn`). The miss is named below, not dropped.
-    if let Some(c) = state
-        .current_meta
-        .lock()
-        .expect("current poisoned")
-        .as_mut()
-        .filter(|c| c.task_id.as_deref() == Some(task_id.as_str()))
-    {
-        c.stopped_by = Some(who.clone());
-    }
-    // ONE CHAIN PER AGENT (#227): stop means stop. The chain ends and the held
-    // messages are dropped from the wake list (their rows stay stored); no wake.
-    {
-        let mut chain = state.chain.lock().expect("chain poisoned");
-        chain.alive = false;
-        chain.held.clear();
-        chain.held_gone.notify_one();
-        // Rotate the token: a routed reply still in flight carries the old one (#227 Bug 5).
-        chain.token = mint_send_id();
-    }
-    let reached = kernel.cancel_task(&TaskId(pid)).await;
-    // STOP REACHES THE TURN ITSELF (#177). When the task walk did not reach the
-    // generation, the turn is still in flight: stop closes it here, so `status`
-    // reports `generating: false` the moment this returns, and fires the
-    // generation's own abort, which drops its provider stream. Before this, a stop
-    // the kernel did not deliver left the turn and its stream running while `stop`
-    // answered `stopped: true`.
-    if reached["cancelled"] != json!(true) {
-        // The kernel's answer is named, not dropped: `{cancelled:false}` means the
-        // task id the turn recorded is not in the kernel's task table.
-        println!(
-            "  [stop] {} kernel cancel did not reach task {pid}: {reached}",
-            agent_id.0
-        );
-    }
-    if let Some(mut entry) = crate::state::take_current_for_cancel(agent_id, &task_id) {
-        entry.stopped_by = Some(who);
-        entry.abort.notify_one();
-        if let Err(e) = close_stopped(agent_id, entry, kernel).await {
-            return json!({"stopped": true, "error": e.to_string()});
+    // THE PASS ENDS NOW: its request's settle acts on nothing from here
+    crate::life::abandon(agent_id);
+    let Some(mut entry) = crate::state::take_current(agent_id) else {
+        return json!({"stopped": false});
+    };
+    entry.stopped_by = Some(who);
+    // the request in flight: an in-process provider's read drops its stream on the
+    // abort; the kernel's cancel reaches the provider's `complete` (#177)
+    entry.abort.notify_one();
+    if let Some(pid) = entry.task_id.as_deref().and_then(|t| t.parse::<i64>().ok()) {
+        let reached = kernel.cancel_task(&TaskId(pid)).await;
+        if reached["cancelled"] != json!(true) {
+            // named, not dropped: the request had ended already, or was never a task
+            println!("  [stop] {} kernel cancel did not reach task {pid}: {reached}", agent_id.0);
         }
     }
-    json!({"stopped": true})
-}
-
-/// A turn that ends in a failure stores its own rows (#177): the incoming message
-/// and an error row naming why, so the model reads the failure on its next turn and
-/// the operator sees it in the history. Nothing of the turn was dispatched.
-async fn store_failed_turn(
-    agent_id: &AgentId,
-    kernel: &Arc<Kernel>,
-    text: &str,
-    notice: bool,
-    reason: &str,
-    origin: &str,
-    attached: Option<&crate::images::Attached>,
-) -> Result<(), String> {
-    let in_id = kernel.mint_id();
-    let in_parent = crate::agent_loop::incoming_parent(text);
-    let error_id = kernel.mint_id();
-    let rows = [
-        crate::row_attrs::with_source(
-            crate::images::stamped(
-                crate::agent_loop::incoming_row(text, in_id, in_parent, notice),
-                attached,
-            ),
-            origin,
-        ),
-        json!({
-            "role": "user",
-            "kind": "error",
-            "content": format!(
-                "[turn failed] {reason}. No answer was stored, and nothing this turn meant \
-                 to send was dispatched."
-            ),
-            "id": error_id,
-            "parent": in_id,
-        }),
-    ];
-    crate::memory::save_history(agent_id, kernel, &rows)
-        .await
-        .map(|_| ())
-        .map_err(|e| e.0)
-}
-
-/// A turn that failed before any pass ran, as the kernel's one refusal shape plus the
-/// `client_id` of the send it belonged to.
-fn turn_refusal(code: &str, error: String, client_id: &str) -> Value {
-    let mut r = fantastic_kernel::refusal::refusal(code, error);
-    fantastic_kernel::refusal::with(&mut r, "client_id", json!(client_id));
-    r
-}
-
-/// The failure a turn reports, with the store's outcome: when its error row could
-/// not be stored, the message says so too.
-fn with_store_outcome(message: String, stored: Result<(), String>) -> String {
-    match stored {
-        Ok(()) => message,
-        Err(e) => format!("{message}; the turn's error row could not be stored: {e}"),
+    if let Err(e) = close_stopped(agent_id, entry, kernel).await {
+        return json!({"stopped": true, "error": e.to_string()});
     }
+    json!({"stopped": true})
 }
 
 /// `rows` — a VIEW of this agent's conversation exactly as the agent HOLDS it in
@@ -827,120 +687,25 @@ pub async fn context_status(
 
 pub use crate::constants::{send_timeout_secs, SEND_TIMEOUT_SECS};
 
-/// The queue row for one submission, removed when this guard is DROPPED while
-/// still armed — i.e. when the dispatch went away before it ever became the
-/// in-flight turn.
+/// THE ARRIVAL OF A MESSAGE (#795): guard the call chain → the memory store named (fail
+/// loud) → a `late` reply recorded, never a pass → the images brought inside the
+/// model's limits → the row STORED → the ACK. The message is read by the agent's next
+/// pass, which starts now when none runs ([`crate::life`]); nothing here waits for it.
 ///
-/// A `cancel`/`timeout` landing during the FIFO wait drops the whole `send`
-/// future at its await point, and the row it enqueued outlived it: `status`
-/// reported a generation nobody was running, forever, and told the next caller it
-/// was one deeper in the line than it was.
-struct QueuedGuard {
-    state: Arc<crate::state::BackendState>,
-    send_id: String,
-    armed: bool,
-}
-
-impl QueuedGuard {
-    /// Pop the row and stop guarding it: the wait is over, the caller owns the
-    /// lock, and the in-flight entry takes over from here.
-    fn disarm(&mut self) {
-        self.armed = false;
-        Self::dequeue(&self.state, &self.send_id);
-    }
-
-    fn dequeue(state: &crate::state::BackendState, send_id: &str) {
-        let mut q = state.queue.lock().expect("queue poisoned");
-        if let Some(pos) = q.iter().position(|e| e.send_id == send_id) {
-            q.remove(pos);
-        }
-    }
-}
-
-impl Drop for QueuedGuard {
-    fn drop(&mut self) {
-        if self.armed {
-            Self::dequeue(&self.state, &self.send_id);
-        }
-    }
-}
-
-/// Whether this send is one of the chain's own turns (never held).
-fn is_chain_turn(
-    state: &crate::state::BackendState,
-    agent_id: &AgentId,
-    chain_token: &str,
-) -> bool {
-    (!chain_token.is_empty() && state.chain.lock().expect("chain poisoned").token == chain_token)
-        || fantastic_kernel::current_origin().is_some_and(|o| o == *agent_id)
-}
-
-/// Hold a message on the agent's chain. The chain may have ended while the row was
-/// being stored (the caller read `alive` before that await): the push and the
-/// `alive` read are ONE critical section, and a message pushed onto a dead chain
-/// revives it and wakes it, or nothing would ever read the message.
-pub(crate) fn push_held_or_wake(
-    kernel: &Arc<Kernel>,
-    agent_id: &AgentId,
-    msg: crate::state::HeldMsg,
-) {
-    let state = state_for(agent_id);
-    let revived = {
-        let mut chain = state.chain.lock().expect("chain poisoned");
-        chain.held.push(msg);
-        let dead = !chain.alive;
-        if dead {
-            chain.alive = true;
-            if chain.token.is_empty() {
-                chain.token = mint_send_id();
-            }
-        }
-        dead
-    };
-    if revived {
-        crate::route::chain_ended(kernel, agent_id);
-    }
-}
-
-/// The shared `send` flow: guard the call chain → the memory store named (fail
-/// loud) → a `late` reply recorded, never a turn → enqueue → FIFO lock → run the
-/// generation under a timeout → clean up → ROUTE the pass's output. The backend
-/// supplies a built `provider` (its key is read inside the pass, before each
-/// request — [`crate::credentials`]) and its `cfg`.
-///
-/// The generation runs INLINE in this dispatch — the backend spawns no task of
-/// its own. It doesn't need to: a `send` IS a kernel task (`"<agent>:<n>"`, one
-/// row in `ps`), and the kernel's `cancel` kills it, running this bundle's
-/// `on_cancel` first. That is why there is no `interrupt` verb any more; the
-/// backend-private cancellation collapsed onto the substrate's.
-///
-/// Routing ([`crate::route::route_reply`]) is the one thing that does NOT run
-/// inline: it is spawned as its own kernel task after the FIFO guard is dropped,
-/// because a `reply_to:self` follow-up must be able to take the guard this
-/// dispatch just held. Only a pass that did not error is routed
-/// (python `core.py:1183`) — a broken chain must not keep spending turns.
-///
-/// `Err` is python's RAISE — a provider failure propagates out of the handler,
-/// and the kernel settles that execution as FAILED with
-/// `{error: "RuntimeError: <msg>", raised: true}`. A refusal and a timeout are
-/// both `Ok`: the turn ANSWERED.
+/// Returns `{accepted: true, re: <row id>, client_id}`; paused, `{held, paused}`. A
+/// refusal (a cycle, no store, bad images) is the reply, and nothing is stored. The
+/// answer, if the model gives one, is the receiving agent's own later message.
 pub async fn send(
-    provider: Arc<dyn Provider>,
     agent_id: &AgentId,
     args: &crate::declared::Send,
     kernel: &Arc<Kernel>,
     cfg: BackendConfig,
 ) -> Result<Value, BundleError> {
-    // PAUSED: the message is held in the store, in order, and not run (#219).
-    if let Some(held) = crate::pause::hold_if_paused(agent_id, args, kernel).await? {
-        return Ok(held);
-    }
     let mut text = args.text.clone();
     // A MESSAGE FROM ANOTHER AGENT OPENS WITH WHO SENT IT — python's
-    // `[from <sender> · to a, b · msg N · re N]` line. Without it a peer's
-    // inquiry arrives as bare prose and the receiver cannot tell it is being
-    // asked. The operator's own sends carry
-    // no header, exactly as in python.
+    // `[from <sender> · to a, b · msg N · re N]` line. Without it a peer's inquiry
+    // arrives as bare prose and the receiver cannot tell it is being asked, nor whom to
+    // answer. The operator's own sends carry no header, exactly as in python.
     if let Some(sender) = fantastic_kernel::current_origin() {
         if sender != *agent_id {
             let mut parts = vec![format!("from {}", sender.as_str())];
@@ -953,49 +718,25 @@ pub async fn send(
             if let Some(r) = args.re {
                 parts.push(format!("re {r}"));
             }
-            // the stream this message was previewed as — what an AI consumer
-            // that watched it stream matches its draft to
+            // the stream this message was previewed as — what an AI consumer that
+            // watched it stream matches its draft to
             if let Some(s) = &args.stream_id {
                 parts.push(format!("stream {s}"));
             }
             text = format!("[{}]\n{text}", parts.join(" \u{b7} "));
         }
     }
-    // captured for routing before any shadowing below
-    let incoming_text = text.clone();
-    // Optional caller-supplied system block (a caller teaches its own tool convention).
-    // Cloned BEFORE the generation moves it: the follow-up turn must be assembled
-    // against the SAME system block this pass ran under, or a caller-driven agent
-    // loses its role on hop 2.
-    // Where this pass's TEXT goes when the model issues no call of its own. Once,
-    // and it does not propagate — a caller cannot spend the model's turns for it.
-    //
-    // KEPT RAW. python drops it only when it is not a string or is blank after a
-    // FULL strip; the value that travels is the one the caller wrote. Trimming it
-    // here silently retargeted `' peer '` at `peer`, so an unknown-agent refusal
-    // named an id the caller never sent.
-    let send_to = args
-        .send_to
-        .clone()
-        .filter(|s| !py_strip(s).is_empty());
     let client_id = safe_client(&args.client_id);
-    // The sender's id, kept in RAM for `status`: the calling agent, else the client.
+    // The sender's id: the calling agent, else the client.
     let origin_id = fantastic_kernel::current_origin()
         .map_or_else(|| client_id.clone(), |o| o.as_str().to_string());
-    // Recursion guard — checked BEFORE the FIFO lock, so a cycle can never
-    // DEADLOCK on it (A→B→A would otherwise block on A's held guard). The rule
-    // itself is the kernel's, shared with the authored-runtime connectors; only
-    // the wording is ours, because the reader here is a model.
-    //
-    // Read-only on purpose: routing does NOT propagate `_call_stack` onward
-    // (python's `_deliver` does not carry it either), so a `reply_to:self` chain
-    // never accumulates its own id and is never mistaken for a cycle on turn 2.
+    // Recursion guard — the kernel's rule, shared with the authored-runtime connectors;
+    // only the wording is ours, because the reader here is a model.
     match check_call_stack(agent_id.as_str(), args.call_stack.as_deref().unwrap_or(&[])) {
         Ok(_) => {}
         Err(CallStackRefusal::Cycle(cycle)) => {
             return Ok(json!({
                 "error": format!("{}: cycle detected", cfg.name),
-                "response": "",
                 "cycle": cycle,
                 "client_id": client_id,
             }));
@@ -1003,12 +744,11 @@ pub async fn send(
         Err(CallStackRefusal::TooDeep) => {
             return Ok(json!({
                 "error": format!("{}: max call depth {MAX_CALL_DEPTH} reached", cfg.name),
-                "response": "",
                 "client_id": client_id,
             }));
         }
     }
-    // NO STORE, NO TURN — said up front, not discovered mid-generation.
+    // NO STORE, NO MESSAGE — said up front.
     if let Err(e) = crate::memory::store_of(agent_id, kernel) {
         let mut r = refusal(MISSING_ARG, e.0);
         with(&mut r, "arg", json!("memory_store_id"));
@@ -1016,15 +756,15 @@ pub async fn send(
         return Ok(r);
     }
     if args.late == Some(true) {
-        // A reply to a call a PREVIOUS incarnation made (see `route::deliver`):
-        // recorded in this agent's own store, never a turn.
+        // A reply to a call a PREVIOUS incarnation made (see `route::deliver`): recorded
+        // in this agent's own store, never a pass.
         save_late(agent_id, kernel, &args.text).await?;
         return Ok(json!({"late": true, "client_id": client_id}));
     }
-    let send_id = mint_send_id();
     let state = state_for(agent_id);
-    // WHAT THE PROVIDER CAN DO is read from it when the chat starts and when its provider or
-    // model changed, and the images of this send are brought inside the model's limits (#622)
+    // WHAT THE PROVIDER CAN DO is read from it when the chat starts and when its provider
+    // or model changed, and the images of this send are brought inside the model's limits
+    // (#622)
     crate::images::refresh(agent_id, kernel, &state).await;
     let attached = match crate::images::attach(agent_id, kernel, args.images.as_deref()).await {
         Ok(a) => a,
@@ -1035,593 +775,24 @@ pub async fn send(
             return Ok(r);
         }
     };
-    // ONE CHAIN PER AGENT (#227): a message that lands while this agent's chain
-    // is alive is HELD — stored as a row, read by the chain's next pass — unless
-    // it is one of the chain's own turns (it carries the chain token).
-    let chain_token = args.chain.clone().unwrap_or_default();
-    // A message the agent sends to ITSELF is its own chain and is never held.
-    let chain_turn = is_chain_turn(&state, agent_id, &chain_token);
-    // An inquiry's answer obeys the hold like any other message: it is read by the
-    // chain's next pass, never a second chain of its own.
-    let chain_alive = state.chain.lock().expect("chain poisoned").alive;
-    if !chain_turn && chain_alive {
-        let row_id = kernel.mint_id();
-        crate::memory::save_history(
-            agent_id,
-            kernel,
-            // The SAME row the normal incoming path stores (`incoming_row`), so a
-            // held message folds and recalls exactly like any other turn (#227).
-            &[crate::row_attrs::with_source(
-                crate::images::stamped(
-                    crate::agent_loop::incoming_row(
-                        &text,
-                        row_id,
-                        crate::agent_loop::incoming_parent(&text),
-                        false,
-                    ),
-                    attached.as_ref(),
-                ),
-                &origin_id,
-            )],
-        )
-        .await?;
-        // A held send RETURNS THE ANSWER of the pass that reads it (#227): its
-        // caller waits on the oneshot the answering pass sends into.
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        push_held_or_wake(
-            kernel,
-            agent_id,
-            crate::state::HeldMsg {
-                client_id: client_id.clone(),
-                send_id: send_id.clone(),
-                reply: reply_tx,
-                origin: origin_id.clone(),
-                text: text.clone(),
-                queued_at: now_secs(),
-                task_id: current_task().map(|t| t.0.to_string()),
-                row_id,
-            },
-        );
-        let mut detail = Map::new();
-        detail.insert("send_id".to_string(), json!(send_id));
-        detail.insert("ahead".to_string(), json!(0));
-        detail.insert("held".to_string(), json!(true));
-        emit_status(kernel, &state, agent_id, &client_id, "queued", detail).await;
-        let ceiling = send_timeout_secs();
-        return Ok(
-            match tokio::time::timeout(Duration::from_secs_f64(ceiling), reply_rx).await {
-                Ok(Ok(v)) => v,
-                Ok(Err(_)) => json!({"held": true, "cancelled": true, "client_id": client_id}),
-                Err(_) => turn_refusal(fantastic_kernel::refusal::TIMEOUT, 
-                    format!("send: timeout after {}s", py_float_repr(ceiling)),
-                    &client_id,
-                ),
-            },
-        );
-    }
-
-    // Enqueue.
-    let queued_at = now_secs();
-    // A notice is this agent's own harness text: honoured only when the agent sent
-    // it to itself (or the operator did), so no peer can hide a message from a
-    // person's view. Python `_send`.
+    // A notice is this agent's own harness text: honoured only when the agent sent it to
+    // itself (or the operator did), so no peer can hide a message from a person's view.
     let notice = args.notice == Some(true)
         && fantastic_kernel::current_origin().is_none_or(|s| s == *agent_id);
-    let entry = QueuedEntry {
-        client_id: client_id.clone(),
-        text: text.clone(),
-        send_id: send_id.clone(),
-        queued_at,
+    let m = crate::life::Incoming {
+        text: &text,
+        client_id: &client_id,
+        origin: &origin_id,
         notice,
-        origin: origin_id.clone(),
+        attached: attached.as_ref(),
     };
-    // WHO IS AHEAD, counted in the SAME critical section as the push. python's
-    // enqueue → `lock.locked()` → acquire runs without yielding, so "the lock is
-    // held" there also covers everyone already queued; on a multi-threaded
-    // runtime two sends can both push and both see the lock free before either
-    // takes it, and neither says `queued` (an event lost, and every later event
-    // ordinal shifted with it).
-    let prior = {
-        let mut q = state.queue.lock().expect("queue poisoned");
-        let prior = q.len();
-        q.push_back(entry);
-        prior
-    };
-    // ARMED FROM HERE UNTIL THE LOCK IS OURS. A `cancel` (or an item `timeout`)
-    // that lands while this dispatch WAITS on the FIFO drops the future at the
-    // await below — the queue row would survive it forever, so `status` reported a
-    // phantom `mine_pending`/`others_pending` and every later caller's `ahead` was
-    // off by one. The guard's Drop removes the row; it is disarmed the moment the
-    // row is popped into the in-flight entry.
-    let mut queued_guard = QueuedGuard {
-        state: Arc::clone(&state),
-        send_id: send_id.clone(),
-        armed: true,
-    };
-
-    // Best-effort contention detection. ONE event, and it is the `status` one —
-    // never a bare `{type:'queued'}` ahead of it, an undocumented type python
-    // never sends, which would break any per-submission event count and every
-    // cross-runtime event-stream diff.
-    let contested = prior > 0 || state.lock.try_lock().is_err();
-    if contested {
-        let ahead = state
-            .queue
-            .lock()
-            .expect("queue poisoned")
-            .len()
-            .saturating_sub(1);
-        let mut detail = Map::new();
-        detail.insert("send_id".to_string(), json!(send_id));
-        detail.insert("ahead".to_string(), json!(ahead));
-        emit_status(kernel, &state, agent_id, &client_id, "queued", detail).await;
+    let row = crate::life::arrive(kernel, agent_id, &m, true).await?;
+    // PAUSED (#219): stored, read by the pass the resume starts
+    if state.life.lock().expect("life poisoned").paused {
+        return Ok(json!({"held": crate::life::unread_count(agent_id), "paused": true}));
     }
-
-    // Acquire FIFO lock.
-    let lock_arc = Arc::clone(&state.lock);
-    let _guard = lock_arc.lock_owned().await;
-
-    // Pop ourselves from the queue, become the in-flight entry — and disarm the
-    // guard, whose job (the wait is over) is done.
-    queued_guard.disarm();
-    // ONE CHAIN PER AGENT (#227): a routed reply carries the token of the chain it
-    // was decided under. If that chain has since ended (a stop, a reboot, a clear,
-    // a lost wake) the token no longer matches: the reply is RECORDED, never a
-    // turn, so it cannot resume or double the chain.
-    let stale =
-        !chain_token.is_empty() && state.chain.lock().expect("chain poisoned").token != chain_token;
-    if stale {
-        save_late(agent_id, kernel, &args.text).await?;
-        drop(_guard);
-        return Ok(json!({"late": true, "client_id": client_id}));
-    }
-    // ONE CHAIN PER AGENT (#227): this pass owns the chain. A new chain mints its
-    // token; this pass TAKES the held messages (it reads their rows) and answers
-    // each of them with its own reply below.
-    let answering = {
-        let mut chain = state.chain.lock().expect("chain poisoned");
-        if !chain.alive {
-            chain.token = mint_send_id();
-        }
-        chain.alive = true;
-        chain.held_gone.notify_one();
-        std::mem::take(&mut chain.held)
-    };
-    // Fired by `stop` ([`stop`]) — the generation below watches it.
-    let abort = Arc::new(tokio::sync::Notify::new());
-    {
-        let mut cur = state.current_meta.lock().expect("current poisoned");
-        *cur = Some(CurrentEntry {
-            client_id: client_id.clone(),
-            text: text.clone(),
-            send_id: send_id.clone(),
-            // PROMOTED, not rebuilt — python's `{**entry, …}` carries the queue
-            // row's `queued_at` into the in-flight entry, and `status` reports it.
-            queued_at,
-            origin: origin_id.clone(),
-            started_at: now_secs(),
-            phase: "thinking".to_string(),
-            text_so_far: String::new(),
-            last_tool: None,
-            // The kernel task this generation IS — how `cancel` reaches it, and
-            // how `on_cancel` recognises its own turn.
-            task_id: current_task().map(|t| t.0.to_string()),
-            parts: None,
-            stopped_by: None,
-            notice,
-            attached: attached.clone(),
-            abort: Arc::clone(&abort),
-        });
-    }
-    emit_status(kernel, &state, agent_id, &client_id, "thinking", Map::new()).await;
-
-    // Run the generation inline, bounded by the per-send ceiling. Cancellation
-    // is the KERNEL's (`cancel <task_id>` → `on_cancel` → this future is
-    // dropped, releasing the provider stream and the FIFO guard) — the backend
-    // holds no task handle of its own.
-    let timeout_secs = send_timeout_secs();
-    // TRANSPORT RETRIES (#198 part 2): a pass that failed on the link is re-run,
-    // visibly, up to the agent's `transport_retries` (0 = off).
-    let retries = crate::record::ai::RECORD
-        .get(&agent_meta(agent_id, kernel), "transport_retries")
-        .and_then(|v| v.as_i64())
-        .expect("transport_retries declares its default") as u32;
-    let mut attempt: u32 = 0;
-    let outcome = loop {
-        let r = tokio::select! {
-            biased;
-            // STOPPED: `stop` closed this turn already, and the generation below is
-            // dropped — its provider stream with it (#177).
-            _ = abort.notified() => None,
-            r = tokio::time::timeout(
-                Duration::from_secs_f64(timeout_secs),
-                run_generation(
-                    &provider,
-                    agent_id,
-                    &state,
-                    &text,
-                    kernel,
-                    &client_id,
-                    cfg,
-                ),
-            ) => Some(r),
-        };
-        match r {
-            Some(Ok(Err(GenFailure::Provider(ref pe))))
-                if pe.is_transient() && attempt < retries =>
-            {
-                attempt += 1;
-                let message = pe.message.clone();
-                // A visible row: the model and the operator both read the retry.
-                let _ = crate::memory::save_history(
-                    agent_id,
-                    kernel,
-                    &[json!({
-                        "role": "user",
-                        "parent": Value::Null,
-                        "kind": "notice",
-                        "content": format!(
-                            "[retry {attempt}/{retries}] the link dropped ({message}) — retrying the turn"
-                        ),
-                    })],
-                )
-                .await;
-                let mut detail = Map::new();
-                detail.insert("attempt".to_string(), json!(attempt));
-                detail.insert("of".to_string(), json!(retries));
-                detail.insert("error".to_string(), json!(message));
-                emit_status(kernel, &state, agent_id, &client_id, "retrying", detail).await;
-                // Backoff 2 s, 4 s, 8 s …; tests use a few milliseconds.
-                let wait = if cfg!(test) {
-                    Duration::from_millis(5)
-                } else {
-                    Duration::from_secs(1u64 << attempt)
-                };
-                let stopped = tokio::select! {
-                    biased;
-                    _ = abort.notified() => true,
-                    _ = tokio::time::sleep(wait) => false,
-                };
-                if stopped {
-                    break None;
-                }
-            }
-            other => break other,
-        }
-    };
-    let Some(outcome) = outcome else {
-        // Nothing is routed and nothing is stored here: `stop` wrote the marker row
-        // and the `done` status. Clear the entry the stop left, release the lock.
-        *state.current_meta.lock().expect("current poisoned") = None;
-        // ONE CHAIN PER AGENT (#227): a stopped chain ends and wakes nothing.
-        {
-            let mut chain = state.chain.lock().expect("chain poisoned");
-            chain.alive = false;
-            chain.held.clear();
-            chain.held_gone.notify_one();
-            chain.token = mint_send_id();
-        }
-        drop(_guard);
-        return Ok(json!({"cancelled": true, "client_id": client_id}));
-    };
-
-    let mut message_id: Option<i64> = None;
-    // Every closed call part `(stream_id, body)` — routing stamps each dispatched
-    // message with the stream it was previewed as.
-    let mut call_streams: Vec<(String, String)> = Vec::new();
-    // A pass the model stopped with a block open dispatches NOTHING.
-    let mut cut = false;
-    // A provider failure python does NOT map propagates out of the handler. The
-    // raise is deferred to after the cleanup below (python does it from an
-    // `except` whose `finally` clears the current entry and releases the lock).
-    let mut raise: Option<(&'static str, String)> = None;
-    // A turn that failed: why, for the asker of an inquiry this chain is answering
-    // (#722). A provider failure is retried only by `transport_retries`, above, inside
-    // the pass (#795, Q4); past them the turn has failed.
-    let mut turn_failed: Option<String> = None;
-    // THE HARNESS STOPPED THE TURN (#766, 1.8): its reason and the number of malformed
-    // attempts. Nothing is routed; the chain ends through the give-up.
-    let mut stopped: Option<String> = None;
-    // A PROVIDER FAILURE NO RETRY MENDS (a refused key, an unknown model): its error.
-    // Never retried: the chain gives up with it at once.
-    let mut permanent: Option<(String, &'static str)> = None;
-    let reply = match outcome {
-        Ok(Ok(Generation::Answered {
-            text: final_text,
-            message_id: tid,
-            call_streams: streams,
-            cut: was_cut,
-        })) => {
-            message_id = Some(tid);
-            cut = was_cut;
-            // `message_id` IS PART OF THE REPLY — python `_run`'s last statement.
-            // Rust computed it (routing needs it to parent the next turn) and
-            // then dropped it on the floor, so a caller could not name the row
-            // its own send produced.
-            // THE ANSWER, NEVER THE THINKING: this reply is what leaves the
-            // agent — the caller's reply (a peer's batch row, an awaited reply),
-            // every held sender's, and the text routing hands a `send_to`. The
-            // thinking stays on the stored row, for this agent's own `recall`.
-            let reply = json!({
-                "response": crate::think::without_thinking(&final_text),
-                "client_id": client_id,
-                "message_id": tid,
-            });
-            // The closed call parts feed routing only — never the caller's reply.
-            call_streams = streams;
-            reply
-        }
-        // THE HARNESS STOP: the stored row is the `stop` call, the turn's call. The reply
-        // names it like any answer; the give-up below tells the caller why.
-        Ok(Ok(Generation::Stopped {
-            reason,
-            message_id: tid,
-        })) => {
-            message_id = Some(tid);
-            let mut args = Map::new();
-            args.insert("reason".to_string(), json!(reason));
-            stopped = Some(reason);
-            json!({
-                "response": crate::tool_parse::render_call("stop", &args),
-                "client_id": client_id,
-                "message_id": tid,
-            })
-        }
-        // THE SEAM'S OWN WORDS. A projection refusal never opened a provider
-        // pass, so no `status(done)` closes it and no `client_id` is added.
-        Ok(Err(GenFailure::Projection(refusal))) => refusal,
-        // FAIL FAST: the store refused or is gone — no turn, said so.
-        Ok(Err(GenFailure::Store(e))) => {
-            emit_status(kernel, &state, agent_id, &client_id, "failed", {
-                let mut m = Map::new();
-                m.insert("reason".to_string(), json!("error"));
-                m.insert("error".to_string(), json!(e.0.clone()));
-                m
-            })
-            .await;
-            turn_failed = Some(e.0.clone());
-            turn_refusal(fantastic_kernel::refusal::STORE_REFUSED, e.0, &client_id)
-        }
-        // FAIL LOUD: a system_prompt_file is set and unusable — no turn on another
-        // block, said so.
-        Ok(Err(GenFailure::PromptFile(e))) => {
-            emit_status(kernel, &state, agent_id, &client_id, "failed", {
-                let mut m = Map::new();
-                m.insert("reason".to_string(), json!("error"));
-                m.insert("error".to_string(), json!(e.0.clone()));
-                m
-            })
-            .await;
-            turn_failed = Some(e.0.clone());
-            turn_refusal(fantastic_kernel::refusal::INVALID_META, e.0, &client_id)
-        }
-        // FAIL LOUD: a fold's summary would not fit its budget
-        // after every re-summarise — no turn on an unfolded view, said so.
-        Ok(Err(GenFailure::FoldSummary(e))) => {
-            emit_status(kernel, &state, agent_id, &client_id, "failed", {
-                let mut m = Map::new();
-                m.insert("reason".to_string(), json!("error"));
-                m.insert("error".to_string(), json!(e.0.clone()));
-                m
-            })
-            .await;
-            turn_failed = Some(e.0.clone());
-            turn_refusal(fantastic_kernel::refusal::LIMIT, e.0, &client_id)
-        }
-        // A FOLD THAT CANNOT BE PLACED (python `member_anchor`'s `ValueError`,
-        // through `_send`'s `except Exception`): the turn fails, reported on
-        // `status(failed, reason='error')`, then raised — a FAILED execution, never
-        // a turn that dies in silence.
-        Ok(Err(GenFailure::FoldAnchor(e))) => {
-            emit_status(kernel, &state, agent_id, &client_id, "failed", {
-                let mut m = Map::new();
-                m.insert("reason".to_string(), json!("error"));
-                m.insert("error".to_string(), json!(e.0.clone()));
-                m
-            })
-            .await;
-            turn_failed = Some(e.0.clone());
-            raise = Some(("ValueError", e.0));
-            Value::Null
-        }
-        // PROVIDER FAILURE (python `core.py`'s `except Exception`):
-        // `status(failed, reason='error', error=str(e))` announces it, then python
-        // re-raises, and a raise is a FAILED execution — which is what makes
-        // `retries` live and dead-lettering possible. A completed
-        // `{error, client_id}` would leave no AI failure retryable.
-        Ok(Err(GenFailure::Provider(pe))) => {
-            emit_status(kernel, &state, agent_id, &client_id, "failed", {
-                let mut m = Map::new();
-                m.insert("reason".to_string(), json!("error"));
-                m.insert("error".to_string(), json!(pe.message.clone()));
-                m
-            })
-            .await;
-            // A FAILED PASS stores its own error row (#177): nothing ends silently. A
-            // REFUSED RECORD (`ValueError`: the record cannot run) never opened a pass
-            // and stores nothing, as ever.
-            let message = if pe.kind == "ValueError" {
-                turn_failed = Some(pe.message.clone());
-                pe.message
-            } else {
-                let stored = store_failed_turn(
-                    agent_id,
-                    kernel,
-                    &incoming_text,
-                    notice,
-                    &pe.message,
-                    &origin_id,
-                    attached.as_ref(),
-                )
-                .await;
-                match pe.permanent_code() {
-                    Some(code) => permanent = Some((pe.message.clone(), code)),
-                    None => turn_failed = Some(pe.message.clone()),
-                }
-                with_store_outcome(pe.message, stored)
-            };
-            raise = Some((pe.kind, message));
-            Value::Null
-        }
-        Err(_elapsed) => {
-            // THE DETAIL IS `reason` AND THE AUTO-FILLS, nothing else — as python's
-            // timeout status (`reason="timeout"`). The
-            // `partial_chars`/`partial_head`/`partial_tail` keys rust added were
-            // a rust-only shape on the one event a UI reads to close a turn.
-            emit_status(kernel, &state, agent_id, &client_id, "failed", {
-                let mut m = Map::new();
-                m.insert("reason".to_string(), json!("timeout"));
-                m
-            })
-            .await;
-            let message = format!("send: timeout after {}s", py_float_repr(timeout_secs));
-            turn_failed = Some(message.clone());
-            // The send ceiling ends the turn with an error row too (#177).
-            let stored = store_failed_turn(
-                agent_id,
-                kernel,
-                &incoming_text,
-                notice,
-                &message,
-                &origin_id,
-                attached.as_ref(),
-            )
-            .await;
-            turn_refusal(fantastic_kernel::refusal::TIMEOUT, with_store_outcome(message, stored), &client_id)
-        }
-    };
-
-    // Clear current_meta FIRST: the follow-up turn establishes its own entry, and
-    // an `emit_status` on it must not attach to this dead one.
-    *state.current_meta.lock().expect("current poisoned") = None;
-    // Release the FIFO guard SECOND, before routing is spawned — a self-addressed
-    // follow-up takes this very guard, and the contention probe above must see a
-    // free lock rather than reporting the chain as a queued rival.
-    drop(_guard);
-
-    // ONE CHAIN PER AGENT (#227): a pass that is NOT routed ends its chain here,
-    // so messages held meanwhile are woken once (see `chain_ended`).
-    // A PERMANENT FAILURE ENDS THE CHAIN through the give-up, the error its reason:
-    // status `failed`, `reason: gave_up`, the open inquiry closed, `send_to` told.
-    if let Some((why, _)) = &permanent {
-        crate::route::give_up(kernel, agent_id, &client_id, send_to.as_deref(), why).await;
-    }
-    if reply.get("error").is_some() || raise.is_some() {
-        crate::route::chain_ended(kernel, agent_id);
-    }
-    // AN INQUIRY WHOSE TURN FAILED tells its asker (#722): the asker must not wait
-    // on an answer that will not come.
-    if let Some(why) = turn_failed {
-        let mut body = Map::new();
-        body.insert(
-            "error".to_string(),
-            json!(format!("{}'s turn failed: {why}", agent_id.as_str())),
-        );
-        crate::route::close_inquiry(kernel, agent_id.as_str(), &client_id, body).await;
-    }
-
-    // THE HARNESS STOP ENDS THE CHAIN through the give-up, as a model's `stop` does
-    // (1.8): status `failed`, `reason: gave_up`, the reason in `error`, the open
-    // inquiry closed, `send_to` told.
-    if let Some(reason) = &stopped {
-        crate::route::give_up(kernel, agent_id, &client_id, send_to.as_deref(), reason).await;
-        crate::route::chain_ended(kernel, agent_id);
-    }
-
-    // ONE CHAIN PER AGENT (#227): the pass that read the held messages answers
-    // each of them with its own reply, under that sender's own client_id.
-    let answer = match &raise {
-        Some((kind, msg)) => {
-            let mut v = json!({"error": msg, "client_id": client_id});
-            // A refused record (`ValueError`) is the caller's own fault, not a link
-            // or provider failure: it carries no transport code. A permanent failure
-            // carries its own code (`unauthorized`, `not_found`, ...).
-            if *kind != "ValueError" {
-                let code = permanent
-                    .as_ref()
-                    .map_or(fantastic_kernel::refusal::TRANSPORT_ERROR, |(_, c)| *c);
-                fantastic_kernel::refusal::with(&mut v, "reason", json!(code));
-            }
-            v
-        }
-        None => reply.clone(),
-    };
-    for held in answering {
-        let mut v = answer.clone();
-        if let Some(o) = v.as_object_mut() {
-            o.insert("client_id".to_string(), json!(held.client_id));
-        }
-        let _ = held.reply.send(v);
-    }
-
-    // The raise happens HERE, after the cleanup python does in its `finally`:
-    // the entry is cleared and the lock is free before the failure leaves this
-    // dispatch, or the next caller inherits a phantom in-flight turn.
-    if let Some((kind, msg)) = raise {
-        return Err(Box::new(PythonRaise(kind, msg)));
-    }
-
-    // ROUTE this pass's output where it was addressed. DETACHED as its own kernel
-    // task, which is the whole reason chaining works: `state.lock` is a
-    // non-reentrant `tokio::sync::Mutex`, so awaiting a self-addressed send inline
-    // — even here, after the drop — would keep THIS dispatch from returning to its
-    // caller until the whole chain finished, and any hop that re-entered before the
-    // drop would stall until the 180s ceiling.
-    //
-    // `Kernel::spawn_task` and not a bare `tokio::spawn`: it survives the parent
-    // dispatch, is a row in `ps`, stays cancellable via the subtree walk, and
-    // scopes `CURRENT_TASK` so the turns the chain spawns nest under it. Each turn
-    // is individually killable and visible; a cancel does NOT reliably kill the
-    // chain past the first hop (orphans are re-parented, exactly as in python).
-    if reply.get("error").is_none() && stopped.is_none() {
-        let text = reply
-            .get("response")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let route_kernel = Arc::clone(kernel);
-        let route_self = agent_id.clone();
-        let route_client = client_id.clone();
-        // The route runs as its own task: this reply waits for none of the
-        // routed calls.
-        let deadline = crate::route::route_deadline(kernel);
-        kernel.spawn_task(agent_id, "route_reply", async move {
-            crate::route::route_reply(
-                route_self,
-                route_kernel,
-                text,
-                route_client,
-                send_to,
-                // THE ROUTE DEFAULT DEADLINE (root `send_timeout`, else the env /
-                // 600 s), threaded to every call the router dispatches. The
-                // kernel defaults nothing. `timeout_secs` stays the generation
-                // ceiling.
-                deadline,
-                cfg.model_window,
-                message_id,
-                call_streams,
-                cut,
-            )
-            .await;
-        });
-    }
-    Ok(reply)
+    Ok(json!({"accepted": true, "re": row, "client_id": client_id}))
 }
-
-/// A handler RAISE with python's exception text. The kernel settles a bundle
-/// `Err` as `{error: <Display>, raised: true}`, and python's settle spells that
-/// `f"{type(e).__name__}: {e}"` — a provider failure is a `RuntimeError`, a
-/// record field the backend cannot run without a `ValueError`.
-#[derive(Debug)]
-struct PythonRaise(&'static str, String);
-
-impl std::fmt::Display for PythonRaise {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.0, self.1)
-    }
-}
-
-impl std::error::Error for PythonRaise {}
 
 // ── inquiry ─────────────────────────────────────────────────────────────────
 
@@ -1666,17 +837,25 @@ pub fn inquiry_text(args: &Inquiry) -> String {
     text
 }
 
-/// Accept an `inquiry` (FULLY ASYNC): register it as open on
-/// its own chain, run that chain detached, and answer at once
-/// `{accepted, re, request_id}`. The answer the model gives with `inquiry_answer`
-/// in ANY turn of that chain — or the news that it ended without one — reaches
-/// the asker later as a message under this call's pid (`crate::route`).
-pub fn inquiry_accept(
+/// Accept an `inquiry` (FULLY ASYNC): register it as open under its own client id,
+/// store it as a message and wake on it, and answer at once `{accepted, re,
+/// request_id}`. The answer the model gives with `inquiry_answer` in any later pass —
+/// or the news that a pass failed or stopped without one — reaches the asker later as
+/// a message under this call's pid (`crate::route`).
+///
+/// # Errors
+/// The memory store refused the inquiry's row.
+pub async fn inquiry_accept(
     agent_id: &AgentId,
     args: &Inquiry,
     text: &str,
     kernel: &Arc<Kernel>,
-) -> Value {
+) -> Result<Value, BundleError> {
+    if let Err(e) = crate::memory::store_of(agent_id, kernel) {
+        let mut r = refusal(MISSING_ARG, e.0);
+        with(&mut r, "arg", json!("memory_store_id"));
+        return Ok(r);
+    }
     let asker = fantastic_kernel::current_origin().map(|a| a.as_str().to_string());
     let task = fantastic_kernel::current_task();
     let pid = task.map_or_else(|| "-".to_string(), |t| t.0.to_string());
@@ -1689,24 +868,26 @@ pub fn inquiry_accept(
         .insert(
             (agent_id.as_str().to_string(), client.clone()),
             crate::route::OpenInquiry {
-                asker,
+                asker: asker.clone(),
                 pid,
                 reply_client,
                 request_id: request_id.clone(),
             },
         );
-    crate::route::deliver_soon(
-        kernel,
-        agent_id.as_str(),
+    let origin = asker.unwrap_or_else(|| client.clone());
+    let m = crate::life::Incoming {
         text,
-        &client,
-        false,
-    );
-    json!({
+        client_id: &client,
+        origin: &origin,
+        notice: false,
+        attached: None,
+    };
+    crate::life::arrive(kernel, agent_id, &m, true).await?;
+    Ok(json!({
         "accepted": true,
         "re": task.map_or(Value::Null, |t| json!(t.0)),
         "request_id": request_id,
-    })
+    }))
 }
 
 // ── boot, the row event, context by grant ───────────────────────────────────
@@ -1715,20 +896,17 @@ pub fn inquiry_accept(
 /// store (fail loud otherwise), starts a new incarnation, and marks the view for
 /// rebuilding — the first call reads the head from the store and runs
 /// `context_recall`. Python `_make_boot`. The store reads: whether the agent is
-/// paused (its last `pause`/`resume` row) — a paused agent says `paused` (#714) — and,
-/// when its record offers `line_summary`, its last line (#709); a store that refuses
-/// either read refuses the boot. After a kernel restart, the calls
-/// the previous process cut that concern this agent come to it as one notice turn
-/// ([`crate::route::resume_cut`]).
+/// paused (its last `pause`/`resume` row) — a paused agent says `paused` (#714) —,
+/// when its record offers `line_summary`, its last line (#709), and the messages stored
+/// after its last answer, which one pass reads (#795); a store that refuses a read
+/// refuses the boot. After a kernel restart, the calls the previous process cut that
+/// concern this agent come to it as one notice ([`crate::route::resume_cut`]).
 pub async fn boot(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     crate::state::bump_incarnation(agent_id);
-    // ONE CHAIN PER AGENT (#227): a new incarnation starts with no chain. Held
-    // senders are dropped here, so their callers get the cancelled shape (Bug 2).
-    state_for(agent_id)
-        .chain
-        .lock()
-        .expect("chain poisoned")
-        .reset("send: the agent rebooted before a turn read this message");
+    // A new incarnation starts with no pass: a request of the previous one that settles
+    // now acts on nothing.
+    crate::life::abandon(agent_id);
+    *state_for(agent_id).current_meta.lock().expect("current poisoned") = None;
     if let Err(e) = crate::memory::store_of(agent_id, kernel) {
         let mut r = refusal(MISSING_ARG, e.0);
         with(&mut r, "arg", json!("memory_store_id"));
@@ -1748,13 +926,19 @@ pub async fn boot(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     if let Err(e) = crate::pause::announce_at_boot(agent_id, kernel).await {
         return refusal(fantastic_kernel::refusal::STORE_REFUSED, e.0);
     }
+    // THE MESSAGES STORED AND NOT READ (the process stopped first) are read by a pass
+    // (#795): nothing acked is lost
+    if let Err(e) = crate::life::restore_unread(kernel, agent_id).await {
+        return refusal(fantastic_kernel::refusal::STORE_REFUSED, e.0);
+    }
     // the chat's current line: the last `line_summary` its history holds (#709)
     if let Err(e) = crate::line_summary::restore(agent_id, kernel).await {
         return refusal(fantastic_kernel::refusal::STORE_REFUSED, e.0);
     }
-    // A CHAIN THE RESTART CUT (#726) goes on: what the previous process left in
-    // flight is a dead letter now, and this agent is told, once.
-    crate::route::resume_cut(kernel, agent_id, &kernel.take_cut(agent_id));
+    // WORK THE RESTART CUT (#726) goes on: what the previous process left in flight is
+    // a dead letter now, and this agent is told, once.
+    crate::route::resume_cut(kernel, agent_id, &kernel.take_cut(agent_id)).await;
+    crate::life::wake(kernel, agent_id);
     Value::Null
 }
 
@@ -1832,17 +1016,21 @@ pub async fn handle<F, R>(
     reflect: R,
 ) -> Result<Value, BundleError>
 where
-    F: Fn(&str) -> Arc<dyn Provider>,
+    F: Fn(&str) -> Arc<dyn Provider> + Send + Sync + 'static,
     R: FnOnce() -> Value,
 {
     use crate::declared::chat::Call;
+    // HOW THIS AGENT'S PASSES REACH THEIR MODEL, kept for the passes that start outside a
+    // call to it (a reply's wake, the next pass over what arrived meanwhile)
+    let provider_for: crate::state::ProviderFor = Arc::new(provider_for);
+    *state_for(agent_id).machine.lock().expect("machine poisoned") = Some(crate::state::Machine {
+        provider: Arc::clone(&provider_for),
+        cfg,
+    });
     let reply = match call {
         Call::Reflect(_) => crate::line_summary::with_line(agent_id, kernel, reflect()),
         Call::Boot(_) => boot(agent_id, kernel).await,
-        Call::Send(a) => {
-            let client = safe_client(&a.client_id);
-            send(provider_for(&client), agent_id, &a, kernel, cfg).await?
-        }
+        Call::Send(a) => send(agent_id, &a, kernel, cfg).await?,
         // A receiver of this agent's streaming parts stops the generation.
         Call::Stop(a) => stop(agent_id, a.stream_id.as_deref(), kernel).await,
         // What the agent HOLDS in memory — its loaded head, never a store read.
@@ -1852,7 +1040,7 @@ where
         // same call either way.
         Call::Inquiry(a) => {
             let text = inquiry_text(&a);
-            inquiry_accept(agent_id, &a, &text, kernel)
+            inquiry_accept(agent_id, &a, &text, kernel).await?
         }
         Call::History(a) => history(agent_id, &a, kernel, cfg.model_window).await?,
         // A CARD in the chat: a host agent's panel, shown inline (#339).
@@ -1880,6 +1068,7 @@ where
                 pass.as_ref(),
                 cfg.model_window,
                 None,
+                &[],
             )
             .await?
         }

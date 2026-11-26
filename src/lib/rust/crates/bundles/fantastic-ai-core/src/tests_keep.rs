@@ -8,11 +8,11 @@ use crate::constants::{AUTOFOLD_AT, KEEP_SUMMARY_MAX};
 const DONE: &str = "<call name=\"done\"></call>";
 
 async fn say(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) {
-    let _ = kernel
+    let _ = crate::tests::settled(kernel, kernel
         .operator_send(vec![Item::new(
             agent.clone(),
             json!({"type": "send", "text": text, "client_id": "probe"}),
-        )])
+        )]))
         .await;
 }
 

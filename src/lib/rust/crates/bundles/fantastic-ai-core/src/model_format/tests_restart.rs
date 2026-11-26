@@ -64,7 +64,7 @@ use super::tests_cache::{conv, decl_of, finish, open, plain, refs, rows_n, run, 
 use super::tests_determinism::{recorded, rendered_history, rules_digest};
 use super::tests_trace::{
     answered, assembled, chat_on, generate, names, operator, restart, set_model, store,
-    store_agent, traces_of, verb, Scripted, Step, DONE, FOREIGN, PLAIN, QWEN,
+    store_agent, traces, traces_of, verb, Scripted, Step, DONE, FOREIGN, PLAIN, QWEN,
 };
 use super::Renderer;
 use crate::provider::ProviderReport;
@@ -428,9 +428,47 @@ async fn clean_restart_cold_then_warm() {
     }
 }
 
+/// The boot pass of a restarted chat is the chat's mock bundle's: script what it answers
+/// BEFORE the restart (the bundle reads its script when the pass starts): the summary
+/// of the recall the boot owes (`recall_due`, a task pass), then `kind`'s `done`.
+fn boot_script(chat: &str, kind: &str) -> Arc<crate::tests::MockScript> {
+    let done = if kind == hermes::NAME { H_DONE } else { DONE };
+    crate::tests::script(
+        &AgentId::from(chat),
+        vec![
+            crate::tests::pass("the work so far, recalled\n\nwhat was read."),
+            crate::tests::pass(done),
+        ],
+        Duration::ZERO,
+    )
+}
+
+/// The turn requests (a system message first) the mock bundle's `script` served.
+fn boot_requests(script: &crate::tests::MockScript) -> Vec<Vec<Value>> {
+    (0..script.passes_served())
+        .map(|n| script.request_messages(n))
+        .filter(|r| r.first().is_some_and(|m| m["role"] == json!("system")))
+        .collect()
+}
+
+/// The newest `render_*` trace row of the chat.
+async fn last_render(site: &Site) -> Value {
+    traces(&site.kernel, &site.agent)
+        .await
+        .into_iter()
+        .rev()
+        .find(|r| {
+            r["event"]
+                .as_str()
+                .is_some_and(|e| e.starts_with("render_"))
+        })
+        .expect("a render row")
+}
+
 /// A crash at the point `steps` leave the pass in (the last one holds it), for `kind`:
-/// nothing of the send is in the store, the new cache is empty before its first pass,
-/// and the next send starts at attempt 1 with the pre-stop bytes and none of `dead`.
+/// only the send's arriving row is stored (the ack was owed, #795), the restart's boot
+/// runs ONE pass over that unread row, and it starts at attempt 1, cold, with the
+/// pre-stop bytes and none of `dead`.
 async fn crash_at(kind: &str, model: &str, steps: Vec<Step>, what: &str, dead: &[&str]) {
     let tmp = TempDir::new().unwrap();
     let chat = format!("rs_{what}_{kind}");
@@ -447,23 +485,27 @@ async fn crash_at(kind: &str, model: &str, steps: Vec<Step>, what: &str, dead: &
     let mut fut = pass_future(&s, &p, &format!("{chat}_dead"));
     let probe = Arc::clone(&p);
     drive(&mut fut, move || probe.asked().len() >= asked + n, what).await;
+    let mid = store(&s.kernel, &s.agent).await;
     assert_eq!(
-        store(&s.kernel, &s.agent).await,
-        before,
+        mid[..before.len()],
+        before[..],
         "{what} {kind}: the store is as before the send"
     );
+    assert_eq!(
+        mid.len(),
+        before.len() + 1,
+        "{what} {kind}: only the arriving row of the send is stored: {:?}",
+        &mid[before.len()..]
+    );
+    let arrived = &mid[before.len()];
+    assert_eq!(arrived["role"], json!("user"), "{what} {kind}");
+    assert_eq!(arrived["content"], json!("go"), "{what} {kind}");
     let ids = s.crash(fut);
 
+    let boot = boot_script(&chat, kind);
     let s = site(tmp.path(), &chat, fields, ids).await;
-    assert_eq!(
-        empty_cache(&s.agent),
-        (0, 0, 0),
-        "{what} {kind}: no entry, chain or pin before the first pass"
-    );
-    assert_eq!(store(&s.kernel, &s.agent).await, before, "{what} {kind}");
-    let p = Scripted::new(model, vec![]);
-    answered(&s.kernel, &s.agent, &p, &format!("{chat}_after")).await;
-    let asked = turn_requests(&p);
+    assert!(crate::tests::settle(&s.kernel).await, "{what} {kind}: quiet");
+    let asked = boot_requests(&boot);
     assert_eq!(asked.len(), 1, "{what} {kind}: one request");
     let now = &asked[0];
     let owed = owed_rows(&s.kernel, &s.agent, &before).await;
@@ -482,6 +524,10 @@ async fn crash_at(kind: &str, model: &str, steps: Vec<Step>, what: &str, dead: &
             );
         }
     }
+    // a new state's cache holds nothing before the boot pass: it renders cold, keeping 0
+    let cold = last_render(&s).await;
+    assert_eq!(cold["event"], json!("render_cold"), "{what} {kind}: {cold}");
+    assert_eq!(cold["kept"], json!(0), "{what} {kind}: {cold}");
     s.stop();
 }
 
@@ -828,7 +874,8 @@ async fn partial_rows_recover() {
     }
     let base = store(&kernel, &a).await;
     let pre = unowned(&assembled(&kernel, &a).await[1..]);
-    let complete = pre.len() - 1;
+    // every shown message is a stored row: the arriving message is a row now (#795)
+    let complete = pre.len();
     let turns: Vec<i64> = base
         .iter()
         .filter(|r| r.get("role").is_some() && r.get("kind").is_none())
@@ -1028,21 +1075,30 @@ async fn killed_process_recovers() {
         let pre = read_json(&tmp.path().join("pre.json"));
         let pre_req: Vec<Value> = pre["request"].as_array().cloned().unwrap();
 
+        // the killed send's arriving row is stored (the ack was owed, #795), nothing else
+        // of it; the boot runs ONE pass over that unread row, scripted before the restart
+        let boot = boot_script("rs7_chat", "default");
         let s = site(tmp.path(), "rs7_chat", json!({"model": PLAIN}), ids).await;
+        assert!(crate::tests::settle(&s.kernel).await, "{role}: quiet");
         let rows = store(&s.kernel, &s.agent).await;
+        let pre_rows = pre["rows"].as_array().cloned().unwrap();
         assert_eq!(
-            &Value::Array(rows.clone()),
-            &pre["rows"],
-            "{role}: no row of the send"
+            rows[..pre_rows.len()],
+            pre_rows[..],
+            "{role}: the rows before the send"
         );
-        let rows_before = rows.clone();
+        let arrived = &rows[pre_rows.len()];
+        assert_eq!(
+            (arrived["role"].clone(), arrived["content"].clone()),
+            (json!("user"), json!("go")),
+            "{role}: the arriving row of the send"
+        );
+        let rows_before = pre_rows.clone();
         let text = Value::Array(rows).to_string();
         for dead in ["STREAMING-THE-ANSWER", "STREAMING-THE-REASK", "invoke name"] {
             assert!(!text.contains(dead), "{role}: {dead:?} is stored");
         }
-        let p = Scripted::new(PLAIN, vec![]);
-        answered(&s.kernel, &s.agent, &p, "rs7_after").await;
-        let asked = turn_requests(&p);
+        let asked = boot_requests(&boot);
         assert_eq!(asked.len(), 1, "{role}");
         let owed = owed_rows(&s.kernel, &s.agent, &rows_before).await;
         assert_eq!(
@@ -1570,6 +1626,9 @@ async fn reload_order_kept() {
                 assert!(out.get("error").is_none(), "{out}");
             }
         }
+        // answered: a recall or fold row after the last answer is read by the boot as
+        // an unread message, and the pass it runs would add rows to the compared store
+        save(&s, &[json!({"role": "assistant", "content": "answered"})]).await;
         let pre_rows = store(&s.kernel, &s.agent).await;
         let pre_view = assembled(&s.kernel, &s.agent).await;
         let ids = s.stop();
@@ -1587,7 +1646,11 @@ async fn reload_order_kept() {
         assert_eq!(view[1..], pre_view[1..], "{point}: the view's bytes");
         let new = save(
             &s,
-            &[json!({"role": "user", "content": format!("after the {point} stop")})],
+            &[
+                json!({"role": "user", "content": format!("after the {point} stop")}),
+                // answered: an unread user row would make the next boot run a pass
+                json!({"role": "assistant", "content": "noted"}),
+            ],
         )
         .await[0];
         assert!(
@@ -1650,7 +1713,7 @@ async fn row_during_summary_keeps_its_place() {
     );
     let mid = save(
         &s,
-        &[json!({"role": "user", "content": "written while the summary was"})],
+        &[json!({"role": "assistant", "content": "written while the summary was"})],
     )
     .await[0];
     gate.notify_one();
@@ -1662,6 +1725,8 @@ async fn row_during_summary_keeps_its_place() {
         fid > mid,
         "the fold's id {fid} is not above the row's {mid}"
     );
+    // answered: a fold row after the last answer is read by the boot as an unread message
+    save(&s, &[json!({"role": "assistant", "content": "answered"})]).await;
     let pre_rows = store(&s.kernel, &s.agent).await;
     let at = |id: i64| pre_rows.iter().position(|r| r["id"] == json!(id)).unwrap();
     assert!(at(mid) < at(fid), "the row is stored before the fold");

@@ -1726,9 +1726,10 @@ async fn task_pass_leaves_cache() {
 }
 
 // K35
-/// A second send of one chat waits on the turn lock behind the running one: its view
-/// is built only after the first pass ended (its pins released, its chain kept), and
-/// both views equal the two passes run one after the other.
+/// A chat runs one pass at a time (#795: the next pass starts once the one in flight
+/// ended): the second pass's view is built only after the first pass ended (its pins
+/// released, its chain kept), and both views equal the two passes run one after the
+/// other.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn queued_turn_serial() {
     let first = conv(&refs(&called_rows(6)), "go");
@@ -1738,29 +1739,28 @@ async fn queued_turn_serial() {
     let pass = Arc::new(pass);
     let (held_tx, held_rx) = tokio::sync::oneshot::channel::<()>();
     let (go_tx, go_rx) = tokio::sync::oneshot::channel::<()>();
+    let (ended_tx, ended_rx) = tokio::sync::oneshot::channel::<()>();
     let running = tokio::spawn({
-        let (pass, state, first) = (Arc::clone(&pass), Arc::clone(&state), first.clone());
+        let (pass, first) = (Arc::clone(&pass), first.clone());
         async move {
-            let _turn = state.lock.lock().await;
             let view = pass.view(&first, &Map::new());
             held_tx.send(()).unwrap();
             go_rx.await.unwrap();
-            finish(view)
+            let out = finish(view);
+            ended_tx.send(()).unwrap();
+            out
         }
     });
     held_rx.await.unwrap();
     let queued = tokio::spawn({
         let (pass, state, second) = (Arc::clone(&pass), Arc::clone(&state), second.clone());
         async move {
-            let _turn = state.lock.lock().await;
+            // the next pass starts once the one in flight ended
+            ended_rx.await.unwrap();
             let at_start = state.render_cache.stats();
             (at_start, turn_of(&pass, &second))
         }
     });
-    assert!(
-        state.lock.try_lock().is_err(),
-        "the first send holds the turn"
-    );
     assert!(
         state.render_cache.stats().pins > 0,
         "the running pass holds its pins"

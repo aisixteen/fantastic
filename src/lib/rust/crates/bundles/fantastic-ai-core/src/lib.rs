@@ -3,13 +3,14 @@
 //! supply only their `Provider` impl + a thin `Bundle` that dispatches verbs
 //! through this crate.
 //!
-//! A backend does ONE provider pass per `send` — **no loop, no agent menu**. But
-//! tool-calling IS this crate's, and RAW: the provider streams plain text, [`tool_parse`]
-//! reads the `<call name=…>` envelope out of it, and [`route`] dispatches what the
-//! completion named, delivering each reply to its own `reply_to`. A chain advances
-//! one pass at a time and only because the model asked again — no call ends the
-//! turn, and stop is the default. Nothing iterates on the model's behalf, and no
-//! provider's native tool API is ever used.
+//! An AI agent is a MACHINE WOKEN BY MESSAGES (#795, [`life`]): every message is
+//! stored and acked, and one pass at a time reads every message not read yet — **no
+//! loop, no agent menu, no waits**. Tool-calling IS this crate's, and RAW: the
+//! provider's answer is plain text, [`tool_parse`] reads the `<call name=…>` envelope
+//! out of it, and [`route`] sends each call the answer named; each reply comes back
+//! later as a message to its own `reply_to`. The model decides what to answer, when
+//! and to whom. Nothing iterates on the model's behalf, and no provider's native tool
+//! API is ever used.
 //!
 //! The other thing the backend owns, because it owns the per-client conversation,
 //! is **context management**: per-client history, auto-compaction on overflow, and
@@ -18,10 +19,10 @@
 //!
 //! Two layers (mirroring the Python `ai_core`):
 //!
-//!  1. PROCESS-GLOBAL STATE keyed by agent id ([`state`]): the FIFO lock,
-//!     current/queue status entries, projection/compaction bookkeeping. Keyed by
-//!     id so multiple backends coexist in one kernel. No task handle — the
-//!     kernel's task table owns in-flight work.
+//!  1. PROCESS-GLOBAL STATE keyed by agent id ([`state`]): the agent's life (a pass
+//!     running, the unread messages, the calls in flight), the pass's status entry,
+//!     projection/compaction bookkeeping. Keyed by id so multiple backends coexist in
+//!     one kernel. No task handle — the kernel's task table owns in-flight work.
 //!
 //!  2. PER-BACKEND CONFIG ([`agent_loop::BackendConfig`]): the caller route
 //!     (cli round-trip vs per-client inbox) + error-name prefix. The
@@ -34,23 +35,20 @@
 //! ### Verbs
 //!
 //! Declared once in [`declared`] (one struct per verb); `reflect` and `docs` render
-//! them. A `send` is ONE pass, then [`route`] honours where its output was addressed
-//! (the model's own `<call>`s first, else `send_to`). ONE CHAIN PER AGENT: a message
-//! that lands while the agent's chain is alive is HELD and answered by the pass that
-//! reads it.
+//! them. A `send` stores its message and acks (`{accepted, re, client_id}`); the pass
+//! that reads it routes the model's own `<call>`s ([`route`]). A message that lands
+//! while a pass runs is read by exactly one next pass.
 //!
-//! There is NO `interrupt` verb: a `send` IS a kernel task, so an in-flight
-//! generation is cancelled with the SUBSTRATE's universal `ps` + `cancel`
-//! (`send "kernel" {type:"cancel", task_id:"<agent>:<n>"}`) — which runs this
-//! crate's [`verbs::on_cancel`] hook (close the turn out: clear the in-flight
-//! entry, emit the final `status(done, reason=cancelled)` + `done`) and then
-//! drops the generation's future, freeing the provider stream and the FIFO
-//! guard. Cancellation belongs to the one primitive, not to one bundle.
+//! There is NO `interrupt` verb: a pass's request is a kernel execution (the
+//! provider's `complete`), so it is cancelled with the SUBSTRATE's universal `ps` +
+//! `cancel`, and the cancelled settle ends the pass as stopped (its open parts abort,
+//! a marker row, `status(done, reason=cancelled)`). `stop` does the same from the
+//! agent's side. Cancellation belongs to the one primitive, not to one bundle.
 //!
 //! ### Events (backend → caller's inbox, via the route)
 //!
 //! - `{type:"status", source, client_id, ts, phase, detail}` where `phase` ∈
-//!   `queued|thinking|streaming|retrying` while a call runs; a call ENDS on
+//!   `thinking|streaming|retrying` while a pass runs; a pass ENDS on
 //!   `done` (reason `ok`, `cancelled`) or `failed` (reason `error`, `timeout`,
 //!   `gave_up`); outside a call, `paused` (the pause verb, or a boot whose store says paused)
 //!   and `idle` (a resume with nothing held).
@@ -97,6 +95,7 @@ pub mod fork;
 pub mod helpers;
 pub mod history_view;
 mod images;
+mod life;
 pub mod line_summary;
 pub mod memory;
 mod model_format;
@@ -118,10 +117,9 @@ mod used;
 pub mod verbs;
 pub mod view;
 
-pub use agent_loop::{run_generation, BackendConfig};
+pub use agent_loop::BackendConfig;
 pub use constants::{CHAT_CARD_MAX_HEIGHT, USAGE_KEYS};
 pub use provider::{Provider, ProviderEvent, ProviderStream};
-pub use route::route_reply;
 pub use think::{without_thinking, ThinkWrap, THINK_CLOSE, THINK_OPEN};
 pub use verbs::SEND_TIMEOUT_SECS;
 

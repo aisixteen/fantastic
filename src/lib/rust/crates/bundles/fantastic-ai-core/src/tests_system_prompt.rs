@@ -26,8 +26,8 @@ async fn set_record_prompt(kernel: &Arc<Kernel>, backend: &AgentId, v: Value) ->
 }
 
 async fn say(kernel: &Arc<Kernel>, backend: &AgentId, payload: Value) {
-    let _ = kernel
-        .operator_send(vec![Item::new(backend.clone(), payload)])
+    let _ = crate::tests::settled(kernel, kernel
+        .operator_send(vec![Item::new(backend.clone(), payload)]))
         .await
         .remove(0)
         .result;
@@ -64,11 +64,11 @@ async fn the_record_prompt_is_the_system_block_of_a_main_and_a_reply_woken_turn(
 async fn a_send_takes_no_system_prompt() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "sp_call").await;
-    let r = kernel
+    let r = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "system_prompt": "call role"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;

@@ -37,7 +37,7 @@ async fn turn(
     for (k, v) in extra.as_object().cloned().unwrap_or_default() {
         p[k] = v;
     }
-    let _ = kernel.operator_send(vec![Item::new(backend.clone(), p)])
+    let _ = crate::tests::settled(kernel, kernel.operator_send(vec![Item::new(backend.clone(), p)]))
         .await
         .remove(0)
         .result;
@@ -45,32 +45,35 @@ async fn turn(
     system_of(s, n - 1)
 }
 
-/// A call that must fail loud: its reply names the reason, the model is not
-/// called, and the call ends `failed` (reason `error`) on the agent's inbox.
+/// A pass that must fail loud: the model is not called, and the pass ends `failed`
+/// (reason `error`) on the agent's inbox, its `error` naming why — `{error}`. The
+/// message itself was acked when it was stored (#795).
 async fn failed_turn(kernel: &Arc<Kernel>, backend: &AgentId, s: &Arc<MockScript>) -> Value {
     let mut rx = rebind_backend_inbox(kernel, backend);
     let before = s.passes_served();
-    let r = kernel.operator_send(vec![Item::new(
+    let r = crate::tests::settled(kernel, kernel.operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
-    assert_eq!(r["reason"], "invalid_meta", "{r}");
+    assert_eq!(r["accepted"], json!(true), "{r}");
     assert_eq!(
         s.passes_served(),
         before,
         "the model was called on another block"
     );
     let evs = drain(&mut rx).await;
-    assert!(
-        evs.iter().any(|e| e["type"] == json!("status")
-            && e["phase"] == json!("failed")
-            && e["detail"]["reason"] == json!("error")),
-        "{evs:#?}"
-    );
-    r
+    let failed = evs
+        .iter()
+        .find(|e| {
+            e["type"] == json!("status")
+                && e["phase"] == json!("failed")
+                && e["detail"]["reason"] == json!("error")
+        })
+        .unwrap_or_else(|| panic!("{evs:#?}"));
+    json!({"error": failed["detail"]["error"]})
 }
 
 /// Name a file view of `prompt.md` on the harness's own leg, with the agent's line on it.
@@ -236,10 +239,10 @@ async fn a_missing_file_fails_the_turn_until_it_appears() {
     for _ in 1..=10 {
         tokio::time::sleep(Duration::from_millis(200)).await;
         let before = s.passes_served();
-        let _ = kernel.operator_send(vec![Item::new(
+        let _ = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(
                 backend.clone(),
                 json!({"type": "send", "text": "go"}),
-            )])
+            )]))
             .await
             .remove(0)
             .result;

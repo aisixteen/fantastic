@@ -76,12 +76,55 @@ impl Fx {
         assert!(r.get("error").is_none(), "{r}");
     }
 
-    async fn send(&self, text: &str, extra: Value) -> Value {
+    /// A send's ack, at once: the pass runs after it.
+    async fn send_ack(&self, text: &str, extra: Value) -> Value {
         let mut payload = json!({"type": "send", "text": text});
         for (key, v) in obj(extra) {
             payload[key] = v;
         }
-        self.call(payload).await
+        let ack = self.call(payload).await;
+        assert_eq!(ack["accepted"], json!(true), "{ack}");
+        ack
+    }
+
+    /// A send, then every agent quiet: its ack.
+    async fn send(&self, text: &str, extra: Value) -> Value {
+        let ack = self.send_ack(text, extra).await;
+        assert!(
+            fantastic_ai_core::state::settle(&self.k, Duration::from_secs(20)).await,
+            "the agents never went quiet"
+        );
+        ack
+    }
+
+    /// The chat's conversation rows, as it holds them.
+    async fn chat_rows(&self) -> Vec<Value> {
+        self.call(json!({"type": "rows"})).await["rows"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The content of the chat's newest assistant row: its last pass's answer.
+    async fn last_answer(&self) -> String {
+        self.chat_rows()
+            .await
+            .iter()
+            .rev()
+            .find(|r| r["role"] == "assistant")
+            .and_then(|r| r["content"].as_str())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// The contents of the chat's error rows: each failed pass's.
+    async fn error_rows(&self) -> Vec<String> {
+        self.chat_rows()
+            .await
+            .iter()
+            .filter(|r| r["kind"] == "error")
+            .filter_map(|r| r["content"].as_str().map(str::to_string))
+            .collect()
     }
 }
 
@@ -596,13 +639,9 @@ async fn a_send_streams_the_engines_text_and_replays_the_conversation_next_turn(
     assert_eq!(fx.created["id"], json!(fx.id), "{}", fx.created);
     fx.chat_knobs(json!({"temperature": 0.1, "max_tokens": 300}))
         .await;
-    let one = fx.send("hi", json!({})).await;
-    assert!(
-        one["response"]
-            .as_str()
-            .is_some_and(|r| r.starts_with("first ")),
-        "{one}"
-    );
+    fx.send("hi", json!({})).await;
+    let one = fx.last_answer().await;
+    assert!(one.starts_with("first "), "{one}");
     let req0 = engine.requests()[0].clone();
     assert!(
         !req0.instructions.is_empty(),
@@ -616,13 +655,9 @@ async fn a_send_streams_the_engines_text_and_replays_the_conversation_next_turn(
     let status = fx.call(json!({"type": "context_status"})).await;
     assert_eq!(status["reported_prompt_tokens"], json!(1200), "{status}");
 
-    let two = fx.send("again", json!({})).await;
-    assert!(
-        two["response"]
-            .as_str()
-            .is_some_and(|r| r.starts_with("second")),
-        "{two}"
-    );
+    fx.send("again", json!({})).await;
+    let two = fx.last_answer().await;
+    assert!(two.starts_with("second"), "{two}");
     let reqs = engine.requests();
     assert_eq!(reqs.len(), 2, "{reqs:?}");
     let roles: Vec<&str> = reqs[1].turns.iter().map(|t| t.role.as_str()).collect();
@@ -651,11 +686,9 @@ async fn a_lean_system_prompt_turn_runs_in_the_real_on_device_window() {
     )
     .await;
     assert!(up.get("error").is_none(), "{up}");
-    let r = fx.send("hi", json!({})).await;
-    assert!(
-        r["response"].as_str().is_some_and(|t| t.starts_with("ok ")),
-        "{r}"
-    );
+    fx.send("hi", json!({})).await;
+    let r = fx.last_answer().await;
+    assert!(r.starts_with("ok "), "{r}");
     let instructions: Vec<String> = engine
         .requests()
         .into_iter()
@@ -671,11 +704,9 @@ async fn the_default_system_block_fits_the_on_device_window() {
     // with no `system_prompt`.
     let engine = Arc::new(FakeEngine::new().context_size(4096));
     let fx = kernel(&engine, json!({})).await;
-    let r = fx.send("hi", json!({})).await;
-    assert!(
-        r["response"].as_str().is_some_and(|t| t.starts_with("ok ")),
-        "{r}"
-    );
+    fx.send("hi", json!({})).await;
+    let r = fx.last_answer().await;
+    assert!(r.starts_with("ok "), "{r}");
     assert!(!engine.requests().is_empty(), "the model is called");
 }
 
@@ -688,15 +719,13 @@ async fn a_send_on_an_unavailable_model_fails_loud_naming_the_reason() {
         json!(fx.id),
         "creating the agent needs no model"
     );
-    let r = fx.send("hi", json!({})).await;
-    assert_eq!(
-        r["error"],
-        json!(format!(
-            "RuntimeError: foundation_models_backend: the on-device model is unavailable: {}",
-            FmReason::APPLE_INTELLIGENCE_NOT_ENABLED
-        )),
-        "{r}"
+    fx.send("hi", json!({})).await;
+    let errs = fx.error_rows().await;
+    let want = format!(
+        "foundation_models_backend: the on-device model is unavailable: {}",
+        FmReason::APPLE_INTELLIGENCE_NOT_ENABLED
     );
+    assert!(errs.iter().any(|e| e.contains(&want)), "{errs:?}");
     assert!(
         engine.requests().is_empty(),
         "nothing reached the engine — and nothing else either"
@@ -733,15 +762,13 @@ async fn unavailability_is_named_before_the_window_is_judged() {
             .unavailable(FmReason::DEVICE_NOT_ELIGIBLE),
     );
     let fx = kernel(&engine, json!({})).await;
-    let r = fx.send("hi", json!({})).await;
-    assert_eq!(
-        r["error"],
-        json!(format!(
-            "RuntimeError: foundation_models_backend: the on-device model is unavailable: {}",
-            FmReason::DEVICE_NOT_ELIGIBLE
-        )),
-        "{r}"
+    fx.send("hi", json!({})).await;
+    let errs = fx.error_rows().await;
+    let want = format!(
+        "foundation_models_backend: the on-device model is unavailable: {}",
+        FmReason::DEVICE_NOT_ELIGIBLE
     );
+    assert!(errs.iter().any(|e| e.contains(&want)), "{errs:?}");
     assert!(engine.requests().is_empty());
 }
 
@@ -749,16 +776,14 @@ async fn unavailability_is_named_before_the_window_is_judged() {
 async fn a_kernel_cancel_of_the_send_cancels_the_on_device_stream() {
     let engine = Arc::new(FakeEngine::new().hang());
     let fx = Arc::new(kernel(&engine, json!({})).await);
-    let fx2 = Arc::clone(&fx);
-    let join = tokio::spawn(async move { fx2.send("hi", json!({})).await });
+    fx.send_ack("hi", json!({})).await;
     // wait for the generation to be in flight: the chat's turn (its provider completes it)
-    let chat = pair_chat(&fx.k, &AgentId::from(fx.id.as_str())).await;
     let mut task_id = None;
     for _ in 0..200 {
         let table = call(&fx.k, "kernel", json!({"type": "ps"})).await;
         task_id = table["tasks"].as_array().and_then(|ts| {
             ts.iter()
-                .find(|t| t["agent"] == json!(chat.as_str()) && t["verb"] == json!("send"))
+                .find(|t| t["agent"] == json!(fx.id.as_str()) && t["verb"] == json!("complete"))
                 .and_then(|t| t["id"].as_i64())
         });
         if task_id.is_some() && !engine.requests().is_empty() {
@@ -766,7 +791,7 @@ async fn a_kernel_cancel_of_the_send_cancels_the_on_device_stream() {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let task_id = task_id.expect("the in-flight send must be in `ps`");
+    let task_id = task_id.expect("the in-flight request must be in `ps`");
     let r = call(
         &fx.k,
         "kernel",
@@ -774,11 +799,15 @@ async fn a_kernel_cancel_of_the_send_cancels_the_on_device_stream() {
     )
     .await;
     assert_eq!(r["cancelled"], json!(true), "{r}");
-    let reply = tokio::time::timeout(Duration::from_secs(5), join)
-        .await
-        .expect("the send must end once cancelled")
-        .unwrap();
-    assert_eq!(reply, json!({"cancelled": true}));
+    assert!(
+        fantastic_ai_core::state::settle(&fx.k, Duration::from_secs(5)).await,
+        "the pass must end once its request is cancelled"
+    );
+    assert!(
+        fx.chat_rows().await.iter().any(|r| r["kind"] == "stopped"),
+        "the cancelled pass ends as stopped: {:?}",
+        fx.chat_rows().await
+    );
     assert_eq!(engine.cancels(), 1, "the on-device stream was cancelled");
     let st = fx.call(json!({"type": "status"})).await;
     assert_eq!(st["generating"], json!(false));

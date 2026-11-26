@@ -43,7 +43,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use serde_json::{json, Map, Value};
 use sha2::{Digest as _, Sha256};
@@ -400,6 +400,7 @@ impl<H: Hasher> RenderCache<H> {
     /// chat `own` ([`super::map::message`]); `role`, `images` and `cache_mark` are carried
     /// unchanged. The returned [`View`] holds the pass's pins until it is finished or
     /// dropped.
+    #[cfg(test)]
     pub(crate) fn view<'c>(
         &'c self,
         decl: &Decl<'_>,
@@ -407,9 +408,35 @@ impl<H: Hasher> RenderCache<H> {
         shown: &[Shown],
         ctx: &Ctx<'_>,
     ) -> View<'c, H> {
+        Self::build(self, CacheRef::Borrowed(self), decl, own, shown, ctx)
+    }
+
+    /// [`Self::view`] holding the cache SHARED: a view that outlives the step that made
+    /// it (a pass waits for its request's settle as a message, #795).
+    pub(crate) fn view_shared(
+        self: &Arc<Self>,
+        decl: &Decl<'_>,
+        own: &str,
+        shown: &[Shown],
+        ctx: &Ctx<'_>,
+    ) -> View<'static, H>
+    where
+        H: 'static,
+    {
+        Self::build(&Arc::clone(self), CacheRef::Shared(Arc::clone(self), PhantomData), decl, own, shown, ctx)
+    }
+
+    fn build<'c>(
+        this: &Self,
+        cache: CacheRef<'c, H>,
+        decl: &Decl<'_>,
+        own: &str,
+        shown: &[Shown],
+        ctx: &Ctx<'_>,
+    ) -> View<'c, H> {
         let kind = decl.name;
         let (pass, kept_chain, last) = {
-            let mut inner = self.lock();
+            let mut inner = this.lock();
             if inner.epoch != Some(ctx.epoch) {
                 inner.clear();
                 inner.epoch = Some(ctx.epoch);
@@ -422,7 +449,7 @@ impl<H: Hasher> RenderCache<H> {
             )
         };
         let mut view = View {
-            cache: self,
+            cache,
             kind,
             messages: Vec::with_capacity(shown.len()),
             rows: 0,
@@ -446,7 +473,7 @@ impl<H: Hasher> RenderCache<H> {
             let content = match (cacheable, s.id) {
                 (true, Some(id)) => {
                     let (rendered, hit) =
-                        self.row(decl, own, &mut view, (kind, id), s, form, pass, ctx.bound);
+                        this.row(decl, own, &mut view, (kind, id), s, form, pass, ctx.bound);
                     hits += usize::from(hit);
                     view.rows += usize::from(!hit);
                     Value::String(rendered)
@@ -454,7 +481,7 @@ impl<H: Hasher> RenderCache<H> {
                 (_, id) => {
                     // an entry for a row that can no longer be cached is dropped
                     if let Some(id) = id {
-                        let mut inner = self.lock();
+                        let mut inner = this.lock();
                         let w = inner
                             .entries
                             .get(&(kind, id))
@@ -497,7 +524,7 @@ impl<H: Hasher> RenderCache<H> {
         });
         let warm = ctx
             .last_send
-            .is_some_and(|t| (self.clock)() - t <= CACHE_LIFETIME_SECS);
+            .is_some_and(|t| (this.clock)() - t <= CACHE_LIFETIME_SECS);
         view.kept_endpoint = if same_endpoint && warm { view.kept } else { 0 };
         view.cold = hits == 0;
         view
@@ -645,11 +672,32 @@ fn message_digest(m: &Value) -> Hash {
     sha(&[role.as_bytes(), content.as_bytes()])
 }
 
+/// How a view reaches its cache: borrowed for one step, or shared by a pass whose
+/// view outlives the step that made it.
+pub(crate) enum CacheRef<'c, H: Hasher> {
+    /// Borrowed (tests).
+    #[cfg(test)]
+    Borrowed(&'c RenderCache<H>),
+    /// Shared.
+    Shared(Arc<RenderCache<H>>, PhantomData<&'c ()>),
+}
+
+impl<H: Hasher> std::ops::Deref for CacheRef<'_, H> {
+    type Target = RenderCache<H>;
+    fn deref(&self) -> &RenderCache<H> {
+        match self {
+            #[cfg(test)]
+            Self::Borrowed(c) => c,
+            Self::Shared(c, _) => c,
+        }
+    }
+}
+
 /// One pass's view, with the pins it holds. [`View::finish`] ends the pass; a view
 /// dropped unfinished (a cancel, a failure, a rerun) releases its pins and keeps the
 /// chain of the last finished pass.
 pub(crate) struct View<'c, H: Hasher = Sha> {
-    cache: &'c RenderCache<H>,
+    cache: CacheRef<'c, H>,
     kind: &'static str,
     /// The messages to send: role, mapped content, images and cache mark.
     pub(crate) messages: Vec<Value>,

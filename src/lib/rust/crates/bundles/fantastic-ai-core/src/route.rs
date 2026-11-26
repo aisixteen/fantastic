@@ -1,34 +1,20 @@
-//! Reply routing — where ONE provider pass's output goes. Mirrors python
-//! `ai_core/core.py:_route_reply`, which is canonical.
+//! Reply routing — where one pass's answer goes (#795).
 //!
-//! After one provider pass, its output goes where it was ADDRESSED. Two paths,
-//! and the first is the model's:
+//! The model's own `<call>`s: each names a target, a payload and `reply_to`. Each goes
+//! out through [`Kernel::call`] — the ack at once, the settle later — and each reply is
+//! delivered, when it comes, as ONE message to its own `reply_to` (default: the agent
+//! itself), tagged `[reply to <pid> · <target> <verb> · ↑<answer> · k of M in batch
+//! <b>]`. Replies are never held until a batch is whole: each one wakes the agent, and
+//! the ones that land while a pass runs are read by its next pass. An ack of a message
+//! sent to another AI is stored and wakes nothing; a refusal wakes.
 //!
-//!   the model's own `<call>`s — each names a target, a payload and
-//!     `reply_to`. All are dispatched, and each reply is delivered to its own
-//!     `reply_to`. `reply_to:'self'` is what makes a chain, and the chain
-//!     continues ONLY because the model asked again. No call ends the turn: stop
-//!     is the default.
+//! Nothing here bounds how far the model goes, and nothing waits: every call is a `ps`
+//! row and `cancel` kills it, so a runaway is visible and killable exactly like a script
+//! agent's `while(true)`.
 //!
-//!   the caller's `send_to` — hands this pass's TEXT to another agent, once,
-//!     without propagating.
-//!
-//! Nothing here bounds how far the model goes. Every dispatch is a `ps` row and
-//! `cancel` kills a subtree, so a runaway is visible and killable exactly like a
-//! script agent's `while(true)`. Deciding how much thinking is allowed is not
-//! this module's call — and NO per-route timeout is added on purpose: N calls in
-//! one pass serialize into N turns inside one route task, and python deliberately
-//! bounds nothing there either.
-//!
-//! DETACHED is the one hard requirement. `BackendState::lock` is a non-reentrant
-//! `tokio::sync::Mutex`, so awaiting a self-addressed send from inside the holder
-//! would stall until the per-send ceiling (180s). Spawned as its own kernel task
-//! (see [`crate::verbs::send`]), the follow-up queues behind the current turn.
-//!
-//! The `_call_stack` recursion guard is NOT propagated from here: python's
-//! `_deliver` does not carry it either, and a `reply_to:self` chain that did
-//! would trip [`fantastic_kernel::call_guard`] as a false cycle on turn 2. The
-//! INBOUND check lives in [`crate::verbs::send`], before the lock.
+//! The `_call_stack` recursion guard is NOT propagated from here: a call the model
+//! makes to itself would trip [`fantastic_kernel::call_guard`] as a false cycle. The
+//! INBOUND check lives in [`crate::verbs::send`].
 
 use crate::events::emit_status;
 use crate::helpers::mint_batch_token;
@@ -80,186 +66,117 @@ pub fn no_payload_error(target: &str) -> String {
     )
 }
 
-/// Read the target's incarnation and hand `text` over — python's
-/// `_deliver_soon`, whose whole job is to capture `born` BEFORE the delivery
-/// runs. A delivery that crosses the target's next boot is recorded, not acted
-/// on (see [`deliver`]).
-pub(crate) fn deliver_soon(
-    kernel: &Arc<Kernel>,
-    target: &str,
-    text: &str,
-    client_id: &str,
-    notice: bool,
-) {
-    let born = crate::state::incarnation(&AgentId::from(target));
-    // ONE CHAIN PER AGENT (#227 Bug 4): the chain token is read when the routing
-    // decision is made, not when the delivery later runs.
-    let chain =
-        if notice || fantastic_kernel::current_origin().is_some_and(|o| o.as_str() == target) {
-            state_for(&AgentId::from(target))
-                .chain
-                .lock()
-                .expect("chain poisoned")
-                .token
-                .clone()
-        } else {
-            String::new()
-        };
-    deliver_soon_with_born(
-        kernel,
-        target,
-        text,
-        client_id,
-        born,
-        notice,
-        chain,
-    );
-}
-
-/// NOT AWAITED. A `send` to an AI agent takes that agent's FIFO lock and does
-/// not return until the whole turn is done — model call, streaming, and that
-/// turn's own routing. Awaiting each delivery inline makes reply 2 of a 4-call
-/// turn wait for the entire conversation reply 1 started, and if the chain ends
-/// first it is never delivered at all — calls left unanswered, easily misread as
-/// a model being stubborn.
+/// HAND `text` TO `dest` as a message. `born` is `dest`'s incarnation (and, to the agent
+/// itself, how often its work was stopped) when the routing decided it: a reply that
+/// crosses its next boot answers a call the previous incarnation made, and one that
+/// crosses a `stop` answers work the stop ended; each is kept as a `late` row that
+/// wakes nothing.
 ///
-/// A KERNEL TASK named `deliver_reply` on the TARGET (python
-/// `kernel.ctx.spawn_task(target, "deliver_reply", coro)`), not a bare spawn: it
-/// is a `ps` row, `cancel` reaches it, and it cannot be orphaned.
-#[allow(clippy::too_many_arguments)]
-fn deliver_soon_with_born(
-    kernel: &Arc<Kernel>,
-    target: &str,
-    text: &str,
-    client_id: &str,
-    born: u64,
-    notice: bool,
-    chain: String,
-) {
-    let target_id = AgentId::from(target);
-    let work_kernel = Arc::clone(kernel);
-    let (target, text) = (target.to_string(), text.to_string());
-    let client_id = client_id.to_string();
-    kernel.spawn_task(&target_id, "deliver_reply", async move {
-        deliver(
-            &work_kernel,
-            &target,
-            &text,
-            &client_id,
-            born,
-            notice,
-            chain,
-        )
-        .await;
-    });
-}
-
-/// Hand `text` to `target` as a fresh turn. Exactly python's `_deliver`.
-///
-/// `pub(crate)` only so the late-reply twin can hand it a STALE `born`, exactly
-/// as python's own test calls `_deliver(..., born=1)`.
-///
-/// `born` is the target's incarnation as of when this delivery was DECIDED. A
-/// boot bumps that counter, so a reply that crosses a reboot answers a call the
-/// previous incarnation made: the agent that asked is gone and the one that
-/// replaced it is on other work. It is kept as a ROW — real data, written by the
-/// TARGET into its own store (the send is marked `late`) — but it wakes no turn.
-/// Woken, the rebooted agent would finish its predecessor's work instead of the
-/// new instruction.
+/// To the agent itself the message is an arrival ([`crate::life::arrive`]); `wakes`
+/// false stores it only (an ack, Q2). To another agent it is a `send` through
+/// [`Kernel::call`]: an AI acks once the row is stored, and a refused hand-off is said
+/// on `dest`'s inbox as a `failed` status, never dropped.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn deliver(
     kernel: &Arc<Kernel>,
-    target: &str,
+    self_id: &AgentId,
+    dest: &str,
     text: &str,
     client_id: &str,
-    born: u64,
+    born: Born,
     notice: bool,
-    chain: String,
+    wakes: bool,
 ) {
-    let target_agent = AgentId::from(target);
-    let late = crate::state::incarnation(&target_agent) != born;
+    let target_agent = AgentId::from(dest);
+    let late = crate::state::incarnation(&target_agent) != born.0;
+    if dest == self_id.as_str() {
+        if late || born.1 != crate::life::stops(self_id) {
+            if let Err(e) = crate::verbs::save_late(self_id, kernel, text).await {
+                eprintln!("  [ai] {self_id}: a late reply could not be kept: {e}");
+            }
+            return;
+        }
+        let m = crate::life::Incoming {
+            text,
+            client_id,
+            origin: self_id.as_str(),
+            notice,
+            attached: None,
+        };
+        if let Err(e) = crate::life::arrive(kernel, self_id, &m, wakes).await {
+            eprintln!("  [ai] {self_id}: a reply could not be stored: {}", e.0);
+        }
+        return;
+    }
     let mut payload = Map::new();
     payload.insert("type".to_string(), json!("send"));
     payload.insert("text".to_string(), json!(text));
     payload.insert("client_id".to_string(), json!(client_id));
-    // ONE CHAIN PER AGENT (#227): a reply routed back to the agent whose chain
-    // is running is that chain's own turn — it carries the chain token, so it is
-    // never held.
-    // Harness self-turns (the held-message wake) are chain turns too.
-    // The token captured when the routing decision was made (#227 Bug 4).
-    if !chain.is_empty() {
-        payload.insert("chain".to_string(), json!(chain));
-    }
-    // HARNESS TEXT, NOT A MESSAGE: a turn this layer writes to
-    // its own agent is stored as `kind: "notice"`, so a view can hide it; the model
-    // still reads it as a user turn. Honoured only on a send to self. Python
-    // `_deliver`.
-    if notice {
-        payload.insert("notice".to_string(), json!(true));
-    }
     if late {
-        // A LATE REPLY TO A PREVIOUS INCARNATION. Kept as a ROW — it is real data —
-        // but it does not wake a turn: the agent that made the call is gone, and
-        // the one that replaced it is on other work. The TARGET writes it (a store
+        // A LATE REPLY TO A PREVIOUS INCARNATION: the TARGET keeps it as a row (a store
         // keys every row by its writer), so it rides a `send` marked `late`.
         payload.insert("late".to_string(), json!(true));
     }
+    // owed until the destination took it: its own arrival is counted from then
+    crate::life::owe(self_id, 1);
+    let (k, d, c, me) = (Arc::clone(kernel), dest.to_string(), client_id.to_string(), self_id.clone());
     let out = kernel
-        .send(vec![Item::new(
-            AgentId::from(target),
-            Value::Object(payload),
-        )])
-        .await
-        .remove(0);
-
-    // ANNOUNCE A FAILED HANDOFF. If the destination could not take the turn —
-    // it is gated, gone, or its own send answered `{"error": …}` — say so on its
-    // inbox instead of dropping the reply.
-    //
-    // Discarding it makes a chain that DIED mid-flight identical to a model that
-    // chose to stop: no error anywhere, the last turn simply never happens.
-    // Only the first send's error would be visible, i.e. never the ones that
-    // matter. This does NOT raise: the routing dispatch is detached, and
-    // unwinding here would kill sibling branches that are still fine.
-    //
-    // THE ANNOUNCEMENT IS AN ORDINARY `status` EVENT — same shape a failed direct
-    // send produces (`{type:'status', source, phase:'failed', detail:{…}, ts,
-    // client_id}`), because that is the shape reflect's `emits` documents and the
-    // shape a UI/harness subscribes to: `reason`/`error` ride in `detail`, where
-    // every subscriber reads `ev.detail.reason`.
-    // FAILED IS `failed`/`timed_out` — python `out["status"] in ("failed",
-    // "timed_out")` — plus any truthy `error` on the reply itself. `cancelled`
-    // is NOT announced: an operator kill already told whoever asked for it.
-    let reply_error = out.result.get("error").filter(|v| !v.is_null());
-    let failed = matches!(out.status, Status::Failed | Status::TimedOut) || reply_error.is_some();
-    if failed && notice {
-        // ONE CHAIN PER AGENT (#227 Bug 3): a wake that failed ends the chain and
-        // releases the held senders (their callers get the cancelled shape).
-        state_for(&target_agent)
-            .chain
-            .lock()
-            .expect("chain poisoned")
-            .reset("send: the turn that was to read this message did not run");
-    }
-    if failed {
-        // The reply's own error, else the RAW status — python passes
-        // `out["status"]`, so the text is `failed`/`timed_out` with no prefix.
-        // Rust wrote `delivery failed`, a string no python subscriber matches.
-        let why = reply_error.map_or_else(|| json!(out.status.as_str()), |e| e.clone());
-        let target_id = AgentId::from(target);
-        let mut detail = Map::new();
-        detail.insert("reason".to_string(), json!("error"));
-        detail.insert("error".to_string(), why);
-        emit_status(
-            kernel,
-            &state_for(&target_id),
-            &target_id,
-            client_id,
-            "failed",
-            detail,
+        .call(
+            Item::new(AgentId::from(dest), Value::Object(payload)),
+            move |out| async move {
+                announce_failed(&k, &d, &c, &out).await;
+                crate::life::owe(&me, -1);
+            },
         )
         .await;
+    if out.status != Status::Accepted {
+        announce_failed(kernel, dest, client_id, &out).await;
+        crate::life::owe(self_id, -1);
     }
+}
+
+/// A destination's incarnation and how often its work was stopped, read when the
+/// routing decided a delivery.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Born(u64, u64);
+
+impl Born {
+    /// `dest`'s, now.
+    pub(crate) fn of(dest: &str) -> Self {
+        let id = AgentId::from(dest);
+        Self(crate::state::incarnation(&id), crate::life::stops(&id))
+    }
+}
+
+/// ANNOUNCE A FAILED HANDOFF on the destination's inbox — the ordinary `status` event a
+/// failed send produces (`detail.reason`/`detail.error`). `failed`/`timed_out` or any
+/// truthy `error`; `cancelled` is not announced: an operator kill already told whoever
+/// asked for it.
+async fn announce_failed(kernel: &Arc<Kernel>, dest: &str, client_id: &str, out: &fantastic_kernel::Outcome) {
+    let reply_error = out.result.get("error").filter(|v| !v.is_null());
+    let failed = matches!(out.status, Status::Failed | Status::TimedOut) || reply_error.is_some();
+    if !failed {
+        return;
+    }
+    let why = reply_error.map_or_else(|| json!(out.status.as_str()), |e| e.clone());
+    let target_id = AgentId::from(dest);
+    let mut detail = Map::new();
+    detail.insert("reason".to_string(), json!("error"));
+    detail.insert("error".to_string(), why);
+    emit_status(kernel, &state_for(&target_id), &target_id, client_id, "failed", detail).await;
+}
+
+/// Whether a stored reply text is the ACK of a message sent to an AI agent
+/// (`[reply to N · <agent> send …]` carrying `accepted`): stored, never woken on (Q2).
+#[must_use]
+pub(crate) fn is_ack_text(text: &str) -> bool {
+    let Some(rest) = text.strip_prefix("[reply to ") else {
+        return false;
+    };
+    let (tag, body) = rest.split_once('\n').unwrap_or((rest, ""));
+    let verb = tag.split(" \u{b7} ").nth(1).and_then(|tv| tv.split_whitespace().nth(1));
+    let verb = verb.map(|v| v.trim_end_matches(']'));
+    verb == Some("send") && body.contains("<accepted>true</accepted>") && !body.contains("<error>")
 }
 
 /// The reply a model reads: the outcome's result with its raw reply body — any
@@ -556,13 +473,16 @@ pub(crate) fn watch_job(
         .or_default()
         .push((job_id.clone(), exec.to_string()));
     let work = Arc::clone(kernel);
+    let born = Born::of(owner);
     let (owner_s, exec_s, job, cid) = (
         owner.to_string(),
         exec.to_string(),
         job_id.clone(),
         client_id.to_string(),
     );
+    let owing = crate::life::Owing::new(&AgentId::from(owner));
     kernel.spawn_task(&AgentId::from(owner), "job_watch", async move {
+        let _owing = owing;
         let entry = RunningJob {
             owner: owner_s.clone(),
             job: job.clone(),
@@ -614,13 +534,14 @@ pub(crate) fn watch_job(
         let exit = job_field(&last, "exit_code")
             .cloned()
             .unwrap_or(Value::Null);
-        // Forget the job BEFORE the wake, so the woken turn's `pending` no longer counts it.
+        // Forget the job BEFORE the wake, so the woken pass no longer counts it.
         drop(entry);
         let text = format!(
             "job_done {}",
             json!({"job_id": job, "exit_code": exit, "lines": lines, "tail": tail})
         );
-        deliver_soon(&work, &owner_s, &text, &cid, false);
+        let owner = AgentId::from(owner_s.as_str());
+        deliver(&work, &owner, &owner_s, &text, &cid, born, false, true).await;
     });
 }
 
@@ -660,20 +581,12 @@ pub(crate) async fn close_inquiry(
         open.pid,
         crate::tool_parse::render_reply(&Value::Object(shown))
     );
-    let (k, me, chain, reply_client) = (
-        Arc::clone(kernel),
-        self_id.to_string(),
-        client_id.to_string(),
-        open.reply_client,
-    );
-    kernel.spawn_task(&AgentId::from(self_id), "inquiry_answer", async move {
-        deliver_answer(&k, &me, &chain, &asker, &reply_client, &text).await;
-    });
+    deliver_answer(kernel, self_id, client_id, &asker, &open.reply_client, &text).await;
 }
 
-/// The answer, sent AS THIS AGENT into the asker's conversation — a send to an AI
-/// runs the asker's whole turn, so this runs as its own task, never inline. A
-/// REFUSED answer is not dropped: this agent is told why, in its own chain. Python
+/// The answer, sent AS THIS AGENT into the asker's conversation through
+/// [`Kernel::call`]: an AI asker acks once the row is stored, and nothing waits. A
+/// REFUSED answer is not dropped: this agent is told why, as a notice. Python
 /// `_deliver_answer`.
 async fn deliver_answer(
     kernel: &Arc<Kernel>,
@@ -683,46 +596,77 @@ async fn deliver_answer(
     reply_client: &str,
     text: &str,
 ) {
+    let (k, me, cid, who) = (
+        Arc::clone(kernel),
+        AgentId::from(self_id),
+        client_id.to_string(),
+        asker.to_string(),
+    );
+    crate::life::owe(&me, 1);
     let out = kernel
-        .send(vec![Item::new(
-            AgentId::from(asker),
-            json!({"type": "send", "text": text, "client_id": reply_client}),
-        )])
-        .await
-        .remove(0);
+        .call(
+            Item::new(
+                AgentId::from(asker),
+                json!({"type": "send", "text": text, "client_id": reply_client}),
+            ),
+            move |out| async move {
+                answer_refused(&k, &me, &cid, &who, &out).await;
+                crate::life::owe(&me, -1);
+            },
+        )
+        .await;
+    if out.status != Status::Accepted {
+        let me = AgentId::from(self_id);
+        answer_refused(kernel, &me, client_id, asker, &out).await;
+        crate::life::owe(&me, -1);
+    }
+}
+
+/// An inquiry answer the asker did not take: this agent is told, as a notice.
+async fn answer_refused(
+    kernel: &Arc<Kernel>,
+    self_id: &AgentId,
+    client_id: &str,
+    asker: &str,
+    out: &fantastic_kernel::Outcome,
+) {
     let err = fantastic_kernel::refusal::error_text(&out.result);
     if err.is_some() || matches!(out.status, Status::Failed | Status::TimedOut) {
         let why = err.unwrap_or_else(|| out.status.as_str().to_string());
-        deliver_soon(
+        crate::life::notice(
             kernel,
             self_id,
             &format!("[your inquiry answer did not reach {asker}: {why}]"),
             client_id,
-            true,
-        );
+        )
+        .await;
     }
 }
 
-/// The model's `inquiry_answer`: delivered to the asker of the inquiry this chain
-/// is answering. `Some` is the error block for the model — nothing to answer, or
-/// the placeholder. Python `_answer_inquiry`.
+/// The model's `inquiry_answer`: delivered to the asker of the inquiry this pass's
+/// messages belong to (`clients`, the first that has one open). `Some` is the error
+/// block for the model — nothing to answer, or the placeholder. Python
+/// `_answer_inquiry`.
 pub(crate) async fn answer_inquiry(
     kernel: &Arc<Kernel>,
     self_id: &str,
-    client_id: &str,
+    clients: &[String],
     call: &crate::tool_parse::ToolCall,
 ) -> Option<String> {
-    let open = open_inquiries()
-        .lock()
-        .expect("open inquiries poisoned")
-        .contains_key(&(self_id.to_string(), client_id.to_string()));
-    if !open {
+    let open = {
+        let open = open_inquiries().lock().expect("open inquiries poisoned");
+        clients
+            .iter()
+            .find(|c| open.contains_key(&(self_id.to_string(), (*c).clone())))
+            .cloned()
+    };
+    let Some(client_id) = open else {
         return Some(
             "inquiry_answer: nothing asked you in this run — an answer goes to an inquiry you \
              received (`[inquiry from …]`)"
                 .to_string(),
         );
-    }
+    };
     let answer = call.arguments.get("answer").cloned().unwrap_or(Value::Null);
     // THE PLACEHOLDER IS NOT AN ANSWER — a model copies the shown example back
     // verbatim (e.g. "..." written as the verdict).
@@ -738,7 +682,7 @@ pub(crate) async fn answer_inquiry(
     };
     let mut body = Map::new();
     body.insert("answer".to_string(), json!(real));
-    close_inquiry(kernel, self_id, client_id, body).await;
+    close_inquiry(kernel, self_id, &client_id, body).await;
     None
 }
 
@@ -778,260 +722,46 @@ pub(crate) fn forget(self_id: &str) {
         .retain(|chain, _| chain.0 != self_id);
 }
 
-/// Honour where this pass's output goes — the DETACHED routing task. The
-/// model's calls are the agent's calls: the task is one the agent's own
-/// dispatch spawned (`Kernel::spawn_task`), so every send in it is the agent's
-/// and is gated as the agent.
-///
-/// `send_timeout` is the AI layer's per-call deadline — the KERNEL defaults
-/// nothing; this layer always supplies one, and the model may override it per
-/// call with a `timeout` arg in the envelope.
-///
-/// `model_window` is the routing agent's backend window
-/// ([`crate::agent_loop::BackendConfig::model_window`]) — the inline cap a reply
-/// body is measured against.
-///
-/// `call_streams` is every closed call part of the pass, `(stream_id, body)`
-/// ([`crate::stream_parts::PartSplitter::closed_calls`]): a dispatched message
-/// carries the `stream_id` of the part it was streamed as.
-///
-/// `cut`: the model stopped with a block open — ONLY A SUCCESSFUL GENERATION
-/// DISPATCHES, so the pass sends nothing, its closed calls included.
-#[allow(clippy::too_many_arguments)]
-pub async fn route_reply(
-    self_id: AgentId,
-    kernel: Arc<Kernel>,
-    text: String,
-    client_id: String,
-    send_to: Option<String>,
-    send_timeout: f64,
-    model_window: i64,
-    message_id: Option<i64>,
-    call_streams: Vec<(String, String)>,
-    cut: bool,
-) {
-    // THE MODEL'S CALLS ARE THE AGENT'S CALLS — gated. The routing task is
-    // spawned by the agent's own dispatch through `Kernel::spawn_task`, which
-    // carries the dispatch identity into it (a bare tokio spawn would not):
-    // dispatches, the binary carrier, and reply deliveries all attribute to the
-    // AI agent.
-    let (wake_kernel, wake_id) = (Arc::clone(&kernel), self_id.clone());
-    let goes_on = route_reply_gated(
-        self_id,
-        kernel,
+/// What one pass's routing takes: its answer and where it came from.
+pub(crate) struct Routed {
+    /// The answer's raw text (thinking marked).
+    pub(crate) text: String,
+    /// The client id of the pass.
+    pub(crate) client_id: String,
+    /// The client ids of every message the pass read: an inquiry answer goes to the
+    /// first that has one open.
+    pub(crate) clients: Vec<String>,
+    /// The AI layer's per-call deadline — the KERNEL defaults nothing; the model may
+    /// override it per call with a `timeout` arg in the envelope.
+    pub(crate) send_timeout: f64,
+    /// The backend's window ([`crate::agent_loop::BackendConfig::model_window`]): the
+    /// inline cap a reply body is measured against.
+    pub(crate) model_window: i64,
+    /// The answer's row: every reply's `↑` and batch token.
+    pub(crate) message_id: Option<i64>,
+    /// Every closed call part of the pass, `(stream_id, body)`: a dispatched message
+    /// carries the `stream_id` of the part it was streamed as.
+    pub(crate) call_streams: Vec<(String, String)>,
+    /// The model stopped with a block open: the pass sends nothing, its closed calls
+    /// included.
+    pub(crate) cut: bool,
+}
+
+/// Honour where this pass's answer goes. THE MODEL'S CALLS ARE THE AGENT'S CALLS: this
+/// runs in a task the agent's pass spawned (`Kernel::spawn_task`), so every call is the
+/// agent's and is gated as the agent. It ends once every call is OUT: each reply comes
+/// later, as a message.
+pub(crate) async fn route_reply(self_id: AgentId, kernel: Arc<Kernel>, routed: Routed) {
+    let Routed {
         text,
         client_id,
-        send_to,
+        clients,
         send_timeout,
         model_window,
         message_id,
         call_streams,
         cut,
-    )
-    .await;
-    if !goes_on {
-        chain_ended(&wake_kernel, &wake_id);
-    }
-}
-
-/// The route's default deadline for a call to an agent, in seconds. PRECEDENCE:
-/// the call's own `timeout` (applied where the item is built) > the root
-/// record's `send_timeout` (any finite positive number, no floor) > the env
-/// `FANTASTIC_AI_SEND_TIMEOUT` > 600 ([`crate::constants::send_timeout_secs`]).
-/// Only the route default reads the root field: the generation and held-wait
-/// ceilings keep `send_timeout_secs()`.
-pub(crate) fn route_deadline(kernel: &Kernel) -> f64 {
-    kernel
-        .root()
-        .and_then(|r| r.record().meta.get("send_timeout").cloned())
-        .and_then(|v| v.as_f64())
-        .unwrap_or_else(crate::constants::send_timeout_secs)
-}
-
-/// ONE CHAIN PER AGENT (#227): the chain has ended. Messages held while it ran
-/// are answered by ONE wake turn; with none held, the chain is no longer alive.
-///
-/// The wake can be lost (refused by the gate, a send error, an agent being shut
-/// down), so a watchdog releases the senders it was for if no pass has taken them
-/// within the send ceiling.
-pub(crate) fn chain_ended(kernel: &Arc<Kernel>, self_id: &AgentId) {
-    chain_ended_within(
-        kernel,
-        self_id,
-        std::time::Duration::from_secs_f64(crate::constants::send_timeout_secs()),
-    );
-}
-
-/// [`chain_ended`] with the watchdog's window given.
-pub(crate) fn chain_ended_within(
-    kernel: &Arc<Kernel>,
-    self_id: &AgentId,
-    ceiling: std::time::Duration,
-) {
-    let state = state_for(self_id);
-    let (held, ids) = {
-        let mut chain = state.chain.lock().expect("chain poisoned");
-        // The held senders STAY in `chain.held`: the wake pass takes and answers them.
-        let held: Vec<String> = chain.held.iter().map(|h| h.client_id.clone()).collect();
-        let ids: Vec<String> = chain.held.iter().map(|h| h.send_id.clone()).collect();
-        if held.is_empty() {
-            chain.alive = false;
-        }
-        (held, ids)
-    };
-    if held.is_empty() {
-        return;
-    }
-    let text = format!(
-        "[{} message(s) arrived while you were working — they are above. Answer them.]",
-        held.len()
-    );
-    deliver_soon(
-        kernel,
-        self_id.as_str(),
-        &text,
-        &held[0],
-        true,
-    );
-    let watched = self_id.clone();
-    let gone = state.chain.lock().expect("chain poisoned").held_gone.clone();
-    kernel.spawn_task(self_id, "chain_wake_watch", async move {
-        // The watchdog ends as soon as the senders it watches are no longer held
-        // (the wake pass took them); on the ceiling it releases them.
-        let deadline = tokio::time::Instant::now() + ceiling;
-        loop {
-            tokio::select! {
-                _ = tokio::time::sleep_until(deadline) => break,
-                _ = gone.notified() => {
-                    let st = state_for(&watched);
-                    let chain = st.chain.lock().expect("chain poisoned");
-                    if !chain.held.iter().any(|h| ids.contains(&h.send_id)) {
-                        return;
-                    }
-                }
-            }
-        }
-        state_for(&watched)
-            .chain
-            .lock()
-            .expect("chain poisoned")
-            .expire(
-                &ids,
-                "send: no turn read this message within the send ceiling",
-            );
-    });
-}
-
-/// A CHAIN CUT BY A RESTART (#726). Everything is records: at its start the kernel
-/// settled the calls the previous process left in flight as dead letters
-/// ([`fantastic_kernel::executions::CutCall`]); the ones this agent's own tasks made
-/// and the messages sent to it reach it here, at its boot, as ONE notice turn of a
-/// new chain. A reply it was waiting for will not come (resend or drop it); a message
-/// it held or was answering was cut, and its sender is told by its own dead letter.
-/// Never silent. A call made inside a dispatch (a pass's own store or provider call)
-/// is the pass's plumbing, not the agent's work: the cut message that ran the pass
-/// says it. Nothing cut, nothing told.
-pub(crate) fn resume_cut(
-    kernel: &Arc<Kernel>,
-    self_id: &AgentId,
-    cut: &[fantastic_kernel::executions::CutCall],
-) {
-    let me = self_id.as_str();
-    let lines: Vec<String> = cut
-        .iter()
-        .filter_map(|c| {
-            let made = c.caller.as_deref() == Some(me) && c.task.is_some();
-            let got = c.target == me && c.verb.as_deref() == Some("send");
-            if made && c.target == me {
-                Some(format!(
-                    "[your own turn \u{b7} dead letter {}] a reply or reminder on its way to \
-                     you was cut before you read it",
-                    c.id
-                ))
-            } else if made {
-                Some(format!(
-                    "[reply to {} \u{b7} {} {}] no reply will come \u{2192} dead letter {}; \
-                     resend or drop",
-                    c.id,
-                    c.target,
-                    c.verb.as_deref().unwrap_or("?"),
-                    c.id
-                ))
-            } else if got && c.caller.as_deref() != Some(me) {
-                Some(format!(
-                    "[from {} \u{b7} dead letter {}] a message to you was cut before it was \
-                     answered; its sender is told \u{2014} do not answer it",
-                    c.caller.as_deref().unwrap_or("operator"),
-                    c.id
-                ))
-            } else {
-                None
-            }
-        })
-        .collect();
-    if lines.is_empty() {
-        return;
-    }
-    let text = format!(
-        "[restart] The kernel stopped while this work was in flight, and a new kernel \
-         started on the same records. What was in flight cannot finish; each is a dead \
-         letter now:\n{}\nGo on from here.",
-        lines.join("\n")
-    );
-    deliver_soon(
-        kernel,
-        me,
-        &text,
-        &fantastic_kernel::inquiry::default_client_id(),
-        true,
-    );
-}
-
-/// One EMITTED thing, in emission order — python's `units` tuple
-/// `(dest, target, verb, item_index, body)`. `idx` links a dispatched call to its
-/// outcome; `body` is pre-decided for the paths that never dispatch (a parse
-/// error, a missing target, a missing payload, the `@body` guard, the binary
-/// carrier).
-struct Unit {
-    dest: String,
-    target: String,
-    verb: String,
-    idx: Option<usize>,
-    body: Option<String>,
-    /// The model's own one-sentence `<title>` for this call. It rides on the
-    /// reply's tag and is what REMAINS once the body is stripped from the view,
-    /// so it is the call's name forever.
-    title: Option<String>,
-}
-
-/// One rendered reply block, owed to `dest`. [`deliver_grouped`] composes the tag
-/// — including the batch stamp, which lives INSIDE it.
-struct Block {
-    dest: String,
-    pid: String,
-    target: String,
-    verb: String,
-    title: Option<String>,
-    body: String,
-    /// It carries a dispatched call's outcome (not this layer's own text).
-    outcome: bool,
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn route_reply_gated(
-    self_id: AgentId,
-    kernel: Arc<Kernel>,
-    text: String,
-    client_id: String,
-    send_to: Option<String>,
-    send_timeout: f64,
-    model_window: i64,
-    message_id: Option<i64>,
-    call_streams: Vec<(String, String)>,
-    cut: bool,
-) -> bool {
-    // ONE CHAIN PER AGENT (#227): true while the chain goes on (see the caller).
-    let mut goes_on = false;
+    } = routed;
     // THE MATCH: a dispatched message carries the `stream_id`
     // of the part it was streamed as, so a consumer settles its draft on it.
     // Matched by the call's exact body, in order — one reading of the text, not
@@ -1056,11 +786,10 @@ async fn route_reply_gated(
             call
         })
         .collect();
-    // Everything owed to ONE destination, in the order the model wrote it.
-    // Grouping (not a message per call) is the whole point — see below.
+    // Everything owed to a destination, in the order the model wrote it: each reply is
+    // its own message, tagged with its place in the batch (`k of M`).
     let mut units: Vec<Unit> = Vec::new();
 
-    let done_called = calls.iter().any(|c| c.name == "done");
     // `stop` (#766, 1.8): the model says the work cannot be done, and why. The reason of
     // its first `stop` that has one; the reader refused a `stop` without one (S25).
     let stop_called: Option<String> = calls.iter().filter(|c| c.name == "stop").find_map(|c| {
@@ -1070,24 +799,10 @@ async fn route_reply_gated(
             .filter(|r| !r.trim().is_empty())
             .map(str::to_string)
     });
-    // `keep` and `line_summary` are notes, not actions: a turn of notes alone is a turn
-    // with no call (#641, #709); the attempts re-asked it (#795), so only a cut pass
-    // routes with none
-    let any_calls = calls.iter().any(acting);
-    // ONE TURN, ONE BATCH. Every call the model emitted is dispatched in a
-    // SINGLE `kernel.send([...])` — concurrent, side-effect order across
-    // calls undefined — and everything owed to one destination arrives as
-    // ONE delivered turn.
-    //
-    // Why whole, never split: replies landing one per turn make a turn that
-    // fanned out 7 calls spend the next 7 turns collecting its own answers,
-    // and every question asked in between is answered turns later by
-    // something older — the model re-asks and the run builds nothing.
-    // Anthropic documents the split shape as the anti-pattern
-    // ("separate user messages reduce parallel tool use"), OpenAI 400s on a
-    // missing tool result, LangGraph's ToolNode collects every ToolMessage
-    // before the agent runs again. The model never sees a PARTIAL batch, so
-    // it never re-asks for the missing half.
+    // EVERY CALL GOES OUT AT ONCE, each through `Kernel::call` (concurrent,
+    // side-effect order across calls undefined), and each reply is ONE message when
+    // it comes (#795, Q3): never held until the batch is whole, because that would be
+    // a wait. The tag's `k of M` says how much of the batch a message is.
     let mut items: Vec<Item> = Vec::new();
     // The deadline each item runs under, as the model is told it (parallel to
     // `items`): the call's own `timeout` as given, else the route default.
@@ -1105,7 +820,7 @@ async fn route_reply_gated(
     // THE ANSWER to an inquiry this chain received goes to the asker now, under the
     // inquiry's pid; an answer with nothing to answer, or a placeholder, is told so.
     for call in calls.iter().filter(|c| c.name == "inquiry_answer") {
-        if let Some(err) = answer_inquiry(&kernel, self_id.as_str(), &client_id, call).await {
+        if let Some(err) = answer_inquiry(&kernel, self_id.as_str(), &clients, call).await {
             units.push(Unit {
                 dest: self_id.as_str().to_string(),
                 target: "-".to_string(),
@@ -1367,10 +1082,9 @@ async fn route_reply_gated(
         if let Some(doc) = document {
             item = item.with_binary_key("bytes", doc);
         }
-        // EVERY dispatched call carries the layer's deadline. The KERNEL
-        // defaults nothing, so without it a call to a handler that never returns
-        // hangs the whole batch forever here — no reply, no timeout block, the
-        // chain simply stops. Set BEFORE the model's own `timeout` arg, which
+        // EVERY dispatched call carries the layer's deadline. The KERNEL defaults
+        // nothing, so without it a call to a handler that never returns would never
+        // reply — no timeout block, the work simply stops. Set BEFORE the model's own `timeout` arg, which
         // overrides it; the kernel validates that value, so a bad one settles
         // as a refusal the model can read.
         item = item.with_timeout(send_timeout);
@@ -1402,6 +1116,10 @@ async fn route_reply_gated(
         if let Some(r) = retries_read.as_ref().and_then(Value::as_u64) {
             item = item.with_retries(u32::try_from(r).unwrap_or(u32::MAX));
         }
+        item = item.with_reply_to(match &reply_to {
+            Some(rt) => fantastic_kernel::ReplyTo::Agent(AgentId::from(rt.as_str())),
+            None => fantastic_kernel::ReplyTo::Row,
+        });
         items.push(item);
         deadlines.push(
             timeout_read
@@ -1424,187 +1142,318 @@ async fn route_reply_gated(
         }
     }
 
-    let outcomes = if items.is_empty() {
-        Vec::new()
-    } else {
-        kernel.send(items).await
+    // THE TAIL: an answer reaching here has calls (the attempts re-asked one with none,
+    // #795), or it was cut and dispatched nothing. It ends with `done` or `stop`, and
+    // the next message wakes the agent.
+    let meta = crate::helpers::agent_meta(&self_id, &kernel);
+    let batch = Batch {
+        self_id: self_id.clone(),
+        client_id: client_id.clone(),
+        message_id,
+        // A FRESH token per pass, shared across destinations; the answer's own id when
+        // it has one, so every `↑` and every `batch` names a row the model can see.
+        token: message_id.map_or_else(mint_batch_token, |t| t.to_string()),
+        cap: crate::context::inline_cap(&meta, model_window),
     };
-
-    // A JOB this agent started (#306): an `exec start` answered `running` is watched, and
-    // its end wakes this agent once. Only this batch's own replies are read, so a job
-    // another agent started never registers against this one.
-    for ((exec, sent), out) in payloads.iter().zip(outcomes.iter()) {
-        let started = sent.get("type").and_then(Value::as_str) == Some("start")
-            && out.result.get("status").and_then(Value::as_str) == Some("running");
-        match out.result.get("job_id").filter(|v| !v.is_null()) {
-            Some(job) if started => watch_job(&kernel, self_id.as_str(), exec, job, &client_id),
-            _ => {}
+    let owed: HashMap<String, usize> = units.iter().fold(HashMap::new(), |mut m, u| {
+        *m.entry(u.dest.clone()).or_insert(0) += 1;
+        m
+    });
+    // EVERY DESTINATION'S INCARNATION, READ NOW, when the routing decides: a target that
+    // reboots meanwhile is still judged against the incarnation this pass addressed.
+    let born: HashMap<String, Born> = owed.keys().map(|d| (d.clone(), Born::of(d))).collect();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut said: Vec<(String, Vec<String>)> = Vec::new();
+    let mut by_item: HashMap<usize, Owed> = HashMap::new();
+    for u in units {
+        let k = {
+            let n = seen.entry(u.dest.clone()).or_insert(0);
+            *n += 1;
+            *n
+        };
+        let m = owed.get(&u.dest).copied().unwrap_or(1);
+        match u.idx {
+            // THIS LAYER'S OWN TEXT (a refusal before dispatch): one message per
+            // destination, now
+            None => {
+                let block = batch.block("-", &u.target, &u.verb, u.title.as_deref(), k, m, &u.body.unwrap_or_default());
+                match said.iter_mut().find(|(d, _)| *d == u.dest) {
+                    Some((_, b)) => b.push(block),
+                    None => said.push((u.dest, vec![block])),
+                }
+            }
+            Some(i) => {
+                by_item.insert(i, Owed { dest: u.dest, target: u.target, verb: u.verb, title: u.title, k, m });
+            }
         }
     }
+    for (dest, blocks) in said {
+        // a message to SELF made only of this layer's own text is a notice
+        let notice = dest == self_id.as_str();
+        let b = born.get(&dest).copied().unwrap_or_default();
+        deliver(&kernel, &self_id, &dest, &blocks.join("\n\n"), &client_id, b, notice, true).await;
+    }
+    let batch = Arc::new(batch);
+    for (i, item) in items.into_iter().enumerate() {
+        let owed = by_item.remove(&i);
+        let born = owed.as_ref().map_or(Born::default(), |o| born.get(&o.dest).copied().unwrap_or_default());
+        let reply = Reply {
+            batch: Arc::clone(&batch),
+            owed,
+            born,
+            deadline: deadlines[i].clone(),
+            sent: payloads.get(i).cloned().unwrap_or_default(),
+        };
+        crate::life::owe(&self_id, 1);
+        let (k, r) = (Arc::clone(&kernel), reply.clone());
+        let out = kernel
+            .call(item, move |out| async move { r.take(&k, out).await })
+            .await;
+        if out.status != Status::Accepted {
+            // REFUSED AT LAUNCH (the gate, the target): its reply is the refusal, now
+            reply.take(&kernel, out).await;
+        }
+    }
+    if let Some(reason) = stop_called.as_deref() {
+        // THE MODEL STOPPED (#766, 1.8): the work cannot be done. Status `failed`,
+        // `reason: gave_up`, the model's reason as `error`, the open inquiry closed with
+        // it; the calls written beside it were dispatched above, as beside `done`.
+        give_up(&kernel, &self_id, &client_id, reason).await;
+    }
+    // `done`: nothing more from this agent now; the next message wakes it, an answer
+    // owed to an inquiry it received included (#795, Q5).
+}
 
-    // The result — INCLUDING an error — goes back. A call that failed silently
-    // is the one thing a model can never debug.
-    //
-    // PID first, then target+verb. Target+verb alone is NOT unique: with two
-    // calls in flight to one agent `[reply to kernel_state set]` is unmatchable
-    // — the model re-issues calls and blames "duplicate delivery" or a reply
-    // queue "running ahead", then re-polls forever.
-    // The PID is the same id `ps`/`cancel` use, so a reply names a row the
-    // model can act on.
-    let meta = crate::helpers::agent_meta(&self_id, &kernel);
-    let cap = crate::context::inline_cap(&meta, model_window);
-    // THE CAP IS PER MESSAGE, not per reply: every reply of a
-    // batch lands in ONE message to its addressee, so the replies share the cap.
-    // A reply that would push its batch past it is held like an oversized one:
-    // two replies each under the cap can together overflow a small window
-    // (`too_small`).
-    let mut used: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-    let blocks: Vec<Block> = units
-        .into_iter()
-        .map(|u| {
-            let outcome = u.idx.is_some();
-            let so_far = used.get(u.dest.as_str()).copied().unwrap_or(0);
-            let (pid, body) = match u.idx {
-                Some(i) => {
-                    let out = &outcomes[i];
-                    let pid = out
-                        .pid
-                        .map(|t| t.0.to_string())
-                        .unwrap_or_else(|| "-".to_string());
-                    let mut shown = reply_as_text(out);
-                    // ANOTHER AGENT'S THINKING NEVER LANDS HERE: a peer's rows
-                    // (`recall`, `rows`) are read without it. This agent's own
-                    // read of its own rows keeps it.
-                    if u.target != self_id.as_str() {
-                        if let Some(clean) = crate::think::without_thinking_fields(&shown) {
-                            shown = std::borrow::Cow::Owned(clean);
-                        }
-                    }
-                    if u.verb == "reflect" {
-                        if let Some(trimmed) = hide_view_body(&shown) {
-                            shown = std::borrow::Cow::Owned(trimmed);
-                        }
-                    }
-                    // A `send` that passed its deadline went to the dead letter:
-                    // the sender is told where, and how to resend or drop it.
-                    let dead_letter = u.verb == "send"
-                        && out.status == Status::TimedOut
-                        && out.pid.is_some();
-                    if dead_letter {
-                        if let Some(obj) = shown.to_mut().as_object_mut() {
-                            obj.insert(
-                                "error".to_string(),
-                                json!(format!(
-                                    "your message to {} hit its {}s deadline \u{2192} dead letter {pid}; resend or drop",
-                                    u.target, deadlines[i]
-                                )),
-                            );
-                        }
-                    }
-                    let pointed = point_to_docs(&u.target, &u.verb, &shown);
-                    let mut body =
-                        crate::tool_parse::render_reply(pointed.as_ref().unwrap_or(&shown));
-                    // FULL ASYNC. A reply is DATA, not a question — the model
-                    // needs to be able to SEE it, not be forced to swallow it
-                    // whole as its next turn. Anything over the inline cap is
-                    // held in RAM under its pid and replaced by its digest + its
-                    // ORIGIN line. SYNC OR ASYNC ALIKE: a
-                    // body is never persisted; under the cap it is inline.
-                    if let Some(p) = out.pid {
-                        let over = so_far
-                            + crate::context::estimate_one(
-                                &json!({"role": "user", "content": body}),
-                            )
-                            > cap;
-                        if over && crate::memory::store_reply(&self_id, &kernel, p.0, &body) {
-                            // CODE POINTS: python prints `len(body)`.
-                            let size = body.chars().count();
-                            let sent = payloads.get(i).map_or(&Value::Null, |(_, p)| p);
-                            // THE STUB IS THE ORIGIN. The body is held in RAM for
-                            // this incarnation only and never persisted; what
-                            // survives is the one line saying how to get it again.
-                            body = format!(
-                                "(settled, {size} bytes — NOT inlined, held in memory only \
-                                 until this agent restarts. origin: {}. To find a line in it: \
-                                 send yourself <type>grep</type> <query>substring</query> \
-                                 <ids><item>{}</item></ids>)",
-                                origin_line(&out.result, &u.target, &u.verb, sent),
-                                p.0
-                            );
-                        }
-                    }
-                    if u.verb == "send" && out.pid.is_some() && !dead_letter {
-                        body = format!("(deadline {}s)\n{body}", deadlines[i]);
-                    }
-                    (pid, body)
-                }
-                None => ("-".to_string(), u.body.unwrap_or_default()),
-            };
-            *used.entry(u.dest.to_string()).or_insert(0) +=
-                crate::context::estimate_one(&json!({"role": "user", "content": body}));
-            Block {
-                dest: u.dest,
-                pid,
-                target: u.target,
-                verb: u.verb,
-                title: u.title,
-                body,
-                outcome,
+/// One pass's routing, as each of its replies needs it.
+struct Batch {
+    self_id: AgentId,
+    client_id: String,
+    message_id: Option<i64>,
+    token: String,
+    cap: i64,
+}
+
+impl Batch {
+    /// ONE reply block, tagged — the ONE line a reply is known by, forever (in the
+    /// store, in `recall` pages, and as the stub a stripped body leaves):
+    /// `[reply to <pid> · <target> <verb> · "<title>" · ↑<answer> · k of M in batch <b>]`.
+    #[allow(clippy::too_many_arguments)]
+    fn block(&self, pid: &str, target: &str, verb: &str, title: Option<&str>, k: usize, m: usize, body: &str) -> String {
+        let mut tag = format!("[reply to {pid} \u{b7} {target} {verb}");
+        if let Some(t) = title {
+            tag.push_str(&format!(" \u{b7} \"{t}\""));
+        }
+        if let Some(t) = self.message_id {
+            tag.push_str(&format!(" \u{b7} \u{2191}{t}"));
+        }
+        if m > 1 {
+            tag.push_str(&format!(" \u{b7} {k} of {m} in batch {}]", self.token));
+        } else {
+            tag.push(']');
+        }
+        format!("{tag}\n{body}")
+    }
+}
+
+/// Where one dispatched call's reply goes, and its place in the batch.
+#[derive(Clone)]
+struct Owed {
+    dest: String,
+    target: String,
+    verb: String,
+    title: Option<String>,
+    k: usize,
+    m: usize,
+}
+
+/// One dispatched call, as its settle needs it.
+#[derive(Clone)]
+struct Reply {
+    batch: Arc<Batch>,
+    /// Where the reply goes (`None`: `reply_to: null`, the row only).
+    owed: Option<Owed>,
+    born: Born,
+    /// The deadline the call ran under, as the model is told it.
+    deadline: String,
+    /// What the call was sent: its target as the model wrote it, and its payload.
+    sent: (String, Value),
+}
+
+impl Reply {
+    /// THE CALL SETTLED: an exec job it started is watched (#306), and the reply is
+    /// rendered and delivered to its `reply_to` as one message. An ack of a message to an
+    /// AI is stored without a wake (Q2). The call is no longer owed.
+    async fn take(&self, kernel: &Arc<Kernel>, out: fantastic_kernel::Outcome) {
+        let me = &self.batch.self_id;
+        let (exec, sent) = &self.sent;
+        let started = sent.get("type").and_then(Value::as_str) == Some("start")
+            && out.result.get("status").and_then(Value::as_str) == Some("running");
+        if let Some(job) = out.result.get("job_id").filter(|v| !v.is_null()) {
+            if started {
+                watch_job(kernel, me.as_str(), exec, job, &self.batch.client_id);
+            }
+        }
+        if let Some(o) = &self.owed {
+            let body = self.render(kernel, &out, o);
+            let pid = out.pid.map_or_else(|| "-".to_string(), |t| t.0.to_string());
+            let text = self.batch.block(&pid, &o.target, &o.verb, o.title.as_deref(), o.k, o.m, &body);
+            let ack = o.verb == "send" && out.status == Status::Completed && is_ack_text(&text);
+            deliver(kernel, me, &o.dest, &text, &self.batch.client_id, self.born, false, !ack).await;
+        }
+        crate::life::owe(me, -1);
+    }
+
+    /// The reply a model reads — INCLUDING an error: a call that failed silently is the
+    /// one thing a model can never debug. Over the inline cap, the body is held in RAM
+    /// under its pid and replaced by its ORIGIN line.
+    fn render(&self, kernel: &Arc<Kernel>, out: &fantastic_kernel::Outcome, o: &Owed) -> String {
+        let me = &self.batch.self_id;
+        let pid = out.pid.map_or_else(|| "-".to_string(), |t| t.0.to_string());
+        let mut shown = reply_as_text(out);
+        // ANOTHER AGENT'S THINKING NEVER LANDS HERE: a peer's rows are read without it.
+        // This agent's own read of its own rows keeps it.
+        if o.target != me.as_str() {
+            if let Some(clean) = crate::think::without_thinking_fields(&shown) {
+                shown = std::borrow::Cow::Owned(clean);
+            }
+        }
+        if o.verb == "reflect" {
+            if let Some(trimmed) = hide_view_body(&shown) {
+                shown = std::borrow::Cow::Owned(trimmed);
+            }
+        }
+        // A call that passed its deadline went to the dead letter: the sender is told
+        // where, and how to resend or drop it.
+        let dead_letter = out.status == Status::TimedOut && out.pid.is_some();
+        if dead_letter {
+            if let Some(obj) = shown.to_mut().as_object_mut() {
+                obj.insert(
+                    "error".to_string(),
+                    json!(format!(
+                        "your message to {} hit its {}s deadline \u{2192} dead letter {pid}; resend or drop",
+                        o.target, self.deadline
+                    )),
+                );
+            }
+        }
+        let pointed = point_to_docs(&o.target, &o.verb, &shown);
+        let mut body = crate::tool_parse::render_reply(pointed.as_ref().unwrap_or(&shown));
+        // FULL ASYNC. A reply is DATA: over the inline cap it is held in RAM under its
+        // pid and replaced by its digest + its ORIGIN line. A body is never persisted.
+        if let Some(p) = out.pid {
+            let over = crate::context::estimate_one(&json!({"role": "user", "content": body})) > self.batch.cap;
+            if over && crate::memory::store_reply(me, kernel, p.0, &body) {
+                let size = body.chars().count();
+                body = format!(
+                    "(settled, {size} bytes — NOT inlined, held in memory only \
+                     until this agent restarts. origin: {}. To find a line in it: \
+                     send yourself <type>grep</type> <query>substring</query> \
+                     <ids><item>{}</item></ids>)",
+                    origin_line(&out.result, &o.target, &o.verb, &self.sent.1),
+                    p.0
+                );
+            }
+        }
+        if o.verb == "send" && out.pid.is_some() && !dead_letter {
+            body = format!("(deadline {}s)\n{body}", self.deadline);
+        }
+        body
+    }
+}
+
+/// The route's default deadline for a call to an agent, in seconds. PRECEDENCE:
+/// the call's own `timeout` (applied where the item is built) > the root
+/// record's `send_timeout` (any finite positive number, no floor) > the env
+/// `FANTASTIC_AI_SEND_TIMEOUT` > 600 ([`crate::constants::send_timeout_secs`]).
+/// Only the route default reads the root field: the generation and held-wait
+/// ceilings keep `send_timeout_secs()`.
+pub(crate) fn route_deadline(kernel: &Kernel) -> f64 {
+    kernel
+        .root()
+        .and_then(|r| r.record().meta.get("send_timeout").cloned())
+        .and_then(|v| v.as_f64())
+        .unwrap_or_else(crate::constants::send_timeout_secs)
+}
+
+/// A CHAIN CUT BY A RESTART (#726). Everything is records: at its start the kernel
+/// settled the calls the previous process left in flight as dead letters
+/// ([`fantastic_kernel::executions::CutCall`]); the ones this agent's own tasks made
+/// and the messages sent to it reach it here, at its boot, as ONE notice turn of a
+/// new chain. A reply it was waiting for will not come (resend or drop it); a message
+/// it held or was answering was cut, and its sender is told by its own dead letter.
+/// Never silent. A call made inside a dispatch (a pass's own store or provider call)
+/// is the pass's plumbing, not the agent's work: the cut message that ran the pass
+/// says it. Nothing cut, nothing told.
+pub(crate) async fn resume_cut(
+    kernel: &Arc<Kernel>,
+    self_id: &AgentId,
+    cut: &[fantastic_kernel::executions::CutCall],
+) {
+    let me = self_id.as_str();
+    let lines: Vec<String> = cut
+        .iter()
+        .filter_map(|c| {
+            // A PASS'S OWN REQUEST is its plumbing, not the agent's work: the pass
+            // re-runs over its unread messages (#795)
+            if c.caller.as_deref() == Some(me) && c.verb.as_deref() == Some("complete") {
+                return None;
+            }
+            let made = c.caller.as_deref() == Some(me) && c.task.is_some();
+            let got = c.target == me && c.verb.as_deref() == Some("send");
+            if made && c.target == me {
+                Some(format!(
+                    "[your own turn \u{b7} dead letter {}] a reply or reminder on its way to \
+                     you was cut before you read it",
+                    c.id
+                ))
+            } else if made {
+                Some(format!(
+                    "[reply to {} \u{b7} {} {}] no reply will come \u{2192} dead letter {}; \
+                     resend or drop",
+                    c.id,
+                    c.target,
+                    c.verb.as_deref().unwrap_or("?"),
+                    c.id
+                ))
+            } else if got && c.caller.as_deref() != Some(me) {
+                Some(format!(
+                    "[from {} \u{b7} dead letter {}] a message to you was cut before it was \
+                     answered; its sender is told \u{2014} do not answer it",
+                    c.caller.as_deref().unwrap_or("operator"),
+                    c.id
+                ))
+            } else {
+                None
             }
         })
         .collect();
+    if lines.is_empty() {
+        return;
+    }
+    let text = format!(
+        "[restart] The kernel stopped while this work was in flight, and a new kernel \
+         started on the same records. What was in flight cannot finish; each is a dead \
+         letter now:\n{}\nGo on from here.",
+        lines.join("\n")
+    );
+    crate::life::notice(kernel, self_id, &text, &fantastic_kernel::inquiry::default_client_id()).await;
+}
 
-    // THE TAIL. An answer reaching here has calls (the attempts re-asked one with none,
-    // #795), or it was cut and dispatched nothing. Nothing reminds and nothing counts
-    // streaks: the answer ends with `done` or `stop`, and the next message wakes the
-    // agent.
-    let any_blocks = !blocks.is_empty();
-    // The chain goes on only when a reply batch lands on this agent itself.
-    let to_self = blocks.iter().any(|b| b.dest == self_id.as_str());
-    if any_blocks {
-        deliver_grouped(
-            &kernel,
-            self_id.as_str(),
-            blocks,
-            &client_id,
-            message_id,
-        )
-        .await;
-        goes_on = to_self;
-    }
-    if let Some(reason) = stop_called.as_deref() {
-        // THE MODEL STOPPED (#766, 1.8): the work cannot be done. The chain ends as
-        // failed through the same give-up as the harness's stop: status `failed`,
-        // `reason: gave_up`, the model's reason as `error`, the open inquiry closed with
-        // it, `send_to` told. It wins over `done` in one answer; the calls written beside
-        // it were dispatched above, as beside `done` (section 5, item 5).
-        give_up(&kernel, &self_id, &client_id, send_to.as_deref(), reason).await;
-        return false;
-    }
-    if done_called {
-        // Nothing more from this agent now: the next message wakes it, an answer owed
-        // to an inquiry it received included (#795, Q5). A caller's `send_to` hand-off
-        // is the one thing that still applies: the finished text is what it asked to
-        // have delivered.
-        if !any_blocks {
-            if let Some(to) = send_to.as_deref() {
-                deliver_soon(&kernel, to, &text, &client_id, false);
-            }
-        }
-        return false;
-    }
-    if any_calls {
-        // Calls that reply elsewhere bring no message back to this agent, so the
-        // chain ends here unless a reply batch landed on self (#227 Bug 1).
-        return to_self;
-    }
-    // No call of the model's own (a cut pass), so the CALLER's one-shot handoff
-    // applies: hand this pass's TEXT to `send_to`, once. It must not propagate — a
-    // caller cannot spend the model's turns for it.
-    if let Some(to) = send_to.as_deref() {
-        deliver_soon(&kernel, to, &text, &client_id, false);
-    }
-    goes_on
+/// One EMITTED thing, in emission order — python's `units` tuple
+/// `(dest, target, verb, item_index, body)`. `idx` links a dispatched call to its
+/// outcome; `body` is pre-decided for the paths that never dispatch (a parse
+/// error, a missing target, a missing payload, the `@body` guard, the binary
+/// carrier).
+struct Unit {
+    dest: String,
+    target: String,
+    verb: String,
+    idx: Option<usize>,
+    body: Option<String>,
+    /// The model's own one-sentence `<title>` for this call. It rides on the
+    /// reply's tag and is what REMAINS once the body is stripped from the view,
+    /// so it is the call's name forever.
+    title: Option<String>,
 }
 
 /// A call that acts: anything but the notes `keep` and `line_summary` (#641, #709).
@@ -1624,14 +1473,8 @@ pub(crate) fn acts(text: &str) -> bool {
 /// (`stop`) end the chain as failed with a reason.
 const CONTROL_CALLS: [&str; 5] = ["done", "inquiry_answer", "keep", "line_summary", "stop"];
 
-/// The give-up tail: say so in the status, close the inquiry and tell the caller.
-pub(crate) async fn give_up(
-    kernel: &Arc<Kernel>,
-    self_id: &AgentId,
-    client_id: &str,
-    send_to: Option<&str>,
-    gave_up: &str,
-) {
+/// The give-up tail: say so in the status and close the inquiry.
+pub(crate) async fn give_up(kernel: &Arc<Kernel>, self_id: &AgentId, client_id: &str, gave_up: &str) {
     let st = state_for(self_id);
     let mut detail = Map::new();
     detail.insert("reason".to_string(), json!("gave_up"));
@@ -1640,111 +1483,6 @@ pub(crate) async fn give_up(
     let mut body = Map::new();
     body.insert("error".to_string(), json!(gave_up));
     close_inquiry(kernel, self_id.as_str(), client_id, body).await;
-    if let Some(to) = send_to {
-        deliver_soon(kernel, to, gave_up, client_id, false);
-    }
-}
-
-/// ONE delivered message per destination: blocks joined by a blank line, each
-/// tagged `[reply to <pid> · <target> <verb>]` — with ` · N of M in batch <token>`
-/// composed INSIDE that tag when the destination is owed more than one.
-///
-/// INSIDE, not a trailing line: that is what the shared prompt teaches and what
-/// python's history trimmers can read (`_REPLY_TAG` / `_BLOCK_SPLIT` match the
-/// tag at the START of a block), so transcripts trim and byte-diff alike across
-/// runtimes.
-///
-/// The stamp is for CORRELATION and COMPLETENESS, not "the rest are still in
-/// flight" — the batch arrives whole. A model that made 2 calls and got 1 back
-/// cannot tell "still running" from "answered the wrong one".
-async fn deliver_grouped(
-    kernel: &Arc<Kernel>,
-    self_id: &str,
-    blocks: Vec<Block>,
-    client_id: &str,
-    message_id: Option<i64>,
-) {
-    // Destination order = first appearance, so the model reads them in the order
-    // it wrote the calls.
-    let mut order: Vec<String> = Vec::new();
-    let mut by_dest: HashMap<String, Vec<Block>> = HashMap::new();
-    for b in blocks {
-        if !by_dest.contains_key(&b.dest) {
-            order.push(b.dest.clone());
-        }
-        by_dest.entry(b.dest.clone()).or_default().push(b);
-    }
-    // A FRESH token per TURN, shared across destinations: it names the batch, and
-    // a model reading two destinations' messages can see they came from one turn.
-    // THE BATCH TOKEN IS THE TURN'S OWN ID when one exists (python), so every
-    // `↑` and every `batch` on a reply points at a row the model can see.
-    let token = message_id.map_or_else(mint_batch_token, |t| t.to_string());
-    // EVERY DESTINATION'S INCARNATION, READ NOW — before any delivery is spawned.
-    // python reads `born` for all of them in one synchronous loop
-    // (`_deliver_soon`), so a target that reboots while a sibling delivery is
-    // still thinking is still judged against the incarnation this turn addressed.
-    let born: HashMap<String, u64> = order
-        .iter()
-        .map(|d| {
-            (
-                d.clone(),
-                crate::state::incarnation(&AgentId::from(d.as_str())),
-            )
-        })
-        .collect();
-    for dest in order {
-        let parts = by_dest.remove(&dest).unwrap_or_default();
-        let m = parts.len();
-        // A batch to SELF made only of this layer's own text is a notice; one that
-        // carries any call's outcome is a reply.
-        let notice = dest == self_id && !parts.iter().any(|b| b.outcome);
-        let body = parts
-            .iter()
-            .enumerate()
-            .map(|(i, b)| {
-                // The ONE line a reply is known by, forever — in the durable
-                // store, in `recall` pages, and as the stub a stripped body
-                // leaves behind. Optional segments append in THIS order:
-                //     [reply to <pid> · <target> <verb> · "<title>" · N of M in batch <b>]
-                let mut tag = format!("[reply to {} \u{b7} {} {}", b.pid, b.target, b.verb);
-                if let Some(t) = &b.title {
-                    tag.push_str(&format!(" \u{b7} \"{t}\""));
-                }
-                if let Some(t) = message_id {
-                    tag.push_str(&format!(" \u{b7} \u{2191}{t}"));
-                }
-                if m > 1 {
-                    tag.push_str(&format!(" \u{b7} {} of {m} in batch {token}]", i + 1));
-                } else {
-                    tag.push(']');
-                }
-                format!("{tag}\n{}", b.body)
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        deliver_soon_with_born(
-            kernel,
-            &dest,
-            &body,
-            client_id,
-            born.get(&dest).copied().unwrap_or_default(),
-            notice,
-            // ONE CHAIN PER AGENT (#227 Bug 4): the token is read when this routing
-            // decision is made, as in `deliver_soon`.
-            if notice
-                || fantastic_kernel::current_origin().is_some_and(|o| o.as_str() == dest.as_str())
-            {
-                state_for(&AgentId::from(dest.as_str()))
-                    .chain
-                    .lock()
-                    .expect("chain poisoned")
-                    .token
-                    .clone()
-            } else {
-                String::new()
-            },
-        );
-    }
 }
 
 #[cfg(test)]

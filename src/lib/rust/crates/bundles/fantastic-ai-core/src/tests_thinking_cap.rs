@@ -243,12 +243,12 @@ async fn traces(kernel: &Arc<Kernel>, chat: &AgentId, event: &str) -> Vec<Value>
 async fn a_cut_thinking_is_re_asked_once_and_answers() {
     let tmp = TempDir::new().unwrap();
     let (kernel, chat) = chat_on_thinker(&tmp, "thinker_once", json!({"thinking_token_budget": 10}), json!({"runaway": 1})).await;
-    let r = kernel
-        .operator_send(vec![Item::new(chat.clone(), json!({"type": "send", "text": "hi"}))])
+    let r = crate::tests::settled(&kernel, kernel
+        .operator_send(vec![Item::new(chat.clone(), json!({"type": "send", "text": "hi"}))]))
         .await
         .remove(0)
         .result;
-    assert_eq!(r["response"], json!(ANSWER), "{r}");
+    assert_eq!(json!(crate::tests::last_answer(&kernel, &chat).await), json!(ANSWER), "{r}");
     let retries = retries(&kernel, &chat).await;
     assert_eq!(retries.len(), 1, "{retries:?}");
     let note = crate::model_format::NOTICE_THINKING_CUT.replace("{budget}", "10");
@@ -261,12 +261,12 @@ async fn a_cut_thinking_is_re_asked_once_and_answers() {
 async fn a_second_cut_stops_the_turn() {
     let tmp = TempDir::new().unwrap();
     let (kernel, chat) = chat_on_thinker(&tmp, "thinker_twice", json!({"thinking_token_budget": 10}), json!({"runaway": 99})).await;
-    let r = kernel
-        .operator_send(vec![Item::new(chat.clone(), json!({"type": "send", "text": "hi"}))])
+    let r = crate::tests::settled(&kernel, kernel
+        .operator_send(vec![Item::new(chat.clone(), json!({"type": "send", "text": "hi"}))]))
         .await
         .remove(0)
         .result;
-    assert_ne!(r["response"], json!(ANSWER), "{r}");
+    assert_ne!(json!(crate::tests::last_answer(&kernel, &chat).await), json!(ANSWER), "{r}");
     assert_eq!(served_by("thinker_twice"), 2, "two passes, then the stop: {r}");
     assert_eq!(retries(&kernel, &chat).await.len(), 2);
     let stops = traces(&kernel, &chat, "stop").await;
@@ -280,11 +280,11 @@ async fn a_second_cut_stops_the_turn() {
 async fn an_enforcing_server_is_not_cut() {
     let tmp = TempDir::new().unwrap();
     let (kernel, chat) = chat_on_thinker(&tmp, "thinker_enforced", json!({"thinking_token_budget": 10}), json!({"runaway": 1, "enforces": true})).await;
-    let r = kernel
-        .operator_send(vec![Item::new(chat.clone(), json!({"type": "send", "text": "hi"}))])
+    let r = crate::tests::settled(&kernel, kernel
+        .operator_send(vec![Item::new(chat.clone(), json!({"type": "send", "text": "hi"}))]))
         .await
         .remove(0)
         .result;
-    assert_eq!(r["response"], json!(ANSWER), "{r}");
+    assert_eq!(json!(crate::tests::last_answer(&kernel, &chat).await), json!(ANSWER), "{r}");
     assert!(retries(&kernel, &chat).await.is_empty());
 }

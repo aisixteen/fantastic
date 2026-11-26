@@ -508,11 +508,9 @@ pub(super) async fn assembled(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Valu
         crate::assembly::assemble_messages(
             agent,
             &state,
-            "next",
             kernel,
             "c",
             crate::caching::Caching::ProviderCache,
-            &crate::row_attrs::Stamp::now(),
         ),
     )
     .await
@@ -521,10 +519,11 @@ pub(super) async fn assembled(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Valu
 }
 
 /// The leading messages the chain of request `now` keeps from request `before`: equal
-/// role and content, the arriving message of `before` excluded (its row's id is new).
+/// role and content. The arriving message of `before` is a stored row now (#795), shown
+/// as the same bytes in `now`, so it is kept with the rest: its link is in the chain
+/// though it is never cached as an entry (`cache.rs` `arriving`).
 fn kept_between(before: &[Value], now: &[Value]) -> usize {
-    let stored = before.len().saturating_sub(1);
-    before[..stored]
+    before
         .iter()
         .zip(now)
         .take_while(|(a, b)| a["role"] == b["role"] && a["content"] == b["content"])
@@ -1014,7 +1013,8 @@ async fn cancelled_turn_writes_no_rows() {
     let h = spawn_generate(&kernel, &a, &p, "e11_b");
     until_asked(&p, 3).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    h.abort();
+    // the pass ends mid-way: a stop (#795: a pass is no task to drop)
+    let _ = as_agent(a.clone(), crate::verbs::stop(&a, None, &kernel)).await;
     let _ = h.await;
     assert_eq!(traces(&kernel, &a).await, before);
     assert!(traces_of(&kernel, &a, "e11_b").await.is_empty());
@@ -1429,7 +1429,8 @@ async fn crashed_pass_writes_no_rows() {
         let h = spawn_generate(&kernel, &a, &p, &client);
         until_asked(&p, asked + n).await;
         tokio::time::sleep(Duration::from_millis(100)).await;
-        h.abort();
+        // the pass ends mid-way: a stop (#795: a pass is no task to drop)
+        let _ = as_agent(a.clone(), crate::verbs::stop(&a, None, &kernel)).await;
         let _ = h.await;
         crate::state::drop_state(&a);
         assert!(traces_of(&kernel, &a, &client).await.is_empty(), "{point}");

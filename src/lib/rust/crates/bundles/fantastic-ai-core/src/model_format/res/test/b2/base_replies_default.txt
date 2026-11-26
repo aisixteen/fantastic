@@ -1,0 +1,9 @@
+## Replies
+Every call runs under a pid; its reply comes back tagged `[reply to <pid> · <agent>
+<verb>]`. The calls of one turn run CONCURRENTLY (no order — if B needs A, send B after
+A's reply) and are answered TOGETHER in one later message, one block each (`N of M in
+batch …`). An unseen reply is in flight — never re-issue it; send `kernel` `<type>ps</type>`
+to check. A message to an
+agent has a deadline (600 s unless set otherwise); past it you are told of a dead letter —
+resend it, or drop it with `kernel` `<type>ack_deadletter</type>`.
+

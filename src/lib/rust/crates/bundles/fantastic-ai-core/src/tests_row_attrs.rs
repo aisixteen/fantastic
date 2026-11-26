@@ -14,8 +14,8 @@ fn passes(n: usize) -> Vec<Vec<ScriptEvent>> {
 }
 
 async fn ask(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    kernel
-        .operator_send(vec![Item::new(agent.clone(), payload)])
+    crate::tests::settled(kernel, kernel
+        .operator_send(vec![Item::new(agent.clone(), payload)]))
         .await
         .remove(0)
         .result
@@ -238,7 +238,7 @@ async fn a_stored_row_maps_the_same_on_every_request_and_no_message_opens_with_a
         // ONE CHAIN PER AGENT (#227): a send while the last chain is still alive is held
         // and answered by a wake turn; each turn here is its own chain
         until_true("the chain to end", || {
-            !crate::state::state_for(&agent).chain.lock().unwrap().alive
+            crate::state::state_for(&agent).is_quiet()
         })
         .await;
         say(&kernel, &agent, text).await;
@@ -297,10 +297,11 @@ async fn a_dead_turn_keeps_the_ts_of_its_request() {
     );
     let t0 = crate::helpers::now_secs();
     let r = ask(&kernel, &agent, json!({"type": "send", "text": "go"})).await;
-    assert_eq!(r["response"], json!(GO), "{r}");
+    assert_eq!(r["accepted"], json!(true), "{r}");
+    assert_eq!(crate::tests::last_answer(&kernel, &agent).await, GO);
     assert_eq!(s.passes_served(), 2, "the thinking-only attempt was not re-asked");
     until_true("the chain to end", || {
-        !crate::state::state_for(&agent).chain.lock().unwrap().alive
+        crate::state::state_for(&agent).is_quiet()
     })
     .await;
     let all = rows(&kernel, &agent).await;
@@ -342,12 +343,10 @@ async fn two_identical_builds_give_the_same_parts_and_a_changed_prompt_only_its_
                 crate::assembly::assemble_messages(
                     &agent,
                     &state,
-                    "next",
                     &kernel,
                     "c",
                     crate::caching::Caching::ProviderCache,
-                    &crate::row_attrs::Stamp::now(),
-                ),
+        ),
             )
             .await
             .map(|(m, _)| parts_of_default(&agent, &m))

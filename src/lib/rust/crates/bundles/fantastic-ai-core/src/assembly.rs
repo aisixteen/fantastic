@@ -437,41 +437,55 @@ impl From<BlockFail> for fantastic_kernel::bundle::BundleError {
     }
 }
 
-/// Build the per-turn message list: system block + the MODEL VIEW of the
-/// persisted history + the user turn, as pieces: the pass's type writes them
+/// Build a pass's message list: system block + the MODEL VIEW of the persisted
+/// history, whose newest rows are the messages the pass reads (stored when they
+/// arrived, #795), as pieces: the pass's type writes them
 /// ([`crate::model_format::map`]). A caller-supplied `system_prompt` REPLACES
 /// the default system block (a caller that wants a different role, or a different
 /// convention, owns it whole); absent that, the record's own `system_prompt` does;
 /// the default is self-identity + the how-to sections, and NO agent menu.
 ///
 /// The conversation is ALWAYS this agent's own (its memory store): there is no
-/// caller-supplied history. `stamp`: the arriving message's `ts` and offset, which the row
-/// it becomes keeps: on an empty thread they are the date the environment section shows.
+/// caller-supplied history. The environment section's date is the thread's first row's.
 ///
 /// Returns `(messages, store_len)`. `store_len` is how many turns the head held
 /// when this view was built, and it is NOT derivable from the messages: the
 /// history is a deduped/trimmed VIEW (see [`crate::history_view`]), so counting
 /// the view puts the compaction reaction cursor short by exactly the turns the
 /// trimmers dropped.
+#[cfg(test)]
 pub(crate) async fn assemble_messages(
     self_id: &AgentId,
     state: &Arc<BackendState>,
-    user_text: &str,
+    kernel: &Arc<Kernel>,
+    client_id: &str,
+    caching: Caching,
+) -> Result<(Vec<Value>, usize), BlockFail> {
+    assemble_read(self_id, state, kernel, client_id, caching)
+        .await
+        .map(|(messages, store_len, _)| (messages, store_len))
+}
+
+/// [`assemble_messages`], and the ids of the rows the history read held: a pass reads
+/// every message stored by then, the ones that arrived after its tail was taken too.
+pub(crate) async fn assemble_read(
+    self_id: &AgentId,
+    state: &Arc<BackendState>,
     kernel: &Arc<Kernel>,
     _client_id: &str,
     caching: Caching,
-    stamp: &crate::row_attrs::Stamp,
-) -> Result<(Vec<Value>, usize), BlockFail> {
+) -> Result<(Vec<Value>, usize, Vec<i64>), BlockFail> {
     // A trimmed VIEW, not a rewrite of the store: stale whole-state reads deduped,
     // identical bodies stubbed, and answered reflects reduced to a stub — the
     // model's own distillation carries the facts forward.
     let store = load_history(self_id, kernel, false).await?;
     let store_len = store.len();
-    // THE DATE THE THREAD BEGAN: its first row's. Only an empty thread takes the
-    // arriving message's, which becomes that first row; a first row with no `ts` (an old
-    // or imported one) shows no date rather than the clock's. A restart shows the same.
+    let read: Vec<i64> = store.iter().filter_map(|r| r.get("id").and_then(Value::as_i64)).collect();
+    // THE DATE THE THREAD BEGAN: its first row's, which is the first message's; a first
+    // row with no `ts` (an old or imported one) shows no date rather than the clock's. A
+    // restart shows the same. An empty thread shows today's.
     let env = if store.is_empty() {
-        stamp.env()
+        crate::row_attrs::Stamp::now().env()
     } else {
         store.first().and_then(Env::of)
     };
@@ -547,18 +561,7 @@ pub(crate) async fn assemble_messages(
         }
         messages.push(msg);
     }
-    let mut incoming = json!({"role": "user", "content": user_text});
-    // the images this turn attached: shown whole to a model that can see them, else alt text
-    if let Some(a) = crate::agent_loop::attached_in_flight(state) {
-        incoming["images"] = Value::Array(a.parts.clone());
-        let how = pics.form_of_new(&a.parts);
-        incoming = crate::images::render(incoming, &a.info, None, how);
-    }
-    if !thoughts.is_empty() {
-        incoming = on_top(incoming, thoughts);
-    }
-    messages.push(incoming);
-    Ok((messages, store_len))
+    Ok((messages, store_len, read))
 }
 
 /// `message` with `markers` at the top of what it shows.
@@ -593,8 +596,6 @@ impl Pictures {
         let limits = crate::images::limits(&meta);
         let recalled =
             std::mem::take(&mut *state.recalled_images.lock().expect("recalled poisoned"));
-        // the turn's own images count against the bound of the model first
-        let current = crate::agent_loop::attached_in_flight(state).map_or(0, |a| a.parts.len());
         let mut out = Self {
             sees,
             limits,
@@ -604,15 +605,22 @@ impl Pictures {
         if !sees {
             return out;
         }
-        // THE MODEL ANSWERED: the rows before its newest answer are anchors from now on
+        // THE MODEL ANSWERED: the rows its newest answer read are anchors from now on —
+        // up to that answer's parent; a message that arrived while it worked was not read
+        // (#795)
         let answered = store.iter().rposition(|r| r["role"] == "assistant");
-        let mut room = limits.max_images.map(|n| (n - current as i64).max(0));
+        let read_upto = answered.and_then(|a| store[a].get("parent").and_then(Value::as_i64));
+        let mut room = limits.max_images.map(|n| n.max(0));
         for r in rendered.iter().rev() {
             let row = &store[r.idx];
             let Some(parts) = crate::images::parts_of(row) else {
                 continue;
             };
-            let wanted = answered.is_none_or(|a| r.idx > a)
+            let unread = match (read_upto, row.get("id").and_then(Value::as_i64)) {
+                (Some(upto), Some(id)) => id > upto,
+                _ => answered.is_none_or(|a| r.idx > a),
+            };
+            let wanted = unread
                 || row
                     .get("id")
                     .and_then(Value::as_i64)
@@ -645,15 +653,6 @@ impl Pictures {
             Form::Recalled
         } else {
             Form::Image
-        }
-    }
-
-    /// The form the images of the turn's own send take.
-    fn form_of_new(&self, parts: &[Value]) -> crate::images::Form {
-        if self.sees && parts.iter().all(|p| crate::images::fits(p, self.limits)) {
-            crate::images::Form::Image
-        } else {
-            crate::images::Form::Alt
         }
     }
 }
@@ -769,7 +768,7 @@ pub fn listed_entries(
 /// rows leave the view with it.
 pub fn render_history(store: &[Value], listed: Option<&[ViewEntry]>) -> Vec<Rendered> {
     let Some(entries) = listed else {
-        return rows_from(store, 0);
+        return recall_first(store, rows_from(store, 0));
     };
     let mut out: Vec<Rendered> = entries
         .iter()
@@ -781,6 +780,32 @@ pub fn render_history(store: &[Value], listed: Option<&[ViewEntry]>) -> Vec<Rend
         .collect();
     let newest = entries.iter().map(|e| e.idx).max().unwrap_or(0);
     out.extend(rows_from(store, newest + 1));
+    recall_first(store, out)
+}
+
+/// THE MESSAGES A PASS READS COME LAST (#795): they are stored when they arrive, so the
+/// `recall` row the pass's owed recall writes lands after them. Between two answers,
+/// each `recall` row is shown before the other rows, on every request alike, so the
+/// request ends with the messages and its prefix stays the same from pass to pass.
+fn recall_first(store: &[Value], rows: Vec<Rendered>) -> Vec<Rendered> {
+    let is = |r: &Rendered, kind: &str| store[r.idx].get("kind").and_then(Value::as_str) == Some(kind);
+    let mut out = Vec::with_capacity(rows.len());
+    let mut span: Vec<Rendered> = Vec::new();
+    let flush = |span: &mut Vec<Rendered>, out: &mut Vec<Rendered>| {
+        let (recalls, rest): (Vec<Rendered>, Vec<Rendered>) =
+            std::mem::take(span).into_iter().partition(|r| is(r, "recall"));
+        out.extend(recalls);
+        out.extend(rest);
+    };
+    for r in rows {
+        if store[r.idx].get("role").and_then(Value::as_str) == Some("assistant") {
+            flush(&mut span, &mut out);
+            out.push(r);
+        } else {
+            span.push(r);
+        }
+    }
+    flush(&mut span, &mut out);
     out
 }
 
@@ -815,7 +840,7 @@ mod tests_worknote {
             .join(" ");
         let h = h.as_str();
         assert!(
-            h.starts_with("## Working Your thinking lasts one turn; your reply's own text stays.")
+            h.starts_with("## Working Your thinking lasts one answer; your reply's own text stays.")
         );
         assert!(h.contains("Keep the task's state there, in a few plain lines before your calls (plain text, not a call or an agent)"));
         assert!(h.contains("what was asked and how you will know it is done; the steps and which one you are on; what you found, with where you found it; what you tried that failed; and your next step."));
@@ -851,7 +876,7 @@ mod tests_worknote {
         assert!(h.contains("Read only what the request names; no docs or reflect sweep before your first real call."));
         assert!(h.contains("an error reply names the missing argument"));
         assert!(h.contains("One answer may hold many <call> elements; they run at once."));
-        assert!(h.contains("a call waits for a later turn only when it does"));
+        assert!(h.contains("a call that does goes in a later answer, after that reply arrives"));
         assert!(h.contains(
             "Before `done`: for each check that shows the task is done, the reply that proves it."
         ));

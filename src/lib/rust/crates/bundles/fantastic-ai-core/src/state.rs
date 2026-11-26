@@ -6,30 +6,11 @@
 use crate::helpers::{now_secs, safe_client};
 use fantastic_kernel::AgentId;
 use serde_json::{json, Value};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::Mutex as AsyncMutex;
 
-/// One queued entry awaiting the FIFO lock.
-#[derive(Clone, Debug)]
-pub struct QueuedEntry {
-    /// Sanitised caller client id.
-    pub client_id: String,
-    /// The user text for this submission.
-    pub text: String,
-    /// Correlation id for status events.
-    pub send_id: String,
-    /// Enqueue timestamp.
-    pub queued_at: f64,
-    /// This layer's own text to its own agent (a reminder, a malformed-call
-    /// report): the incoming row is stored as `kind: "notice"`.
-    pub notice: bool,
-    /// The sender's id (the calling agent, else the sanitised client id) —
-    /// kept in RAM for `status`'s `pending_from`.
-    pub origin: String,
-}
-
-/// The entry currently holding the FIFO lock (used by `status`).
+/// The pass in flight (used by `status`, `stop` and `on_cancel`).
 #[derive(Clone, Debug)]
 pub struct CurrentEntry {
     /// Sanitised caller client id.
@@ -38,14 +19,12 @@ pub struct CurrentEntry {
     pub text: String,
     /// Correlation id for status events.
     pub send_id: String,
-    /// Enqueue timestamp, carried over from the queue row — python promotes the
-    /// WHOLE queued entry (`{**entry, started_at, phase, …}`), so `queued_at`
-    /// survives into `status.current` and says how long the caller waited.
+    /// When the first message this pass reads arrived.
     pub queued_at: f64,
     /// The sender's id (the calling agent, else the client): the `source` of the
     /// incoming row.
     pub origin: String,
-    /// Lock-acquisition timestamp.
+    /// When the pass started.
     pub started_at: f64,
     /// Current phase of the call: queued|thinking|streaming|retrying, or the phase that ended it.
     pub phase: String,
@@ -53,38 +32,45 @@ pub struct CurrentEntry {
     pub text_so_far: String,
     /// Last tool entry (entry/exit), for status snapshots.
     pub last_tool: Option<Value>,
-    /// The KERNEL TASK this generation runs as (`"<agent>:<n>"`) — the pid of
-    /// the `send` dispatch. `cancel <task_id>` kills the turn; the bundle's
-    /// `on_cancel` matches on this to know the killed task is ITS generation
-    /// (not some other dispatch on the same agent) and to close the turn out.
+    /// The KERNEL EXECUTION of the pass's request in flight: the provider's
+    /// `complete` call, or the chat's own task that reads an in-process provider.
+    /// `stop` cancels it; the bundle's `on_cancel` matches on it to know the killed
+    /// task is ITS pass's request (not some other dispatch on the same agent).
     pub task_id: Option<String>,
     /// This pass's STREAMING PARTS — the splitter + publisher the stream loop
     /// feeds (python `_current[id]["parts"]`). `stop` checks a `stream_id`
     /// against it; `on_cancel` aborts its open parts. `None` until the provider
     /// pass starts.
     pub parts: Option<Arc<AsyncMutex<crate::events::PassParts>>>,
-    /// Fired by `stop`: the generation's own loop watches it and drops the
-    /// provider stream, so a stop reaches the stream whether or not the kernel's
-    /// task walk does (#177).
+    /// Fired by `stop`: an in-process provider's read watches it and drops the
+    /// stream, so a stop reaches the stream whether or not the kernel's task walk
+    /// does (#177).
     pub abort: Arc<tokio::sync::Notify>,
     /// Who stopped this generation with the `stop` verb — the caller's id, or
     /// `"operator"` (python `stopped_by`). The cut marker names them.
     pub stopped_by: Option<String>,
-    /// Carried from the queue row: the incoming row is a `notice`.
+    /// The pass reads only this layer's own text (a notice).
     pub notice: bool,
-    /// What the turn's attached images add to its incoming row (`images`, `attributes.image`):
-    /// see [`crate::images::Attached`]. `None`: an imageless turn.
-    pub(crate) attached: Option<crate::images::Attached>,
+    /// The row the pass answers: the newest it reads, its answer row's parent.
+    pub(crate) answers: i64,
+    /// The number of the pass's request in flight: a request id recorded late is not
+    /// taken for a newer one's.
+    pub(crate) request: u64,
 }
 
 /// Per-agent coordination state. Cloning the `Arc` is cheap.
 pub struct BackendState {
-    /// FIFO serializer — only one `send` runs at a time per agent.
-    pub lock: Arc<AsyncMutex<()>>,
-    /// Snapshot for the `status` verb. `Some` iff a `send` holds the lock.
+    /// Snapshot for the `status` verb. `Some` iff a pass is in flight.
     pub current_meta: Mutex<Option<CurrentEntry>>,
-    /// Entries waiting on `lock`. Front = next to acquire.
-    pub queue: Mutex<VecDeque<QueuedEntry>>,
+    /// THE AGENT'S LIFE (#795): whether a pass runs, the messages stored and not yet
+    /// read by one, and the calls its answers have in flight.
+    pub(crate) life: Mutex<Life>,
+    /// Told whenever [`Life`] changes: a test waits on it for the agent to be quiet.
+    pub(crate) life_changed: tokio::sync::Notify,
+    /// How this agent's passes reach their model: set by every call the bundle
+    /// answers, read by a pass that starts outside a call (a reply's wake, the next
+    /// pass over the messages a pass did not read).
+    pub(crate) machine: Mutex<Option<Machine>>,
     /// PUBLIC last context-overflow projection summary (the `context_status`
     /// verb's `last_projection`). `{fired, strategy?, kept_messages?,
     /// dropped_messages?, summarized?, too_small?}`. Free of internal bookkeeping.
@@ -117,9 +103,6 @@ pub struct BackendState {
     pub calib: Mutex<Option<f64>>,
     /// The endpoint's last reported prompt size — python `_reported`.
     pub reported: Mutex<Option<i64>>,
-    /// ONE CHAIN PER AGENT (#227): whether a chain is running, the token its
-    /// own turns carry, and the client_ids of messages held for its next pass.
-    pub chain: Mutex<ChainState>,
     /// When the last provider pass ended (unix seconds) — `fork_points` reads it
     /// to say whether the prompt cache is still warm. Python `_last_send`.
     pub last_send_secs: Mutex<Option<f64>>,
@@ -141,7 +124,7 @@ pub struct BackendState {
     pub(crate) model_key: Mutex<Option<crate::model_format::rules::ModelKey>>,
     /// The chat's own RENDER CACHE (#766): its rows rendered for the model type, RAM
     /// only, bounded by its record's `render_cache_bytes`. It goes with this state.
-    pub(crate) render_cache: crate::model_format::cache::RenderCache,
+    pub(crate) render_cache: Arc<crate::model_format::cache::RenderCache>,
     /// The chat's token counts since its first pass (#766, 1.7): RAM, `None` until seeded
     /// from the newest assistant row ([`crate::used::seed`]).
     pub(crate) used_running: Mutex<Option<crate::used::Used>>,
@@ -156,104 +139,77 @@ pub struct BackendState {
     pub(crate) trace_count: Mutex<Option<usize>>,
 }
 
-/// The agent's chain: `alive` while a pass or its routing is running.
+/// One message stored in the agent's memory and not yet read by a pass.
+#[derive(Clone, Debug)]
+pub(crate) struct Arrival {
+    /// Its stored row's id.
+    pub(crate) row_id: i64,
+    /// The sanitised client id it came with.
+    pub(crate) client_id: String,
+    /// The sender's id (the calling agent, else the client id).
+    pub(crate) origin: String,
+    /// Its text, as stored.
+    pub(crate) text: String,
+    /// Its correlation id for status events.
+    pub(crate) send_id: String,
+    /// When it arrived.
+    pub(crate) at: f64,
+    /// This layer's own text (a notice).
+    pub(crate) notice: bool,
+}
+
+/// THE AGENT'S LIFE (#795): it is woken by messages, one pass at a time.
 #[derive(Default)]
-pub struct ChainState {
-    /// A pass or its routing is running.
-    pub alive: bool,
-    /// The token this chain's own turns carry.
-    pub token: String,
-    /// Messages held for the chain's next pass, in order. Each holds the
-    /// oneshot its caller awaits, so a held send returns the answer of the
-    /// pass that reads it.
-    pub held: Vec<HeldMsg>,
-    /// Signalled whenever `held` is taken, cleared or released: a wake watchdog
-    /// waiting on it looks again whether the senders it watches are still held.
-    pub held_gone: Arc<tokio::sync::Notify>,
+pub(crate) struct Life {
+    /// A pass is running: from its start to the write of its answer row.
+    pub(crate) running: bool,
+    /// The number of the pass in flight, raised when one starts and when `stop` or
+    /// a cancel ends one: a request settle that names an older one is not acted on.
+    pub(crate) epoch: u64,
+    /// Messages stored and not yet read, in arrival order: the next pass reads them
+    /// all.
+    pub(crate) unread: Vec<Arrival>,
+    /// The calls the agent's answers sent whose replies have not come yet.
+    pub(crate) open: usize,
+    /// Paused (#219): arrivals are stored and unread, and no pass starts.
+    pub(crate) paused: bool,
+    /// How many times a `stop`, a pause or a boot ended the agent's work: a reply its
+    /// earlier answers routed, landing after, is recorded `late` and wakes nothing.
+    pub(crate) stops: u64,
 }
 
-/// A message held while its agent's chain is alive: its client_id, and the
-/// channel that hands its caller the reply of the pass that answers it.
-pub struct HeldMsg {
-    /// The held message's client_id.
-    pub client_id: String,
-    /// The held send's own id — how a watchdog names the senders of one wake.
-    pub send_id: String,
-    /// Hands the caller the reply of the pass that answers it.
-    pub reply: tokio::sync::oneshot::Sender<serde_json::Value>,
-    /// The sender's id (the calling agent, else the sanitised client id).
-    pub origin: String,
-    /// The incoming text.
-    pub text: String,
-    /// When it was held.
-    pub queued_at: f64,
-    /// The kernel task of the send that holds it — how the deadline's cancel
-    /// finds it.
-    pub task_id: Option<String>,
-    /// The id of the held incoming row.
-    pub row_id: i64,
-}
+/// Builds the provider of a pass, its client id given.
+pub(crate) type ProviderFor = Arc<dyn Fn(&str) -> Arc<dyn crate::provider::Provider> + Send + Sync>;
 
-impl ChainState {
-    /// Answer one held sender with an error: its caller is released, not left
-    /// waiting for a pass that will never read it.
-    fn release(h: HeldMsg, why: &str) {
-        let _ = h.reply.send(serde_json::json!({
-            "error": why,
-            "held": true,
-            "client_id": h.client_id,
-        }));
-    }
-
-    /// END THE CHAIN AND FORGET IT (a reboot, a context clear, a delete): every
-    /// held sender is released with `why`, and the token is dropped, so a reply
-    /// still in flight for the old chain is recorded, never admitted.
-    pub fn reset(&mut self, why: &str) {
-        for h in std::mem::take(&mut self.held) {
-            Self::release(h, why);
-        }
-        self.held_gone.notify_one();
-        self.alive = false;
-        self.token = String::new();
-    }
-
-    /// The wake for these held senders never ran: release exactly them with
-    /// `why`. With nobody left held the chain is over. Returns whether any were
-    /// still waiting.
-    pub fn expire(&mut self, send_ids: &[String], why: &str) -> bool {
-        let (gone, keep): (Vec<HeldMsg>, Vec<HeldMsg>) = std::mem::take(&mut self.held)
-            .into_iter()
-            .partition(|h| send_ids.contains(&h.send_id));
-        self.held = keep;
-        let any = !gone.is_empty();
-        for h in gone {
-            Self::release(h, why);
-        }
-        if any && self.held.is_empty() {
-            self.alive = false;
-            self.token = String::new();
-        }
-        any
-    }
-
-    /// WITHDRAW one held message by its task id (its sender's deadline passed):
-    /// removed and returned, never answered. The chain itself is untouched —
-    /// other held senders and the running pass go on.
-    pub fn withdraw(&mut self, task_id: &str) -> Option<HeldMsg> {
-        let at = self
-            .held
-            .iter()
-            .position(|h| h.task_id.as_deref() == Some(task_id))?;
-        Some(self.held.remove(at))
-    }
+/// What a pass needs that only a call to the bundle hands over: the provider, and the
+/// backend's knobs.
+#[derive(Clone)]
+pub(crate) struct Machine {
+    /// Builds the provider of a pass (its client id given).
+    pub(crate) provider: ProviderFor,
+    /// The backend's knobs.
+    pub(crate) cfg: crate::agent_loop::BackendConfig,
 }
 
 impl BackendState {
+    /// The life changed: whoever waits for the agent to be quiet looks again.
+    pub(crate) fn changed(&self) {
+        self.life_changed.notify_waiters();
+    }
+
+    /// QUIET: no pass runs, nothing is unread, and no call its answers sent is still
+    /// owed a reply.
+    pub(crate) fn is_quiet(&self) -> bool {
+        let life = self.life.lock().expect("life poisoned");
+        !life.running && life.unread.is_empty() && life.open == 0
+    }
+
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            lock: Arc::new(AsyncMutex::new(())),
             current_meta: Mutex::new(None),
-            queue: Mutex::new(VecDeque::new()),
+            life: Mutex::new(Life::default()),
+            life_changed: tokio::sync::Notify::new(),
+            machine: Mutex::new(None),
             projection: Mutex::new(None),
             compaction_mark: Mutex::new(None),
             folds_since: Mutex::new(0),
@@ -262,14 +218,13 @@ impl BackendState {
             prev_request: Mutex::new(None),
             calib: Mutex::new(None),
             reported: Mutex::new(None),
-            chain: Mutex::new(ChainState::default()),
             last_send_secs: Mutex::new(None),
             caps_checked: Mutex::new(None),
             recalled_images: Mutex::new(Vec::new()),
             line_summary: Mutex::new(None),
             model_seen: Mutex::new(None),
             model_key: Mutex::new(None),
-            render_cache: crate::model_format::cache::RenderCache::new(),
+            render_cache: Arc::new(crate::model_format::cache::RenderCache::new()),
             used_running: Mutex::new(None),
             used_pending: Mutex::new(crate::used::Pending::default()),
             last_type: Mutex::new(None),
@@ -327,10 +282,7 @@ pub fn bump_incarnation(agent_id: &AgentId) {
     *m.entry(agent_id.clone()).or_insert(0) += 1;
 }
 
-/// `true` iff a `send` holds the FIFO lock right now (a generation is in
-/// flight). Read off `current_meta` — the backend keeps no task handle of its
-/// own: a generation IS its kernel dispatch task (see the `ps`/`cancel` system
-/// verbs), and the kernel owns the abort.
+/// `true` iff a pass is in flight right now. Read off `current_meta`.
 pub fn is_generating(agent_id: &AgentId) -> bool {
     BACKENDS
         .lock()
@@ -339,23 +291,64 @@ pub fn is_generating(agent_id: &AgentId) -> bool {
         .unwrap_or(false)
 }
 
+/// WAIT UNTIL `agent_id` IS QUIET ([`BackendState::is_quiet`]) or `within` passes:
+/// `true` when it is. Woken by the life's changes, never a clock; the bound is only
+/// the failure. Tests and harnesses read the end of an agent's work through it.
+pub async fn until_quiet(agent_id: &AgentId, within: std::time::Duration) -> bool {
+    let st = state_for(agent_id);
+    let wait = async {
+        loop {
+            let changed = st.life_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if st.is_quiet() {
+                return;
+            }
+            changed.await;
+        }
+    };
+    tokio::time::timeout(within, wait).await.is_ok()
+}
+
+/// TEST SUPPORT: wait until EVERY agent of `kernel` is quiet — a reply one delivers may
+/// wake another, so the agents are looked at again until one sweep finds them all quiet.
+/// `false` when `within` passed first.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn settle(kernel: &Arc<fantastic_kernel::Kernel>, within: std::time::Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        let mut all = true;
+        for id in kernel.agent_ids() {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if !state_for(&id).is_quiet() {
+                all = false;
+                if !until_quiet(&id, left).await {
+                    return false;
+                }
+            }
+        }
+        if all {
+            return true;
+        }
+    }
+}
+
 /// Drop the agent's state slot (delete / shutdown). An in-flight `send` is a
 /// KERNEL task — it dies with the agent's dispatches, not through a bundle-held
 /// handle.
 pub fn drop_state(agent_id: &AgentId) {
     let removed = BACKENDS.lock().remove(agent_id);
-    // ONE CHAIN PER AGENT (#227): held senders are released, not left to the ceiling.
+    // a pass whose request settles after this acts on nothing
     if let Some(state) = removed {
-        state
-            .chain
-            .lock()
-            .expect("chain poisoned")
-            .reset("send: the agent was deleted or shut down");
+        let mut life = state.life.lock().expect("life poisoned");
+        life.epoch += 1;
+        life.running = false;
+        life.unread.clear();
     }
 }
 
-/// Close out a generation the kernel is cancelling: if `task_id` names the turn
-/// currently holding the lock, clear the in-flight entry and hand back the
+/// Close out a pass the kernel is cancelling: if `task_id` names the request of
+/// the pass in flight, clear the in-flight entry and hand back the
 /// client id so the backend can emit its final `done` (the `on_cancel` half of
 /// the task table's two-phase kill). `None` if the cancelled task isn't this
 /// agent's generation (a `history` / `reflect` dispatch on the same agent).
@@ -368,12 +361,12 @@ pub fn take_current_for_cancel(agent_id: &AgentId, task_id: &str) -> Option<Curr
     cur.take()
 }
 
-/// Withdraw the message of kernel task `task_id` held on this agent's chain, if
-/// any. Never creates a state slot.
-pub fn withdraw_held(agent_id: &AgentId, task_id: &str) -> Option<HeldMsg> {
+/// Take the in-flight entry of the pass whatever its request: a pass a cancel or a
+/// stop closes.
+pub(crate) fn take_current(agent_id: &AgentId) -> Option<CurrentEntry> {
     let state = BACKENDS.lock().get(agent_id).map(Arc::clone)?;
-    let mut chain = state.chain.lock().expect("chain poisoned");
-    chain.withdraw(task_id)
+    let taken = state.current_meta.lock().expect("current poisoned").take();
+    taken
 }
 
 // ── status snapshot ─────────────────────────────────────────────────
@@ -431,36 +424,9 @@ pub fn status_snapshot(agent_id: &AgentId, client_id: Option<&str>) -> Value {
     };
     let state = state_for(agent_id);
     let cur = state.current_meta.lock().expect("current poisoned").clone();
-    let queue = state
-        .queue
-        .lock()
-        .expect("queue poisoned")
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>();
-    // Held messages (the chain is running) are pending too: a snapshot of
-    // (sender, client, text, queued_at) taken under the chain lock.
-    let held: Vec<(String, String, String, String, f64)> = state
-        .chain
-        .lock()
-        .expect("chain poisoned")
-        .held
-        .iter()
-        .map(|h| {
-            (
-                h.origin.clone(),
-                h.client_id.clone(),
-                h.send_id.clone(),
-                h.text.clone(),
-                h.queued_at,
-            )
-        })
-        .collect();
-    let pending_from: Vec<String> = queue
-        .iter()
-        .map(|q| q.origin.clone())
-        .chain(held.iter().map(|h| h.0.clone()))
-        .collect();
+    // THE MESSAGES NOT READ YET: stored, and read by the next pass.
+    let unread: Vec<Arrival> = state.life.lock().expect("life poisoned").unread.clone();
+    let pending_from: Vec<String> = unread.iter().map(|a| a.origin.clone()).collect();
 
     let current = cur
         .as_ref()
@@ -471,23 +437,12 @@ pub fn status_snapshot(agent_id: &AgentId, client_id: Option<&str>) -> Value {
         Some(req) => {
             let mut mine = Vec::new();
             let mut others = 0u64;
-            for q in queue.iter() {
-                if q.client_id == *req {
+            for a in &unread {
+                if a.client_id == *req {
                     mine.push(json!({
-                        "send_id": q.send_id,
-                        "text": q.text,
-                        "queued_at": q.queued_at,
-                    }));
-                } else {
-                    others += 1;
-                }
-            }
-            for (_, client, send_id, text, queued_at) in held.iter() {
-                if client == req {
-                    mine.push(json!({
-                        "send_id": send_id,
-                        "text": text,
-                        "queued_at": queued_at,
+                        "send_id": a.send_id,
+                        "text": a.text,
+                        "queued_at": a.at,
                     }));
                 } else {
                     others += 1;
@@ -495,7 +450,7 @@ pub fn status_snapshot(agent_id: &AgentId, client_id: Option<&str>) -> Value {
             }
             (Value::Array(mine), others)
         }
-        None => (Value::Array(Vec::new()), (queue.len() + held.len()) as u64),
+        None => (Value::Array(Vec::new()), unread.len() as u64),
     };
 
     json!({

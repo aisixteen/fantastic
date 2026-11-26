@@ -199,12 +199,10 @@ async fn embed_rows_never_reach_the_prompt() {
             crate::assembly::assemble_messages(
                 &backend,
                 &state,
-                "hi",
                 &kernel,
                 "probe",
                 crate::caching::Caching::ProviderCache,
-                &crate::row_attrs::Stamp::now(),
-            ),
+        ),
         )
         .await
         .expect("store read")

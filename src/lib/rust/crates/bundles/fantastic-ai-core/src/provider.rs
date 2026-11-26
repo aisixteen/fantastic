@@ -18,6 +18,7 @@
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
 use serde_json::{Map, Value};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// One event off a provider stream, in arrival order.
@@ -91,6 +92,11 @@ pub fn reason_class(reason: Option<&str>) -> ErrorClass {
     }
 }
 
+/// The kind of a request a `cancel` ended ([`ProviderError::cancelled`]).
+pub const CANCELLED: &str = "CancelledError";
+/// The kind of a request its deadline ended ([`ProviderError::timed_out`]).
+pub const TIMED_OUT: &str = "TimeoutError";
+
 /// Why a provider pass failed.
 ///
 /// Every provider failure propagates out of the handler (python's `_send`
@@ -134,6 +140,38 @@ impl ProviderError {
             kind: "RuntimeError",
             class: ErrorClass::Permanent(code),
         }
+    }
+
+    /// The request was CANCELLED (a `cancel` of its execution): the pass it belonged to
+    /// ends, never re-asked ([`Self::is_cancelled`]).
+    pub fn cancelled(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: CANCELLED,
+            class: ErrorClass::Turn,
+        }
+    }
+
+    /// The request passed its deadline (the per-request ceiling, `secs`).
+    #[must_use]
+    pub fn timed_out(secs: f64) -> Self {
+        Self {
+            message: format!("send: timeout after {}s", fantastic_bundle::py_float_repr(secs)),
+            kind: TIMED_OUT,
+            class: ErrorClass::Turn,
+        }
+    }
+
+    /// A cancel ended the request.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.kind == CANCELLED
+    }
+
+    /// The request's deadline ended it.
+    #[must_use]
+    pub fn is_timed_out(&self) -> bool {
+        self.kind == TIMED_OUT
     }
 
     /// python's `ValueError` — a connector field the record MUST name (see
@@ -365,7 +403,7 @@ pub trait Provider: Send + Sync {
     fn model(&self) -> String;
 
     /// Whether this provider can run a pass at all — checked FIRST in a turn
-    /// ([`crate::agent_loop::run_generation`]), before the owed recall, the
+    /// ([`crate::agent_loop::start`]), before the owed recall, the
     /// assembly and the projection. `Err` fails the turn with that refusal,
     /// exactly as a failed pass does. Python `_run` builds its provider before
     /// anything else and a raise there ends the turn; a provider that knows up
@@ -397,6 +435,104 @@ pub trait Provider: Send + Sync {
     /// ([`crate::remote_provider::complete`]).
     fn enforces_thinking_budget(&self) -> bool {
         false
+    }
+
+    /// The provider AGENT this one reaches through the kernel, when it is one: its
+    /// request goes out as a `complete` call ([`begin`]). `None`: an in-process
+    /// provider, whose stream is read as its own I/O.
+    fn remote(&self) -> Option<&crate::remote_provider::RemoteProvider> {
+        None
+    }
+}
+
+/// What runs with a request's settle: the whole raw answer (thinking markers intact),
+/// or why there is none. It runs as a message to the chat; nothing waits for it.
+pub type Done = Box<
+    dyn FnOnce(Result<String, ProviderError>) -> futures_util::future::BoxFuture<'static, ()>
+        + Send,
+>;
+
+/// Where a request's tokens go WHILE it streams: the live view only (#795). Nothing
+/// here is ever parsed or routed: the answer is read from the settle ([`Done`]).
+#[async_trait]
+pub trait Live: Send + Sync {
+    /// One token, in order.
+    async fn token(&self, t: &str);
+}
+
+/// ONE REQUEST AS A MESSAGE (#795): `messages` go out and this returns at once; `done`
+/// gets the whole answer when the request settles. A provider agent is called through
+/// the kernel ([`crate::remote_provider::RemoteProvider::begin`]); an in-process
+/// provider's stream is read in a task of `owner`'s, its own I/O, watched by `abort`.
+/// `deadline` is how long the request may take (what is left of its pass's ceiling,
+/// `ceiling` seconds whole): past it, `done` gets the timeout. The execution the request
+/// runs as is handed back for `stop` and `cancel` (`None`: it was refused before one
+/// existed, and `done` has its error).
+#[allow(clippy::too_many_arguments)]
+pub async fn begin(
+    provider: Arc<dyn Provider>,
+    kernel: &Arc<fantastic_kernel::Kernel>,
+    owner: &fantastic_kernel::AgentId,
+    messages: Vec<Value>,
+    max_tokens: Option<i64>,
+    deadline: (Duration, f64),
+    abort: Arc<tokio::sync::Notify>,
+    live: Arc<dyn Live>,
+    done: Done,
+) -> Option<fantastic_kernel::TaskId> {
+    if provider.remote().is_some() {
+        let remote = Arc::clone(&provider);
+        return remote
+            .remote()
+            .expect("checked above")
+            .begin(messages, max_tokens, deadline, live, done)
+            .await;
+    }
+    let done = DoneOnce(Some(done), fantastic_kernel::Inherited::capture());
+    Some(kernel.spawn_task(owner, "complete", async move {
+        let mut done = done;
+        let read = async {
+            let mut stream = provider.chat(&messages, max_tokens).await?;
+            let mut text = String::new();
+            while let Some(ev) = futures_util::StreamExt::next(&mut stream).await {
+                let ProviderEvent::Token(t) = ev?;
+                live.token(&t).await;
+                text.push_str(&t);
+            }
+            Ok(text)
+        };
+        let (within, ceiling) = deadline;
+        let read = tokio::select! {
+            biased;
+            // STOPPED: the stream is dropped, and the stop closed the pass already
+            _ = abort.notified() => return,
+            r = tokio::time::timeout(within, read) => {
+                r.unwrap_or_else(|_| Err(ProviderError::timed_out(ceiling)))
+            }
+        };
+        if let Some(done) = done.0.take() {
+            done(read).await;
+        }
+    }))
+}
+
+/// A request's [`Done`] that runs once: when the task reading it is dropped first (a
+/// `cancel` of it, a stop), it runs with the cancel, so the pass it belongs to is never
+/// left waiting for a settle that cannot come.
+/// It runs as whoever sent the request (captured when it was sent).
+struct DoneOnce(Option<Done>, fantastic_kernel::Inherited);
+
+impl Drop for DoneOnce {
+    fn drop(&mut self) {
+        if let Some(done) = self.0.take() {
+            if let Ok(h) = tokio::runtime::Handle::try_current() {
+                let task = self
+                    .1
+                    .clone()
+                    .scope(done(Err(ProviderError::cancelled("the request was cancelled"))));
+                h.spawn(task);
+            }
+        }
     }
 }
 

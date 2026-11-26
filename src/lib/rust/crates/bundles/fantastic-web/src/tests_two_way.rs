@@ -555,6 +555,33 @@ fn drain(rx: &mut fantastic_kernel::inbox::InboxReceiver) -> Vec<Value> {
     out
 }
 
+/// Every agent of `k` quiet: the passes its sends started have ended.
+async fn settle(k: &Arc<Kernel>) {
+    assert!(
+        fantastic_ai_core::state::settle(k, Duration::from_secs(20)).await,
+        "the agents never went quiet"
+    );
+}
+
+/// What a watcher gets of one turn: wait for A's passes to end, then collect from
+/// `rx` until the turn's `done` has arrived (it rides the socket after the events).
+async fn stream_of_turn(
+    a: &Arc<Kernel>,
+    rx: &mut fantastic_kernel::inbox::InboxReceiver,
+) -> Vec<Value> {
+    settle(a).await;
+    let mut out = Vec::new();
+    let end = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < end {
+        out.extend(drain(rx));
+        if kinds(&out).iter().any(|t| t == "status:done") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    out
+}
+
 /// The kinds of a stream, `status:<phase>` for a status.
 fn kinds(evs: &[Value]) -> Vec<String> {
     evs.iter()
@@ -706,14 +733,17 @@ async fn b_watches_an_ai_on_a_and_gets_its_stream_until_unwatch_or_drop() {
             out.result
         );
         assert_eq!(out.result["client_id"], json!("remote"), "{wire:?}");
-        // the reply rode the same socket AFTER the turn's events
-        assert_stream_before_done(&drain(&mut rx), wire);
+        assert_eq!(out.result["accepted"], json!(true), "{wire:?}: {:?}", out.result);
+        // the turn's events rode the same socket, `done` last
+        assert_stream_before_done(&stream_of_turn(&p.ka, &mut rx).await, wire);
 
         // unwatched: A stops streaming, the next turn brings nothing
         p.kb.unwatch(&target, &w).await;
         p.until_watched("ai", false).await;
         let out = p.call("ai", turn("two")).await;
         assert_eq!(out.status.as_str(), "completed", "{wire:?}");
+        settle(&p.ka).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(drain(&mut rx), Vec::<Value>::new(), "{wire:?}");
 
         // watched again, then the link drops: A gives the watch back
@@ -727,6 +757,8 @@ async fn b_watches_an_ai_on_a_and_gets_its_stream_until_unwatch_or_drop() {
         p.until_watched("ai", false).await;
         let local = op(&p.ka, &p.n("ai"), turn("three")).await;
         assert_eq!(local.status.as_str(), "completed", "{wire:?}");
+        settle(&p.ka).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(drain(&mut rx), Vec::<Value>::new(), "{wire:?}");
         p.stop().await;
     }
@@ -770,6 +802,7 @@ async fn a_watch_from_b_is_gated_by_the_legs_watch_line() {
             "{wire:?}: {:?}",
             out.result
         );
+        settle(&p.ka).await;
         assert!(!p.has_watchers("ai").await, "{wire:?}");
         assert_eq!(drain(&mut rx), Vec::<Value>::new(), "{wire:?}");
         p.stop().await;
@@ -877,6 +910,7 @@ async fn a_dropped_link_fails_calls_fast_and_a_redial_resumes_the_watch() {
         // while the link is down, what A's AI streams is not kept for B
         let local = op(&p.ka, &p.n("ai"), turn("unseen")).await;
         assert_eq!(local.status.as_str(), "completed", "{wire:?}");
+        settle(&p.ka).await;
 
         // A redials and says hello again: B's watch resumes without B asking
         p.dial().await;
@@ -889,7 +923,7 @@ async fn a_dropped_link_fails_calls_fast_and_a_redial_resumes_the_watch() {
             "{wire:?}: {:?}",
             out.result
         );
-        assert_stream_before_done(&drain(&mut rx), wire);
+        assert_stream_before_done(&stream_of_turn(&p.ka, &mut rx).await, wire);
         p.stop().await;
     }
 }

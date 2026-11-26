@@ -24,11 +24,11 @@ async fn stored(kernel: &Arc<Kernel>, agent: &AgentId) -> String {
 
 /// Start `agent`'s run as the operator.
 async fn start(kernel: &Arc<Kernel>, agent: &AgentId) {
-    let _ = kernel
+    let _ = crate::tests::settled(kernel, kernel
         .operator_send(vec![Item::new(
             agent.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
+        )]))
         .await;
 }
 
@@ -37,9 +37,10 @@ fn ask(target: &AgentId, payload: Value) -> String {
     call_envelope(target.as_str(), payload, None)
 }
 
-/// An asker sends its peer a message (and ends with `done`, when `done`); the peer answers
-/// with thinking. The asker's next request — the reply batch — and its stored rows
-/// hold the peer's answer, and none of the peer's thinking.
+/// An asker sends its peer a message (and ends with `done`, when `done`); the peer
+/// thinks, then answers with its own `send` back (#795: the model decides to answer).
+/// The asker's next request and its stored rows hold the peer's answer, and none of the
+/// peer's thinking.
 async fn a_peer_answer_reaches_the_asker_without_its_thinking(tag: &str, done: bool) {
     let tmp = TempDir::new().unwrap();
     let (kernel, peer) = mk_kernel(&tmp, tag).await;
@@ -51,10 +52,11 @@ async fn a_peer_answer_reaches_the_asker_without_its_thinking(tag: &str, done: b
         question
     };
     let a = script(&asker, vec![pass(first), pass(DONE)], Duration::ZERO);
+    let answer = ask(&asker, json!({"type": "send", "text": "Four lamps."}));
     script(
         &peer,
         vec![pass(format!(
-            "<think>PEER-SECRET-PLAN</think>Four lamps.\n{DONE}"
+            "<think>PEER-SECRET-PLAN</think>{answer}\n{DONE}"
         ))],
         Duration::ZERO,
     );
@@ -93,15 +95,15 @@ async fn the_send_reply_is_the_answer_only() {
         vec![pass(format!("<think>DEEP-THOUGHT</think>The answer.\n{DONE}"))],
         Duration::ZERO,
     );
-    let r = kernel
+    let r = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             agent.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
-    assert_eq!(r["response"], json!(format!("The answer.\n{DONE}")), "{r}");
+    assert_eq!(json!(crate::tests::last_answer(&kernel, &agent).await), json!(format!("The answer.\n{DONE}")), "{r}");
 }
 
 /// A peer's ROWS read through `recall`: the content comes back, the stored

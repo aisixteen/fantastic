@@ -249,8 +249,10 @@ async fn pause_stops_the_generation_and_holds_a_send() {
     assert!(!ran, "a held send ran");
 }
 
+/// RESUME = ONE PASS (#795): the messages held during the pause were stored as they
+/// arrived, the resumed row after them; one pass reads them all, nothing is re-sent.
 #[tokio::test]
-async fn resume_runs_held_after_the_resumed_row() {
+async fn resume_runs_one_pass_over_the_held_and_the_resumed_row() {
     let tmp = TempDir::new().unwrap();
     let (kernel, id) = setup(&tmp, "resume").await;
     let served = served_for(&id);
@@ -267,9 +269,10 @@ async fn resume_runs_held_after_the_resumed_row() {
         .expect("no resumed row in that request");
     let held_at = s.find("held-probe").expect("held text vanished");
     assert!(
-        resumed_at < held_at,
-        "resumed row must come before the held turn"
+        held_at < resumed_at,
+        "the held message, as it arrived, then the resumed row"
     );
+    assert_eq!(served.requests.lock().unwrap().len(), 1, "one pass, nothing re-sent");
 }
 
 #[tokio::test]

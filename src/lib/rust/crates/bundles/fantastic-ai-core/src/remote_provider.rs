@@ -258,15 +258,20 @@ pub async fn complete(agent_id: &AgentId, args: &Complete, kernel: &Arc<Kernel>,
     };
     let mut meter = harness_meter(args, provider.as_ref());
     let mut cut = false;
+    // THE WHOLE ANSWER rides the reply (#795): the chat parses it, never the tokens,
+    // which feed only the live view
+    let mut whole = String::new();
     while let Some(ev) = stream.next().await {
         match ev {
             Ok(ProviderEvent::Token(text)) => {
                 let over = meter.as_mut().is_some_and(|m| m.feed(&text) && m.is_open());
+                whole.push_str(&text);
                 kernel
                     .emit_quiet(agent_id, json!({"type": TOKEN_EVENT, "rid": rid, "text": text}))
                     .await;
                 if over {
                     // the thinking ends here: its span is closed and the request dropped
+                    whole.push_str(THINK_CLOSE);
                     kernel
                         .emit_quiet(agent_id, json!({"type": TOKEN_EVENT, "rid": rid, "text": THINK_CLOSE}))
                         .await;
@@ -281,7 +286,7 @@ pub async fn complete(agent_id: &AgentId, args: &Complete, kernel: &Arc<Kernel>,
     let r = provider.report();
     let stop_reason = if cut { Some(THINKING_CUT.to_string()) } else { r.stop_reason };
     let mut reply = json!({"rid": rid, "model": provider.model(), "prompt_tokens": r.prompt_tokens,
-           "completion_tokens": r.completion_tokens, "stop_reason": stop_reason});
+           "completion_tokens": r.completion_tokens, "stop_reason": stop_reason, "text": whole});
     // the cache counts, only when the endpoint has them
     for (key, n) in [("cache_read", r.cache_read), ("cache_write", r.cache_write)] {
         if let Some(n) = n {
@@ -425,23 +430,9 @@ fn token_of(item: &Value, rid: &str) -> Option<String> {
     .then(|| item.get("text").and_then(Value::as_str).unwrap_or("").to_string())
 }
 
-#[async_trait]
-impl Provider for RemoteProvider {
-    async fn chat(&self, messages: &[Value], max_tokens: Option<i64>) -> Result<ProviderStream, ProviderError> {
-        let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let rid = format!("{}~{n}", self.chat.as_str());
-        self.send_images(messages, &rid).await?;
-        // the reader: an inbox of this pass only, watching the provider's stream
-        let reader = AgentId::from(format!("_provider_reader_{}_{n}", self.chat.as_str()));
-        let inbox = self.kernel.ensure_inbox(&reader);
-        if let Some(refused) = self.kernel.watch(&self.provider, reader.clone()).await {
-            self.kernel.remove_inbox(&reader);
-            return Err(ProviderError::raised(format!(
-                "ai_chat: cannot watch provider `{}`: {}",
-                self.provider.as_str(),
-                refused.get("error").and_then(Value::as_str).unwrap_or(&refused.to_string())
-            )));
-        }
+impl RemoteProvider {
+    /// The `complete` payload of one request.
+    fn payload(&self, messages: &[Value], max_tokens: Option<i64>, rid: &str) -> Map<String, Value> {
         let mut payload = Map::new();
         payload.insert("type".into(), json!("complete"));
         payload.insert("messages".into(), Value::Array(messages.to_vec()));
@@ -455,8 +446,165 @@ impl Provider for RemoteProvider {
         if !self.knobs.is_empty() {
             payload.insert("knobs".into(), Value::Object(self.knobs.clone()));
         }
-        // The call runs INSIDE the chat's turn (no spawn): it is the chat's send, judged
-        // by its grants, and a cancel of the turn cancels the provider's pass with it.
+        payload
+    }
+
+    /// A reader's inbox watching the provider's stream for one request: its id and
+    /// inbox, or why the provider cannot be watched.
+    async fn reader(&self, n: u64) -> Result<(AgentId, fantastic_kernel::inbox::InboxReceiver), ProviderError> {
+        let reader = AgentId::from(format!("_provider_reader_{}_{n}", self.chat.as_str()));
+        let inbox = self.kernel.ensure_inbox(&reader);
+        if let Some(refused) = self.kernel.watch(&self.provider, reader.clone()).await {
+            self.kernel.remove_inbox(&reader);
+            return Err(ProviderError::raised(format!(
+                "ai_chat: cannot watch provider `{}`: {}",
+                self.provider.as_str(),
+                refused.get("error").and_then(Value::as_str).unwrap_or(&refused.to_string())
+            )));
+        }
+        Ok((reader, inbox))
+    }
+
+    /// THE CHAT'S REQUEST AS A MESSAGE (#795): the `complete` call goes out through
+    /// [`Kernel::call`] and this returns its pid at once. The provider's tokens feed
+    /// `live` from a watcher of its stream that holds no lock and wakes nothing; the
+    /// settle runs `done` with the WHOLE answer the reply carries (`text`), so a token
+    /// the live view dropped never changes what is read. A call refused at launch runs
+    /// `done` with the refusal and hands back no pid.
+    pub(crate) async fn begin(
+        &self,
+        messages: Vec<Value>,
+        max_tokens: Option<i64>,
+        deadline: (std::time::Duration, f64),
+        live: Arc<dyn crate::provider::Live>,
+        done: crate::provider::Done,
+    ) -> Option<fantastic_kernel::TaskId> {
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let rid = format!("{}~{n}", self.chat.as_str());
+        if let Err(e) = self.send_images(&messages, &rid).await {
+            done(Err(e)).await;
+            return None;
+        }
+        let (reader, mut inbox) = match self.reader(n).await {
+            Ok(r) => r,
+            Err(e) => {
+                done(Err(e)).await;
+                return None;
+            }
+        };
+        let guard = Unwatch { kernel: Arc::clone(&self.kernel), provider: self.provider.clone(), reader, done: false };
+        // THE LIVE VIEW: the tokens of this request, until the settle says it ended;
+        // what is still queued then is fed first. It carries the chat's identity (no
+        // `ps` row): the live view's events are the chat's own, and an emit outside
+        // any identity is dropped
+        let (end_tx, mut end_rx) = tokio::sync::oneshot::channel::<()>();
+        let feed_rid = rid.clone();
+        let feeder = fantastic_kernel::spawn_inherit(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    item = inbox.recv() => match item {
+                        Some(it) => {
+                            if let Some(t) = token_of(&it.payload, &feed_rid) {
+                                live.token(&t).await;
+                            }
+                        }
+                        None => break,
+                    },
+                    _ = &mut end_rx => {
+                        while let Some(it) = inbox.try_recv() {
+                            if let Some(t) = token_of(&it.payload, &feed_rid) {
+                                live.token(&t).await;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        });
+        let done = Arc::new(Mutex::new(Some(done)));
+        let (within, ceiling) = deadline;
+        let item = Item::new(self.provider.clone(), Value::Object(self.payload(&messages, max_tokens, &rid)))
+            .with_timeout(within.as_secs_f64());
+        let (report, model, provider) = (Arc::clone(&self.report), Arc::clone(&self.model), self.provider.clone());
+        let then_done = Arc::clone(&done);
+        let out = self
+            .kernel
+            .call(item, move |o| async move {
+                let _ = end_tx.send(());
+                let _ = feeder.await;
+                let mut guard = guard;
+                guard.release().await;
+                let read = answer_of(&o, &report, &model, &provider, ceiling);
+                let done = then_done.lock().expect("done poisoned").take();
+                if let Some(done) = done {
+                    done(read).await;
+                }
+            })
+            .await;
+        if out.status == Status::Accepted {
+            return out.pid;
+        }
+        // REFUSED AT LAUNCH (the gate, the target): the continuation never runs
+        let done = done.lock().expect("done poisoned").take();
+        if let Some(done) = done {
+            done(Err(ProviderError::raised(format!(
+                "ai_chat: complete on `{}` was refused: {}",
+                self.provider.as_str(),
+                fantastic_kernel::refusal::error_text(&out.result).unwrap_or_else(|| out.result.to_string())
+            ))))
+            .await;
+        }
+        None
+    }
+}
+
+/// The settle of a `complete` call: its whole answer (`text`), the report read into the
+/// provider's cells; `Err` for a failed, cancelled or timed-out request.
+fn answer_of(
+    o: &fantastic_kernel::Outcome,
+    report: &Mutex<ProviderReport>,
+    model: &Mutex<String>,
+    provider: &AgentId,
+    ceiling: f64,
+) -> Result<String, ProviderError> {
+    match o.status {
+        // the provider's own answer, a failed pass included: its error as it wrote it
+        Status::Completed | Status::Errored if o.status == Status::Completed || o.result.get("rid").is_some() => {
+            settle(&o.result, report, model)?;
+            Ok(o.result.get("text").and_then(Value::as_str).unwrap_or_default().to_string())
+        }
+        Status::Cancelled => Err(ProviderError::cancelled(format!(
+            "ai_chat: complete on `{}` was cancelled",
+            provider.as_str()
+        ))),
+        Status::TimedOut => Err(ProviderError::timed_out(ceiling)),
+        _ => Err(ProviderError::raised(format!(
+            "ai_chat: complete on `{}` ended {:?}: {}",
+            provider.as_str(),
+            o.status,
+            o.result
+        ))),
+    }
+}
+
+#[async_trait]
+impl Provider for RemoteProvider {
+    fn remote(&self) -> Option<&RemoteProvider> {
+        Some(self)
+    }
+
+    /// A HELPER'S REQUEST (a fold summary, the owed recall): read as a stream inside
+    /// the pass that asks it. The chat's own requests go out by [`RemoteProvider::begin`].
+    async fn chat(&self, messages: &[Value], max_tokens: Option<i64>) -> Result<ProviderStream, ProviderError> {
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let rid = format!("{}~{n}", self.chat.as_str());
+        self.send_images(messages, &rid).await?;
+        // the reader: an inbox of this request only, watching the provider's stream
+        let (reader, inbox) = self.reader(n).await?;
+        let payload = self.payload(messages, max_tokens, &rid);
+        // The helper's call runs inside the pass that asks it: it is the chat's send,
+        // judged by its grants.
         let call = {
             let kernel = Arc::clone(&self.kernel);
             let provider = self.provider.clone();

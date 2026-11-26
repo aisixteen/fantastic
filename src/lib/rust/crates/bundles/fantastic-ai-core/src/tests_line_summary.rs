@@ -35,17 +35,17 @@ fn read_call() -> String {
 }
 
 async fn say(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) {
-    let _ = kernel
+    let _ = crate::tests::settled(kernel, kernel
         .operator_send(vec![Item::new(
             agent.clone(),
             json!({"type": "send", "text": text, "client_id": "probe"}),
-        )])
+        )]))
         .await;
 }
 
 async fn verb(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    let out = kernel
-        .operator_send(vec![Item::new(agent.clone(), payload)])
+    let out = crate::tests::settled(kernel, kernel
+        .operator_send(vec![Item::new(agent.clone(), payload)]))
         .await
         .remove(0);
     assert_eq!(out.status.as_str(), "completed", "{:?}", out.result);
@@ -345,11 +345,9 @@ async fn project(kernel: &Arc<Kernel>, agent: &AgentId) -> Arc<MockScript> {
         crate::assembly::assemble_messages(
             agent,
             &state,
-            "next",
             kernel,
             "cli",
             crate::caching::Caching::ProviderCache,
-            &crate::row_attrs::Stamp::now(),
         ),
     )
     .await

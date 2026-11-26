@@ -11,8 +11,8 @@ use fantastic_kernel::test_support::as_agent;
 
 /// One verb sent to the agent; its result.
 async fn verb(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    kernel
-        .operator_send(vec![Item::new(agent.clone(), payload)])
+    crate::tests::settled(kernel, kernel
+        .operator_send(vec![Item::new(agent.clone(), payload)]))
         .await
         .remove(0)
         .result
@@ -44,23 +44,24 @@ async fn store(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
     res["rows"].as_array().cloned().unwrap_or_default()
 }
 
-/// The model view the next turn assembles, in the given caching mode.
+/// The model view the next pass assembles, in the given caching mode, for a message
+/// `next` that arrives now: the history the pass reads, then that message, its newest row
+/// (#795: stored when it arrived; here not stored, so the history stays the test's).
 async fn view_with(kernel: &Arc<Kernel>, agent: &AgentId, caching: Caching) -> Vec<Value> {
     let state = crate::state::state_for(agent);
-    let (msgs, _) = as_agent(
+    let (mut msgs, _) = as_agent(
         agent.clone(),
         crate::assembly::assemble_messages(
             agent,
             &state,
-            "next",
             kernel,
             "c",
             caching,
-            &crate::row_attrs::Stamp::now(),
         ),
     )
     .await
     .expect("assemble");
+    msgs.push(json!({"role": "user", "content": "next"}));
     msgs
 }
 
@@ -165,11 +166,11 @@ async fn turn_messages(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) -> Vec
         Duration::ZERO,
     );
     let _rx = rebind_backend_inbox(kernel, agent);
-    let reply = kernel
+    let reply = crate::tests::settled(kernel, kernel
         .operator_send(vec![Item::new(
             agent.clone(),
             json!({"type": "send", "text": text, "client_id": "c"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;

@@ -427,8 +427,15 @@ async fn a_monitor_ends_with_its_job_delivering_what_waited() {
     )
     .await;
     assert!(ear.texts().join("\n").contains("FATAL step 1"));
-    until(|| true, 0.3, "").await;
-    let listed = call(&k, &rn, json!({"type": "monitors"})).await;
+    // the monitor is gone once its final delivery is out: wait on that state, not on time
+    let mut listed = call(&k, &rn, json!({"type": "monitors"})).await;
+    for _ in 0..250 {
+        if listed["monitors"] == json!([]) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        listed = call(&k, &rn, json!({"type": "monitors"})).await;
+    }
     assert_eq!(listed["monitors"], json!([]), "{listed}");
 }
 

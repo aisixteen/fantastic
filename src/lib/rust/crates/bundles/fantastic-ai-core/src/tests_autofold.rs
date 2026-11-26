@@ -18,18 +18,18 @@ async fn rows(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
 
 /// One send to the agent.
 async fn say(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) {
-    let _ = kernel
+    let _ = crate::tests::settled(kernel, kernel
         .operator_send(vec![Item::new(
             agent.clone(),
             json!({"type": "send", "text": text, "client_id": "probe"}),
-        )])
+        )]))
         .await;
 }
 
 /// One verb on the agent; its result.
 async fn verb(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    kernel
-        .operator_send(vec![Item::new(agent.clone(), payload)])
+    crate::tests::settled(kernel, kernel
+        .operator_send(vec![Item::new(agent.clone(), payload)]))
         .await
         .remove(0)
         .result

@@ -1,32 +1,30 @@
-//! Pause / resume (#219). A paused AI agent stops its in-flight generation and
-//! HOLDS every incoming message, in order, in its memory store — nothing is run and
-//! nothing is dropped. The pause state and the held queue are rows in the agent's
-//! own store, so a restart reads them back from the head: a paused agent boots
-//! paused with its queue intact.
+//! Pause / resume (#219). A paused AI agent stops its pass in flight and HOLDS every
+//! incoming message: each is stored as it arrives, as any message is (#795), and no
+//! pass starts. The pause state is a row in the agent's own store, so a restart reads
+//! it back: a paused agent boots paused, and the messages it holds are the ones stored
+//! after its last answer.
 //!
-//! Rows (all in this agent's store head):
+//! Rows (in this agent's store head):
 //!   `{kind:"pause", paused_since}`   — the agent is paused from here on
-//!   `{kind:"held", payload}`         — an incoming message held while paused
-//!   `{kind:"resume", role:"user"}`   — released: the held messages after it run
+//!   `{kind:"resume", role:"user"}`   — released: ONE pass reads every message held
 //!
 //! The chat says so on its own inbox, as a `status`: `paused` when the pause verb
 //! pauses it and when it boots with its store saying paused; `idle` when a resume
-//! has nothing held (held messages, released, move it through a call's own phases).
+//! has nothing held (held messages, released, move it through a pass's own phases).
 
 use std::sync::Arc;
 
 use fantastic_kernel::bundle::BundleError;
-use fantastic_kernel::{AgentId, Item, Kernel};
+use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Value};
 
 use crate::events::emit_status;
 use crate::helpers::now_secs;
-use crate::memory::{head, save_history, store_call, store_of, MemResult};
+use crate::memory::{head, save_history, store_call, MemResult};
 use crate::state::state_for;
 
 const PAUSE: &str = "pause";
 const RESUME: &str = "resume";
-const HELD: &str = "held";
 
 /// The pause state as the store head shows it.
 pub struct PauseView {
@@ -34,18 +32,15 @@ pub struct PauseView {
     pub paused: bool,
     /// When the current pause began (`paused_since`), if paused.
     pub since: Option<f64>,
-    /// Messages held since the last resume, in arrival order.
-    pub held: Vec<Value>,
 }
 
-/// Read the pause state off the store head. The last `pause`/`resume` row decides
-/// whether the agent is paused; the `held` rows after the last `resume` are the queue.
+/// Read the pause state off the store head: the last `pause`/`resume` row decides
+/// whether the agent is paused.
 pub async fn view(agent_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<PauseView> {
     let rows = head(agent_id, kernel).await?;
     let mut out = PauseView {
         paused: false,
         since: None,
-        held: Vec::new(),
     };
     for r in &rows {
         match r.get("kind").and_then(Value::as_str) {
@@ -56,41 +51,11 @@ pub async fn view(agent_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<PauseVi
             Some(RESUME) => {
                 out.paused = false;
                 out.since = None;
-                out.held.clear();
-            }
-            Some(HELD) => {
-                if let Some(p) = r.get("payload") {
-                    out.held.push(p.clone());
-                }
             }
             _ => {}
         }
     }
     Ok(out)
-}
-
-/// THE HOLD CHECK at the top of message intake. Returns `Some(reply)` when the agent
-/// is paused: the message is appended to the held queue and not run. `None` means
-/// run it. A record with no store is left to the send's own refusal.
-pub async fn hold_if_paused(
-    agent_id: &AgentId,
-    args: &crate::declared::Send,
-    kernel: &Arc<Kernel>,
-) -> Result<Option<Value>, BundleError> {
-    if store_of(agent_id, kernel).is_err() {
-        return Ok(None);
-    }
-    let v = view(agent_id, kernel).await?;
-    if !v.paused {
-        return Ok(None);
-    }
-    save_history(
-        agent_id,
-        kernel,
-        &[json!({"kind": HELD, "payload": held_call(args)})],
-    )
-    .await?;
-    Ok(Some(json!({"held": v.held.len() + 1, "paused": true})))
 }
 
 /// The chat's `status` outside a call — `paused` or `idle` — on its own inbox, for
@@ -125,26 +90,16 @@ pub async fn announce_at_boot(agent_id: &AgentId, kernel: &Arc<Kernel>) -> MemRe
     )
     .await?;
     let last = crate::memory::rows_of(&res, agent_id);
-    if last
+    let paused = last
         .first()
         .and_then(|r| r.get("kind"))
         .and_then(Value::as_str)
-        == Some(PAUSE)
-    {
+        == Some(PAUSE);
+    crate::life::set_paused(agent_id, paused);
+    if paused {
         announce(agent_id, kernel, "paused").await;
     }
     Ok(())
-}
-
-/// The held call as the stored row keeps it: the `send` verb and its arguments, which
-/// `resume` hands back to the agent's entry.
-fn held_call(args: &crate::declared::Send) -> Value {
-    let mut call = serde_json::to_value(args).unwrap_or_default();
-    if let Value::Object(m) = &mut call {
-        m.retain(|_, v| !v.is_null());
-        m.insert("type".to_string(), json!("send"));
-    }
-    call
 }
 
 /// `pause` — stop the in-flight generation and hold incoming messages. Already
@@ -156,10 +111,11 @@ pub async fn pause(
 ) -> Result<Value, BundleError> {
     let v = view(agent_id, kernel).await?;
     if v.paused {
-        return Ok(json!({"paused": true, "held": v.held.len()}));
+        return Ok(json!({"paused": true, "held": crate::life::unread_count(agent_id)}));
     }
     // The stop writes the `[stopped by …]` marker and closes the open parts.
     let _ = crate::verbs::stop(agent_id, None, kernel).await;
+    crate::life::set_paused(agent_id, true);
     save_history(
         agent_id,
         kernel,
@@ -174,8 +130,8 @@ pub async fn pause(
     Ok(json!({"paused": true, "held": 0}))
 }
 
-/// `resume` — write one resumed row (with the note), then release the held messages
-/// in order as if they had just arrived. Not paused: a no-op.
+/// `resume` — write one resumed row (with the note), then ONE pass reads every message
+/// held (#795): nothing is re-sent. Not paused: a no-op.
 pub async fn resume(
     agent_id: &AgentId,
     note: Option<&str>,
@@ -197,19 +153,12 @@ pub async fn resume(
         &[json!({"kind": RESUME, "role": "user", "content": content})],
     )
     .await?;
-    let released = v.held.len();
+    crate::life::set_paused(agent_id, false);
+    let released = crate::life::unread_count(agent_id);
     if released == 0 {
         announce(agent_id, kernel, "idle").await;
+    } else {
+        crate::life::wake(kernel, agent_id);
     }
-    let held = v.held;
-    // Released as their own kernel task, one after another, so each held turn runs
-    // after the resumed row and in arrival order, without holding this dispatch.
-    let aid = agent_id.clone();
-    let k = Arc::clone(kernel);
-    kernel.spawn_task(agent_id, "resume_release", async move {
-        for p in held {
-            let _ = k.send(vec![Item::new(aid.clone(), p)]).await;
-        }
-    });
     Ok(json!({"resumed": true, "released": released}))
 }

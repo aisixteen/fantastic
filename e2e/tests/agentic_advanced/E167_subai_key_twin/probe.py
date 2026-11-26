@@ -42,6 +42,7 @@ sys.path.insert(0, str(E2E))
 
 from helpers import creds
 from helpers.ai import CHAT_MODULE
+from helpers.host.passes import run_pass
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
 from helpers.lines import ALL, PROVIDER, create as line_create
 from helpers.verdict import verdict
@@ -112,8 +113,14 @@ def main() -> int:
         start = len(b.turns())
         b.reply(*script)
         out = hk.send(AI, {"type": "send", "text": "Build the routine."})
-        need(not out.get("error"), f"the builder's send is accepted: {short(out)}")
+        need(out.get("accepted") is True, f"the builder's send is accepted: {short(out)}")
+        # the send is acked at once (#795): the chain is over once every scripted answer
+        # was asked for and nothing of the twin runs
+        end = time.monotonic() + 90
+        while time.monotonic() < end and len(b.turns()) - start < len(script):
+            time.sleep(0.05)
         need(idle(), "the builder's chain settles")
+        time.sleep(0.5)
         need(len(b.turns()) - start == len(script),
              f"one builder request per scripted answer: {len(b.turns()) - start} "
              f"for {len(script)}")
@@ -123,7 +130,7 @@ def main() -> int:
         made, and the chat's rows after it, as text. `refused`: the provider pass
         fails on the key store, and a failed pass raises out of the send."""
         start = len(h.requests)
-        out = hk.send(SUB_AI, {"type": "send", "text": "tick"})
+        out = run_pass(hk, SUB_AI, {"type": "send", "text": "tick"})
         if refused:
             need(FAILED in str(out.get("error") or ""),
                  f"the tick fails on the key store ({FAILED}): {short(out)}")

@@ -1,6 +1,6 @@
-//! #568: the AI-to-AI send deadline (root `send_timeout`), the dead letter and
-//! the withdrawal at expiry, the deadline the model is told, and `status`
-//! counting held senders.
+//! #568 under #795: a call's deadline (root `send_timeout`) and its dead letter, on a
+//! slow NON-AI target; a send to an AI never times out (it is acked at once); the
+//! deadline the model is told; and `status` counting the messages not read yet.
 
 use super::*;
 use fantastic_kernel::test_support::as_agent;
@@ -70,118 +70,110 @@ fn spawn_send(
     })
 }
 
-/// A message held behind a busy target passes its sender's deadline while held:
-/// its entry is withdrawn, a marker row says so, and no pass ever answers it.
+/// A SEND TO AN AI NEVER TIMES OUT (#795): it is acked once its message is stored, so
+/// even a tight deadline is met while the agent's pass runs; the message is read by the
+/// next pass, and nothing is withdrawn or cut.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_message_held_behind_a_busy_target_is_withdrawn_into_the_dead_letter_at_its_deadline() {
+async fn an_ai_send_never_times_out_it_is_acked_at_once() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "dl_held").await;
+    let s = script(&backend, vec![pass(DONE), pass(DONE)], Duration::ZERO);
+    let gate = s.hold_next();
+    let _first = spawn_send(&kernel, &backend, "one", "o", None);
+    assert!(until_passes(&s, 1).await, "the first pass never started");
+    let out = spawn_send(&kernel, &backend, "two", "t", Some(0.3)).await.unwrap();
+    assert_eq!(out.status, fantastic_kernel::outcome::Status::Completed, "{:?}", out.result);
+    assert_eq!(out.result["accepted"], json!(true), "{}", out.result);
+    gate.notify_one();
+    assert!(settle(&kernel).await, "the agent never went quiet");
+    assert_eq!(s.passes_served(), 2, "the message was read by the next pass");
+    assert!(s.request(1).contains("two"), "{}", s.request(1));
+    let all = rows(&kernel, &backend).await;
+    assert!(!all.iter().any(|r| r["kind"] == "withdrawn" || r["kind"] == "stopped"), "{all:?}");
+}
+
+/// A CALL PAST ITS DEADLINE IS A DEAD LETTER, on a slow NON-AI target (#568): the
+/// reply tells the sender where it went and how to drop it, the dead letter can be
+/// acked, and the call can be sent again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_call_past_its_deadline_tells_the_sender_its_dead_letter_and_can_be_resent() {
+    let _lock = SEND_TIMEOUT_ENV_LOCK.lock().await;
+    let _env = EnvGuard::set(None);
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = with_sleeper(&tmp, "dl_resend").await;
+    set_root_timeout(&kernel, json!(0.3));
     let s = script(
         &backend,
-        vec![pass(DONE), pass(DONE)],
-        Duration::from_millis(1500),
+        vec![pass(send_call("sleeper", "ping", None)), pass(DONE)],
+        Duration::ZERO,
     );
-    let first = spawn_send(&kernel, &backend, "one", "o", None);
-    assert!(until_passes(&s, 1).await, "the first pass never started");
-    let started = std::time::Instant::now();
-    let two = spawn_send(&kernel, &backend, "two", "t", Some(0.3));
-    let out = two.await.unwrap();
-    assert_eq!(out.status, fantastic_kernel::outcome::Status::TimedOut);
-    let p = out.pid.expect("a pid").0;
-    assert!(
-        started.elapsed() < Duration::from_millis(1200),
-        "queue time counts: {:?}",
-        started.elapsed()
-    );
-    assert!(
-        crate::state::state_for(&backend)
-            .chain
-            .lock()
-            .unwrap()
-            .held
-            .is_empty(),
-        "the held entry must be withdrawn"
-    );
-    let all = rows(&kernel, &backend).await;
-    let withdrawn: Vec<&Value> = all.iter().filter(|r| r["kind"] == "withdrawn").collect();
-    assert_eq!(withdrawn.len(), 1, "{all:?}");
-    let content = withdrawn[0]["content"].as_str().unwrap();
-    assert!(content.contains(&format!("dead letter {p}")), "{content}");
-    let two_row = all.iter().find(|r| r["content"] == "two").expect("row two");
-    assert_eq!(withdrawn[0]["parent"], two_row["id"]);
-    let _ = first.await.unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(
-        s.passes_served(),
-        1,
-        "no pass may answer the withdrawn message"
-    );
+    let _ = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go", "client_id": "o"}),
+        )]))
+        .await;
+    assert!(until_passes(&s, 2).await, "the dead letter woke no pass");
+    let req = s.request(1);
+    let marker = "your message to sleeper hit its 0.3s deadline \u{2192} dead letter ";
+    let at = req.find(marker).unwrap_or_else(|| panic!("{req}"));
+    let pid: String = req[at + marker.len()..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    assert!(!pid.is_empty(), "{req}");
+    let acked = as_agent(
+        backend.clone(),
+        kernel.send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "ack_deadletter", "id": pid.parse::<i64>().unwrap()}),
+        )]),
+    )
+    .await
+    .remove(0)
+    .result;
+    assert_eq!(acked["acked"], json!(true), "{acked}");
+    let resent = as_agent(
+        backend.clone(),
+        kernel.send(vec![Item::new(
+            AgentId::from("sleeper"),
+            json!({"type": "send", "text": "ping", "ms": 10}),
+        )
+        .with_timeout(10.0)]),
+    )
+    .await
+    .remove(0)
+    .result;
+    assert_eq!(resent["slept"], json!(true), "{resent}");
 }
 
-/// REGRESSION PIN (it holds without #568's change): a message whose own pass is
-/// running at its deadline is cut — no late finish — and settles timed out.
+/// `status` answers at once while a pass runs, counts the messages stored and not read
+/// yet as pending and names their senders.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_message_whose_pass_is_running_at_its_deadline_is_cut_into_the_dead_letter() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, backend) = mk_kernel(&tmp, "dl_cut").await;
-    let _s = script(&backend, vec![pass("late")], Duration::from_millis(1500));
-    let out = spawn_send(&kernel, &backend, "go", "o", Some(0.3))
-        .await
-        .unwrap();
-    assert_eq!(out.status, fantastic_kernel::outcome::Status::TimedOut);
-    assert!(out.pid.is_some());
-    assert!(out.result.get("response").is_none(), "{}", out.result);
-    until_true("the generation to stop", || {
-        !crate::state::is_generating(&backend)
-    })
-    .await;
-    let all = rows(&kernel, &backend).await;
-    assert!(all.iter().any(|r| r["kind"] == "stopped"), "{all:?}");
-}
-
-/// `status` answers at once while a pass runs, counts held messages as pending
-/// and names every pending sender.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn status_counts_held_messages_and_names_their_senders() {
+async fn status_counts_unread_messages_and_names_their_senders() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "dl_status").await;
     let peer = add_peer(&kernel, &tmp, &backend).await;
-    let _s = script(
-        &backend,
-        vec![pass(DONE), pass(DONE)],
-        Duration::from_millis(1500),
-    );
-    let (k, b) = (Arc::clone(&kernel), backend.clone());
-    let _first = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
-            b,
-            json!({"type": "send", "text": "one", "client_id": "o"}),
-        )])
-        .await
-    });
-    assert!(until_passes(&_s, 1).await);
-    let (k, b, p) = (Arc::clone(&kernel), backend.clone(), peer.clone());
-    let _held = tokio::spawn(async move {
-        as_agent(
-            p,
-            k.operator_send(vec![Item::new(
-                b,
-                json!({"type": "send", "text": "two", "client_id": "pc"}),
-            )]),
-        )
-        .await
-    });
-    until_held(&backend, 1).await;
+    let s = script(&backend, vec![pass(DONE), pass(DONE)], Duration::ZERO);
+    let gate = s.hold_next();
+    let _first = spawn_send(&kernel, &backend, "one", "o", None);
+    assert!(until_passes(&s, 1).await);
+    let two = as_agent(
+        peer.clone(),
+        kernel.send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "two", "client_id": "pc"}),
+        )]),
+    )
+    .await
+    .remove(0)
+    .result;
+    assert_eq!(two["accepted"], json!(true), "{two}");
     let t = std::time::Instant::now();
     let bare = kernel.operator_send(vec![Item::new(backend.clone(), json!({"type": "status"}))])
         .await
         .remove(0)
         .result;
-    assert!(
-        t.elapsed() < Duration::from_millis(200),
-        "{:?}",
-        t.elapsed()
-    );
+    assert!(t.elapsed() < Duration::from_millis(200), "{:?}", t.elapsed());
     assert_eq!(bare["generating"], json!(true), "{bare}");
     assert_eq!(bare["others_pending"], json!(1), "{bare}");
     assert_eq!(bare["pending_from"], json!([peer.as_str()]), "{bare}");
@@ -192,15 +184,11 @@ async fn status_counts_held_messages_and_names_their_senders() {
         .await
         .remove(0)
         .result;
-    assert!(
-        mine["mine_pending"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("two"),
-        "{mine}"
-    );
+    assert!(mine["mine_pending"][0]["text"].as_str().unwrap().contains("two"), "{mine}");
     assert_eq!(mine["others_pending"], json!(0), "{mine}");
     assert_eq!(mine["pending_from"], json!([peer.as_str()]), "{mine}");
+    gate.notify_one();
+    assert!(settle(&kernel).await);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -234,6 +222,8 @@ fn send_call(target: &str, text: &str, timeout: Option<&str>) -> String {
     )
 }
 
+/// The reply to a `send` says the deadline it ran under: the root's, or the call's own
+/// `timeout`. To a peer AI the reply is its ack, stored for the sender's next pass.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_send_reply_states_its_deadline_and_a_per_call_timeout_overrides_it() {
     let _lock = SEND_TIMEOUT_ENV_LOCK.lock().await;
@@ -242,109 +232,30 @@ async fn a_send_reply_states_its_deadline_and_a_per_call_timeout_overrides_it() 
     let (kernel, backend) = mk_kernel(&tmp, "dl_told").await;
     let peer = add_peer(&kernel, &tmp, &backend).await;
     set_root_timeout(&kernel, json!(5));
-    let _sp = script(&peer, vec![pass("ok"), pass("ok")], Duration::ZERO);
+    let _sp = script(&peer, vec![pass(DONE), pass(DONE)], Duration::ZERO);
     let s = script(
         &backend,
-        vec![
-            pass(format!(
-                "{}{}",
-                send_call(peer.as_str(), "a", None),
-                send_call(peer.as_str(), "b", Some("30"))
-            )),
-            pass(DONE),
-        ],
+        vec![pass(format!(
+            "{}{}",
+            send_call(peer.as_str(), "a", None),
+            send_call(peer.as_str(), "b", Some("30"))
+        ))],
         Duration::ZERO,
     );
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "o"}),
-        )])
+        )]))
         .await;
-    assert!(until_passes(&s, 2).await);
-    let req = s.request(1);
-    assert!(req.contains("(deadline 5.0s)"), "{req}");
-    assert!(req.contains("(deadline 30s)"), "{req}");
+    let kept: String = rows(&kernel, &backend)
+        .await
+        .iter()
+        .filter_map(|r| r["content"].as_str().map(str::to_string))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(kept.contains("(deadline 5.0s)"), "{kept}");
+    assert!(kept.contains("(deadline 30s)"), "{kept}");
     assert!(s.request(0).contains("resend it, or drop it with"));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_send_past_its_deadline_tells_the_sender_its_dead_letter_and_can_be_resent() {
-    let _lock = SEND_TIMEOUT_ENV_LOCK.lock().await;
-    let _env = EnvGuard::set(None);
-    let tmp = TempDir::new().unwrap();
-    let (kernel, backend) = mk_kernel(&tmp, "dl_resend").await;
-    let peer = add_peer(&kernel, &tmp, &backend).await;
-    set_root_timeout(&kernel, json!(0.3));
-    let sp = script(
-        &peer,
-        vec![pass(DONE), pass(DONE), pass("resent answer")],
-        Duration::from_millis(1500),
-    );
-    // Grants: the backend may ack its own dead letters at the root.
-    let _ = kernel.operator_send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({
-                "type": "update_agent", "id": "kernel_state",
-            }),
-        )])
-        .await;
-    let busy = spawn_send(&kernel, &peer, "busy", "o", None);
-    assert!(until_passes(&sp, 1).await, "the peer never got busy");
-    let s = script(
-        &backend,
-        vec![pass(send_call(peer.as_str(), "ping", None)), pass(DONE)],
-        Duration::ZERO,
-    );
-    let _ = kernel.operator_send(vec![Item::new(
-            backend.clone(),
-            json!({"type": "send", "text": "go", "client_id": "o"}),
-        )])
-        .await;
-    assert!(until_passes(&s, 2).await);
-    let req = s.request(1);
-    let marker = format!("your message to {peer} hit its 0.3s deadline \u{2192} dead letter ");
-    let at = req.find(&marker).unwrap_or_else(|| panic!("{req}"));
-    let pid: String = req[at + marker.len()..]
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect();
-    assert!(!pid.is_empty(), "{req}");
-    let peer_rows = rows(&kernel, &peer).await;
-    assert!(
-        peer_rows
-            .iter()
-            .any(|r| r["kind"] == "withdrawn" && r["content"].as_str().unwrap().contains(&pid)),
-        "{peer_rows:?}"
-    );
-    let acked = as_agent(
-        backend.clone(),
-        kernel.operator_send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({"type": "ack_deadletter", "id": pid.parse::<i64>().unwrap()}),
-        )]),
-    )
-    .await
-    .remove(0)
-    .result;
-    assert_eq!(acked["acked"], json!(true), "{acked}");
-    let _ = busy.await;
-    until_true("the peer to be idle", || {
-        !crate::state::is_generating(&peer)
-            && !crate::state::state_for(&peer).chain.lock().unwrap().alive
-    })
-    .await;
-    let resent = as_agent(
-        backend.clone(),
-        kernel.operator_send(vec![Item::new(
-            peer.clone(),
-            json!({"type": "send", "text": "ping", "client_id": "r"}),
-        )
-        .with_timeout(10.0)]),
-    )
-    .await
-    .remove(0)
-    .result;
-    assert!(resent.get("response").is_some(), "{resent}");
 }
 
 async fn status_reply(kernel: &Arc<Kernel>, to: &AgentId, payload: Value) -> Value {

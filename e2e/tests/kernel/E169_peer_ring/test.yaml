@@ -1,0 +1,12 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: three scripted OpenAI-compatible
+# servers play the models of three peers (the kernel's own ai_chat.tools chats over
+# vllm_backend providers), driven over web_rest.
+id: peer_ring
+group: kernel
+title: "three peers ask each other in a ring (#795): every send is acked at once, every question is answered by its receiver's own send back with `re`, no call stays open and no ceiling is hit (the E37 deadlock); then a kill during a peer's request: the new kernel's pass re-runs once over the message it had not answered"
+runner: probe.py
+runtimes: [rust]
+costs: free
+limits:
+  idle_seconds: 120
+  turn_seconds: 300
