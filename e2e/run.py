@@ -13,7 +13,8 @@ Three properties worth stating, because each replaces something that bit:
     five wording dialects meant a reworded probe silently became unscoreable.
   * LANES ARE A SHARED RESOURCE. The GPU behind the endpoint holds a fixed
     number of sequences and other people's traffic shares it. `--lanes` is a promise
-    about someone else's latency, not a throughput dial.
+    about someone else's latency, not a throughput dial. It bounds MODEL tests only:
+    a free test (`costs: free`) takes no lane and runs at once, one per test.
   * EVERY RUN KEEPS ITS LOG. `runs/<stamp>/<group>.<id>.log` (`:` spelled `@`) holds the full
     transcript. A failure you cannot re-read is a failure you cannot diagnose —
     and these cost real turns, so re-running to look again is not free.
@@ -448,7 +449,11 @@ async def _run_one(t: dict, bk, logdir: Path, sem: asyncio.Semaphore, results: d
         results[name] = {"state": "skip", "note": note, "took": 0.0, "rc": 0, "log": logdir / log_name(name), "muted": True}
         print(f"  SKIP  {name:<34} {0:6.0f}s  {note}", flush=True)
         return
-    async with sem:
+    # A FREE TEST TAKES NO LANE (owner rule: one lane per free test). Lanes guard the
+    # model endpoint only; a free test reaches no model, so it never waits for one.
+    # Browser and long tests still take their own slots above.
+    lane = contextlib.nullcontext() if t.get("costs") == "free" else sem
+    async with lane:
         log = logdir / log_name(name)
         # The knobs a test owns, rendered into the env its runner already reads.
         env = {**os.environ, **limit_env(t)}
