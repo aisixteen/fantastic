@@ -144,8 +144,7 @@ async def main():
         Path(FILE).write_text(body(token))
         r = await _call(root, root.id, {
             "type": "create_agent", "parent_id": home(root), "id": FILES,
-            "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-            "ingress_rule": "allow_all_ingress", "description": "This run's files.",
+            "handler_module": "file_bridge.tools", "allow": ["."], "root": ".", "description": "This run's files.",
         })
         assert not r.get("error"), f"create {FILES}: {r}"
         await human(root, ai=[])

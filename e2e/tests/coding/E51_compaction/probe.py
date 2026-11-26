@@ -54,12 +54,10 @@ async def main():
             {
                 "type": "create_agent", "parent_id": home(root), "id": FB,
                 "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-                "ingress_rule": "allow_all_ingress",
             },
             {
                 "type": "create_agent", "parent_id": home(root), "id": "notes",
                 "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-                "ingress_rule": "allow_all_ingress",
             },
         ):
             r = await _call(root, root.id, payload)

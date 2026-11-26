@@ -42,13 +42,13 @@ loader. The host never learns what the page is; it just serves bytes.
 `npm run build` (the one pinned dev dep, `typescript`) emits this library as ES
 modules into `dist/`. A page that imports those modules instead of a packed
 bundle is served the same way — a `file_bridge` agent rooted at a copy of the
-build output inside the kernel's running dir (the bridge is SEALED by default and
-its root CLAMPED to the running dir):
+build output inside the kernel's running dir (its root CLAMPED to the running dir;
+the web host reads it with its own `can` line on the bridge):
 
 ```bash
 cp -R /PATH/TO/src/lib/ts/dist ./ts_dist_src
 fantastic kernel_state create_agent handler_module=file_bridge.tools id=ts_dist \
-  root=ts_dist_src allow='["."]' ingress_rule=allow_all_ingress
+  root=ts_dist_src allow='["."]'
 # → /ts_dist/file/index.js is the public entry; relative imports resolve under it
 ```
 

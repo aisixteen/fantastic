@@ -161,8 +161,7 @@ async fn run(
 /// python `agent_file` — any agent answering `read_stream{path,offset,length}`
 /// becomes an HTTP file server. The request is handed to the web host
 /// (`fetch_file` — this route is the transport, the operator) and the HOST reads
-/// each chunk AS ITSELF, so `web`'s own lines AND the served agent's io leg
-/// judge it; anything that does not answer with a chunk is a 404, and only an
+/// each chunk AS ITSELF, so `web`'s own lines judge it; anything that does not answer with a chunk is a 404, and only an
 /// `unauthorized` denial carries a body (a missing file must not leak its
 /// absence).
 async fn file_proxy(state: AppState, agent_id: String, path: String) -> Response {
@@ -178,13 +177,13 @@ async fn file_proxy(state: AppState, agent_id: String, path: String) -> Response
     // not answer with a chunk — a denial, a missing file, an agent that is not
     // a SOURCE at all — is a 404.
     let Some(first) = first else {
-        // A GATE denial carries its reason in the body: this kernel teaches
-        // through denials, and the route passes it on. A MISSING
-        // FILE stays a bare 404 — no body, no existence leak.
+        // A source's own `unauthorized` answer carries its reason in the body,
+        // and the route passes it on. A MISSING FILE, and a read the kernel
+        // refused (the unknown answer), stay a bare 404 — no body, no existence
+        // leak.
         if meta.get("reason").and_then(Value::as_str) == Some("unauthorized") {
-            // EXACTLY four keys, in THIS order, a missing one as `null` (a
-            // sealed io-gate denial carries no `side`); `see` and anything else
-            // is dropped. Note the order differs from the REST refusal's.
+            // EXACTLY four keys, in THIS order, a missing one as `null`; `see`
+            // and anything else is dropped. Note the order differs from the REST refusal's.
             let mut detail = serde_json::Map::new();
             for k in ["error", "reason", "side", "hint"] {
                 detail.insert(k.into(), meta.get(k).cloned().unwrap_or(Value::Null));
@@ -708,13 +707,7 @@ fn rest_gate(
     match decision {
         Decision::Allow => None,
         Decision::Deny(denial) => {
-            let mut body = json!({"error": denial.reason, "reason": "unauthorized"});
-            if !denial.hint.is_empty() {
-                body["hint"] = json!(denial.hint);
-            }
-            if !denial.see.is_empty() {
-                body["see"] = json!(denial.see);
-            }
+            let body = denial.to_refusal();
             Some(routes::respond(
                 StatusCode::FORBIDDEN,
                 &[],

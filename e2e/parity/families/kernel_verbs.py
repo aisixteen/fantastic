@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import time
 
-from families import ALL, MEMORY, OPEN, call, line_call, save_kernel_log
+from families import ALL, MEMORY, call, line_call, save_kernel_log
 
 NAME = "kernel_verbs"
 
@@ -29,7 +29,7 @@ def run(ctx) -> None:  # noqa: C901
         (w / "agents/limited").mkdir(parents=True, exist_ok=True)
         write_rec(w / "agents/limited/agent.yaml",
                   {"id": "limited", "handler_module": "cli.tools",
-                   "parent_id": k.root_id, **OPEN})
+                   "parent_id": k.root_id})
         for p in ("agents/web/agent.yaml", "agents/web/agents/ws/agent.yaml",
                   "agents/web/agents/rest/agent.yaml"):
             r = read_rec(w / p)
@@ -42,13 +42,13 @@ def run(ctx) -> None:  # noqa: C901
     try:
         (ctx.work / "a.txt").write_text("a\n")
         rec.json("setup/files", k.create(parent_id=k.home, id="files",
-                                         handler_module="file_bridge.tools", allow=["."], root=".", **OPEN))
+                                         handler_module="file_bridge.tools", allow=["."], root="."))
         rec.json("setup/readings", k.create(parent_id=k.home, id="readings",
-                                            handler_module="file_bridge.tools", allow=["."], root=".", **OPEN))
+                                            handler_module="file_bridge.tools", allow=["."], root="."))
         rec.json("setup/limited", call(k, "limited", {"type": "reflect"}))
         rec.json("setup/kernel_store", k.create(parent_id=k.home, id="kernel_store",
                                                 handler_module="file_bridge.tools", allow=["."],
-                                                root=".fantastic", **OPEN))
+                                                root=".fantastic"))
         time.sleep(0.8)
 
         # ── C13 — persist_blob / load_blob ──

@@ -992,7 +992,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "fantastic-bundle",
- "fantastic-io-bridge",
  "fantastic-kernel",
  "libc",
  "notify",

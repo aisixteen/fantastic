@@ -116,7 +116,7 @@ def main() -> int:
 
     try:
         rec = hk.create(parent_id="rest", handler_module="exec_bridge.tools", id=EX,
-                        ingress_rule="allow_all_ingress", cwd=str(work), env=oslayer.child_env(),
+                        cwd=str(work), env=oslayer.child_env(),
                         allowed=ALLOWED)
         need(rec.get("id") == EX, f"create {EX}: {str(rec)[:200]}")
 

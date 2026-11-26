@@ -135,7 +135,6 @@ def main(scenario_id: str) -> int:
             handler_module="file_bridge.tools",
             allow=["."],
             root=".fantastic",
-            ingress_rule="allow_all_ingress",
         )
         assert store.get("id"), store
 
@@ -150,7 +149,6 @@ def main(scenario_id: str) -> int:
                 # A DATA store of its own, apart from the records.
                 meta["root"] = f".fantastic/data/{entry['id']}"
                 meta["allow"] = ["."]
-                meta["ingress_rule"] = "allow_all_ingress"
             if entry["role"] == "user":
                 # THE HUMAN'S WORDS ARE POLICY ON ITS RECORD. The scenario says
                 # what the person answers; without carrying it the human has no
@@ -161,7 +159,6 @@ def main(scenario_id: str) -> int:
                 # The COMMAND allowlist is the only gate — regexes over the
                 # full command line; the runner permits its own python.
                 meta["allowed"] = [f"{sys.executable} -c .*"]
-                meta["ingress_rule"] = "allow_all_ingress"
                 # where and with what it runs: the operator's, on the record
                 meta["cwd"] = "."
                 meta["inherit_env"] = ["PATH", "HOME"]

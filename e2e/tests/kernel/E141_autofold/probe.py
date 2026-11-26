@@ -164,7 +164,7 @@ def main() -> int:
             '<payload><type>read</type><path>big.txt</path></payload></call>')
     try:
         rec = hk.create(parent_id="rest", handler_module="file_bridge.tools", id=FILES,
-                        root="files", allow=["."], ingress_rule="allow_all_ingress")
+                        root="files", allow=["."])
         need(rec.get("id") == FILES, f"create {FILES}: {str(rec)[:200]}")
         can = {"memory": ALL, FILES: ALL}
         # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it:

@@ -218,8 +218,7 @@ async fn a_restarted_sender_never_joins_a_settled_execution() {
         &kb,
         "kernel_state",
         json!({"type": "create_agent", "parent_id": b_id, "handler_module": "file_bridge.tools",
-               "id": doc, "allow": ["."], "root": tb.path().to_string_lossy(),
-               "ingress_rule": "allow_all_ingress"}),
+               "id": doc, "allow": ["."], "root": tb.path().to_string_lossy()}),
     )
     .await;
     assert!(made.get("error").is_none(), "{made}");

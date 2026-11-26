@@ -1106,21 +1106,6 @@ async fn watch_remote_reply(agent_id: &AgentId, target: &str, kind: &str) -> Val
 
 // ── read loop ───────────────────────────────────────────────────────
 
-/// The TEACHING denial a leg answers an inbound frame with — the rule's own
-/// `reason`/`hint`/`see`, never a sentence invented at the call site. Mirrors the
-/// python read loop and the web inbound legs, so discovery-through-denial works
-/// over a bridge leg exactly as it does over a browser socket.
-fn deny_reply(denial: &authorizer::Denial) -> Value {
-    let mut out = json!({"error": denial.reason, "reason": "unauthorized"});
-    if !denial.hint.is_empty() {
-        out["hint"] = json!(denial.hint);
-    }
-    if !denial.see.is_empty() {
-        out["see"] = json!(denial.see);
-    }
-    out
-}
-
 /// Serve ONE inbound `call` frame — `{type:'call', id, target, payload}` — and
 /// ship its reply `{type:'reply', id, data}`. Sent AS THE LEG `leg`: this runs in
 /// a task the leg's own read loop spawned, so the gate judges the leg.
@@ -1185,7 +1170,7 @@ async fn serve_inbound_call(
     if let Decision::Deny(denial) = decision {
         let _ = state
             .transport
-            .send_frame(json!({"type":"reply","id":corr_id,"data":deny_reply(&denial)}))
+            .send_frame(json!({"type":"reply","id":corr_id,"data":denial.to_refusal()}))
             .await;
     } else {
         // THE FRAME ID IS THE EXECUTION ID. The correlator a peer already sends
@@ -1329,7 +1314,7 @@ async fn serve_watch(leg: &AgentId, state: &Arc<BridgeState>, kernel: &Arc<Kerne
             token: auth_token.as_deref(),
         });
     if let Decision::Deny(denial) = decision {
-        refuse_watch(state, id, src, &deny_reply(&denial)).await;
+        refuse_watch(state, id, src, &denial.to_refusal()).await;
         return;
     }
     let Some(target) = kernel.resolve_target(src) else {

@@ -435,14 +435,12 @@ mod tests {
     }
 
     #[test]
-    fn exec_can_run_anything_and_is_not_sealed() {
+    fn exec_can_run_anything() {
         let p = sandbox("exec");
         write_all(&p).unwrap();
         let e = rec(&p, "user/agents/exec/agent.yaml");
+        // A leg with no `allowed` runs nothing; who may call it is the callers' lines.
         assert_eq!(e["allowed"], json!([".*"]));
-        // Both halves are needed: an unsealed leg with no `allowed` runs nothing,
-        // and `allowed` on a sealed leg never gets asked.
-        assert_eq!(e["ingress_rule"], "allow_all_ingress");
         assert!(e.get("can").is_none(), "exec holds no lines");
         let _ = std::fs::remove_dir_all(&p.work);
     }
@@ -453,7 +451,6 @@ mod tests {
         write_all(&p).unwrap();
         let f = rec(&p, "user/agents/files/agent.yaml");
         assert_eq!(f["root"], ".");
-        assert_eq!(f["ingress_rule"], "allow_all_ingress");
         // inclusion-only: no `.` entry and nothing under the state folder
         for a in f["allow"].as_array().expect("an allow list") {
             let a = a.as_str().unwrap();

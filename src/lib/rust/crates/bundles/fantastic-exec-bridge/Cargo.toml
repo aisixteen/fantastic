@@ -4,7 +4,7 @@ name = "fantastic-exec-bridge"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Process edge of the io family — a general-purpose COMMAND runner, sealed by default, gated by a regex allowlist over a published control wire. Spawns commands in the background."
+description = "Process edge of the io family — a general-purpose COMMAND runner, bound by a regex allowlist over a published control wire. Spawns commands in the background."
 
 [dependencies]
 fantastic-bundle = { path = "../../fantastic-bundle" }

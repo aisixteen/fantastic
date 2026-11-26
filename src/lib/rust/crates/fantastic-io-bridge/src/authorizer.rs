@@ -1,7 +1,9 @@
-//! Bridge authorization — base types + the two rule registries (`ingress`/`egress`).
+//! Wire-leg authorization — base types + the two rule registries (`ingress`/`egress`).
 //!
-//! Two independent, TYPED rules govern a leg, mirrored on the wire and enforced on
-//! the RECEIVER:
+//! The rules guard a WIRE leg's outside boundary (an HTTP/WS client, a remote
+//! kernel's frames); an in-kernel agent's call is judged by the kernel's `can`
+//! lines alone and never meets them. Two independent, TYPED rules govern a leg,
+//! mirrored on the wire and enforced on the RECEIVER:
 //!   - an INGRESS rule (the inbound FILTER) — [`ingress::resolve`] → `authorize`,
 //!     consulted at the read-loop choke point before an inbound `call` dispatches.
 //!   - an EGRESS rule (the outbound DECORATOR) — [`egress::resolve`] → `credential`,
@@ -33,63 +35,27 @@ pub struct Action<'a> {
     pub token: Option<&'a str>,
 }
 
-/// Everything a refusal carries — the denial half of python's `Decision`,
-/// field for field.
-///
-/// Not a bare `String`: a rule states the fact AND the repair, so no gate
-/// invents its own `hint` at the call site and the runtimes share one vocabulary
-/// for `unauthorized`. The rule KNOWS why it refused and how to open the edge;
-/// that knowledge travels with the verdict instead of being guessed downstream.
+/// What a refusal carries — the denial half of python's `Decision`: one reason
+/// a person reads. The wire leg answers its external client with it.
 #[derive(Debug, Clone, Default)]
 pub struct Denial {
     /// One line a person reads — the `error` field on the wire.
     pub reason: String,
-    /// The repair: what to do instead. Empty ⇒ omit the field.
-    pub hint: String,
-    /// A doc pointer (readme key). Empty ⇒ omit the field.
-    pub see: String,
 }
 
 impl Denial {
-    /// A denial that states only the reason.
+    /// A denial that states its reason.
     pub fn new(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
-            hint: String::new(),
-            see: String::new(),
         }
-    }
-
-    /// …plus the repair. A refusal that cannot be acted on costs the same as no
-    /// reply.
-    #[must_use]
-    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
-        self.hint = hint.into();
-        self
-    }
-
-    /// …plus a doc pointer.
-    #[must_use]
-    pub fn with_see(mut self, see: impl Into<String>) -> Self {
-        self.see = see.into();
-        self
     }
 
     /// The wire shape every inbound gate answers a denial with. Built HERE so no
-    /// call site has to remember the key order or invent the teaching half.
+    /// call site has to remember the key order.
     #[must_use]
     pub fn to_refusal(&self) -> Value {
-        let mut out = json!({ "error": self.reason, "reason": "unauthorized" });
-        let obj = out.as_object_mut().expect("json! object");
-        // Empty ⇒ ABSENT, not `""` — the same rule the kernel's `refusal`
-        // follows, so a caller tests for the key, not for an empty string.
-        if !self.hint.is_empty() {
-            obj.insert("hint".to_string(), Value::String(self.hint.clone()));
-        }
-        if !self.see.is_empty() {
-            obj.insert("see".to_string(), Value::String(self.see.clone()));
-        }
-        out
+        json!({ "error": self.reason, "reason": "unauthorized" })
     }
 }
 
@@ -97,9 +63,8 @@ impl Denial {
 pub enum Decision {
     /// Permit the inbound action — dispatch `kernel.send`.
     Allow,
-    /// Refuse it; the gate replies `{error: reason, reason:"unauthorized",
-    /// hint?, see?}` — forwarding the [`Denial`]'s fields, never inventing its
-    /// own.
+    /// Refuse it; the gate replies `{error: reason, reason:"unauthorized"}`
+    /// ([`Denial::to_refusal`]).
     Deny(Denial),
 }
 
@@ -152,19 +117,6 @@ impl IngressName {
             Self::Password => "password_ingress",
         }
     }
-}
-
-/// The inbound filters an edge with no wire envelope takes (the file and process
-/// edges): the password rule reads a token off an envelope, which such an edge never
-/// has, so it is not a name there. The names spell as [`IngressName`]'s.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub enum EnvelopelessIngress {
-    /// Permit every inbound action.
-    #[serde(rename = "allow_all_ingress")]
-    AllowAll,
-    /// Refuse every inbound action.
-    #[serde(rename = "deny_ingress")]
-    Deny,
 }
 
 /// The outbound DECORATOR a leg's record names (`egress_rule`).

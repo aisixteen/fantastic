@@ -79,7 +79,6 @@ agents:
         root: "@state"
         # the whole store dir: without it record persistence stops at the first write
         allow: ["."]
-        ingress_rule: allow_all_ingress
         agents:
           # THE PROJECT'S SYSTEM BLOCK: `<state>/prompt.md`, read by every AI
           # through this view (`kern/prompt`). A view reaches its bridge by its
@@ -114,7 +113,6 @@ agents:
         handler_module: file_bridge.tools
         root: "."
         allow: []
-        ingress_rule: allow_all_ingress
         agents:
           # THE STATIC FILES every view's cells load: a read-only folder view.
           - id: static_files
@@ -133,7 +131,6 @@ agents:
         cwd: "."
         # a bare command is found on the CHILD's PATH only, never the kernel's
         inherit_env: ["*"]
-        ingress_rule: allow_all_ingress
 
       # THE USER'S HOME: saved set-ups, keys and stored fantastic locations
       # (`user_store.tools`, its folder fixed by the binary).
@@ -183,7 +180,6 @@ agents:
                 root: "@self"
                 readonly: false
                 allow: [.mcp.json]
-                ingress_rule: allow_all_ingress
 
       # ===== THE USER SPACE: canvas_root's subtree =====
       - id: canvas_root

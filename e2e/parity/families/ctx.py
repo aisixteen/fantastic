@@ -24,7 +24,7 @@ import re
 import threading
 import time
 
-from families import ALL, MEMORY, OPEN, ROOT_ID, VLLM, ai, ai_pair, call, line_call, save_kernel_log, vllm
+from families import ALL, MEMORY, ROOT_ID, VLLM, ai, ai_pair, call, line_call, save_kernel_log, vllm
 from spec import CTX_RESERVE, CTX_WINDOW, CTX_WINDOW_TINY
 from stubs.openai_chat import Handler as OpenAIHandler, OpenAIChatStub, content_text
 
@@ -231,7 +231,7 @@ def run(ctx) -> None:  # noqa: C901
         # A PERSISTENCE PROVIDER FIRST. The reboot below is the only way to
         # measure a boot-time `context_recall`, and it needs rows on disk.
         rec.json("create_store", k.create(
-            parent_id=k.home, handler_module="file_bridge.tools", allow=["."], id="store", **OPEN,
+            parent_id=k.home, handler_module="file_bridge.tools", allow=["."], id="store",
             root=".fantastic"))
         # the file agents first: each AI's line on `docs` names an id that exists
         roster = [
@@ -251,7 +251,7 @@ def run(ctx) -> None:  # noqa: C901
             "can": {"docs": ALL, ROOT_ID: line_call("reflect")}})))
         meta_all = {}
         for aid, hm, meta in roster:
-            m = {"parent_id": k.home, "handler_module": hm, "id": aid, **OPEN, **meta}
+            m = {"parent_id": k.home, "handler_module": hm, "id": aid, **meta}
             meta_all[aid] = m
             rec.json(f"create_{aid}", k.create(**m))
         rec.json("roster_meta", meta_all)

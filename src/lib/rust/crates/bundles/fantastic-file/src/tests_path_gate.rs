@@ -40,7 +40,6 @@ async fn bridge(tmp: &tempfile::TempDir, extra: Value) -> Arc<Kernel> {
         "handler_module": HANDLER_MODULE,
         "id": "fb",
         "root": served.display().to_string(),
-        "ingress_rule": "allow_all_ingress",
         "allow": ["sub"],
     });
     cfg.as_object_mut()

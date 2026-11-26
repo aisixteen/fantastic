@@ -232,7 +232,7 @@ async def main():
         r = await _call(root, root.id, {
             "type": "create_agent", "parent_id": conn.id, "id": RUNNER,
             "handler_module": "exec_bridge.tools", "cwd": os.getcwd(),
-            "inherit_env": ["PATH", "HOME"], "ingress_rule": "allow_all_ingress",
+            "inherit_env": ["PATH", "HOME"],
             "allowed": [re.escape(INTERP) + " .*"],
             "can": {AI: lines.call("send")},
             "description": f"Runs `{INTERP} <script> [args…]` in the test's directory. "

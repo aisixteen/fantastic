@@ -22,7 +22,7 @@
 //! | `watch{src}` / `unwatch{src}` | `event{src,payload}` |
 //! | `onmessage` / `offmessage` | `inbox{payload}` |
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use fantastic_io_bridge::codec::{decode_binary_frame, encode_binary_frame};
@@ -51,89 +51,6 @@ static OWNER_INBOX: OnceLock<Mutex<HashMap<AgentId, OwnerInbox>>> = OnceLock::ne
 
 fn owner_inbox() -> &'static Mutex<HashMap<AgentId, OwnerInbox>> {
     OWNER_INBOX.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// How many refused payloads one owner's ledger keeps; the oldest is evicted past it.
-pub(crate) const REFUSED_CAP: usize = 256;
-
-/// The mail this leg's handler REFUSED, per owner, noted at SEND time. The fanout
-/// queues a copy of every payload before the handler runs, so the verdict on a piece
-/// of mail must be carried from the handler to the drain: a drain that re-reads the
-/// live record when it dequeues would deliver refused mail if the leg was reopened in
-/// between.
-static REFUSED: OnceLock<Mutex<HashMap<AgentId, Ledger>>> = OnceLock::new();
-
-/// One owner's ledger. `noted` holds refusals the handler recorded that the drain has
-/// not consumed yet. `early` holds items the drain already dropped on its own live
-/// gate BEFORE the handler got to note them: the handler's note then cancels against
-/// one of these instead of leaving an entry nobody will consume (which would drop a
-/// later, legitimate mail with an identical payload).
-#[derive(Default)]
-struct Ledger {
-    noted: VecDeque<Value>,
-    early: VecDeque<Value>,
-}
-
-fn push_capped(q: &mut VecDeque<Value>, v: &Value) {
-    if q.len() >= REFUSED_CAP {
-        q.pop_front();
-    }
-    q.push_back(v.clone());
-}
-
-fn remove_eq(q: &mut VecDeque<Value>, v: &Value) -> bool {
-    q.iter().position(|x| x == v).map(|i| q.remove(i)).is_some()
-}
-
-fn refused() -> &'static Mutex<HashMap<AgentId, Ledger>> {
-    REFUSED.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// True when a relay has registered an inbox drain for `owner`.
-pub(crate) fn has_owner_inbox(owner: &AgentId) -> bool {
-    owner_inbox()
-        .lock()
-        .expect("OWNER_INBOX")
-        .contains_key(owner)
-}
-
-/// Record that `payload`, sent to `owner`, was refused. Bounded by [`REFUSED_CAP`].
-/// If the drain already dropped this very item, the two cancel and nothing is kept.
-pub(crate) fn note_refused(owner: &AgentId, payload: &Value) {
-    let mut g = refused().lock().expect("REFUSED");
-    let l = g.entry(owner.clone()).or_default();
-    if !remove_eq(&mut l.early, payload) {
-        push_capped(&mut l.noted, payload);
-    }
-}
-
-/// Remove ONE noted refusal equal to `payload`; true when there was one.
-pub(crate) fn take_refused(owner: &AgentId, payload: &Value) -> bool {
-    let mut g = refused().lock().expect("REFUSED");
-    let Some(l) = g.get_mut(owner) else {
-        return false;
-    };
-    remove_eq(&mut l.noted, payload)
-}
-
-/// The drain dropped `payload` on its own gate with no noted refusal: remember it so
-/// the handler's late [`note_refused`] cancels instead of lingering.
-fn note_dropped_early(owner: &AgentId, payload: &Value) {
-    let mut g = refused().lock().expect("REFUSED");
-    push_capped(&mut g.entry(owner.clone()).or_default().early, payload);
-}
-
-fn clear_refused(owner: &AgentId) {
-    refused().lock().expect("REFUSED").remove(owner);
-}
-
-#[cfg(test)]
-pub(crate) fn refused_len(owner: &AgentId) -> usize {
-    refused()
-        .lock()
-        .expect("REFUSED")
-        .get(owner)
-        .map_or(0, |l| l.noted.len())
 }
 
 /// Register an owner inbox row with no drain task, so a test can pull the queued
@@ -255,36 +172,15 @@ async fn drop_proxy(kernel: &Arc<Kernel>, src: &AgentId, sub: Sub) {
     kernel.cancel_task(&sub.drain).await;
 }
 
-/// The mail framer: what `owner`'s program gets of a queued payload. The job's own
-/// telemetry echoes back through the owner's watcher fanout, and the fanout mirrors
-/// every call made to the leg BEFORE any handler runs: only a call of a verb the
-/// program declared, which the agent's own entry accepts and the leg's gate admits,
-/// is mail (python `_inbox_framer`).
-fn inbox_framer(p: &Value, owner: &AgentId, kernel: &Kernel) -> Option<Value> {
-    let mail = crate::mail::of(owner, p)?;
-    if crate::gate(&crate::snapshot_meta(owner, kernel), owner, &mail.name).is_some() {
-        return None;
-    }
+/// The drain's verdict on ONE queued item: the frame to write, or `None` to drop
+/// it. The job's own telemetry echoes back through the owner's watcher fanout, and
+/// the fanout mirrors every call made to the leg BEFORE any handler runs: only a
+/// call of a verb the program declared, which the agent's own entry accepts, is
+/// mail (python `_inbox_framer`). A call no `can` line permits never reaches the
+/// fanout — the kernel refused it first.
+pub(crate) fn drain_verdict(p: &Value, owner: &AgentId) -> Option<Value> {
+    crate::mail::of(owner, p)?;
     Some(json!({"op": "inbox", "payload": p}))
-}
-
-/// The drain's verdict on ONE queued item: the frame to write, or `None` to drop it.
-/// Mail the handler refused at send time ([`note_refused`]) is dropped whatever the
-/// record says now; the live gate in [`inbox_framer`] still catches an item the
-/// drain dequeues before the handler has noted it.
-pub(crate) fn drain_verdict(p: &Value, owner: &AgentId, kernel: &Kernel) -> Option<Value> {
-    let mail = crate::mail::of(owner, p)?;
-    let key = crate::mail::payload_of(&mail);
-    if take_refused(owner, &key) {
-        return None;
-    }
-    let f = inbox_framer(p, owner, kernel);
-    if f.is_none() {
-        // Dropped on the live gate before the handler noted it (the handler runs
-        // after the fanout): let its late note cancel against this.
-        note_dropped_early(owner, &key);
-    }
-    f
 }
 
 /// Read one `[4-byte BE len | payload]` frame. `None` = the socket is finished:
@@ -460,7 +356,6 @@ pub async fn serve(
                 // makes the gap safe: it can receive no more mail in the interim.
                 let prev = owner_inbox().lock().expect("OWNER_INBOX").remove(&owner);
                 if let Some(prev) = prev {
-                    clear_refused(&owner);
                     kernel.unwatch(&owner, &prev.proxy).await;
                     kernel.remove_inbox(&prev.proxy);
                     kernel.cancel_task(&prev.drain).await;
@@ -487,8 +382,10 @@ pub async fn serve(
                 // `watch_drain` above.
                 let drain = kernel.spawn_task(&owner, "inbox_drain", async move {
                     while let Some(p) = rx.recv().await {
-                        let Some(k) = weak.upgrade() else { break };
-                        if let Some(f) = drain_verdict(&p.payload, &o, &k) {
+                        if weak.upgrade().is_none() {
+                            break;
+                        }
+                        if let Some(f) = drain_verdict(&p.payload, &o) {
                             push_item(&w, f, &p).await;
                         }
                     }
@@ -555,7 +452,6 @@ pub(crate) async fn release_owner_inbox(kernel: &Arc<Kernel>, owner: &AgentId, j
         }
     };
     if let Some(c) = mine {
-        clear_refused(owner);
         kernel.unwatch(owner, &c.proxy).await;
         kernel.remove_inbox(&c.proxy);
         kernel.cancel_task(&c.drain).await;

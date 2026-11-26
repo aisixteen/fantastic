@@ -94,7 +94,6 @@ async fn mk_kernel_with(
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "id": file_id,
                 "root": tmp.path().join(".fantastic").to_string_lossy(),
-                "ingress_rule": "allow_all_ingress",
             }),
         )])
         .await

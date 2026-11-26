@@ -60,7 +60,7 @@ fn kernel(tmp: &TempDir) -> Arc<Kernel> {
 async fn mk(kernel: &Arc<Kernel>, tmp: &TempDir, id: &str, extra: Value) -> Value {
     let mut create = json!({
         "type": "create_agent", "parent_id": "kernel", "id": id,
-        "handler_module": HANDLER_MODULE, "ingress_rule": "allow_all_ingress",
+        "handler_module": HANDLER_MODULE,
         "cwd": tmp.path().to_string_lossy(),
     });
     for (k, v) in extra.as_object().cloned().unwrap_or_default() {

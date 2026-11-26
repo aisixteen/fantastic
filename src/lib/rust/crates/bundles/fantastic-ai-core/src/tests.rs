@@ -475,7 +475,6 @@ async fn add_file_bridge(kernel: &Arc<Kernel>, id: &str, root: &std::path::Path)
                 "id": id,
                 "root": root.to_string_lossy(),
                 // the fs edge seals by default — open it so history persists through it
-                "ingress_rule": "allow_all_ingress",
             }),
         )])
         .await
@@ -2252,8 +2251,8 @@ async fn a_projection_refusal_is_returned_verbatim_and_does_not_raise() {
 /// Two shapes, one contract. A bundle returning `Err` is already mapped to an
 /// error reply by the kernel's dispatch, so it routes back on its own; a PANIC is
 /// re-raised into the caller, which is why the router catches it. Unguarded, a
-/// `file_bridge` whose ingress rule cannot be resolved raises out of its handler
-/// and the model gets no reply, no error and no further turn — the run stops and
+/// handler that raises (a `file_bridge` whose root cannot be resolved) leaves
+/// the model with no reply, no error and no further turn — the run stops and
 /// looks finished. An exception is a result; the model can act on one and cannot
 /// act on silence.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2290,7 +2289,7 @@ async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
         ) -> Result<Reply, BundleError> {
             match call {
                 Call::Panic(_) => panic!("the handler died outright"),
-                Call::Reflect(_) => Err("unknown ingress rule type 'password:whatever'".into()),
+                Call::Reflect(_) => Err("root cannot be resolved".into()),
             }
         }
     }
@@ -2338,7 +2337,7 @@ async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
     );
     let turn2 = s.request(1);
     assert!(
-        turn2.contains("password:whatever"),
+        turn2.contains("root cannot be resolved"),
         "it must carry what actually went wrong: {turn2}"
     );
 

@@ -87,14 +87,12 @@ async def main():
                 "id": FB,
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "root": ".",
-                "ingress_rule": "allow_all_ingress",
             },
             {
                 "type": "create_agent",
                 "parent_id": home(root),
                 "id": "notes",
                 "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-                "ingress_rule": "allow_all_ingress",
             },
             {
                 "type": "create_agent",
@@ -103,7 +101,6 @@ async def main():
                 "handler_module": "exec_bridge.tools",
                 "cwd": os.getcwd(),
                 "inherit_env": ["PATH", "HOME"],
-                "ingress_rule": "allow_all_ingress",
                 "allowed": ["grep .*", "find .*"],
                 "description": lines.runs(["grep .*", "find .*"]),
             },

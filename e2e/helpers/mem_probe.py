@@ -24,11 +24,9 @@ async def files(root) -> None:
     line on each AI once that AI exists."""
     for payload in (
         {"type": "create_agent", "parent_id": home(root), "id": "work_fb",
-         "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-         "ingress_rule": "allow_all_ingress"},
+         "handler_module": "file_bridge.tools", "allow": ["."], "root": "."},
         {"type": "create_agent", "parent_id": home(root), "id": "notes",
-         "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-         "ingress_rule": "allow_all_ingress"},
+         "handler_module": "file_bridge.tools", "allow": ["."], "root": "."},
     ):
         r = await call(root, root.id, payload)
         assert not r.get("error"), f"create {payload['id']}: {r}"

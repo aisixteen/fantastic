@@ -102,8 +102,8 @@ def roster(stub_url: str, interp: str) -> list:
         ("kernel_store", "file_bridge.tools", dict(allow=["."], root=".")),
         ("totals", "file_bridge.tools", dict(allow=["."], root=".")),
         ("sched", "scheduler.tools", {}),
-        ("wsb", "ws_bridge.tools", dict(url="ws://127.0.0.1:9/nowhere")),
-        ("relay", "relay_connector.tools", dict(url="ws://127.0.0.1:9/nowhere")),
+        ("wsb", "ws_bridge.tools", dict(url="ws://127.0.0.1:9/nowhere", **OPEN)),
+        ("relay", "relay_connector.tools", dict(url="ws://127.0.0.1:9/nowhere", **OPEN)),
         ("sload", "static_loader.tools", dict(root=".")),
         ("cli", "cli.tools", {}),
         ("olla", "ollama_backend.tools", ai(model="m", endpoint="http://127.0.0.1:9")),
@@ -311,12 +311,11 @@ def run(ctx) -> None:
     try:
         # ══ s1 — the store first, then the roster ══
         rec.json("s1/create_store", k.create(
-            parent_id=k.home, handler_module="file_bridge.tools", allow=["."], id="store", **OPEN,
+            parent_id=k.home, handler_module="file_bridge.tools", allow=["."], id="store",
             root=".fantastic"))
         for aid, hm, meta in agents:
             rec.json(f"s1/create_{aid}", k.create(
-                **{"parent_id": k.home, "handler_module": hm, "id": aid,
-                   **OPEN, **meta}))
+                **{"parent_id": k.home, "handler_module": hm, "id": aid, **meta}))
         rec.json("s1/sched_schedule", call(k, "sched", {
             "type": "schedule", "target": "readings", "payload": {"type": "list", "path": ""},
             "interval_seconds": 3600}))

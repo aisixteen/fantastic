@@ -461,7 +461,6 @@ async def build_fixture(root, *, interpreter: str | None = None):
                         "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "kernel_store",
                         "root": ".fantastic",
-                        "ingress_rule": "allow_all_ingress",
                     },
                 }
             ]
@@ -482,7 +481,6 @@ async def build_fixture(root, *, interpreter: str | None = None):
                         "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "readings",
                         "root": "readings",
-                        "ingress_rule": "allow_all_ingress",
                         "description": "Sensor readings — one integer per file.",
                     },
                 }
@@ -501,7 +499,6 @@ async def build_fixture(root, *, interpreter: str | None = None):
                         "id": "totals",
                         # a DATA store — the records under `.fantastic` stay the loader's
                         "root": ".fantastic/data",
-                        "ingress_rule": "allow_all_ingress",
                         "description": "Durable store for computed results.",
                     },
                 }
@@ -568,7 +565,6 @@ async def build_fixture(root, *, interpreter: str | None = None):
                         "parent_id": home(root),
                         "handler_module": EXEC_MODULE,
                         "id": EXECUTOR_LEG,
-                        "ingress_rule": "allow_all_ingress",
                         # the COMMAND runner's gate: run THIS interpreter against a file argument.
                         "allowed": [rf"{re.escape(interp)} \S+"],
                         "description": lines.runs([rf"{re.escape(interp)} \S+"],

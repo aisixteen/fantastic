@@ -41,8 +41,7 @@ async fn setup(dir: &std::path::Path, grant: bool, meta: Value) -> (Arc<Kernel>,
     );
     let root = k.root().expect("root").id.0.clone();
     let r = op(&k, &root, json!({"type": "create_agent", "parent_id": root, "id": "cfg",
-        "handler_module": fantastic_file::HANDLER_MODULE, "allow": [".mcp.json"],
-        "ingress_rule": "allow_all_ingress"})).await;
+        "handler_module": fantastic_file::HANDLER_MODULE, "allow": [".mcp.json"]})).await;
     assert!(r.get("error").is_none(), "create cfg: {r}");
     let can = if grant { json!({"cfg": {"call": VERBS}}) } else { json!({}) };
     let mut create = json!({"type": "create_agent", "parent_id": root, "id": "mcp",

@@ -158,7 +158,7 @@ connector** (send/emit/spawn back into the kernel over a socketpair), so a job c
 push frames to a panel, call an AI, or read memory — by id.
 
 **Hand to an LLM:** *"Create an `exec_bridge` at my project (`interpreters` naming
-my python, `shim=python`, `ingress_rule=allow_all_ingress`); start `train.py` as
+my python, `shim=python`); start `train.py` as
 a job; render its `progress` stream into an html panel and serve `training_ui.html`
 via a file_bridge agent."*
 

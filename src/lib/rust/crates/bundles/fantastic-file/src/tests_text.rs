@@ -2,7 +2,8 @@
 //! Ported from python `file_bridge/tests/test_text_verbs.py`.
 //!
 //! A caller edits with its own grants on the bridge, so there is no deputy. The
-//! posture cases (readonly, sealed) are answered by the bridge's own gate.
+//! readonly posture is answered by the bridge itself; who may call is the caller's
+//! `can` lines.
 //! `undo` is one RAM slot per path — a second undo is redo.
 
 use super::*;
@@ -34,7 +35,7 @@ async fn mk(tmp: &tempfile::TempDir, extra: Value) -> Arc<Kernel> {
         "type": "create_agent", "parent_id": "kernel",
         "handler_module": HANDLER_MODULE, "id": "fb",
         "root": tmp.path().join("served").display().to_string(),
-        "allow": ["."], "ingress_rule": "allow_all_ingress",
+        "allow": ["."],
     });
     for (k, v) in extra.as_object().expect("extra is an object") {
         if v.is_null() {
@@ -339,14 +340,48 @@ async fn readonly_leg_refuses_the_edit() {
     assert_eq!(text_of(&tmp, "m.py"), "a = 1\n");
 }
 
+/// An edit is the caller's: one with no line on the bridge gets the unknown answer
+/// and the file stays; one with a line edits it.
 #[tokio::test]
-async fn sealed_leg_denies_everything() {
+async fn only_a_caller_with_a_line_edits() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let k = mk(&tmp, json!({"ingress_rule": null})).await;
+    let k = mk(&tmp, json!({})).await;
+    for (id, can) in [("stranger", json!({})), ("editor", json!({"fb": {"call": ["edit"]}}))] {
+        fantastic_kernel::test_support::register(
+            &k,
+            Agent::new(
+                AgentId::from(id),
+                None,
+                Some(AgentId::from("kernel_state")),
+                json!({"can": can}).as_object().cloned().unwrap(),
+                std::path::PathBuf::new(),
+                false,
+            ),
+        );
+    }
     put(&tmp, "m.py", "a = 1\n");
-    let r = patch(&k, "m.py", Some(&block("a = 1", "a = 2")), json!({})).await;
-    assert_eq!(r["reason"], "unauthorized", "{r}");
+    let edit = |who: &'static str| {
+        let k = Arc::clone(&k);
+        async move {
+            fantastic_kernel::test_support::as_agent(
+                AgentId::from(who),
+                k.operator_send(vec![Item::new(
+                    AgentId::from("fb"),
+                    json!({"type": "edit", "edits": [{"path": "m.py", "hunks": 1}],
+                           "bytes": block("a = 1", "a = 2")}),
+                )]),
+            )
+            .await
+            .remove(0)
+            .result
+        }
+    };
+    let r = edit("stranger").await;
+    assert_eq!(r, fantastic_kernel::refusal::unknown_agent("fb"), "{r}");
     assert_eq!(text_of(&tmp, "m.py"), "a = 1\n");
+    let r = edit("editor").await;
+    assert!(r.get("error").is_none(), "{r}");
+    assert_eq!(text_of(&tmp, "m.py"), "a = 2\n");
 }
 
 // ─── read / write / append / version ────────────────────────────

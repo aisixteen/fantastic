@@ -122,7 +122,7 @@ async fn stage(tmp: &TempDir, port: u16, web: &str) -> Arc<Kernel> {
                "can": {"term": {"call": ["*"]}, "cap": {"call": ["*"]}}}),
         json!({"type": "create_agent", "parent_id": "kernel",
                "handler_module": fantastic_exec_bridge::HANDLER_MODULE, "id": "term",
-               "ingress_rule": "allow_all_ingress", "cwd": tmp.path().to_string_lossy(),
+               "cwd": tmp.path().to_string_lossy(),
                "allowed": [".*"]}),
         json!({"type": "create_agent", "parent_id": "kernel",
                "handler_module": "capture.tools", "id": "cap"}),

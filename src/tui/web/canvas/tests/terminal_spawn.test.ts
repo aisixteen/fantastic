@@ -11,7 +11,6 @@ test("the exec agent a terminal spawns runs the child's own login shell", () => 
     cwd: ".",
     inherit_env: ["*"],
     shell: "login",
-    ingress_rule: "allow_all_ingress",
   });
 });
 

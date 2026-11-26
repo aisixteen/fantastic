@@ -228,7 +228,6 @@ def main() -> int:
             id=FB,
             root=str(served),
             allow=["."],
-            ingress_rule="allow_all_ingress",
         )
         need(rec.get("id") == FB, f"create {FB}: {str(rec)[:200]}")
         rec = hk.create(parent_id="rest", handler_module="exec_bridge.tools", id=EB)

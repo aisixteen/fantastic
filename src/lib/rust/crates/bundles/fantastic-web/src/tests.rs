@@ -434,7 +434,6 @@ async fn make_file_bridge(kernel: &Arc<Kernel>, id: &str, root: &std::path::Path
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "id": id,
                 "root": root.to_string_lossy(),
-                "ingress_rule": "allow_all_ingress",
             }),
         )])
         .await
@@ -689,10 +688,7 @@ async fn sealed_leg_denies_the_call_and_leaks_no_telemetry() {
         .unwrap_or_else(|| panic!("no reply: {t:?}"));
     assert_eq!(reply["type"], "reply");
     assert_eq!(reply["data"]["reason"], "unauthorized", "{reply}");
-    assert!(
-        reply["data"]["hint"].is_string() || reply["data"]["see"].is_string(),
-        "a denial must teach how to open the edge: {reply}"
-    );
+    assert_eq!(reply["data"]["error"], "edge sealed by policy", "{reply}");
     assert!(reply["data"]["tree"].is_null(), "the reflect must NOT run");
 
     // NO AUTO-WATCH: an event on the host reaches nobody.
@@ -911,7 +907,6 @@ async fn web_rest_octet_leg_edit_and_read_stream() {
                 "type": "create_agent", "parent_id": "kernel_state",
                 "handler_module": "file_bridge.tools", "allow": ["."], "id": fb_id,
                 "root": "served",
-                "ingress_rule": "allow_all_ingress",
             }),
         )])
         .await
@@ -1026,7 +1021,7 @@ async fn web_rest_octet_leg_edit_and_read_stream() {
         .result;
 }
 
-/// A SEALED REST leg answers 403 with the repair — it does not serve, and it does
+/// A SEALED REST leg answers its HTTP client 403 — it does not serve, and it does
 /// not blame the wrong side.
 ///
 /// A leg carrying NO `ingress_rule` is sealed, as everywhere else in the io
@@ -1034,7 +1029,7 @@ async fn web_rest_octet_leg_edit_and_read_stream() {
 /// cause (this leg is sealed), never an EGRESS one ("wr_sealed may not call
 /// \"reflect\" on …").
 #[tokio::test]
-async fn sealed_rest_leg_answers_403_and_teaches_the_repair() {
+async fn sealed_rest_leg_answers_403_and_names_the_seal() {
     let tmp = TempDir::new().unwrap();
     let kernel = mk_kernel(&tmp, false, true);
     let port = free_port();
@@ -1083,13 +1078,7 @@ async fn sealed_rest_leg_answers_403_and_teaches_the_repair() {
     assert_eq!(resp.status().as_u16(), 403, "a sealed leg must not serve");
     let body: Value = resp.json().await.expect("body json");
     assert_eq!(body["reason"], "unauthorized", "body: {body}");
-    assert!(
-        body["hint"]
-            .as_str()
-            .unwrap_or("")
-            .contains("ingress_rule=allow_all_ingress"),
-        "the 403 must carry the repair: {body}"
-    );
+    assert_eq!(body["error"], "edge sealed by policy", "the 403 names the seal: {body}");
     assert!(
         body["agents"].is_null(),
         "the tree leaked past the gate: {body}"
@@ -1270,8 +1259,7 @@ async fn stage_host(
         json!({"type": "create_agent", "parent_id": "kernel",
                "handler_module": HANDLER_MODULE, "id": web_id, "port": port}),
         json!({"type": "create_agent", "parent_id": "kernel_state",
-               "handler_module": "file_bridge.tools", "allow": ["."], "id": fb_id, "root": "served",
-               "ingress_rule": "allow_all_ingress"}),
+               "handler_module": "file_bridge.tools", "allow": ["."], "id": fb_id, "root": "served"}),
         json!({"type": "create_agent", "parent_id": web_id,
                "handler_module": "web_rest.tools", "id": rest_id,
                "ingress_rule": "allow_all_ingress",
@@ -1897,7 +1885,7 @@ async fn reflect_sentence_and_verbs_match_python() {
         obj["surfaces"],
         json!({"rest": ["/rest/{target_id}", "/rest/_reflect", "/rest/_reflect/{target_id}"]})
     );
-    // The io leg is open AND both call gates name the host, so the file bridge
+    // Both call gates name the host, so the file bridge
     // is the one agent a browser could actually fetch.
     assert_eq!(obj["browser_reachable"], json!(["fb_r"]));
     // the route contract is the man text plus the declared `fetch_file`, not a reflect block
@@ -2698,12 +2686,12 @@ async fn octet_leg_names_executions_and_validates_type() {
 
 // ─── The file proxy ───────────────────────────────────────────
 
-/// A GATE denial is a 404 carrying EXACTLY
-/// `error, reason, side, hint` in that order (a missing key as `null`), while a
-/// missing file is a bare 404 with no body at all. Rust served the denied file
-/// 200 and answered a missing file with text/plain.
+/// The file proxy streams a served file; a missing file is a bare 404 with no
+/// body at all, and so is a file the host holds no line to read — the kernel's
+/// refusal names nothing. Rust once served a denied file 200 and answered a
+/// missing file with text/plain.
 #[tokio::test]
-async fn gate_denial_404_carries_the_hint_but_a_missing_file_does_not() {
+async fn a_missing_or_refused_file_is_a_bare_404() {
     let tmp = TempDir::new().unwrap();
     let port = free_port();
     let kernel = stage_host(&tmp, port, "web_fp", "rest", "fb_fp").await;
@@ -2744,10 +2732,13 @@ async fn gate_denial_404_carries_the_hint_but_a_missing_file_does_not() {
     assert!(missing.headers().get("content-type").is_none());
     assert_eq!(missing.headers()["content-length"], "0");
 
-    // SEAL the leg — now the same request is a 404 that TEACHES.
+    // DROP the host's lines (its line on the root reached the bridge too): the host
+    // reads each chunk AS ITSELF, so the kernel now answers it the unknown answer,
+    // and the browser gets the same bare 404 as a missing file — a refused read
+    // leaks no existence.
     let r = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel"),
-            json!({"type": "update_agent", "id": "fb_fp", "ingress_rule": "deny_ingress"}),
+            json!({"type": "update_agent", "id": "web_fp", "can": {}}),
         )])
         .await
         .remove(0)
@@ -2759,27 +2750,8 @@ async fn gate_denial_404_carries_the_hint_but_a_missing_file_does_not() {
         .await
         .expect("get");
     assert_eq!(denied.status().as_u16(), 404);
-    assert_eq!(denied.headers()["content-type"], "application/json");
-    let text = denied.text().await.unwrap();
-    let parsed: Value = serde_json::from_str(&text).expect("json body");
-    let keys: Vec<&str> = parsed
-        .as_object()
-        .expect("an object")
-        .keys()
-        .map(String::as_str)
-        .collect();
-    assert_eq!(
-        keys,
-        ["error", "reason", "side", "hint"],
-        "exactly four keys, in python's file-proxy order: {text}"
-    );
-    assert_eq!(parsed["reason"], "unauthorized");
-    assert_eq!(
-        parsed["side"],
-        Value::Null,
-        "a sealed io gate names no side"
-    );
-    assert!(parsed["hint"].is_string(), "{text}");
+    assert!(denied.headers().get("content-type").is_none());
+    assert_eq!(denied.headers()["content-length"], "0");
 
     stop(&kernel, "web_fp").await;
 }

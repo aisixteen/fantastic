@@ -27,7 +27,6 @@ async fn a_relative_state_folder_finds_its_store_and_persists() {
                 "type": "create_agent", "parent_id": "kernel",
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "id": "store", "root": "@state",
-                "ingress_rule": "allow_all_ingress",
             }),
         )])
         .await

@@ -16,7 +16,7 @@ from __future__ import annotations
 import threading
 import time
 
-from families import ALL, MEMORY, OPEN, ROOT_ID, VLLM, ai, ai_split, call, line_call, quiesce, save_kernel_log, vllm
+from families import ALL, MEMORY, ROOT_ID, VLLM, ai, ai_split, call, line_call, quiesce, save_kernel_log, vllm
 from spec import AI_FILL_CHARS, AI_RESERVE, AI_WINDOW
 from stubs.openai_chat import Handler as OpenAIHandler, OpenAIChatStub
 
@@ -142,12 +142,11 @@ def run(ctx) -> None:  # noqa: C901
     k = ctx.boot(reach=reach, port=ports.take("main"))
     try:
         rec.json("setup/readings", k.create(parent_id=k.home, id="readings",
-                                            handler_module="file_bridge.tools", allow=["."], root=".",
-                                            **OPEN))
+                                            handler_module="file_bridge.tools", allow=["."], root="."))
         rec.json("setup/slow", k.create(parent_id=k.home, id="slow",
-                                        handler_module="slow_probe.tools", **OPEN))
+                                        handler_module="slow_probe.tools"))
         rec.json("setup/plant", k.create(parent_id=k.home, id="plant",
-                                         handler_module="plant_probe.tools", **OPEN))
+                                         handler_module="plant_probe.tools"))
         ai_meta = vllm(stub.base_url(), context_window=AI_WINDOW,
                        output_reserve=AI_RESERVE, context_async=True)
         # each AI is a provider (the backend) and a chat naming it. Siblings need a
@@ -157,8 +156,8 @@ def run(ctx) -> None:  # noqa: C901
         for aid, can in (("ai", {"readings": ALL, "slow": ALL, "plant": ALL, **root_line}),
                          ("ai2", {"readings": ALL, **root_line, "ai": ALL})):
             prov, chat = ai_split(aid, VLLM, ai(can=can, **ai_meta))
-            rec.json(f"setup/{aid}_provider", k.create(parent_id=k.home, **OPEN, **prov))
-            rec.json(f"setup/{aid}", k.create(parent_id=k.home, **OPEN, **chat))
+            rec.json(f"setup/{aid}_provider", k.create(parent_id=k.home, **prov))
+            rec.json(f"setup/{aid}", k.create(parent_id=k.home, **chat))
         ai_can = (call(k, "ai", {"type": "reflect"}) or {}).get("can") or {}
         rec.json("setup/ai_line_on_ai2", call(k, k.root_id, {
             "type": "update_agent", "id": "ai", "can": {**ai_can, "ai2": ALL}}))
@@ -292,8 +291,8 @@ def run(ctx) -> None:  # noqa: C901
                       env_extra={"FANTASTIC_AI_SEND_TIMEOUT": "0.5"})
         try:
             prov, chat = ai_split("ai_to", VLLM, ai(can={"readings": ALL}, **ai_meta))
-            rec.json("send_timeout/create_ai_provider", k2.create(parent_id=k2.home, **OPEN, **prov))
-            rec.json("send_timeout/create_ai", k2.create(parent_id=k2.home, **OPEN, **chat))
+            rec.json("send_timeout/create_ai_provider", k2.create(parent_id=k2.home, **prov))
+            rec.json("send_timeout/create_ai", k2.create(parent_id=k2.home, **chat))
             time.sleep(1.0)
             t0 = time.monotonic()
             reply = call(k2, "ai_to", {"type": "send", "text": "CASE=send_timeout#1 stall me",

@@ -96,13 +96,11 @@ async def main():
         r = await _call(root, root.id, {
             "type": "create_agent", "parent_id": home(root), "id": FB,
             "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-            "ingress_rule": "allow_all_ingress",
         })
         assert not r.get("error"), f"create {FB}: {r}"
         r = await _call(root, root.id, {
             "type": "create_agent", "parent_id": home(root), "id": RUNNER,
             "handler_module": "exec_bridge.tools", "cwd": os.getcwd(), "inherit_env": ["PATH", "HOME"],
-            "ingress_rule": "allow_all_ingress",
             "allowed": [re.escape(INTERP) + r" worker\.py"],
             "description": lines.runs([re.escape(INTERP) + r" worker\.py"]),
         })

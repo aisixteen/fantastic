@@ -86,7 +86,6 @@ async def main():
                 "id": FB,
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "root": ".",
-                "ingress_rule": "allow_all_ingress",
             },
         )
         assert not r.get("error"), f"create {FB}: {r}"
@@ -95,7 +94,6 @@ async def main():
             "handler_module": "exec_bridge.tools",
             "cwd": os.getcwd(),
             "inherit_env": ["PATH", "HOME"],
-            "ingress_rule": "allow_all_ingress",
             "allowed": [re.escape(INTERP) + " -c .*"],
             "description": (
                 "Runs the long heartbeat job: "

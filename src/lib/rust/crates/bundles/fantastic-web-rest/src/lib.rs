@@ -42,7 +42,7 @@ use std::sync::Arc;
 pub const HANDLER_MODULE: &str = "web_rest.tools";
 
 /// What the bundle is for — its one short man text.
-const MAN: &str = "The REST call surface of a web host: POST /<id>/<target> sends the body onward as this leg, gated as the leg; GET /<id>/_reflect[/<target>] reflects. Sealed by default; the token rides the X-Fantastic-Auth header.";
+const MAN: &str = "The REST call surface of a web host: POST /<id>/<target> sends the body onward as this leg, gated as the leg; GET /<id>/_reflect[/<target>] reflects. Sealed to HTTP clients by default (its ingress_rule); the token rides the X-Fantastic-Auth header.";
 
 /// The REST verb-channel bundle.
 pub struct WebRestBundle;

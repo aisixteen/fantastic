@@ -44,8 +44,7 @@ def seeds(n: int) -> tuple[list[dict], list[tuple[str, dict]]]:
         cells.append({"id": cid, "handler_module": "terminal_view.ts", "backend_id": bid, "owns_backend": False,
                       "can_call": {"$self": "*", bid: VERBS}, "callable_by": {"$self": "*"},
                       "x": 20 + (i % cols) * 250, "y": 20 + (i // cols) * 170, "width": 240, "height": 160})
-        hosts.append((FOLDER, {"id": bid, "handler_module": "exec_bridge.tools", "cwd": ".", "inherit_env": ["*"], "shell": "login",
-                               "ingress_rule": "allow_all_ingress", "can_call": {"$self": "*"},
+        hosts.append((FOLDER, {"id": bid, "handler_module": "exec_bridge.tools", "cwd": ".", "inherit_env": ["*"], "shell": "login", "can_call": {"$self": "*"},
                                "callable_by": {"$self": "*", "mcp": ["*"], "user": ["*"], "canvas_root": ["*"], "canvas_ws": ["watch"]}}))
     return cells, hosts
 
