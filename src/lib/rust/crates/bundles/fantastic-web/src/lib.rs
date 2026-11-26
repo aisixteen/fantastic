@@ -155,8 +155,11 @@ async fn serve(
             request::serve(agent_id, &a, &rec, kernel).await
         }
         verbs::Call::FetchFile(a) => {
-            let (v, body) = fetch_file_reply(a, kernel).await;
-            return Ok((Some(v), body));
+            return Ok(match fetch_file_reply(a, kernel).await {
+                Some((v, body)) => (Some(v), body),
+                // deferred: the read's settle settles the call
+                None => (Some(Value::Null), None),
+            });
         }
     };
     Ok((Some(reply), None))
@@ -471,24 +474,46 @@ async fn stop_reply(agent_id: &AgentId) -> Value {
 /// python `_fetch_file` — one `read_stream` chunk of `path` on `agent_id`, sent
 /// from this host's own dispatch, so the read is THE HOST's: the served agent's
 /// `web`'s own lines and the served agent's io leg judge it. The reply comes back whole, its raw
-/// chunk at its slot.
+/// chunk at its slot. ASYNC (#795): the host's call defers its settle and the read
+/// goes out through [`Kernel::call`]; the read's settle settles it. `None`: deferred.
 async fn fetch_file_reply(
     a: verbs::FetchFile,
     kernel: &Arc<Kernel>,
-) -> (Value, Option<fantastic_kernel::Blob>) {
-    let out = kernel
-        .send(vec![Item::new(
-            AgentId::from(a.agent_id.as_str()),
-            json!({
-                "type": "read_stream",
-                "path": a.path,
-                "offset": a.offset,
-                "length": a.length,
-            }),
-        )])
-        .await
-        .remove(0);
-    (out.result, out.body)
+) -> Option<(Value, Option<fantastic_kernel::Blob>)> {
+    let d = match kernel.defer() {
+        Ok(d) => d,
+        Err(refused) => return Some((refused, None)),
+    };
+    let item = Item::new(
+        AgentId::from(a.agent_id.as_str()),
+        json!({
+            "type": "read_stream",
+            "path": a.path,
+            "offset": a.offset,
+            "length": a.length,
+        }),
+    );
+    let k = Arc::clone(kernel);
+    let ack = kernel
+        .call(item, move |out| async move {
+            k.settle_deferred(d.pid(), as_own_reply(out));
+        })
+        .await;
+    if ack.status != fantastic_kernel::Status::Accepted {
+        kernel.settle_deferred(d.pid(), as_own_reply(ack));
+    }
+    None
+}
+
+/// Another call's outcome as this handler's own reply: its result and body, settled
+/// as a handler's reply settles (`errored` when refusal-shaped).
+fn as_own_reply(out: fantastic_kernel::Outcome) -> fantastic_kernel::Outcome {
+    let status = if fantastic_kernel::is_refused(&out.result) {
+        fantastic_kernel::Status::Errored
+    } else {
+        fantastic_kernel::Status::Completed
+    };
+    fantastic_kernel::Outcome::new(out.pid, status, out.result).with_body(out.body)
 }
 
 async fn mount_reply(agent_id: &AgentId, child_id: &str, kernel: &Arc<Kernel>) -> Value {

@@ -171,8 +171,7 @@ async fn forward_sent(k: &Arc<Kernel>, leg: &str) -> Outcome {
     k.operator_send(vec![Item::new(
         AgentId::from(leg),
         json!({"type": "forward", "target": "echo",
-               "payload": {"type": "take", "a": {"b": "kept"}, "a.b": null},
-               "forward_timeout": 30.0}),
+               "payload": {"type": "take", "a": {"b": "kept"}, "a.b": null}}),
     )
     .with_binary(
         vec![Step::from("payload"), Step::from("a.b")],

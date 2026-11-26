@@ -69,7 +69,7 @@ def last_user(req: dict) -> str:
 def run_call(program: str) -> str:
     return (f'<call name="send">\n<routing><target_id>{EX}</target_id></routing>\n'
             f"<payload><type>run</type><command>{PY}</command>"
-            f"<args><item>-c</item><item>{program}</item></args><wait_s>60</wait_s></payload>\n</call>")
+            f"<args><item>-c</item><item>{program}</item></args></payload>\n</call>")
 
 
 def main() -> int:

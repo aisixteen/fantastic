@@ -57,10 +57,11 @@ async fn serve(
             })),
             None,
         ),
-        verbs::Call::InboundCall(a) => {
-            let (v, b) = inbound::call(a, body, kernel).await;
-            (Some(v), b)
-        }
+        verbs::Call::InboundCall(a) => match inbound::call(a, body, kernel).await {
+            Some((v, b)) => (Some(v), b),
+            // deferred: the onward settle settles the leg's call
+            None => (Some(Value::Null), None),
+        },
         verbs::Call::InboundEmit(a) => (Some(inbound::emit(a, body, kernel).await), None),
         verbs::Call::InboundWatch(a) => (Some(inbound::watch(a, kernel).await), None),
         verbs::Call::InboundStateSubscribe(a) => {

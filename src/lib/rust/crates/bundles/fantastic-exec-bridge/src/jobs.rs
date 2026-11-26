@@ -76,6 +76,49 @@ pub struct Job {
     /// `monitors_closed`). `monitor` refuses the job from then on, even while its
     /// process still reads alive — a monitor filed after the end would never end.
     pub monitors_closed: bool,
+    /// A `run` whose reply is the job's END: its deferred settle, taken once when
+    /// the job ends ([`settle_run`]).
+    pub run_end: Option<RunEnd>,
+}
+
+/// The `run` call waiting for its job's end: the execution that settles then, how
+/// many of the last lines its reply carries, and the kernel it settles on.
+pub struct RunEnd {
+    pub(crate) pid: TaskId,
+    pub(crate) tail: u64,
+    pub(crate) kernel: Arc<Kernel>,
+}
+
+/// `run`'s reply: the job's last `tail` lines, its status and its exit code.
+pub(crate) fn run_reply_of(owner: &AgentId, job_id: TaskId, tail: u64) -> Value {
+    let jid = crate::JobRef::of(job_id.get());
+    let (status, exit_code) = {
+        let g = jobs();
+        match jid.find(&g, owner) {
+            Some(j) => (j.status.clone(), j.exit_code),
+            None => ("running".to_string(), None),
+        }
+    };
+    let mut reply = crate::tail::tail_reply(owner, &jid, tail, crate::verbs::Stream::Both);
+    fantastic_kernel::refusal::with(&mut reply, "status", json!(status));
+    fantastic_kernel::refusal::with(&mut reply, "exit_code", json!(exit_code));
+    reply
+}
+
+/// THE JOB ENDED: a `run` waiting for it settles now with its output, as a message
+/// to its caller (the kernel delivers it). No lock is held while it settles.
+pub(crate) fn settle_run(owner: &AgentId, job_id: TaskId) {
+    let waiting = jobs()
+        .get_mut(&(owner.clone(), job_id))
+        .and_then(|j| j.run_end.take());
+    let Some(end) = waiting else { return };
+    let reply = run_reply_of(owner, job_id, end.tail);
+    let out = fantastic_kernel::Outcome::new(
+        Some(end.pid),
+        fantastic_kernel::Status::Completed,
+        reply,
+    );
+    end.kernel.settle_deferred(end.pid, out);
 }
 
 /// A job's key: its OWNER and its id (the pump's kernel task id).
@@ -292,15 +335,19 @@ impl Drop for FinalizeRow {
         if !self.armed {
             return;
         }
-        let mut g = jobs();
-        if let Some(j) = g.get_mut(&self.key) {
-            if j.exit_code.is_none() {
-                // `on_cancel` SIGKILLed the child before the abort; say so, and
-                // leave a label `clear` accepts.
-                j.status = "stopped".to_string();
-                j.exit_code = Some(crate::sys::KILLED_EXIT_CODE);
+        {
+            let mut g = jobs();
+            if let Some(j) = g.get_mut(&self.key) {
+                if j.exit_code.is_none() {
+                    // `on_cancel` SIGKILLed the child before the abort; say so, and
+                    // leave a label `clear` accepts.
+                    j.status = "stopped".to_string();
+                    j.exit_code = Some(crate::sys::KILLED_EXIT_CODE);
+                }
             }
         }
+        // a `run` of the job is told it ended
+        settle_run(&self.key.0, self.key.1);
     }
 }
 
@@ -399,6 +446,7 @@ pub async fn pump(owner: AgentId, ready: Ready, mut child: crate::sys::Child, ke
             }
         }
     };
+    settle_run(&owner, job_id);
     let mut done = json!({"type": "job_done", "job_id": job_id.get(), "exit_code": code,
                           "ok": code == Some(0), "lines": lines, "last_line": last_line});
     if let Some(f) = fault {

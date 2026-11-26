@@ -510,13 +510,13 @@ async fn tick_loop(agent_id: AgentId, kernel: Arc<Kernel>) {
                         fantastic_kernel::refusal::error_text(&e).unwrap_or_default()
                     ));
                 }
-                // HANDED OFF, never awaited (#722): a fire to a busy target must not
-                // hold the next tick. The task is the scheduler's own, so every
-                // fire is still the scheduler's send.
-                let (id, k) = (agent_id.clone(), Arc::clone(&kernel));
-                kernel.spawn_task(&agent_id, "fire", async move {
-                    fire_many(&id, &k, &due).await;
-                });
+                // NEVER AWAITED (#722, #795): each fire is acked at once and its
+                // settle is recorded when it comes, so a busy target never holds
+                // the next tick. The loop is the scheduler's own task, so every
+                // fire is the scheduler's send.
+                for sch in &due {
+                    fire_one(&agent_id, &kernel, sch, None).await;
+                }
                 continue;
             }
         }
@@ -584,19 +584,41 @@ fn fire_outcome(status: Status, result: Value) -> (Value, Value) {
     (Value::Null, json!(format!("{status}: {detail}")))
 }
 
-/// Fire every due schedule AS THE SCHEDULER — each its own send, all concurrent,
-/// no head-of-line blocking — recording each `schedule_fired` when that fire
-/// settles, and return those events in `due` order.
-async fn fire_many(agent_id: &AgentId, kernel: &Arc<Kernel>, due: &[Value]) -> Vec<Value> {
-    futures_util::future::join_all(due.iter().map(|sch| fire_one(agent_id, kernel, sch))).await
+/// ONE FIRE (#795): the call goes out AS THE SCHEDULER through [`Kernel::call`] and
+/// is acked at once; its settle — a message to the scheduler — records and emits
+/// the `schedule_fired` event, then settles `answer` (a deferred `tick_now`) with
+/// it. A fire refused at launch is recorded now. Nothing waits: a fire to an AI
+/// settles with its ack.
+async fn fire_one(
+    agent_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    sch: &Value,
+    answer: Option<fantastic_kernel::Deferred>,
+) {
+    let ts = now_secs();
+    // AS THE SCHEDULER: this runs in its handler (`tick_now`) or in its tick loop,
+    // a task its own `boot` spawned — identity comes from that dispatch.
+    let (id, k, s) = (agent_id.clone(), Arc::clone(kernel), sch.clone());
+    let ack = kernel
+        .call(fire_item(sch), move |out| async move {
+            fired(&id, &k, &s, ts, out, answer).await;
+        })
+        .await;
+    if ack.status != Status::Accepted {
+        fired(agent_id, kernel, sch, ts, ack, answer).await;
+    }
 }
 
-/// One fire and its `schedule_fired` event, recorded and emitted once it settles.
-async fn fire_one(agent_id: &AgentId, kernel: &Arc<Kernel>, sch: &Value) -> Value {
-    let ts = now_secs();
-    // AS THE SCHEDULER: this runs in its handler (`tick_now`) or in a task of the
-    // tick loop its own `boot` spawned — identity comes from that dispatch.
-    let out = kernel.send(vec![fire_item(sch)]).await.remove(0);
+/// A fire settled: its `schedule_fired` event recorded and emitted, and a waiting
+/// `tick_now` answered with its outcome.
+async fn fired(
+    agent_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    sch: &Value,
+    ts: f64,
+    out: fantastic_kernel::Outcome,
+    answer: Option<fantastic_kernel::Deferred>,
+) {
     let duration_ms = ((now_secs() - ts) * 1000.0) as i64;
     let (result, error) = fire_outcome(out.status, out.result);
     let event = json!({
@@ -623,7 +645,20 @@ async fn fire_one(agent_id: &AgentId, kernel: &Arc<Kernel>, sch: &Value) -> Valu
     // program's on_message. Telemetry rides the scheduler's own inbox and
     // schedule_events.yaml.
     kernel.emit(agent_id, event.clone()).await;
-    event
+    if let Some(d) = answer {
+        // the outcome: its `result` when the target answered, its `error` when it
+        // did not — never both, never an empty one
+        let mut reply = json!({"fired": true, "schedule_id": event["schedule_id"].clone()});
+        for key in ["result", "error"] {
+            if let Some(v) = event.get(key).filter(|v| !v.is_null()) {
+                reply[key] = v.clone();
+            }
+        }
+        kernel.settle_deferred(
+            d.pid(),
+            fantastic_kernel::Outcome::new(Some(d.pid()), Status::Completed, reply),
+        );
+    }
 }
 
 fn now_secs() -> f64 {
@@ -851,24 +886,17 @@ async fn tick_now_reply(agent_id: &AgentId, sid: &str, kernel: &Arc<Kernel>) -> 
         SCHEDULE_CACHE.lock().insert(agent_id.clone(), schedules);
         return persist_err("tick_now", &e);
     }
-    let due = vec![schedules[idx].clone()];
     // THE OUTCOME, not just the fact. `{fired:true}` alone hides a target that
     // refuses every fire (e.g. `{type:'tick'}` sent to an AI agent, which has no
     // such verb), and the model never learns the payload is wrong. Python
-    // canonical.
-    let ev = fire_many(agent_id, kernel, &due)
-        .await
-        .pop()
-        .unwrap_or(Value::Null);
-    // the outcome: its `result` when the target answered, its `error` when it did
-    // not — never both, never an empty one
-    let mut out = json!({"fired": true, "schedule_id": sid});
-    for key in ["result", "error"] {
-        if let Some(v) = ev.get(key).filter(|v| !v.is_null()) {
-            out[key] = v.clone();
-        }
-    }
-    out
+    // canonical. The reply DEFERS until the fire settles (#795): nothing waits,
+    // the fire's settle answers this call.
+    let d = match kernel.defer() {
+        Ok(d) => d,
+        Err(refused) => return refused,
+    };
+    fire_one(agent_id, kernel, &schedules[idx], Some(d)).await;
+    Value::Null
 }
 
 async fn history_reply(agent_id: &AgentId, a: verbs::History, kernel: &Arc<Kernel>) -> Value {

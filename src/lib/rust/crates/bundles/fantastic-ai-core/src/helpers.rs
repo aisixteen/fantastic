@@ -118,3 +118,18 @@ pub fn mint_send_id() -> String {
 pub fn mint_batch_token() -> String {
     os_random(2).iter().map(|b| format!("{b:02x}")).collect()
 }
+
+/// Another call's outcome as this handler's own reply (a deferred settle): its
+/// result, body and secret marks, settled as a handler's reply settles — `errored`
+/// when refusal-shaped.
+pub(crate) fn own_reply(out: fantastic_kernel::Outcome) -> fantastic_kernel::Outcome {
+    let status = if fantastic_kernel::is_refused(&out.result) {
+        fantastic_kernel::Status::Errored
+    } else {
+        fantastic_kernel::Status::Completed
+    };
+    let marks = out.secret.clone();
+    fantastic_kernel::Outcome::new(out.pid, status, out.result)
+        .with_body(out.body)
+        .with_secret(marks)
+}

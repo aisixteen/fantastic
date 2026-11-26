@@ -42,9 +42,8 @@ use fantastic_ai_core::credentials::key_reader;
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::inquiry::{self, Answer, Inquiry, Kind};
 use fantastic_kernel::refusal::{self as rf, refusal};
-use fantastic_kernel::{current_origin, AgentId, Kernel};
+use fantastic_kernel::{current_origin, AgentId, Kernel, TaskId};
 use serde_json::{json, Map, Value};
-use tokio::sync::oneshot;
 
 use crate::imap::Fail;
 use crate::record::Endpoint;
@@ -90,10 +89,18 @@ struct Sent {
     message_id: String,
 }
 
-/// What an answered inquiry tells the `send` that waits on it.
+/// A `send`'s approval: the deferred `send` the person's answer settles, or an
+/// answer that came before the `send` deferred.
 enum Slot {
-    Waiting(oneshot::Sender<Decision>),
+    Waiting(Pending),
     Answered(Decision),
+}
+
+/// A `send` that asked and deferred its settle (#795): nothing waits on the
+/// person; the answer settles it, as a message to its caller.
+struct Pending {
+    pid: TaskId,
+    args: verbs::Send,
 }
 
 #[derive(Clone)]
@@ -102,23 +109,11 @@ struct Decision {
 }
 
 /// The mail bundle: the sends waiting for an answer, and the recent sends, per agent.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct MailBundle {
     slots: Arc<Mutex<HashMap<(String, i64), Slot>>>,
-    sent: Mutex<HashMap<String, VecDeque<Sent>>>,
-    counter: AtomicU64,
-}
-
-/// Takes a waiting `send`'s slot out when the send ends, however it ends.
-struct SlotGuard {
-    slots: Arc<Mutex<HashMap<(String, i64), Slot>>>,
-    key: (String, i64),
-}
-
-impl Drop for SlotGuard {
-    fn drop(&mut self) {
-        self.slots.lock().expect("slots poisoned").remove(&self.key);
-    }
+    sent: Arc<Mutex<HashMap<String, VecDeque<Sent>>>>,
+    counter: Arc<AtomicU64>,
 }
 
 fn meta(kernel: &Kernel, id: &AgentId) -> Map<String, Value> {
@@ -265,7 +260,7 @@ impl MailBundle {
         let smtp = endpoint(&m, "smtp", id)?;
         // the login must be readable before a person is asked
         read_login(id, kernel, &smtp.host).await?;
-        // ask, and hold until the answer
+        // ask; the answer settles this call later (nothing waits on the person)
         let text = format!("Send this mail?\nTo: {}\nSubject: {}\n\n{}", a.to.join(", "), a.subject, a.text);
         let asked = inquiry::ask(
             id,
@@ -275,26 +270,32 @@ impl MailBundle {
         .await;
         let Some(re) = asked.get("re").and_then(Value::as_i64) else { return Err(asked) };
         let key = (id.0.clone(), re);
-        let _guard = SlotGuard { slots: Arc::clone(&self.slots), key: key.clone() };
-        let rx = {
+        let answered = {
             let mut slots = self.slots.lock().expect("slots poisoned");
             match slots.remove(&key) {
-                Some(Slot::Answered(d)) => {
-                    let (tx, rx) = oneshot::channel();
-                    let _ = tx.send(d);
-                    rx
-                }
+                Some(Slot::Answered(d)) => Some((d, a)),
                 _ => {
-                    let (tx, rx) = oneshot::channel();
-                    slots.insert(key.clone(), Slot::Waiting(tx));
-                    rx
+                    let d = kernel.defer()?;
+                    slots.insert(key, Slot::Waiting(Pending { pid: d.pid(), args: a }));
+                    None
                 }
             }
         };
-        let d = rx.await.map_err(|_| refusal(rf::TRANSPORT_CLOSED, format!("{id}: the approval was lost — nothing was sent")))?;
-        if !d.yes {
+        match answered {
+            // answered before this call deferred: go on now
+            Some((d, a)) => self.decided(id, kernel, a, d.yes).await,
+            None => Ok(Value::Null),
+        }
+    }
+
+    /// The person answered a `send`: on yes, sign in, send and record it (the agent's
+    /// inbox is told `sent`); on no, `{sent: false}`.
+    async fn decided(&self, id: &AgentId, kernel: &Arc<Kernel>, a: verbs::Send, yes: bool) -> Result<Value, Value> {
+        if !yes {
             return Ok(json!({"sent": false}));
         }
+        let m = meta(kernel, id);
+        let smtp = endpoint(&m, "smtp", id)?;
         // approved: sign in now, and thread the reply
         let login = read_login(id, kernel, &smtp.host).await?;
         let mut thread = None;
@@ -327,12 +328,15 @@ impl MailBundle {
         smtp::send(&smtp.host, smtp.port, smtp.tls.unwrap_or(true), login.username(), login.secret(), out)
             .await
             .map_err(failed)?;
-        let mut sent = self.sent.lock().expect("sent poisoned");
-        let q = sent.entry(id.0.clone()).or_default();
-        q.push_back(Sent { to: a.to.clone(), subject: a.subject.clone(), ts: now(), approved_by: Some("operator".to_string()), message_id: message_id.clone() });
-        while q.len() > RECENT {
-            q.pop_front();
+        {
+            let mut sent = self.sent.lock().expect("sent poisoned");
+            let q = sent.entry(id.0.clone()).or_default();
+            q.push_back(Sent { to: a.to.clone(), subject: a.subject.clone(), ts: now(), approved_by: Some("operator".to_string()), message_id: message_id.clone() });
+            while q.len() > RECENT {
+                q.pop_front();
+            }
         }
+        kernel.emit(id, json!({"type": "sent", "message_id": message_id, "to": a.to})).await;
         Ok(json!({"sent": true, "message_id": message_id, "to": a.to}))
     }
 
@@ -359,15 +363,28 @@ impl MailBundle {
         if is_open(kernel, id, re) {
             drop_open(kernel, id, re).await;
         }
-        let d = Decision { yes };
-        let mut slots = self.slots.lock().expect("slots poisoned");
-        match slots.remove(&(id.0.clone(), re)) {
-            Some(Slot::Waiting(tx)) => {
-                let _ = tx.send(d);
+        let waiting = {
+            let mut slots = self.slots.lock().expect("slots poisoned");
+            match slots.remove(&(id.0.clone(), re)) {
+                Some(Slot::Waiting(p)) => Some(p),
+                _ => {
+                    slots.insert((id.0.clone(), re), Slot::Answered(Decision { yes }));
+                    None
+                }
             }
-            _ => {
-                slots.insert((id.0.clone(), re), Slot::Answered(d));
-            }
+        };
+        // the deferred `send` goes on as the mail agent's own work, and settles
+        if let Some(p) = waiting {
+            let (me, k, aid) = (self.clone(), Arc::clone(kernel), id.clone());
+            kernel.spawn_task(id, "send", async move {
+                let res = me.decided(&aid, &k, p.args, yes).await.unwrap_or_else(|e| e);
+                let status = if fantastic_kernel::is_refused(&res) {
+                    fantastic_kernel::Status::Errored
+                } else {
+                    fantastic_kernel::Status::Completed
+                };
+                k.settle_deferred(p.pid, fantastic_kernel::Outcome::new(Some(p.pid), status, res));
+            });
         }
         out
     }
@@ -436,6 +453,16 @@ impl Handler for MailBundle {
         &record::RECORD
     }
 
+    /// A deferred `send` cancelled (its deadline, `cancel`): the person's later
+    /// answer finds nothing to send.
+    async fn on_cancel(&self, agent_id: &AgentId, task_id: &TaskId, _kernel: &Arc<Kernel>) -> Result<(), BundleError> {
+        self.slots
+            .lock()
+            .expect("slots poisoned")
+            .retain(|(owner, _), slot| !(owner == &agent_id.0 && matches!(slot, Slot::Waiting(p) if p.pid == *task_id)));
+        Ok(())
+    }
+
     async fn handle(&self, agent_id: &AgentId, call: Self::Call, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
         use verbs::Call;
         let out = match call {
@@ -463,13 +490,7 @@ impl Handler for MailBundle {
                 }
                 out
             }
-            Call::Send(a) => {
-                let out = self.send(agent_id, kernel, a).await.unwrap_or_else(|e| e);
-                if out["sent"] == json!(true) {
-                    kernel.emit(agent_id, json!({"type": "sent", "message_id": out["message_id"], "to": out["to"]})).await;
-                }
-                out
-            }
+            Call::Send(a) => self.send(agent_id, kernel, a).await.unwrap_or_else(|e| e),
             Call::Inquiries(a) => inquiry::list(agent_id, &a, kernel),
             Call::AnswerInquiry(a) => self.answer(agent_id, kernel, a).await,
         };

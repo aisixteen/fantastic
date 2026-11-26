@@ -58,7 +58,10 @@ struct ProbeBundle {
     capture: Option<PathBuf>,
 }
 
-fantastic_kernel::stand_in_verbs!(probe_verbs { HitV "hit" { block: Option<f64> } });
+fantastic_kernel::stand_in_verbs!(probe_verbs {
+    HitV "hit" { block: Option<f64> },
+    SendV "send" { text: Option<String> },
+});
 
 #[async_trait]
 impl Handler for ProbeBundle {
@@ -103,6 +106,19 @@ impl Handler for ProbeBundle {
                     tokio::time::sleep(Duration::from_secs_f64(b)).await;
                 }
                 Ok(Some(json!({"hit": agent_id.as_str()})))
+            }
+            // AN AI'S ACCEPT, as ai-core answers it: the message is stored and
+            // acked at once; its pass runs on, on its own, long after
+            probe_verbs::Call::SendV(_) => {
+                self.hits
+                    .0
+                    .lock()
+                    .unwrap()
+                    .insert(agent_id.as_str().to_string(), (now(), None));
+                tokio::spawn(async {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                });
+                Ok(Some(json!({"accepted": true, "re": 7, "client_id": "sched"})))
             }
         }
     }
@@ -534,6 +550,48 @@ async fn tick_now_reports_a_refused_fire() {
         fired["error"].clone()
     };
     assert!(said.to_string().contains("ghost"), "{fired}");
+}
+
+/// A FIRE TO AN AI SETTLES WITH ITS ACK (#795): the fire is a message; the AI's
+/// accept is its settle, recorded in the history and answered by `tick_now`, and
+/// nothing waits for the AI's pass.
+#[tokio::test]
+async fn a_fire_to_an_ai_settles_with_its_ack() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch, hits) = mk_probed(&tmp, &["p_ai"], None, true).await;
+    let r = kernel
+        .operator_send(vec![Item::new(
+            sch.clone(),
+            json!({"type": "schedule", "target": "p_ai", "payload": {"type": "send", "text": "tick"},
+                   "interval_seconds": 999_999}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let sid = r["schedule_id"].as_str().unwrap().to_string();
+    let t0 = std::time::Instant::now();
+    let fired = tokio::time::timeout(
+        Duration::from_secs(5),
+        kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "tick_now", "schedule_id": sid}))]),
+    )
+    .await
+    .expect("tick_now settles with the fire's ack")
+    .remove(0)
+    .result;
+    assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
+    assert_eq!(fired["fired"], true, "{fired}");
+    assert_eq!(fired["result"]["accepted"], true, "{fired}");
+    assert!(hits.0.lock().unwrap().contains_key("p_ai"), "the message reached the AI");
+    let hist = kernel
+        .operator_send(vec![Item::new(sch.clone(), json!({"type": "history", "schedule_id": sid}))])
+        .await
+        .remove(0)
+        .result;
+    let entries = hist["entries"].as_array().or_else(|| hist["history"].as_array()).cloned().unwrap_or_default();
+    assert!(
+        entries.iter().any(|e| e["result"]["accepted"] == true),
+        "the history records the ack: {hist}"
+    );
 }
 
 #[tokio::test]

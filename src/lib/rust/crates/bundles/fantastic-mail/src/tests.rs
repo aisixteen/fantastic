@@ -424,3 +424,21 @@ async fn a_mark_and_a_sent_mail_are_published_on_the_agents_inbox() {
     assert_eq!(got[1]["message_id"], out.result["message_id"]);
     assert_eq!(got[1]["to"], json!(["friend@example.org"]));
 }
+
+/// THE APPROVAL IS A MESSAGE (#795): a `send` defers its settle and its handler
+/// returns; nothing waits on the person. A `send` whose call ended first (its
+/// deadline) sends nothing when the person answers yes later.
+#[tokio::test]
+async fn a_send_whose_call_ended_sends_nothing_on_a_later_yes() {
+    let r = rig().await;
+    let payload = json!({"type": "send", "to": ["friend@example.org"], "subject": "Hi", "text": "x"});
+    let out = r
+        .kernel
+        .operator_send(vec![Item::new(AgentId::from("mail"), payload).with_timeout(0.3)])
+        .await
+        .remove(0);
+    assert_eq!(out.status, Status::TimedOut, "{}", out.result);
+    approve(&r, json!(true)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(r.smtp.lock().unwrap().mails.is_empty(), "a cancelled send was sent");
+}

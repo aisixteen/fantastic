@@ -420,13 +420,16 @@ async fn a_monitor_ends_with_its_job_delivering_what_waited() {
     )
     .await;
     assert!(r["monitor_id"].is_i64(), "{r}");
+    // each delivery is its own call (#795): no order across them, so both are awaited
     until(
-        || ear.texts().iter().any(|t| t.contains("job ended")),
+        || {
+            let t = ear.texts();
+            t.iter().any(|t| t.contains("job ended")) && t.join("\n").contains("FATAL step 1")
+        },
         5.0,
-        "the final delivery at job end",
+        "the first match and the final delivery at job end",
     )
     .await;
-    assert!(ear.texts().join("\n").contains("FATAL step 1"));
     // the monitor is gone once its final delivery is out: wait on that state, not on time
     let mut listed = call(&k, &rn, json!({"type": "monitors"})).await;
     for _ in 0..250 {

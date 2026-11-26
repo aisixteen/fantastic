@@ -188,6 +188,7 @@ pub async fn pump(
     if let Some(dir) = pty.lock().paste_dir.take() {
         let _ = fantastic_file::fs::remove(&dir, "", true);
     }
+    jobs::settle_run(&owner, job_id);
     kernel
         .emit(
             &owner,

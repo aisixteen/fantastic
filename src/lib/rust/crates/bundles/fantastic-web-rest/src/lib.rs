@@ -57,10 +57,11 @@ async fn serve(
     match call {
         verbs::Call::Reflect(_) => (Some(reflect_reply(agent_id, kernel)), None),
         verbs::Call::GetRoutes(_) => (Some(get_routes(agent_id)), None),
-        verbs::Call::InboundCall(a) => {
-            let (v, b) = fantastic_web_ws::inbound::call(a, body, kernel).await;
-            (Some(v), b)
-        }
+        verbs::Call::InboundCall(a) => match fantastic_web_ws::inbound::call(a, body, kernel).await {
+            Some((v, b)) => (Some(v), b),
+            // deferred: the onward settle settles the leg's call
+            None => (Some(serde_json::Value::Null), None),
+        },
     }
 }
 

@@ -499,21 +499,108 @@ async fn pump_reply(agent_id: &AgentId, a: &verbs::Pump, kernel: &Arc<Kernel>) -
              onto its own source truncates it after the first chunk",
         );
     }
-    let src_id = AgentId::from(src.as_str());
-    let sink_id = AgentId::from(sink.as_str());
-    let (mut offset, mut first, mut chunks) = (0u64, true, 0u64);
-    loop {
-        // TWO ORDINARY SENDS, python's: each end is a batch item (pid, rows,
-        // `ps` row), the read taking its chunk back raw, the write carrying it at
-        // `bytes` in python's key order. Sent from this dispatch, so both are THIS
-        // BRIDGE's sends, gated as the bridge.
-        let read = kernel
-            .send(vec![Item::new(
-                src_id.clone(),
-                fantastic_kernel::verbs::call("read_stream", json!({"path": spath, "offset": offset, "length": chunk})),
-            )])
-            .await
-            .remove(0);
+    let d = match kernel.defer() {
+        Ok(d) => d,
+        Err(refused) => return refused,
+    };
+    // THE PUMP IS A CHAIN OF CALLS (#795): this call defers its settle, each read's
+    // settle sends the write, each write's settle sends the next read, and the last
+    // settles the pump. Nothing waits.
+    pump_step(Pumping {
+        kernel: Arc::clone(kernel),
+        src_id: AgentId::from(src.as_str()),
+        sink_id: AgentId::from(sink.as_str()),
+        src,
+        sink,
+        spath,
+        dpath,
+        chunk,
+        offset: 0,
+        first: true,
+        chunks: 0,
+        d,
+    })
+    .await;
+    Value::Null
+}
+
+/// One step of a pump: the future its continuation runs.
+type PumpStep = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+/// A pump in flight: its two ends, where it stands, and the call it settles.
+struct Pumping {
+    kernel: Arc<Kernel>,
+    src: String,
+    sink: String,
+    src_id: AgentId,
+    sink_id: AgentId,
+    spath: String,
+    dpath: String,
+    chunk: u64,
+    offset: u64,
+    first: bool,
+    chunks: u64,
+    d: fantastic_kernel::Deferred,
+}
+
+impl Pumping {
+    /// The pump's answer settles its call.
+    fn done(&self, v: Value) {
+        let status = if fantastic_kernel::is_refused(&v) {
+            fantastic_kernel::Status::Errored
+        } else {
+            fantastic_kernel::Status::Completed
+        };
+        self.kernel
+            .settle_deferred(self.d.pid(), fantastic_kernel::Outcome::new(Some(self.d.pid()), status, v));
+    }
+}
+
+/// `item` through [`Kernel::call`]: `then` runs with its settle — a message to this
+/// agent — or now with the refusal of a launch that never ran.
+pub(crate) async fn call_or_now<F, Fut>(kernel: &Arc<Kernel>, item: Item, then: F)
+where
+    F: FnOnce(fantastic_kernel::Outcome) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let slot = Arc::new(std::sync::Mutex::new(Some(then)));
+    let s = Arc::clone(&slot);
+    let ack = kernel
+        .call(item, move |o| async move {
+            let then = s.lock().expect("then poisoned").take();
+            if let Some(then) = then {
+                then(o).await;
+            }
+        })
+        .await;
+    if ack.status != fantastic_kernel::Status::Accepted {
+        let then = slot.lock().expect("then poisoned").take();
+        if let Some(then) = then {
+            then(ack).await;
+        }
+    }
+}
+
+/// TWO ORDINARY SENDS per chunk, python's: each end is a call (pid, rows, `ps`
+/// row), the read taking its chunk back raw, the write carrying it at `bytes` in
+/// python's key order. Both are THIS BRIDGE's sends, gated as the bridge.
+fn pump_step(p: Pumping) -> PumpStep {
+    Box::pin(async move {
+        let kernel = Arc::clone(&p.kernel);
+        let item = Item::new(
+            p.src_id.clone(),
+            fantastic_kernel::verbs::call(
+                "read_stream",
+                json!({"path": p.spath, "offset": p.offset, "length": p.chunk}),
+            ),
+        );
+        call_or_now(&kernel, item, move |read| pump_read(p, read)).await;
+    })
+}
+
+/// A read settled: its chunk goes to the sink.
+fn pump_read(p: Pumping, read: fantastic_kernel::Outcome) -> PumpStep {
+    Box::pin(async move {
         let (rmeta, body) = (read.result, read.body);
         // python tests the reply for a `bytes` chunk (`isinstance(r["bytes"],
         // bytes)`); on this channel the chunk rides the body, so the carrier
@@ -523,56 +610,60 @@ async fn pump_reply(agent_id: &AgentId, a: &verbs::Pump, kernel: &Arc<Kernel>) -
             .filter(|_| rmeta.is_object())
             .and_then(|b| b.into_at("bytes"))
         else {
-            return rf::refusal(
+            return p.done(rf::refusal(
                 rf::TRANSPORT_ERROR,
-                format!(
-                    "pump: read from {} failed: {}",
-                    py_repr(&src),
-                    rmeta
-                ),
-            );
+                format!("pump: read from {} failed: {}", py_repr(&p.src), rmeta),
+            ));
         };
-        let wmeta = kernel
-            .send(vec![Item::new(
-                sink_id.clone(),
-                fantastic_kernel::verbs::call("write_stream", json!({"path": dpath, "offset": offset, "truncate": first})),
-            )
-            .with_binary_key("bytes", body)])
-            .await
-            .remove(0)
-            .result;
+        let kernel = Arc::clone(&p.kernel);
+        let item = Item::new(
+            p.sink_id.clone(),
+            fantastic_kernel::verbs::call(
+                "write_stream",
+                json!({"path": p.dpath, "offset": p.offset, "truncate": p.first}),
+            ),
+        )
+        .with_binary_key("bytes", body);
+        call_or_now(&kernel, item, move |w| pump_wrote(p, rmeta, w.result)).await;
+    })
+}
+
+/// A write settled: the pump goes on, or ends.
+fn pump_wrote(mut p: Pumping, rmeta: Value, wmeta: Value) -> PumpStep {
+    Box::pin(async move {
         if !wmeta.is_object() || wmeta.get("error").is_some_and(|e| !e.is_null()) {
-            return rf::refusal(
+            return p.done(rf::refusal(
                 rf::TRANSPORT_ERROR,
-                format!(
-                    "pump: write to {} failed: {}",
-                    py_repr(&sink),
-                    wmeta
-                ),
-            );
+                format!("pump: write to {} failed: {}", py_repr(&p.sink), wmeta),
+            ));
         }
-        first = false;
-        chunks += 1;
+        p.first = false;
+        p.chunks += 1;
         let next = rmeta.get("next_offset").and_then(Value::as_u64);
         if rmeta.get("eof").and_then(Value::as_bool) == Some(true) {
-            offset = next.unwrap_or(offset);
-            break;
+            p.offset = next.unwrap_or(p.offset);
+            let v = json!({"source": p.spath, "sink": p.dpath, "bytes": p.offset, "chunks": p.chunks});
+            return p.done(v);
         }
         match next {
-            Some(n) if n > offset => offset = n,
+            Some(n) if n > p.offset => {
+                p.offset = n;
+                pump_step(p).await;
+            }
             // No forward progress and no eof: a SOURCE that would loop forever.
             _ => {
-                return rf::refusal(
+                let v = rf::refusal(
                     rf::TRANSPORT_ERROR,
                     format!(
-                        "pump: source {} made no progress at offset {offset}",
-                        py_repr(&src)
+                        "pump: source {} made no progress at offset {}",
+                        py_repr(&p.src),
+                        p.offset
                     ),
-                )
+                );
+                p.done(v);
             }
         }
-    }
-    json!({"source": spath, "sink": dpath, "bytes": offset, "chunks": chunks})
+    })
 }
 
 /// Do two pump paths name ONE file — equal once normalised (`./x` is `x`)?

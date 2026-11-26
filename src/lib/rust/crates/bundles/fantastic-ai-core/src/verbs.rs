@@ -134,6 +134,7 @@ pub async fn on_delete(agent_id: &AgentId, kernel: &Arc<Kernel>) {
     crate::strategies::strip::forget(agent_id.as_str());
     crate::memory::forget(agent_id, kernel);
     crate::prompt_file::drop_file(agent_id, kernel).await;
+    crate::remote_provider::forget_watch(agent_id, kernel).await;
 }
 
 /// The `on_cancel` bundle hook, shared by every backend: the kernel is killing
