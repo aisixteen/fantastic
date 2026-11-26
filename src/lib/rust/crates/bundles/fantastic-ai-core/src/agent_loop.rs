@@ -7,15 +7,14 @@
 //! happens". This module generates; [`crate::route::route_reply`] then dispatches
 //! whatever the completion named and delivers each reply to its own `reply_to`. A
 //! chain therefore advances one pass at a time, each pass woken by a delivered
-//! message. There is no loop in the kernel or in a pass: when a pass writes no
-//! call, the AI bundle may wake itself with an ordinary message to its own inbox
-//! (the nudge, `route.rs`), its own policy built from the bus.
+//! message. There is no loop in the kernel, and nothing wakes an agent but a message.
 //!
 //! INSIDE THE TURN, ATTEMPTS (#766, 1.5): an answer whose calls are malformed or
 //! foreign for the pass's model type is re-asked, up to [`CALL_RETRIES`] times, with
 //! the failed answer and its report; nothing of a failed attempt is stored or routed.
-//! After the last one failed the harness stops the turn with the `stop` call
-//! ([`Generation::Stopped`]). An attempt whose thinking the harness cut at the chat's
+//! An answer with NO CALL (prose, notes or thinking only, #795) is re-asked the same
+//! way, its report the type's no-call text. After the last one failed the harness stops
+//! the turn with the `stop` call ([`Generation::Stopped`]). An attempt whose thinking the harness cut at the chat's
 //! cap (`stop_reason` [`THINKING_CUT`], #782) is re-asked ONCE with a short "answer
 //! now" note and logged as a `retry`; a second cut stops the turn the same way.
 
@@ -97,16 +96,8 @@ pub enum Generation {
         /// its closed calls included.
         cut: bool,
     },
-    /// A DEAD turn: nothing left once the thinking is stripped. DISCARDED —
-    /// never stored, never an answer — and routed like any turn that dispatched
-    /// nothing, so the no-call reminder rerolls it (python `_run`'s
-    /// `dead_turn` reply).
-    Dead {
-        /// The raw completion text (thinking only, or nothing).
-        text: String,
-    },
     /// THE HARNESS STOPPED THE TURN (#766, 1.8): `1 + CALL_RETRIES` attempts in a row
-    /// wrote malformed calls, so the model is not asked again. Stored: the incoming row
+    /// wrote malformed calls or no call, so the model is not asked again. Stored: the incoming row
     /// and the assistant row `message_id`, whose content is the `stop` call with
     /// `reason`. Nothing is routed; the chain ends through the give-up.
     Stopped {
@@ -476,35 +467,6 @@ pub async fn run_generation(
         (cut.then_some(calls), p.splitter.closed_calls.clone())
     };
 
-    // A DEAD TURN — nothing left once the thinking is stripped — did not answer,
-    // whatever the provider's finish reason says (a tiny thinking budget can end
-    // the thought with a clean `finish_reason: stop` and an empty answer). The
-    // ANSWER is discarded here — never stored, never counted as an answer — and
-    // the turn is routed like any that dispatched nothing: the no-call reminder
-    // rerolls it (python `_run`). Failing the turn outright would end a long
-    // chain on its first dead turn.
-    if without_thinking(&last_text).trim().is_empty() {
-        // The INCOMING row is kept — only the empty answer is dropped. The turn
-        // this one answered may be a reply batch carrying the results of the
-        // model's own calls; unstored, the reroll would arrive with those results
-        // gone and the model would re-ask for them.
-        let in_id = kernel.mint_id();
-        let in_parent = incoming_parent(user_text);
-        save_history(self_id, kernel, &[incoming_row(in_id, in_parent)]).await?;
-        // it stored no assistant row: its attempt's counts wait in `turn.rejected`
-        drop(accepted);
-        emit_status(kernel, state, self_id, client_id, "stalled", {
-            let mut m = Map::new();
-            m.insert("reason".to_string(), json!("dead_turn"));
-            m
-        })
-        .await;
-        // its trace rows name no row: it stored none
-        let events = crate::model_format::trace::of_turn(&pass, restarted.as_ref());
-        crate::model_format::trace::write(self_id, kernel, state, client_id, None, events).await;
-        return Ok(Generation::Dead { text: last_text });
-    }
-
     emit_status(kernel, state, self_id, client_id, "done", {
         let mut m = Map::new();
         m.insert("reason".to_string(), json!("ok"));
@@ -863,8 +825,15 @@ async fn attempts(
         if thought_cut {
             bad = Some(thinking_note(crate::model_format::NOTICE_THINKING_CUT, view_of.meta));
         }
+        // AN ANSWER WITH NO CALL (#795, Q3): prose, notes or thinking only ran nothing.
+        // It is re-asked like a malformed one, its report the type's no-call text, and
+        // after the last attempt the harness stops the pass. A cut answer (a call still
+        // open at its end) is the cut path, never re-asked.
+        if bad.is_none() && !open && !crate::route::acts(&text) {
+            bad = Some((pass.decl.texts)(crate::model_format::Section::NoCall).to_string());
+        }
         let Some(why) = bad else {
-            // THE ACCEPTED ATTEMPT: calls, prose, reasoning or nothing. The pass
+            // THE ACCEPTED ATTEMPT: its calls, or a cut call. The pass
             // finished: its view's chain is kept, its pins go.
             typed_view.finish(&mut pass.events(), Mode::Turn.name());
             let accepted = pass.accepted(&report);
@@ -910,8 +879,9 @@ async fn attempts(
             .discard(Some((attempt, errors.last().map_or("", String::as_str))))
             .await;
         let answer = without_thinking(&raw);
-        // a cut pass is mostly thinking: an empty answer is no message
-        if !(thought_cut && answer.is_empty()) {
+        // a cut pass or a thinking-only answer is mostly thinking: an empty answer is no
+        // message
+        if !answer.trim().is_empty() {
             reask.push(json!({"role": "assistant", "content": answer}));
         }
         reask.push(json!({"role": "user", "content": why}));

@@ -1,1 +1,1 @@
-{n} attempts in a row wrote malformed calls, so the harness stopped the turn.
+{n} attempts in a row wrote malformed calls or no call, so the harness stopped the turn.

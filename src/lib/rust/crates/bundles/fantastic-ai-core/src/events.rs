@@ -85,7 +85,7 @@ pub async fn emit_status(
 ///
 /// A call part with an addressee goes to that inbox (each of `to`), as an emit —
 /// gated like any emit on another agent; a refused one is dropped. Prose, thought
-/// and calls without an addressee (done, await, inquiry_answer) go on the
+/// and calls without an addressee (done, inquiry_answer) go on the
 /// agent's own inbox, tagged with `client_id` (none for the terminal caller).
 pub struct PartPublisher {
     kernel: Arc<Kernel>,

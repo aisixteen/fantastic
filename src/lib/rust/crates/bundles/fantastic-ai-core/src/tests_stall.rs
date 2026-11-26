@@ -24,8 +24,8 @@ fn error_rows(rows: &[Value]) -> Vec<&Value> {
 }
 
 /// A pass that FAILS (a stalled stream, say) ends its turn with an ERROR ROW: the
-/// incoming message and a row naming the failure. The FIFO lock is released, so
-/// the failed turn is retried on its own and reads the row (#533).
+/// incoming message and a row naming the failure. The FIFO lock is released, so the
+/// next message runs and reads the row (#533, #795).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failed_pass_stores_an_error_row_and_the_queue_moves_on() {
     let tmp = TempDir::new().unwrap();
@@ -61,10 +61,17 @@ async fn a_failed_pass_stores_an_error_row_and_the_queue_moves_on() {
         rows.iter().any(|r| r["content"] == json!("one")),
         "{rows:#?}"
     );
-    // the failed turn is retried on its own (#533): the next pass reads the failure
-    assert!(until_passes(&s, 2).await, "the retry turn never ran");
-    let seen = s.request(1);
-    assert!(seen.contains("[turn failed]"), "{seen}");
+    // the lock is free: the next message runs its own pass, and it reads the error row
+    let second = kernel.operator_send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "two", "client_id": "probe"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(second["response"], json!(r#"<call name="done"></call>"#), "{second}");
+    assert_eq!(s.passes_served(), 2);
+    assert!(s.request(1).contains("stream_stalled"), "{}", s.request(1));
 }
 
 /// Every status event the agent's inbox has taken in, as it arrives. Polls until
@@ -277,8 +284,8 @@ async fn a_failed_provider_turn_settles_its_sender_and_emits_done_error_once() {
         .collect();
     assert_eq!(dones.len(), 1, "{seen:#?}");
     assert_eq!(dones[0]["detail"]["reason"], json!("error"), "{dones:#?}");
-    // the failure is retried (#533): the second pass is the retry turn
-    assert!(until_passes(&s, 2).await, "the retry turn never ran");
+    // nothing re-runs the failed turn (#795)
+    assert_eq!(s.passes_served(), 1, "the failed turn was run again");
 }
 
 /// A message held behind a chain is answered by the pass that reads it. When that
@@ -436,10 +443,12 @@ fn status_reason<'a>(events: &'a [Value], reason: &str) -> Option<&'a Value> {
     })
 }
 
-/// A FAILED TURN IS RETRIED (#533): a pass that errors once, then answers. The
-/// second pass runs on its own, with the error row between the two turns.
+/// A FAILED PASS ENDS VISIBLY, with no turn of its own (#795, Q4; was #533): a
+/// provider failure past `transport_retries` stores its error row after the incoming
+/// one, ends on `status(failed)` naming the error, and nothing more is asked — no
+/// self-sent retry, no loop.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_failed_pass_is_retried_on_its_own_and_its_answer_is_stored() {
+async fn a_failed_pass_ends_with_its_error_row_and_no_turn_of_its_own() {
     let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_retry_once").await;
@@ -447,8 +456,49 @@ async fn a_failed_pass_is_retried_on_its_own_and_its_answer_is_stored() {
         &backend,
         vec![
             vec![ScriptEvent::Fail("mock_backend: boom".into())],
+            // never served: a failed pass is not re-run as a turn
             pass(r#"RETRIED-ANSWER <call name="done"></call>"#),
         ],
+        Duration::ZERO,
+    );
+    let mut rx = rebind_backend_inbox(&kernel, &backend);
+    let mut seen: Vec<Value> = Vec::new();
+    let out = kernel.operator_send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go", "client_id": "probe"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(out["raised"], json!(true), "{out}");
+    events_until(&mut rx, &mut seen, |ev| status_reason(ev, "error").is_some()).await;
+    let failed = status_reason(&seen, "error").expect("a failed status");
+    assert_eq!(failed["phase"], json!("failed"), "{failed}");
+    assert!(
+        failed["detail"]["error"].as_str().unwrap_or_default().contains("boom"),
+        "{failed}"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(s.passes_served(), 1, "a failed pass was re-run");
+    let rows = stored_rows(&kernel, &backend).await;
+    let at = |f: &dyn Fn(&Value) -> bool| rows.iter().position(f);
+    let incoming = at(&|r| r["content"] == json!("go")).expect("incoming row");
+    let error = at(&|r| r["kind"] == json!("error")).expect("error row");
+    assert!(incoming < error, "{rows:#?}");
+}
+
+/// A pass cut at `max_tokens` (a provider error) is not silent: its error row and its
+/// failed status name the cut (#533, #795).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pass_cut_at_max_tokens_fails_naming_the_cut() {
+    let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "rt_retry_cut").await;
+    let s = script(
+        &backend,
+        vec![vec![ScriptEvent::Fail(
+            "mock_backend: the turn was cut at max_tokens=16384 and is NOT complete".into(),
+        )]],
         Duration::ZERO,
     );
     let out = kernel.operator_send(vec![Item::new(
@@ -458,101 +508,19 @@ async fn a_failed_pass_is_retried_on_its_own_and_its_answer_is_stored() {
         .await
         .remove(0)
         .result;
-    assert_eq!(out["raised"], json!(true), "{out}");
-    assert!(until_passes(&s, 2).await, "the retry turn never ran");
-    let mut rows = Vec::new();
-    for _ in 0..200 {
-        rows = stored_rows(&kernel, &backend).await;
-        if rows.iter().any(|r| {
-            r["content"]
-                .as_str()
-                .is_some_and(|c| c.contains("RETRIED-ANSWER"))
-        }) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    let at = |f: &dyn Fn(&Value) -> bool| rows.iter().position(f);
-    let incoming = at(&|r| r["content"] == json!("go")).expect("incoming row");
-    let error = at(&|r| r["kind"] == json!("error")).expect("error row");
-    let answer = at(&|r| {
-        r["content"]
-            .as_str()
-            .is_some_and(|c| c.contains("RETRIED-ANSWER"))
-    })
-    .expect("the retried answer is stored");
-    assert!(incoming < error && error < answer, "{rows:#?}");
-}
-
-/// A pass cut at `max_tokens` (a provider error) gets the next turn with the
-/// `[turn failed]` text (#533).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_pass_cut_at_max_tokens_gets_the_next_turn_with_the_failure_text() {
-    let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
-    let tmp = TempDir::new().unwrap();
-    let (kernel, backend) = mk_kernel(&tmp, "rt_retry_cut").await;
-    let s = script(
-        &backend,
-        vec![
-            vec![ScriptEvent::Fail(
-                "mock_backend: the turn was cut at max_tokens=16384 and is NOT complete".into(),
-            )],
-            pass(r#"<call name="done"></call>"#),
-        ],
-        Duration::ZERO,
-    );
-    let _ = kernel.operator_send(vec![Item::new(
-            backend.clone(),
-            json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
-        .await;
-    assert!(until_passes(&s, 2).await, "the retry turn never ran");
-    let seen = s.request(1);
     assert!(
-        seen.contains("[turn failed]") && seen.contains("cut at max_tokens=16384"),
-        "{seen}"
+        out["error"].as_str().unwrap_or_default().contains("cut at max_tokens=16384"),
+        "{out}"
     );
-}
-
-/// MAX_SILENT_TURNS failures in a row end in `gave_up` naming the error, not a
-/// loop (#533).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn failures_in_a_row_end_in_gave_up_not_a_loop() {
-    let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
-    let tmp = TempDir::new().unwrap();
-    let (kernel, backend) = mk_kernel(&tmp, "rt_retry_bound").await;
-    let mut passes: Vec<Vec<ScriptEvent>> = (0..crate::constants::MAX_SILENT_TURNS)
-        .map(|_| vec![ScriptEvent::Fail("mock_backend: boom".into())])
-        .collect();
-    // an eleventh pass must never be served
-    passes.push(pass(r#"<call name="done"></call>"#));
-    let s = script(&backend, passes, Duration::ZERO);
-    let mut rx = rebind_backend_inbox(&kernel, &backend);
-    let mut seen: Vec<Value> = Vec::new();
-    let _ = kernel.operator_send(vec![Item::new(
-            backend.clone(),
-            json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
-        .await;
-    events_until(&mut rx, &mut seen, |ev| {
-        status_reason(ev, "gave_up").is_some()
-    })
-    .await;
-    let gave_up = status_reason(&seen, "gave_up").expect("gave_up");
-    assert_eq!(
-        gave_up["phase"],
-        json!("failed"),
-        "a give-up is a failed call: {gave_up}"
-    );
+    assert_eq!(s.passes_served(), 1);
+    let rows = stored_rows(&kernel, &backend).await;
+    let errors = error_rows(&rows);
     assert!(
-        gave_up["detail"]["error"]
+        errors.iter().any(|r| r["content"]
             .as_str()
-            .unwrap_or_default()
-            .contains("boom"),
-        "{gave_up}"
+            .is_some_and(|c| c.contains("cut at max_tokens=16384"))),
+        "{rows:#?}"
     );
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(s.passes_served(), crate::constants::MAX_SILENT_TURNS);
 }
 
 /// A cancelled turn is not retried (#533).
@@ -589,10 +557,10 @@ async fn a_cancelled_turn_is_not_retried() {
     assert!(error_rows(&rows).is_empty(), "{rows:#?}");
 }
 
-/// A message held while the chain runs waits for the retried turn and is answered
-/// by it (#533).
+/// A message held while the chain runs is answered by the one pass that reads it after
+/// the chain's pass failed (#533, #795).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_held_message_is_answered_by_the_retried_turn() {
+async fn a_held_message_is_answered_after_the_failed_pass() {
     let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_retry_held").await;

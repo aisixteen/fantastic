@@ -174,7 +174,7 @@ async fn send_streams_tokens_and_emits_done() {
     let body = ndjson_body(&[
         json!({"message": {"content": "Hello"}}),
         json!({"message": {"content": " "}}),
-        json!({"message": {"content": "world"}, "done": true}),
+        json!({"message": {"content": "world <call name=\"done\"></call>"}, "done": true}),
     ]);
     Mock::given(method("POST"))
         .and(path("/api/chat"))
@@ -196,7 +196,7 @@ async fn send_streams_tokens_and_emits_done() {
         .remove(0)
         .result;
     assert_eq!(reply["client_id"], client_id);
-    assert_eq!(reply["response"], "Hello world");
+    assert_eq!(reply["response"], "Hello world <call name=\"done\"></call>");
 
     let events = drain(&mut rx).await;
     let token_count = events
@@ -326,7 +326,7 @@ async fn thinking_streams_wrapped_and_persists_stripped() {
     let server = MockServer::start().await;
     let body = ndjson_body(&[
         json!({"message": {"thinking": "deliberating"}}),
-        json!({"message": {"content": "ack"}, "done": true}),
+        json!({"message": {"content": "ack <call name=\"done\"></call>"}, "done": true}),
     ]);
     Mock::given(method("POST"))
         .and(path("/api/chat"))
@@ -344,7 +344,7 @@ async fn thinking_streams_wrapped_and_persists_stripped() {
         .remove(0)
         .result;
     // the reply is the answer: thinking never leaves the agent
-    assert_eq!(reply["response"], json!("ack"), "{reply}");
+    assert_eq!(reply["response"], json!("ack <call name=\"done\"></call>"), "{reply}");
     let h = kernel.operator_send(vec![Item::new(
             pair_chat(&kernel, &backend).await,
             json!({"type": "history"}),
@@ -353,7 +353,7 @@ async fn thinking_streams_wrapped_and_persists_stripped() {
         .remove(0)
         .result;
     let rows = h["rows"].as_array().expect("rows array");
-    assert_eq!(rows.last().unwrap()["head"], "ack");
+    assert_eq!(rows.last().unwrap()["head"], "ack <call name=\"done\"></call>");
 }
 
 /// Set the paired chat's request knobs (#632: they are the chat's, sent with each pass).
@@ -473,22 +473,13 @@ async fn list_models_is_unknown_type() {
 async fn history_persists_and_round_trips() {
     let tmp = TempDir::new().unwrap();
     let server = MockServer::start().await;
-    // A call-less turn is nudged, and a mock that only ever says "ack" would chain
-    // on for MAX_SILENT_TURNS passes while the test reads the store. So: "ack" once,
-    // then the explicit `done` that ends the chain, and the read waits for that end.
-    let ack = ndjson_body(&[json!({"message": {"content": "ack"}, "done": true})]);
-    let done = ndjson_body(&[
-        json!({"message": {"content": "<call name=\"done\"></call>"}, "done": true}),
+    // An answer with no call is re-asked (#795), so the mock's answer ends with `done`.
+    let ack = ndjson_body(&[
+        json!({"message": {"content": "ack <call name=\"done\"></call>"}, "done": true}),
     ]);
     Mock::given(method("POST"))
         .and(path("/api/chat"))
         .respond_with(ResponseTemplate::new(200).set_body_string(ack))
-        .up_to_n_times(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/api/chat"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(done))
         .mount(&server)
         .await;
 
@@ -503,10 +494,8 @@ async fn history_persists_and_round_trips() {
         .await
         .remove(0)
         .result;
-    // The script makes the end deterministic: two generations (the call-less "ack",
-    // then the `done` the nudge earned), so two status `done` events; each one is
-    // emitted before its turn's rows are saved, so then wait for the store itself
-    // to hold all four rows.
+    // One generation, so one status `done` event; it is emitted before the turn's
+    // rows are saved, so then wait for the store itself to hold both rows.
     let chat = pair_chat(&kernel, &backend).await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut dones = 0;
@@ -521,14 +510,14 @@ async fn history_persists_and_round_trips() {
             }
             events.push(v.payload);
         }
-        if dones >= 2 {
+        if dones >= 1 {
             rows = fantastic_kernel::test_support::as_agent(
                 chat.clone(),
                 fantastic_ai_core::memory::load_history(&chat, &kernel, true),
             )
             .await
             .expect("store read");
-            if rows.len() >= 4 {
+            if rows.len() >= 2 {
                 break;
             }
         }
@@ -552,7 +541,7 @@ async fn history_persists_and_round_trips() {
     assert_eq!(digest[0]["role"], "user");
     assert_eq!(digest[0]["head"], "ping");
     assert_eq!(digest[1]["role"], "assistant");
-    assert_eq!(digest[1]["head"], "ack");
+    assert_eq!(digest[1]["head"], "ack <call name=\"done\"></call>");
 
     // The turns live in the CHAT's memory store (`memory_store_id`) — the chat's id IS
     // the conversation's; the provider and the kernel keep none.
@@ -566,14 +555,10 @@ async fn history_persists_and_round_trips() {
         none.is_empty(),
         "the provider holds no conversation: {none:#?}"
     );
-    // four turns: the ping, the call-less answer, the nudge it earned, and the `done`
-    assert_eq!(rows.len(), 4, "one row per message: {rows:#?}");
+    // two turns: the ping and the answer
+    assert_eq!(rows.len(), 2, "one row per message: {rows:#?}");
     assert_eq!(rows[0]["content"], "ping");
-    assert_eq!(rows[1]["content"], "ack");
-    assert!(rows[2]["content"]
-        .as_str()
-        .unwrap()
-        .starts_with("[no call was dispatched]"));
+    assert_eq!(rows[1]["content"], "ack <call name=\"done\"></call>");
     assert!(
         !tmp.path()
             .join(".fantastic")
@@ -883,7 +868,7 @@ async fn a_body_cut_mid_stream_raises_in_ollamas_words() {
 async fn a_final_ndjson_line_without_a_newline_still_counts() {
     let tmp = TempDir::new().unwrap();
     let server = MockServer::start().await;
-    let body = "{\"message\":{\"content\":\"Hello\"}}\n{\"message\":{\"content\":\" world\"},\"done\":true,\"done_reason\":\"stop\"}";
+    let body = "{\"message\":{\"content\":\"Hello\"}}\n{\"message\":{\"content\":\" world <call name=\\\"done\\\"></call>\"},\"done\":true,\"done_reason\":\"stop\"}";
     Mock::given(method("POST"))
         .and(path("/api/chat"))
         .respond_with(ResponseTemplate::new(200).set_body_string(body))
@@ -892,7 +877,7 @@ async fn a_final_ndjson_line_without_a_newline_still_counts() {
     let (kernel, backend) = mk_kernel(&tmp, "eofline", &server.uri()).await;
     let _rx = rebind_backend_inbox(&kernel, &backend);
     let r = send_once(&kernel, &backend, "c_eof").await;
-    assert_eq!(r["response"], json!("Hello world"), "{r}");
+    assert_eq!(r["response"], json!("Hello world <call name=\"done\"></call>"), "{r}");
     // and a thinking-only turn cut at EOF (no newline) still closes its span once
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -907,10 +892,12 @@ async fn a_final_ndjson_line_without_a_newline_still_counts() {
     let chat = pair_chat(&kernel, &backend).await;
     let mut rx = rebind_backend_inbox(&kernel, &chat);
     let r = send_once(&kernel, &backend, "c_eof2").await;
-    // a thinking-only turn is dead: its reply is the empty answer (thinking never
-    // leaves the agent); the chat's own stream shows the span, closed once
-    assert_eq!(r["response"], json!(""), "{r}");
-    assert_eq!(r["dead_turn"], json!(true), "{r}");
+    // a thinking-only answer is re-asked, and every attempt is one: the harness stops
+    // the turn (#795); the chat's own stream shows the span, closed once per attempt
+    assert!(
+        r["response"].as_str().unwrap_or_default().starts_with("<call name=\"stop\">"),
+        "{r}"
+    );
     let streamed: String = drain(&mut rx)
         .await
         .iter()

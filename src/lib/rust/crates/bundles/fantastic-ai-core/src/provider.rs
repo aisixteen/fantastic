@@ -35,12 +35,12 @@ pub enum ErrorClass {
     /// was fine, so a retry may succeed (#198). `transport_retries` rerun the turn.
     Transient,
     /// The same request fails the same way every time (the key refused or missing,
-    /// the model unknown or unavailable): never retried, never nudged — the chain
+    /// the model unknown or unavailable): never retried — the chain
     /// gives up with the error. Carries the refusal code the wire names it by
     /// ([`fantastic_kernel::refusal`]: `unauthorized`, `not_found`, `disabled`).
     Permanent(&'static str),
-    /// This pass failed (a bad request, a broken stream): the failed turn's own retry
-    /// turn (#533) may still answer.
+    /// This pass failed (a bad request, a broken stream): never retried; the turn fails
+    /// with its error row, and the next message runs a turn of its own (#795).
     Turn,
 }
 

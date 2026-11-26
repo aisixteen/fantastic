@@ -57,7 +57,7 @@ fn tag_re() -> &'static Regex {
     R.get_or_init(|| Regex::new(r"<(/?)([^\s<>/=]*)([^<>\n]{0,300}?)(/?)>").expect("tag"))
 }
 
-/// A call opener whose leading `<` was dropped — `call name="await">`, right
+/// A call opener whose leading `<` was dropped — `call name="done">`, right
 /// after `</think>`. Not a tag to [`tag_re`], so without this only its `</call>`
 /// would be seen and the report would say to delete that.
 /// Only at the start of the text or after whitespace — where the dropped `<` was

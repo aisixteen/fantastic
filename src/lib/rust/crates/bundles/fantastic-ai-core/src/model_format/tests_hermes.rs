@@ -287,12 +287,11 @@ fn roundtrip_several_calls() {
     );
 }
 
-// R8: the five non-send tools of `4fd5bb4d`
+// R8: the non-send tools of `4fd5bb4d`, `await` gone (#795)
 #[test]
 fn roundtrip_control_calls() {
     for (name, args) in [
         ("done", json!({})),
-        ("await", json!({})),
         ("inquiry_answer", json!({"answer": "yes, \"both\""})),
         ("keep", json!({"of": "4", "summary": "the plan"})),
         ("line_summary", json!({"text": "read a.md: 3 sections"})),
@@ -940,7 +939,7 @@ fn multi_two_calls_one_block() {
 fn multi_three_calls_one_block() {
     let a = r#"{"name": "send", "arguments": {"routing": {"target_id": "notes"}, "payload": {"type": "write", "path": "a.md"}}}"#;
     let b = r#"{"name": "line_summary", "arguments": {"text": "writing a.md"}}"#;
-    let c = r#"{"name": "await", "arguments": {}}"#;
+    let c = r#"{"name": "done", "arguments": {}}"#;
     let body = "one \"line\"\ntwo\n";
     let r = multi_bad(&format!(
         "{CALL_OPEN}\n{a}\n<bytes>{body}</bytes>\n{b}\n{c}\n{CALL_CLOSE}"
@@ -958,7 +957,7 @@ fn multi_three_calls_one_block() {
 #[test]
 fn multi_destructive_command_left_out() {
     let a = r#"{"name": "send", "arguments": {"routing": {"target_id": "exec"}, "payload": {"type": "run", "command": "rm -rf build"}}}"#;
-    let b = r#"{"name": "await", "arguments": {}}"#;
+    let b = r#"{"name": "done", "arguments": {}}"#;
     let r = multi_bad(&format!("{CALL_OPEN}\n{a}\n{b}\n{CALL_CLOSE}"));
     let shown = r#"{"name": "send", "arguments": {"routing": {"target_id": "exec"}, "payload": {"type": "run", "command": "LEFT OUT — write the command yourself"}}}"#;
     assert!(
@@ -1045,14 +1044,10 @@ fn notice(text: &str) -> String {
     h
 }
 
-// H7: the notice texts. `EMPTY_AWAIT_NOTE` (route.rs) and `NO_CALL_NUDGE` are private
-// to `route.rs`: their call text is restated.
+// H7: the notice texts; the no-call nudge of a stored row is restated.
 #[test]
 fn notice_texts_rendered() {
     let done = "<tool_call>\n{\"name\": \"done\", \"arguments\": {}}\n</tool_call>";
-    let empty_await = "Otherwise make the call you were waiting on, or end the chain with \
-                       <call name=\"done\"></call>.";
-    assert!(notice(empty_await).contains(done));
     let no_target = notice(crate::route::NO_TARGET_ERROR);
     assert!(
         no_target.contains("Shape: <tool_call>\n{\"name\": \"send\", \"arguments\": {\"routing\": \
@@ -1440,7 +1435,6 @@ fn registered_with_its_howto() {
         [
             "send",
             "done",
-            "await",
             "inquiry_answer",
             "keep",
             "line_summary",
@@ -1449,7 +1443,7 @@ fn registered_with_its_howto() {
     );
     // the stop wording, and no internal envelope
     assert!(HOWTO_SEND.contains(
-        "`{\"name\": \"stop\", \"arguments\": {\"reason\": \"WHY\"}}` (the work cannot be done: say why)"
+        "end it with `{\"name\": \"stop\", \"arguments\": {\"reason\": \"WHY\"}}`"
     ));
     assert!(!HOWTO_SEND.contains("<call name="));
     // the how-to survives its own type's render

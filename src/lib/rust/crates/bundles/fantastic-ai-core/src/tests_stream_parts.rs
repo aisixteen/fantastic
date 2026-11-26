@@ -396,7 +396,8 @@ async fn a_call_part_streams_to_its_addressee() {
 }
 
 /// The model stops generating mid-call: the call is NOT dispatched, and the
-/// conversation's newest assistant row is the cut marker, which the next turn sees.
+/// conversation's newest assistant row is the cut marker, which the next message's
+/// turn sees.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_model_that_stops_with_a_block_open_leaves_the_marker_on_top() {
     let tmp = TempDir::new().unwrap();
@@ -409,6 +410,8 @@ async fn a_model_that_stops_with_a_block_open_leaves_the_marker_on_top() {
         "<call name=\"send\"><routing><target_id>notes</target_id></routing><payload><type>refl";
     let fp = slow(&ai, &[open_call, DONE], Duration::ZERO);
     call(&kernel, ai.as_str(), json!({"type": "send", "text": "go"})).await;
+    // a cut pass ends: the next message's turn sees the marker (#795, nothing re-asks it)
+    call(&kernel, ai.as_str(), json!({"type": "send", "text": "next"})).await;
     until_requests(&fp, 2).await;
     let marker = last_assistant(&fp, 1);
     assert_eq!(
@@ -841,19 +844,19 @@ async fn rows_is_a_view_of_what_the_agent_holds() {
     let fp = slow(&ai, &["hello there", DONE], Duration::ZERO);
     call(&kernel, ai.as_str(), json!({"type": "send", "text": "hi"})).await;
     until_requests(&fp, 2).await;
-    // pass 2 (the nudge's answer) appends its rows AFTER its request starts: wait
-    // until the head holds the whole turn — hi, hello there, the nudge, done — so
+    // the prose attempt is re-asked inside the turn (#795) and its rows land after the
+    // second request starts: wait until the head holds the whole turn — hi, done — so
     // the two reads below page one settled head (each `rows` call is atomic; two
     // calls are not one snapshot)
     let mut settled = Value::Null;
     for _ in 0..250 {
         settled = rows(json!({"type": "rows"})).await;
-        if settled["total"] == json!(4) {
+        if settled["total"] == json!(2) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert_eq!(settled["total"], json!(4), "{settled}");
+    assert_eq!(settled["total"], json!(2), "{settled}");
     let page = rows(json!({"type": "rows", "limit": 1})).await;
     let rest = rows(json!({"type": "rows", "after": page["next"]})).await;
     assert_eq!(page["loaded"], json!(true), "{page}");
@@ -1046,6 +1049,7 @@ async fn a_cut_pass_sends_nothing_not_even_its_closed_calls() {
     let pass = format!("{done_one} then {open_two}");
     let fp = slow(&ai, &[&pass, DONE], Duration::ZERO);
     call(&kernel, ai.as_str(), json!({"type": "send", "text": "go"})).await;
+    call(&kernel, ai.as_str(), json!({"type": "send", "text": "next"})).await;
     until_requests(&fp, 2).await;
     let marker = last_assistant(&fp, 1);
     assert_eq!(

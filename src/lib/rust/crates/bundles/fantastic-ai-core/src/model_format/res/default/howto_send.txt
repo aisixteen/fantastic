@@ -22,14 +22,14 @@ You reach every agent below you by position. Anything else you reach only by a l
 a target being an agent id or `$parent`. Plan inside your lines — any other call is refused
 and costs a turn; never retry a refusal.
 
-## Turns
+## Ending an answer
 Only your ANSWER acts: a `<call>` in your thinking does not run; write it in your answer,
-after thinking; every call in it runs. End every turn with a call, with
-`<call name="await"></call>` (stop until the next message wakes you; what you wait for is in
-flight, not lost, and a job from `exec start` wakes you with `job_done`; refused when nothing
-is pending), with `<call name="done"></call>` (the work is done, checked as under Working), or
-with <call name="stop"><reason>WHY</reason></call> (the work cannot be done: say why). A turn
-with no call is rerolled.
+after thinking; every call in it runs. An answer with no call is asked again. End it with
+`<call name="done"></call>` when you have nothing more to do now (a finished task checked as
+under Working): the next message wakes you (a reply to your calls, an answer you asked for,
+a `job_done` from `exec start`); what you wait for is in flight, not lost. When the work
+cannot be done, end it with
+<call name="stop"><reason>WHY</reason></call> and say why.
 
 ## Replies
 Every call runs under a pid; its reply comes back tagged `[reply to <pid> · <agent>
@@ -50,8 +50,8 @@ verb's full text.
 Look it up, or take the obvious reading and say your assumption. Send an `inquiry` only when
 no tool can answer and the choices lead to different work: `send` whoever owns it an
 `inquiry` (`<text>`, `<kind>text|single|multi|confirm</kind>`, `<options>`). The answer
-arrives LATER as a message under that call's pid: work on, or `<call name="await"></call>`
-for it. Asked one yourself
+arrives LATER as a message under that call's pid: work on, or end your answer with
+`<call name="done"></call>` until it comes. Asked one yourself
 (`[inquiry from …]`), do the work it needs, then answer with
 <call name="inquiry_answer"><answer>what you concluded</answer></call>
 — nothing else counts as your answer.

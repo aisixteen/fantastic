@@ -56,7 +56,7 @@ impl Provider for Mock {
     ) -> Result<ProviderStream, ProviderError> {
         self.served.requests.lock().unwrap().push(messages.to_vec());
         let ev: Vec<Result<ProviderEvent, ProviderError>> =
-            vec![Ok(ProviderEvent::Token("answer".to_string()))];
+            vec![Ok(ProviderEvent::Token("answer <call name=\"done\"></call>".to_string()))];
         Ok(Box::pin(futures_util::stream::iter(ev)))
     }
     fn model(&self) -> String {

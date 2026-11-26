@@ -36,7 +36,7 @@ use crate::tool_parse::{extract_tool_calls, malformed_calls, CLOSE, TOOLS};
 /// this text and the router are one change. It states facts and a few short working
 /// rules: how to address an agent, what `reflect` returns, where `reply_to` sends the
 /// answer, how to recognise a reply, and when work counts as done. It never names a
-/// loop; stopping is `done` or `await`.
+/// loop; an answer ends with `done` or `stop`.
 pub(crate) const HOWTO_SEND: &str = include_str!("res/default/howto_send.txt");
 /// The working rules, placed LAST in the default system block: the model follows the
 /// most recent instructions most closely, and these must survive a long task brief.
@@ -100,6 +100,9 @@ pub(crate) const REPORT_ALSO: &str = include_str!("res/default/report_also.txt")
 /// The reason of the `stop` the harness writes after the last malformed attempt: `{n}`,
 /// the number of attempts (1.8). It holds no text of any attempt.
 pub(crate) const STOP_REASON: &str = include_str!("res/default/stop_reason.txt");
+/// The report that re-asks an answer with no call (#795): nothing ran, write the call in
+/// the answer, or end with `done`.
+pub(crate) const REPORT_NO_CALL: &str = include_str!("res/default/report_no_call.txt");
 /// The report on a `stop` written with no reason, or an empty one (S25).
 pub(crate) const REPORT_STOP_REASON: &str = include_str!("res/default/report_stop_reason.txt");
 
@@ -113,6 +116,7 @@ pub(crate) fn texts(s: Section) -> &'static str {
         Section::Async => HOWTO_ASYNC,
         Section::Working => HOWTO_WORKING,
         Section::StopReason => STOP_REASON,
+        Section::NoCall => REPORT_NO_CALL,
         shared => super::shared_text(shared).expect("a shared section"),
     }
 }

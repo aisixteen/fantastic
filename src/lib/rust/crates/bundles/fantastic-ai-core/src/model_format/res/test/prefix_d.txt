@@ -22,7 +22,7 @@
 call NOT dispatched: kernel refused reflect — no line to kernel in your can. Nothing ran.
 == row 4 assistant ==
 <call name="keep"><of>11</of><summary>План записано в plan.md.</summary></call>
-<call name="await"></call>
+<call name="done"></call>
 == row 5 user ==
 [no call was dispatched] Your answer emitted no <call> element, so NOTHING ran — a call written in your thinking does not run: write it in your answer, after the thinking. If the task is unfinished, emit that call now. If it is finished, end the chain explicitly: <call name="done"></call>
 [no progress — 2 answers in a row ran nothing] Your last 2 answers had no call, so nothing ran.

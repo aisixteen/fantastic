@@ -91,12 +91,12 @@ fn a_good_turn_reports_nothing() {
 fn a_trailing_fence_after_the_calls_leaves_them_dispatchable() {
     let text = "<call name=\"send\"><routing><target_id>exec</target_id></routing><payload><type>tail</type>\
                 <text>go</text></payload></call>\n\
-                <call name=\"await\"></call>\n\
+                <call name=\"done\"></call>\n\
                 ```\n";
     let calls = extract_tool_calls(text);
     assert_eq!(calls.len(), 2, "{calls:?}");
     assert_eq!(calls[0].name, "send");
-    assert_eq!(calls[1].name, "await");
+    assert_eq!(calls[1].name, "done");
     assert!(
         malformed_calls(text).is_empty(),
         "{:?}",
@@ -111,11 +111,11 @@ fn a_leading_invoke_fragment_leaves_the_valid_calls_after_it() {
     let text = "<invoke name=\"x\"></invoke>\n\
                 <call name=\"send\"><routing><target_id>exec</target_id></routing><payload><type>tail</type>\
                 <text>go</text></payload></call>\n\
-                <call name=\"await\"></call>";
+                <call name=\"done\"></call>";
     let calls = extract_tool_calls(text);
     assert_eq!(calls.len(), 2, "{calls:?}");
     assert_eq!(calls[0].name, "send");
-    assert_eq!(calls[1].name, "await");
+    assert_eq!(calls[1].name, "done");
     assert!(
         malformed_calls(text).is_empty(),
         "{:?}",
@@ -130,12 +130,12 @@ fn a_leading_invoke_fragment_and_a_trailing_fence_together() {
     let text = "<invoke name=\"x\"></invoke>\n\
                 <call name=\"send\"><routing><target_id>exec</target_id></routing><payload><type>tail</type>\
                 <text>go</text></payload></call>\n\
-                <call name=\"await\"></call>\n\
+                <call name=\"done\"></call>\n\
                 ```\n";
     let calls = extract_tool_calls(text);
     assert_eq!(calls.len(), 2, "{calls:?}");
     assert_eq!(calls[0].name, "send");
-    assert_eq!(calls[1].name, "await");
+    assert_eq!(calls[1].name, "done");
     assert!(
         malformed_calls(text).is_empty(),
         "{:?}",

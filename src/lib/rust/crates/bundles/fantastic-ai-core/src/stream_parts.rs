@@ -518,7 +518,7 @@ impl PartSplitter {
         if call.target.is_some() || call.to.is_some() {
             return true;
         }
-        // Only `send` names an addressee; every other tool (done, await,
+        // Only `send` names an addressee; every other tool (done, stop,
         // inquiry_answer) speaks to the caller from its first byte.
         call.name.as_deref() != Some("send")
     }

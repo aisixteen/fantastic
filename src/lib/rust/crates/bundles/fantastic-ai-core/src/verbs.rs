@@ -124,7 +124,7 @@ pub fn status(agent_id: &AgentId, args: &Status) -> Value {
 /// crate keeps for the deleted id, so an id re-created later starts clean and
 /// nothing leaks: the FIFO lock and queue, the in-flight entry,
 /// the projection and its marks, the fold and recall counters, the calibration
-/// (the state slot), the routing count, the silent streaks, the strip set, and
+/// (the state slot), the jobs and open inquiries, the strip set, and
 /// this kernel's head, bodies, grants and watchers, and its rows in the memory
 /// store (`keep_memory:true` on the delete keeps those). Python `on_delete`.
 ///
@@ -865,27 +865,6 @@ impl Drop for QueuedGuard {
     }
 }
 
-/// The owed pids a message settles, settled once: at the point the message is
-/// visible where an `await` can see it, or at the latest when `send` returns.
-struct OwedSettle {
-    agent: String,
-    text: Option<String>,
-}
-
-impl OwedSettle {
-    fn now(&mut self) {
-        if let Some(t) = self.text.take() {
-            crate::route::settle_owed(&self.agent, &t);
-        }
-    }
-}
-
-impl Drop for OwedSettle {
-    fn drop(&mut self) {
-        self.now();
-    }
-}
-
 /// Whether this send is one of the chain's own turns (never held).
 fn is_chain_turn(
     state: &crate::state::BackendState,
@@ -894,13 +873,6 @@ fn is_chain_turn(
 ) -> bool {
     (!chain_token.is_empty() && state.chain.lock().expect("chain poisoned").token == chain_token)
         || fantastic_kernel::current_origin().is_some_and(|o| o == *agent_id)
-}
-
-/// What `send` will decide about the hold, read early (the chain can still end
-/// before the real decision, which is why the settle also runs on every other path).
-fn would_hold(state: &crate::state::BackendState, agent_id: &AgentId, args: &crate::declared::Send) -> bool {
-    let token = args.chain.as_deref().unwrap_or("");
-    !is_chain_turn(state, agent_id, token) && state.chain.lock().expect("chain poisoned").alive
 }
 
 /// Hold a message on the agent's chain. The chain may have ended while the row was
@@ -964,19 +936,6 @@ pub async fn send(
         return Ok(held);
     }
     let mut text = args.text.clone();
-    // AN ANSWER UNDER AN INQUIRY'S PID settles what this agent was owed.
-    //
-    // A message that will be HELD settles only once it is visible as held (see
-    // `push_held_or_wake`): settling first drops the pid from `awaiting()` while
-    // the message is in no queue, and a concurrent `await` then sees nothing to
-    // wait for. Every other path settles here, as before.
-    let mut owed = OwedSettle {
-        agent: agent_id.as_str().to_string(),
-        text: Some(text.clone()),
-    };
-    if !would_hold(&state_for(agent_id), agent_id, args) {
-        owed.now();
-    }
     // A MESSAGE FROM ANOTHER AGENT OPENS WITH WHO SENT IT — python's
     // `[from <sender> · to a, b · msg N · re N]` line. Without it a peer's
     // inquiry arrives as bare prose and the receiver cannot tell it is being
@@ -1123,8 +1082,6 @@ pub async fn send(
                 row_id,
             },
         );
-        // Only now is the message visible as held: settle what it answers.
-        owed.now();
         let mut detail = Map::new();
         detail.insert("send_id".to_string(), json!(send_id));
         detail.insert("ahead".to_string(), json!(0));
@@ -1144,7 +1101,6 @@ pub async fn send(
     }
 
     // Enqueue.
-    owed.now();
     let queued_at = now_secs();
     // A notice is this agent's own harness text: honoured only when the agent sent
     // it to itself (or the operator did), so no peer can hide a message from a
@@ -1355,37 +1311,21 @@ pub async fn send(
     let mut call_streams: Vec<(String, String)> = Vec::new();
     // A pass the model stopped with a block open dispatches NOTHING.
     let mut cut = false;
-    // A DEAD turn (only thinking) is discarded unstored and routed as a silent
-    // turn — the reminder rerolls it, told why.
-    let mut dead_turn = false;
     // A provider failure python does NOT map propagates out of the handler. The
     // raise is deferred to after the cleanup below (python does it from an
     // `except` whose `finally` clears the current entry and releases the lock).
     let mut raise: Option<(&'static str, String)> = None;
-    // A failed pass (not a refused record) earns its own retry turn (#533).
-    let mut failed_reason: Option<String> = None;
-    // A turn that failed and is NOT retried: why, for the asker of an inquiry this
-    // chain is answering (#722). A retried pass leaves its inquiry open: the retry
-    // may still answer it, and a give-up closes it.
+    // A turn that failed: why, for the asker of an inquiry this chain is answering
+    // (#722). A provider failure is retried only by `transport_retries`, above, inside
+    // the pass (#795, Q4); past them the turn has failed.
     let mut turn_failed: Option<String> = None;
     // THE HARNESS STOPPED THE TURN (#766, 1.8): its reason and the number of malformed
     // attempts. Nothing is routed; the chain ends through the give-up.
     let mut stopped: Option<String> = None;
     // A PROVIDER FAILURE NO RETRY MENDS (a refused key, an unknown model): its error.
-    // Never retried, never nudged: the chain gives up with it at once.
+    // Never retried: the chain gives up with it at once.
     let mut permanent: Option<(String, &'static str)> = None;
     let reply = match outcome {
-        Ok(Ok(Generation::Dead { text: final_text })) => {
-            dead_turn = true;
-            // python `_run`'s dead-turn reply: no `message_id` — nothing was
-            // stored, so there is no row to name. THE ANSWER ONLY (see below):
-            // a dead turn's answer is empty.
-            json!({
-                "response": crate::think::without_thinking(&final_text),
-                "client_id": client_id,
-                "dead_turn": true,
-            })
-        }
         Ok(Ok(Generation::Answered {
             text: final_text,
             message_id: tid,
@@ -1514,10 +1454,9 @@ pub async fn send(
                     attached.as_ref(),
                 )
                 .await;
-                if let Some(code) = pe.permanent_code() {
-                    permanent = Some((pe.message.clone(), code));
-                } else {
-                    failed_reason = Some(pe.message.clone());
+                match pe.permanent_code() {
+                    Some(code) => permanent = Some((pe.message.clone(), code)),
+                    None => turn_failed = Some(pe.message.clone()),
                 }
                 with_store_outcome(pe.message, stored)
             };
@@ -1562,35 +1501,12 @@ pub async fn send(
 
     // ONE CHAIN PER AGENT (#227): a pass that is NOT routed ends its chain here,
     // so messages held meanwhile are woken once (see `chain_ended`).
-    // A FAILED TURN IS RETRIED (#533): the chain stays alive and its own next turn
-    // is delivered, under the silent-turn bound; at the bound the chain gives up.
-    let retrying = match &failed_reason {
-        Some(why) => {
-            !crate::route::failed_turn_retry(
-                kernel,
-                agent_id,
-                &client_id,
-                send_to.as_deref(),
-                why,
-            )
-            .await
-        }
-        None => false,
-    };
     // A PERMANENT FAILURE ENDS THE CHAIN through the give-up, the error its reason:
     // status `failed`, `reason: gave_up`, the open inquiry closed, `send_to` told.
     if let Some((why, _)) = &permanent {
-        crate::route::give_up(
-            kernel,
-            agent_id,
-            &client_id,
-            send_to.as_deref(),
-            why,
-            crate::route::silent_streak(agent_id, &client_id) + 1,
-        )
-        .await;
+        crate::route::give_up(kernel, agent_id, &client_id, send_to.as_deref(), why).await;
     }
-    if !retrying && (reply.get("error").is_some() || raise.is_some()) {
+    if reply.get("error").is_some() || raise.is_some() {
         crate::route::chain_ended(kernel, agent_id);
     }
     // AN INQUIRY WHOSE TURN FAILED tells its asker (#722): the asker must not wait
@@ -1605,18 +1521,10 @@ pub async fn send(
     }
 
     // THE HARNESS STOP ENDS THE CHAIN through the give-up, as a model's `stop` does
-    // (1.8): status `failed`, `reason: gave_up`, the reason in `error`, the number of
-    // malformed attempts in `silent_turns`, the open inquiry closed, `send_to` told.
+    // (1.8): status `failed`, `reason: gave_up`, the reason in `error`, the open
+    // inquiry closed, `send_to` told.
     if let Some(reason) = &stopped {
-        crate::route::give_up(
-            kernel,
-            agent_id,
-            &client_id,
-            send_to.as_deref(),
-            reason,
-            1 + crate::constants::CALL_RETRIES,
-        )
-        .await;
+        crate::route::give_up(kernel, agent_id, &client_id, send_to.as_deref(), reason).await;
         crate::route::chain_ended(kernel, agent_id);
     }
 
@@ -1674,9 +1582,6 @@ pub async fn send(
         let route_kernel = Arc::clone(kernel);
         let route_self = agent_id.clone();
         let route_client = client_id.clone();
-        // What this turn ANSWERED — tells routing whether it was a chain turn
-        // (a delivered reply) and so whether a silent turn earns the nudge.
-        let route_incoming = incoming_text.clone();
         // THE ROUTED CALLS REACH THEIR TARGETS BEFORE THIS REPLY GOES BACK
         // (python's event loop order): released at launch,
         // not at completion — a self-addressed call fans out before it needs the
@@ -1691,7 +1596,6 @@ pub async fn send(
                 text,
                 route_client,
                 send_to,
-                route_incoming,
                 // THE ROUTE DEFAULT DEADLINE (root `send_timeout`, else the env /
                 // 600 s), threaded to every call the router dispatches. The
                 // kernel defaults nothing. `timeout_secs` stays the generation
@@ -1699,7 +1603,6 @@ pub async fn send(
                 deadline,
                 cfg.model_window,
                 message_id,
-                dead_turn,
                 call_streams,
                 cut,
                 Some(route_launched),

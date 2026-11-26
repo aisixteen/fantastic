@@ -1199,7 +1199,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_last_budget_is_per_agent_and_freed_on_delete() {
     let (_server, endpoint) = server_with(
-        sse(&[delta(Some("stop"), json!({"content": "ok"}))], true),
+        sse(&[delta(Some("stop"), json!({"content": "ok <call name=\"done\"></call>"}))], true),
         200,
     )
     .await;
@@ -1244,10 +1244,9 @@ async fn the_last_budget_is_per_agent_and_freed_on_delete() {
         .await
         .remove(0)
         .result;
-    assert_eq!(out["response"], json!("ok"), "{out}");
-    // The call-less answer is REROLLED in the background (the no-call reminder)
-    // until the chain gives up; let it settle, or a reroll that lands after the
-    // delete below records a budget for the re-created id.
+    assert_eq!(out["response"], json!("ok <call name=\"done\"></call>"), "{out}");
+    // Let the chain settle, or a pass that lands after the delete below records a
+    // budget for the re-created id.
     let mut quiet = 0;
     for _ in 0..500 {
         let st = kernel.operator_send(vec![Item::new(

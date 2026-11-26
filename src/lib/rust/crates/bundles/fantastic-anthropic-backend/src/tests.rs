@@ -1792,14 +1792,8 @@ const STALL_AGENT: &str = "stall_turn";
 async fn a_stalled_api_stream_ends_the_turn_with_an_error_row() {
     let (ep, server) = stalling_endpoint(Some(sse(&[start(), text("half")]))).await;
     let tmp = TempDir::new().unwrap();
-    // `misfire_limit: 2`: the failed turn is retried once (#533), then the chain gives up
-    let kernel = mk_with_store(
-        &tmp,
-        &ep,
-        json!({"stream_idle_seconds": 0.2}),
-        json!({"misfire_limit": 2}),
-    )
-    .await;
+    // the failed turn is not re-run (#795): its error row and status end it
+    let kernel = mk_with_store(&tmp, &ep, json!({"stream_idle_seconds": 0.2}), json!({})).await;
     let started = std::time::Instant::now();
     let r = call(
         &kernel,
@@ -1827,11 +1821,10 @@ async fn a_stalled_api_stream_ends_the_turn_with_an_error_row() {
                 .collect()
         })
         .unwrap_or_default();
-    // the retry (#533) may have stored a second error row by now
-    assert!(!errors.is_empty(), "{rows}");
+    assert_eq!(errors.len(), 1, "{rows}");
     let content = errors[0]["content"].as_str().unwrap_or_default();
     assert!(content.contains("stream_stalled"), "{content}");
-    // the chain gives up after the retry fails too, and nothing is generating
+    // nothing is generating
     let mut status = json!({});
     for _ in 0..500 {
         status = call(&kernel, STALL_AGENT, json!({"type": "status"})).await;

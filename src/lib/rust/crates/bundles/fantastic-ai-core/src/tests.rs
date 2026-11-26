@@ -672,6 +672,7 @@ async fn send_streams_tokens_and_emits_done() {
             ScriptEvent::Token("Hello".into()),
             ScriptEvent::Token(" ".into()),
             ScriptEvent::Token("world".into()),
+            ScriptEvent::Token(" <call name=\"done\"></call>".into()),
         ]],
         Duration::ZERO,
     );
@@ -686,7 +687,7 @@ async fn send_streams_tokens_and_emits_done() {
         .remove(0)
         .result;
     assert_eq!(reply["client_id"], client_id);
-    assert_eq!(reply["response"], "Hello world");
+    assert_eq!(reply["response"], "Hello world <call name=\"done\"></call>");
 
     let events = drain(&mut rx).await;
     let token_count = events
@@ -807,10 +808,10 @@ async fn thinking_is_streamed_raw_but_neither_dispatched_nor_persisted() {
     );
 }
 
-/// A turn spent ENTIRELY reasoning is a DEAD TURN: it is
+/// An attempt spent ENTIRELY reasoning is an answer with no call (#795): it is
 /// DISCARDED — durable history holds nothing of it, no empty assistant row a
-/// later turn would read as an answer — and REROLLED by the no-call reminder,
-/// which says why.
+/// later turn would read as an answer — and RE-ASKED inside its pass with the
+/// no-call report.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_thinking_only_turn_is_discarded_and_rerolled() {
     let tmp = TempDir::new().unwrap();
@@ -836,13 +837,13 @@ async fn a_thinking_only_turn_is_discarded_and_rerolled() {
         .await
         .remove(0)
         .result;
-    assert_eq!(reply["dead_turn"], json!(true), "{reply:#?}");
+    assert_eq!(reply["response"], json!("<call name=\"done\"></call>"), "{reply:#?}");
     assert!(reply.get("raised").is_none(), "{reply:#?}");
-    assert!(until_passes(&s, 2).await, "the dead turn was not rerolled");
+    assert_eq!(s.passes_served(), 2, "the thinking-only attempt was not re-asked");
     assert!(
         s.request(1)
-            .contains("[no answer] Your last turn produced only thinking"),
-        "the reroll says why: {}",
+            .contains(&json_text(crate::model_format::default::REPORT_NO_CALL)),
+        "the re-ask says why: {}",
         s.request(1)
     );
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -858,7 +859,7 @@ async fn a_thinking_only_turn_is_discarded_and_rerolled() {
             let c = r["head"].as_str().unwrap_or("");
             c.contains("all 578 tokens") || (r["role"] == json!("assistant") && c.trim().is_empty())
         }),
-        "a dead turn stores nothing: {rows:#?}"
+        "a thinking-only attempt stores nothing: {rows:#?}"
     );
 }
 
@@ -1010,7 +1011,7 @@ async fn status_current_shape_matches_python() {
 async fn send_reply_carries_message_id() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_tid").await;
-    let _s = script(&backend, vec![pass("ack")], Duration::ZERO);
+    let _s = script(&backend, vec![pass("ack <call name=\"done\"></call>")], Duration::ZERO);
     let r = kernel
         .operator_send(vec![Item::new(
             backend.clone(),
@@ -1032,7 +1033,7 @@ async fn send_reply_carries_message_id() {
         .find(|row| row["id"].as_i64() == Some(message_id))
         .expect("the row the reply names");
     assert_eq!(assistant["role"], json!("assistant"));
-    assert_eq!(assistant["content"], json!("ack"));
+    assert_eq!(assistant["content"], json!("ack <call name=\"done\"></call>"));
 }
 
 /// The env is process-global, so the test that overrides the send ceiling must
@@ -1366,11 +1367,10 @@ async fn recall_pages_durable_store_and_context_status_shape() {
 async fn history_persists_and_round_trips() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "hist").await;
-    // `done` because a call-less turn is nudged now: without it the chain runs
-    // on and the LAST stored turn is the nudge's answer, not this one.
+    // `done` because an answer with no call is re-asked (#795).
     script(
         &backend,
-        vec![pass("ack"), pass(r#"<call name="done"></call>"#)],
+        vec![pass(r#"ack <call name="done"></call>"#)],
         Duration::ZERO,
     );
     let _rx = rebind_backend_inbox(&kernel, &backend);
@@ -1393,25 +1393,19 @@ async fn history_persists_and_round_trips() {
     assert_eq!(rows[0]["role"], "user");
     assert_eq!(rows[0]["head"], "ping");
     assert_eq!(rows[1]["role"], "assistant");
-    assert_eq!(rows[1]["head"], "ack");
+    assert_eq!(rows[1]["head"], r#"ack <call name="done"></call>"#);
 
     // WHERE IT LIVES: the agent's MEMORY STORE (`memory_store_id`), keyed by
     // who wrote it, ids from the kernel's one counter. Agent id is conversation
     // id, so one list is what every reader gets.
     let rows = conversation(&kernel, &backend).await;
     // ONE ROW PER TURN — list index == store index (recall/reaction paging).
-    // Four turns: the ping, the call-less answer, the nudge it earned, and the
-    // `done` that ended the chain.
-    assert_eq!(rows.len(), 4, "one row per message: {rows:#?}");
+    // Two turns: the ping and the answer that ended the chain.
+    assert_eq!(rows.len(), 2, "one row per message: {rows:#?}");
     assert_eq!(rows[0]["role"], "user");
     assert_eq!(rows[0]["content"], "ping");
     assert_eq!(rows[1]["role"], "assistant");
-    assert_eq!(rows[1]["content"], "ack");
-    assert_eq!(rows[2]["role"], "user");
-    assert!(rows[2]["content"]
-        .as_str()
-        .unwrap()
-        .starts_with("[no call was dispatched]"));
+    assert_eq!(rows[1]["content"], r#"ack <call name="done"></call>"#);
     // Every row carries the id the counter gave it, ascending.
     let ids: Vec<i64> = rows.iter().map(|r| r["id"].as_i64().unwrap()).collect();
     assert!(ids.windows(2).all(|w| w[0] < w[1]), "{ids:?}");
@@ -1455,7 +1449,7 @@ async fn chat_persists_with_no_loader_provider_wired() {
 
     script(
         &backend,
-        vec![pass("ack"), pass(r#"<call name="done"></call>"#)],
+        vec![pass(r#"ack <call name="done"></call>"#)],
         Duration::ZERO,
     );
     let _rx2 = rebind_backend_inbox(&kernel, &backend);
@@ -1476,18 +1470,18 @@ async fn chat_persists_with_no_loader_provider_wired() {
     let rows = h["rows"].as_array().expect("rows array");
     assert_eq!(
         rows.len(),
-        4,
+        2,
         "history came back empty with no loader provider: {h:#?}"
     );
     assert_eq!(rows[0]["head"], "ping");
-    assert_eq!(rows[1]["head"], "ack");
+    assert_eq!(rows[1]["head"], r#"ack <call name="done"></call>"#);
     // …and it is REALLY in the agent's MEMORY STORE, not on its file leg: the
     // kernel keeps no conversation, and putting rows on disk is a durable
     // store's job that no AI agent asks for.
     let rows = conversation(&kernel, &backend).await;
     assert_eq!(
         rows.len(),
-        4,
+        2,
         "the conversation is not in the store: {rows:#?}"
     );
     assert_eq!(rows[0]["content"], "ping");
@@ -2055,7 +2049,7 @@ async fn a_verb_in_the_tool_slot_is_refused_by_name() {
         "it must show where the verb goes: {turn2}"
     );
     assert!(
-        turn2.contains("send, done, await, inquiry_answer"),
+        turn2.contains("send, done, inquiry_answer"),
         "it must name the closed set: {turn2}"
     );
 }
@@ -2110,8 +2104,8 @@ async fn a_caller_send_to_hands_off_once() {
     );
 }
 
-/// A failed pass routes nothing (#533): it is retried as its own turn, and that
-/// retry ends the chain. The failed pass's own output is never dispatched.
+/// A failed pass routes nothing (#533, #795): it is not re-run as a turn of its own,
+/// and its own output is never dispatched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_error_reply_does_not_route() {
     let tmp = TempDir::new().unwrap();
@@ -2137,11 +2131,7 @@ async fn an_error_reply_does_not_route() {
         "{r:#?}"
     );
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(
-        s.passes_served(),
-        2,
-        "the failed pass is retried once, then done"
-    );
+    assert_eq!(s.passes_served(), 1, "a failed pass is not re-run");
 }
 
 /// PROVIDER FAILURE, KIND 2: unmapped — python re-raises it out of the
@@ -2497,17 +2487,12 @@ async fn routing_is_its_own_ps_row() {
     );
 }
 
-// ─── the end-of-chain contract: DONE is explicit; silence is nudged ─────
-// Mirrors python `test_done_and_nudge.py`.
+// ─── the end-of-pass contract: DONE is explicit; silence is re-asked ─────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn silent_chain_turns_are_nudged_until_a_call_or_done() {
-    // The model is QUERIED UNTIL IT CALLS (python-canonical): a second silent
-    // turn does not end the chain.
-    //
-    // NO STREAK AND NO CAP here: a cap that drops the chain in SILENCE is the
-    // exact failure the reminder exists to prevent, one layer up. python's two
-    // honest ends (`done`, `await`) both return above this branch.
+    // The model is RE-ASKED UNTIL IT CALLS, inside its pass (#795): a silent answer
+    // does not end the chain, and the attempts bound it.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "ndg").await;
     let s = script(
@@ -2520,7 +2505,6 @@ async fn silent_chain_turns_are_nudged_until_a_call_or_done() {
             )),
             pass("thinking out loud, no envelope"),
             pass("still just prose"),
-            pass("ok, finishing"),
             pass("<call name=\"done\"></call>"),
         ],
         Duration::ZERO,
@@ -2533,24 +2517,23 @@ async fn silent_chain_turns_are_nudged_until_a_call_or_done() {
         .await
         .remove(0)
         .result;
-    assert!(until_passes(&s, 5).await, "the chain did not reach done");
-    for n in [2, 3, 4] {
+    assert!(until_passes(&s, 4).await, "the chain did not reach done");
+    let report = json_text(crate::model_format::default::REPORT_NO_CALL);
+    for n in [2, 3] {
         assert!(
-            s.request(n)
-                .contains("[no call was dispatched] Your answer emitted no"),
-            "pass {} must be a nudge",
+            s.request(n).contains(&report),
+            "request {} must be a re-ask",
             n + 1
         );
     }
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(s.passes_served(), 5, "done ended it; nothing reminds after");
+    assert_eq!(s.passes_served(), 4, "done ended it; nothing asks after");
 }
 
-/// A turn that is ONLY thinking did not answer: it is never stored and never
-/// counts as completed — it is rerolled by the no-call reminder, told why
-/// (a tiny thinking budget, then a clean `stop` with no answer; failing it
-/// outright would end a long chain). python
-/// `test_a_dead_turn_is_discarded_and_rerolled`.
+/// An attempt that is ONLY thinking did not answer: it is never stored and never
+/// counts as completed — it is re-asked inside its pass with the no-call report
+/// (#795; a tiny thinking budget, then a clean `stop` with no answer; failing it
+/// outright would end a long chain).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dead_turn_is_discarded_and_rerolled() {
     let tmp = TempDir::new().unwrap();
@@ -2572,30 +2555,30 @@ async fn a_dead_turn_is_discarded_and_rerolled() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r["dead_turn"], json!(true), "{r:#?}");
+    assert_eq!(r["response"], json!(r#"<call name="done"></call>"#), "{r:#?}");
     assert_eq!(
         r.as_object().unwrap().keys().collect::<Vec<_>>(),
-        vec!["response", "client_id", "dead_turn"],
+        vec!["response", "client_id", "message_id"],
         "{r:#?}"
     );
-    assert!(until_passes(&s, 2).await, "the dead turn was not rerolled");
-    // the dead call ended STALLED (no reply), not done; the reroll is a call of its own
+    assert_eq!(s.passes_served(), 2, "the thinking-only attempt was not re-asked");
+    // one call: it ends done, once; the re-ask is an attempt of it, marked `retrying`
     let evs = drain(&mut rx).await;
-    let ends: Vec<(&str, &str)> = evs
+    let phases: Vec<&str> = evs
         .iter()
         .filter(|v| v["type"] == json!("status"))
-        .filter_map(|v| Some((v["phase"].as_str()?, v["detail"]["reason"].as_str()?)))
+        .filter_map(|v| v["phase"].as_str())
         .collect();
-    assert_eq!(ends.first(), Some(&("stalled", "dead_turn")), "{evs:#?}");
+    assert!(phases.contains(&"retrying"), "{evs:#?}");
+    assert_eq!(phases.iter().filter(|p| **p == "done").count(), 1, "{evs:#?}");
     let incoming = s.request_messages(1);
     let last = incoming
         .last()
         .and_then(|m| m["content"].as_str())
         .unwrap_or("")
         .to_string();
-    assert!(last.starts_with("[no answer]"), "{last}");
-    assert!(last.contains("[no call was dispatched]"), "{last}");
-    // the turn the dead one answered is KEPT (a reply batch must not vanish);
+    assert_eq!(last, crate::model_format::default::REPORT_NO_CALL);
+    // the message the attempt answered is KEPT (a reply batch must not vanish);
     // only its empty answer is dropped
     assert!(
         incoming.iter().any(|m| {
@@ -2612,18 +2595,19 @@ async fn a_dead_turn_is_discarded_and_rerolled() {
     );
 }
 
-/// Silent turns in a row are bounded: at MAX_SILENT_TURNS the chain stops
-/// reminding and tells its caller the model could not answer. python
-/// `test_a_chain_gives_up_after_max_silent_turns` (which patches the cap to 3; a
-/// rust const is not patchable, so this runs the real cap).
+/// An answer with no call is re-asked INSIDE its pass (#795, Q3): prose, then prose
+/// again, and after `1 + CALL_RETRIES` attempts the harness stops the pass — status
+/// `failed`, `reason: gave_up`, the stop reason naming the attempts — and nothing more
+/// is asked. Each re-ask carries the prose and the no-call report; the prose is never
+/// stored as an answer. A silent model never ends work silently, and never runs away.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_chain_gives_up_after_max_silent_turns() {
-    let cap = crate::constants::MAX_SILENT_TURNS;
+async fn a_call_less_answer_is_reasked_inside_the_pass_then_the_harness_stops_it() {
+    let n = 1 + crate::constants::CALL_RETRIES;
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "gives_up").await;
     let s = script(
         &backend,
-        (0..cap + 5).map(|_| pass("just prose")).collect(),
+        (0..n + 5).map(|_| pass("just prose")).collect(),
         Duration::ZERO,
     );
     // a browser-style client: its events land on the agent's own inbox, where
@@ -2637,19 +2621,22 @@ async fn a_chain_gives_up_after_max_silent_turns() {
         .await
         .remove(0)
         .result;
-    assert!(
-        until_passes(&s, cap).await,
-        "the chain stalled before the cap"
-    );
+    assert!(until_passes(&s, n).await, "the pass stalled before its last attempt");
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(s.passes_served(), cap, "no reminder after the cap");
+    assert_eq!(s.passes_served(), n, "nothing is asked after the harness stop");
+    // every re-ask carries the answer and the type's no-call report
+    let report = crate::model_format::default::REPORT_NO_CALL;
+    for k in 1..n {
+        let req = s.request_messages(k);
+        let tail: Vec<&Value> = req.iter().rev().take(2).collect();
+        assert_eq!(tail[0]["content"], json!(report), "{req:#?}");
+        assert_eq!(tail[1]["content"], json!("just prose"), "{req:#?}");
+    }
     let mut dones = Vec::new();
     while let Some(v) = rx.try_recv() {
         let p = v.payload;
-        // every status that ends a call: the give-up is the last, a FAILED call
         if p["type"] == json!("status")
-            && ["done", "failed", "stalled", "awaiting"]
-                .contains(&p["phase"].as_str().unwrap_or_default())
+            && ["done", "failed"].contains(&p["phase"].as_str().unwrap_or_default())
         {
             dones.push(p);
         }
@@ -2659,91 +2646,21 @@ async fn a_chain_gives_up_after_max_silent_turns() {
     assert_eq!(last["detail"]["reason"], json!("gave_up"), "{dones:#?}");
     assert_eq!(
         last["detail"]["error"],
-        json!(crate::route::gave_up_text(cap)),
+        json!(crate::model_format::fill(
+            crate::model_format::default::STOP_REASON,
+            &[("n", &n.to_string())]
+        )),
         "{last:#?}"
     );
-    assert_eq!(last["detail"]["silent_turns"], json!(cap), "{last:#?}");
-    assert_eq!(
-        crate::route::gave_up_text(cap),
-        "The LLM was not able to answer — 10 turns in a row produced no call. \
-         Reiterate the inquiry.",
-        "python `_GAVE_UP`, byte for byte"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_chain_gives_up_after_its_misfire_limit() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, backend) = mk_kernel(&tmp, "misfire_limit").await;
-    let _ = kernel
-        .operator_send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({"type": "update_agent", "id": backend.as_str(), "misfire_limit": 3}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let s = script(
-        &backend,
-        (0..8).map(|_| pass("just prose")).collect(),
-        Duration::ZERO,
-    );
-    let mut rx = rebind_backend_inbox(&kernel, &backend);
-    let _ = kernel
-        .operator_send(vec![Item::new(
-            backend.clone(),
-            json!({"type": "send", "text": "go", "client_id": "tab1"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert!(
-        until_passes(&s, 3).await,
-        "the chain stalled before the limit"
-    );
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(s.passes_served(), 3, "no reminder after the limit");
-    let mut dones = Vec::new();
-    while let Some(v) = rx.try_recv() {
-        let p = v.payload;
-        // every status that ends a call: the give-up is the last, a FAILED call
-        if p["type"] == json!("status")
-            && ["done", "failed", "stalled", "awaiting"]
-                .contains(&p["phase"].as_str().unwrap_or_default())
-        {
-            dones.push(p);
-        }
-    }
-    let last = dones.last().expect("an ending status");
-    assert_eq!(last["phase"], json!("failed"), "{dones:#?}");
-    assert_eq!(last["detail"]["reason"], json!("gave_up"), "{dones:#?}");
-    assert_eq!(last["detail"]["silent_turns"], json!(3), "{last:#?}");
-    assert_eq!(
-        last["detail"]["error"],
-        json!(crate::route::gave_up_text(3)),
-        "{last:#?}"
-    );
-    assert!(
-        crate::route::gave_up_text(3).contains("3 turns in a row"),
-        "the gave-up text names the limit"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn misfire_limit_is_validated() {
-    let check = |v| {
-        let meta = json!({"misfire_limit": v});
-        crate::tests_decl::refused_at_the_write(meta.as_object().unwrap())
-    };
-    for bad in [json!(1), json!(51), json!("x")] {
-        assert!(
-            check(bad.clone()).is_some_and(|e| e.contains("misfire_limit")),
-            "{bad} should be refused"
-        );
-    }
-    for good in [json!(2), json!(50)] {
-        assert_eq!(check(good.clone()), None, "{good} should be accepted");
-    }
+    // the prose was no answer: the one stored assistant row is the harness's `stop`
+    let rows = conversation(&kernel, &backend).await;
+    let answers: Vec<&str> = rows
+        .iter()
+        .filter(|r| r["role"] == json!("assistant"))
+        .filter_map(|r| r["content"].as_str())
+        .collect();
+    assert_eq!(answers.len(), 1, "{rows:#?}");
+    assert!(answers[0].starts_with("<call name=\"stop\">"), "{answers:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2838,11 +2755,9 @@ async fn every_model_call_carries_the_layer_default_timeout() {
             call,
             "probe".to_string(),
             None,
-            String::new(),
             0.2,
             crate::constants::DEFAULT_CONTEXT_WINDOW,
             None,
-            false,
             Vec::new(),
             false,
             None,
@@ -2901,11 +2816,9 @@ async fn a_malformed_timeout_arg_is_refused_by_name() {
             call,
             "probe".to_string(),
             None,
-            String::new(),
             0.2,
             crate::constants::DEFAULT_CONTEXT_WINDOW,
             None,
-            false,
             Vec::new(),
             false,
             None,
@@ -2954,11 +2867,9 @@ async fn a_reply_to_naming_no_agent_dispatches_nothing_and_says_so() {
             call,
             "probe".to_string(),
             None,
-            String::new(),
             5.0,
             crate::constants::DEFAULT_CONTEXT_WINDOW,
             None,
-            false,
             Vec::new(),
             false,
             None,
@@ -3624,11 +3535,9 @@ async fn a_batch_of_calls_without_reply_to_all_come_back() {
             text,
             "probe".to_string(),
             None,
-            "[reply to x · y z]".to_string(),
             30.0,
             crate::constants::DEFAULT_CONTEXT_WINDOW,
             None,
-            false,
             Vec::new(),
             false,
             None,
@@ -3729,20 +3638,18 @@ async fn a_batch_that_includes_a_peer_ai_still_delivers() {
     );
 }
 
-// ── await: the honest wait ───────────────────────────────────────────────────
+// ── done: nothing more now ───────────────────────────────────────────────────
 
-/// `await` with nothing of the agent's in flight and nothing queued ENDS the chain
-/// visibly (#177): no second pass runs, and the stored note says there was nothing
-/// to await. The note is a row the model reads on its next turn, not a turn sent to
-/// self (python delivered a refusal turn; the spec overrides that here).
+/// `done` leaves the agent idle (#795): no second pass runs and nothing reminds it;
+/// the next message wakes it with a pass of its own.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn await_with_nothing_in_flight_ends_the_chain_with_a_visible_note() {
+async fn done_leaves_the_agent_idle_and_the_next_message_wakes_it() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "aw1").await;
     let s = script(
         &backend,
         vec![
-            pass(r#"waiting <call name="await"></call>"#),
+            pass(r#"nothing more now <call name="done"></call>"#),
             pass(r#"<call name="done"></call>"#),
         ],
         Duration::ZERO,
@@ -3757,40 +3664,29 @@ async fn await_with_nothing_in_flight_ends_the_chain_with_a_visible_note() {
         .result;
     assert!(until_passes(&s, 1).await, "the first pass never ran");
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(s.passes_served(), 1, "the empty await ended the chain");
-    let rows = conversation(&kernel, &backend).await;
-    let notes: Vec<&Value> = rows
-        .iter()
-        .filter(|r| r.get("kind").and_then(Value::as_str) == Some("note"))
-        .collect();
-    assert_eq!(notes.len(), 1, "{rows:#?}");
-    let content = notes[0]["content"].as_str().unwrap_or_default();
-    assert!(
-        content.contains("[await: nothing to wait for]"),
-        "{content}"
-    );
-    assert!(content.contains("nothing was awaited"), "{content}");
-    assert!(
-        content.contains("reach you through your check-ins"),
-        "{content}"
-    );
-    assert!(
-        content.contains("has reported or been stopped"),
-        "{content}"
-    );
+    assert_eq!(s.passes_served(), 1, "done left the agent idle");
+    let _ = kernel
+        .operator_send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "again", "client_id": "probe"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(s.passes_served(), 2, "the next message woke it");
+    assert!(s.request(1).contains("again"), "{}", s.request(1));
 }
 
-/// The honest wait: something is QUEUED for the agent, so `await` ends the turn
-/// with no nudge and no refusal — and the queued message is the next turn. Twin
-/// of python's `test_await_with_a_message_queued_stops_quietly_and_the_queue_wakes_it`.
+/// Something is QUEUED for the agent when its pass ends with `done`: the queued
+/// message is the next turn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn await_with_a_message_queued_stops_quietly_and_the_queue_wakes_it() {
+async fn done_with_a_message_queued_and_the_queue_wakes_it() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "aw2").await;
     let s = script(
         &backend,
         vec![
-            pass(r#"waiting <call name="await"></call>"#),
+            pass(r#"nothing more now <call name="done"></call>"#),
             pass(r#"<call name="done"></call>"#),
         ],
         Duration::from_millis(300),
@@ -3815,11 +3711,6 @@ async fn await_with_a_message_queued_stops_quietly_and_the_queue_wakes_it() {
     let _ = first.await.expect("first send");
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(s.passes_served(), 2, "the queued message is the next turn");
-    for n in 0..2 {
-        let t = s.request(n);
-        assert!(!t.contains("[await: nothing to wait for]"), "pass {n}: {t}");
-        assert!(!t.contains("[no call was dispatched]"), "pass {n}: {t}");
-    }
     assert!(s.request(1).contains("two"), "{}", s.request(1));
 }
 
@@ -3993,7 +3884,7 @@ async fn a_held_send_returns_the_answer_of_the_pass_that_reads_it() {
         &backend,
         vec![
             pass(r#"<call name="done"></call>"#),
-            pass("ANSWER-OF-THE-READING-PASS"),
+            pass(r#"ANSWER-OF-THE-READING-PASS <call name="done"></call>"#),
         ],
         Duration::from_millis(300),
     );
@@ -4512,13 +4403,6 @@ async fn an_inquiry_answer_obeys_the_hold() {
         .result
     });
     assert!(until_passes(&s, 1).await, "the first pass never started");
-    // The agent is OWED an answer under this pid (as after an accepted inquiry).
-    crate::route::awaiting()
-        .lock()
-        .unwrap()
-        .entry(backend.as_str().to_string())
-        .or_default()
-        .insert("p9".to_string());
     let (k, b) = (Arc::clone(&kernel), backend.clone());
     let second = tokio::spawn(async move {
         k.operator_send(vec![Item::new(
@@ -4577,10 +4461,10 @@ async fn a_to_list_fans_out_one_copy_per_recipient_carrying_the_list() {
 async fn history_answers_the_digest_and_the_full_turns() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "hdig").await;
-    let long = "x".repeat(300);
+    let long = format!("{}{}", "x".repeat(275), r#"<call name="done"></call>"#);
     script(
         &backend,
-        vec![pass(long.clone()), pass(r#"<call name="done"></call>"#)],
+        vec![pass(long.clone())],
         Duration::ZERO,
     );
     let _rx = rebind_backend_inbox(&kernel, &backend);
@@ -5837,8 +5721,8 @@ async fn inquiry_round(
 }
 
 /// The race: the peer answers as soon as it is asked, with no gate, so its answer
-/// may land before the asker's route has registered the owed pid. Either order
-/// must leave the asker woken once and owing nothing.
+/// may land before the asker's route has delivered the accepted reply. Either order
+/// must leave the asker woken once with it.
 async fn inquiry_round_ungated(
     tag: &str,
     peer_passes: Vec<String>,
@@ -5863,7 +5747,7 @@ async fn inquiry_round_with(
         &backend,
         vec![
             pass(ask),
-            pass("<call name=\"await\"></call>"),
+            pass("<call name=\"done\"></call>"),
             pass("<call name=\"done\"></call>"),
         ],
         Duration::ZERO,
@@ -5875,9 +5759,7 @@ async fn inquiry_round_with(
     );
     if gated {
         // The peer's answer is released only once the asker's second pass has been
-        // requested. That pass comes after the asker's route has registered the
-        // owed pid: the route delivers its replies (the "accepted" one included)
-        // only after `owe`, and the pass reads them.
+        // requested: that pass reads the accepted inquiry's reply.
         let gate = Arc::new(tokio::sync::Notify::new());
         *r.gate.lock().unwrap() = Some(Arc::clone(&gate));
         let asker = Arc::clone(&a);
@@ -5903,19 +5785,6 @@ async fn inquiry_round_with(
 
 fn answer_call(text: &str) -> String {
     format!("<call name=\"inquiry_answer\"><answer>{text}</answer></call>")
-}
-
-/// The pids `me` is owed right now, copied out so no test panics holding the
-/// process-wide lock (a poisoned `awaiting()` would fail unrelated tests).
-fn owed_under(me: &str) -> Vec<String> {
-    let mut pids: Vec<String> = crate::route::awaiting()
-        .lock()
-        .unwrap()
-        .get(me)
-        .map(|s| s.iter().cloned().collect())
-        .unwrap_or_default();
-    pids.sort();
-    pids
 }
 
 /// A held send reads `alive` before it stores its row; the chain can end in that
@@ -5959,103 +5828,16 @@ async fn a_message_held_on_a_chain_that_just_ended_wakes_it() {
     );
 }
 
-/// A held reply that settles an owed pid must be visible as held BEFORE the pid
-/// stops being owed: never an instant with nothing owed and nothing held, which is
-/// what makes an `await` read "nothing to wait for".
+/// However fast the answer lands, the asker wakes once with it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_held_inquiry_reply_keeps_the_pid_owed_until_it_is_held() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, backend) = mk_kernel(&tmp, "held_owed").await;
-    let _s = script(
-        &backend,
-        vec![pass(r#"<call name="done"></call>"#)],
-        Duration::ZERO,
-    );
-    let me = backend.as_str().to_string();
-    crate::route::owe(&me, "7");
-    let state = crate::state::state_for(&backend);
-    {
-        let mut c = state.chain.lock().unwrap();
-        c.alive = true;
-        c.token = "tok".to_string();
-    }
-    let k = Arc::clone(&kernel);
-    let b = backend.clone();
-    let sender = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
-            b,
-            json!({"type": "send", "text": "[reply to 7 \u{b7} peer inquiry]", "client_id": "peer"}),
-        )])
-        .await
-    });
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let owed = owed_under(&me);
-        let held = state.chain.lock().unwrap().held.len();
-        if owed.is_empty() {
-            assert_eq!(held, 1, "nothing owed and nothing held at once");
-            break;
-        }
-        assert!(std::time::Instant::now() < deadline, "the pid stayed owed");
-        tokio::task::yield_now().await;
-    }
-    sender.abort();
-}
-
-/// An answer that beats the owed registration is settled BEFORE `owe` runs; the
-/// pid must not be left owed afterwards (the stale count that made `await` lie).
-#[test]
-fn an_answer_that_beats_the_owed_registration_leaves_nothing_owed() {
-    let me = "owe_beat_asker";
-    crate::route::settle_owed(me, "[reply to 7 · peer inquiry]");
-    crate::route::owe(me, "7");
-    let owed = owed_under(me);
-    assert!(owed.is_empty(), "the early answer left {owed:?} owed");
-}
-
-/// The normal order: owed first, then the answer clears it.
-#[test]
-fn an_answer_after_registration_still_clears_the_owed_pid() {
-    let me = "owe_after_asker";
-    crate::route::owe(me, "7");
-    crate::route::settle_owed(me, "[reply to 7 · peer inquiry]");
-    let owed = owed_under(me);
-    assert!(owed.is_empty(), "the answered pid is still owed: {owed:?}");
-}
-
-/// Only inquiry tags count as early answers: a reply to a plain send settles
-/// nothing, so a later owed registration for that pid is kept.
-#[test]
-fn an_early_settle_for_a_non_inquiry_reply_is_not_recorded() {
-    let me = "owe_send_asker";
-    crate::route::settle_owed(me, "[reply to 9 · peer send]");
-    crate::route::owe(me, "9");
-    let owed = owed_under(me);
-    assert_eq!(
-        owed,
-        vec!["9".to_string()],
-        "a send reply was recorded early"
-    );
-}
-
-/// Whichever order the answer and the owed registration land in, the asker wakes
-/// once with the answer and owes nothing after. The peer is ungated, so this does
-/// not force the race; the unit tests above pin the early-answer order.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_instant_answer_wakes_the_asker_once_and_leaves_nothing_owed() {
-    let (_tmp, a, _r, asker) =
+async fn an_instant_answer_wakes_the_asker_once() {
+    let (_tmp, a, _r, _asker) =
         inquiry_round_ungated("inq_instant", vec![answer_call("ship it")]).await;
     let third = a.request(2);
     assert_eq!(
         third.matches("<answer>ship it</answer>").count(),
         1,
         "{third}"
-    );
-    assert!(!third.contains("nothing to wait for"), "{third}");
-    let owed = owed_under(asker.as_str());
-    assert!(
-        owed.is_empty(),
-        "the asker is still owed an answer it already has: {owed:?}"
     );
 }
 
@@ -6073,7 +5855,6 @@ async fn an_inquiry_is_accepted_and_answered_later_under_its_pid() {
         "{third}"
     );
     assert!(third.contains("<answer>ship it</answer>"), "{third}");
-    assert!(!third.contains("nothing to wait for"), "{third}");
     assert!(r.request(0).contains("[inquiry from "), "{}", r.request(0));
 }
 
@@ -6094,15 +5875,66 @@ async fn the_receiver_may_work_for_several_turns_before_answering() {
     );
 }
 
+/// A receiver that ends with `done` before it answers leaves the inquiry OPEN (#795,
+/// Q5): nothing closes it for the asker, and a later pass of the receiver still
+/// answers it under its pid.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ending_without_an_answer_tells_the_asker() {
-    let (_tmp, a, _) =
-        inquiry_round("inq_done", vec!["<call name=\"done\"></call>".to_string()]).await;
-    assert!(
-        a.request(2).contains("ended its run without answering"),
-        "{}",
-        a.request(2)
+async fn ending_without_an_answer_leaves_the_inquiry_open_for_a_later_pass() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "inq_done").await;
+    let peer = add_peer(&kernel, &tmp, &backend).await;
+    let ask = call_envelope(
+        peer.as_str(),
+        json!({"type": "inquiry", "text": "ship?"}),
+        None,
     );
+    let a = script(
+        &backend,
+        vec![
+            pass(ask),
+            pass("<call name=\"done\"></call>"),
+            pass("<call name=\"done\"></call>"),
+        ],
+        Duration::ZERO,
+    );
+    let r = script(
+        &peer,
+        vec![
+            pass("<call name=\"done\"></call>"),
+            pass(answer_call("ship it")),
+        ],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .operator_send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "decide", "client_id": "probe"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(until_passes(&r, 1).await, "the peer was never asked");
+    assert!(until_passes(&a, 2).await, "the accepted reply never reached the asker");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(a.passes_served(), 2, "the peer's `done` closed the inquiry");
+    // still open: the peer's next pass on that thread answers it
+    let client = crate::route::open_inquiries()
+        .lock()
+        .unwrap()
+        .keys()
+        .find(|(agent, _)| agent == peer.as_str())
+        .map(|(_, c)| c.clone())
+        .expect("the inquiry is still open");
+    let _ = kernel
+        .operator_send(vec![Item::new(
+            peer.clone(),
+            json!({"type": "send", "text": "answer it now", "client_id": client}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(until_passes(&a, 3).await, "the later answer never reached the asker");
+    assert!(a.request(2).contains("<answer>ship it</answer>"), "{}", a.request(2));
 }
 
 /// The placeholder is refused in the receiver's own chain (python `repr` of the
@@ -7177,14 +7009,6 @@ async fn delete_drops_every_row_but_the_incarnation() {
     *old.view_source.lock().unwrap() = Some("array".into());
     *old.calib.lock().unwrap() = Some(2.0);
     *old.reported.lock().unwrap() = Some(10);
-    crate::route::inflight()
-        .lock()
-        .unwrap()
-        .insert(id.clone(), 1);
-    crate::route::silent()
-        .lock()
-        .unwrap()
-        .insert((id.clone(), "c".into()), 2);
     crate::strategies::strip::stripped_state()
         .lock()
         .unwrap()
@@ -7205,12 +7029,6 @@ async fn delete_drops_every_row_but_the_incarnation() {
         .remove(0)
         .result;
     assert_eq!(out["deleted"], true, "{out}");
-    assert!(!crate::route::inflight().lock().unwrap().contains_key(&id));
-    assert!(!crate::route::silent()
-        .lock()
-        .unwrap()
-        .keys()
-        .any(|chain| chain.0 == id));
     assert!(!crate::strategies::strip::stripped_state()
         .lock()
         .unwrap()
@@ -7457,14 +7275,11 @@ async fn a_draft_only_in_thinking_does_not_run() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn calls_only_in_thinking_make_a_dead_turn() {
-    // Nothing of it runs; the empty answer is rerolled with the no-answer line.
+    // Nothing of it runs; the empty answer is re-asked with the no-call report (#795).
     let (_t, s) = answer_only("ao3", |r, _| format!("<think>{r}</think>")).await;
     let next = last_in(&s, 1);
     assert!(!next.contains("[reply to "), "{next}");
-    assert!(
-        next.starts_with("[no answer] Your last turn produced only thinking"),
-        "{next}"
-    );
+    assert_eq!(next, crate::model_format::default::REPORT_NO_CALL);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7483,7 +7298,7 @@ async fn an_unclosed_thought_with_a_call_does_not_dispatch() {
     let (_t, s) = answer_only("ao5", |r, _| format!("<think>plan {r} and more")).await;
     let next = last_in(&s, 1);
     assert!(!next.contains("[reply to "), "{next}");
-    assert!(next.starts_with("[no answer]"), "{next}");
+    assert_eq!(next, crate::model_format::default::REPORT_NO_CALL);
 }
 
 // ─── the call checker through the agent (python `test_call_check.py`) ───────
@@ -7688,8 +7503,10 @@ async fn user_rows(kernel: &Arc<Kernel>, backend: &AgentId) -> Vec<Value> {
         .collect()
 }
 
+/// The no-call report is never stored: it is an attempt's re-ask inside the pass
+/// (#795). The task stays a plain user row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_no_call_reminder_is_a_notice_and_the_task_is_not() {
+async fn the_no_call_report_is_never_stored_and_the_task_is_not_a_notice() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "nt_a").await;
     let s = script(
@@ -7706,13 +7523,9 @@ async fn the_no_call_reminder_is_a_notice_and_the_task_is_not() {
     assert!(until_passes(&s, 2).await);
     tokio::time::sleep(Duration::from_millis(200)).await;
     let users = user_rows(&kernel, &backend).await;
+    assert_eq!(users.len(), 1, "{users:#?}");
     assert_eq!(users[0]["content"], json!("go"));
     assert!(users[0].get("kind").is_none(), "{:?}", users[0]);
-    assert!(users[1]["content"]
-        .as_str()
-        .unwrap_or("")
-        .starts_with("[no call was dispatched]"));
-    assert_eq!(users[1]["kind"], json!("notice"), "{:?}", users[1]);
 }
 
 /// A batch with a reply is not a notice. (A report on malformed calls is no batch any
@@ -7984,40 +7797,10 @@ async fn a_routing_name_in_the_payload_of_a_routed_call_is_delivered() {
     );
 }
 
-/// A call that actually runs resets the streak: the next wrapped answer is only
-/// named, never escalated.
+/// Two empty answers in a row are both re-asked inside the pass (#795), and the third
+/// attempt's call runs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_call_that_runs_resets_the_escalation() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, backend) = mk_kernel(&tmp, "esc_r").await;
-    let wrapped = "<tool_call>\n<call name=\"done\"></call>\n</tool_call>";
-    let s = script(
-        &backend,
-        vec![
-            pass(wrapped),
-            pass("<call name=\"send\"><routing><target_id>kernel</target_id></routing><payload><type>reflect</type></payload></call>"),
-            pass(wrapped),
-            pass("<call name=\"done\"></call>"),
-        ],
-        Duration::ZERO,
-    );
-    let _ = kernel
-        .operator_send(vec![Item::new(
-            backend.clone(),
-            json!({"type": "send", "text": "go"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert!(until_passes(&s, 4).await, "the chain did not finish");
-    let report = s.request(3);
-    assert!(report.contains("holds no call"), "{report}");
-    assert!(!report.contains("[no progress"), "{report}");
-}
-
-/// Two thinking-only turns in a row escalate the nudge itself.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn two_thinking_only_turns_escalate_the_nudge() {
+async fn two_empty_answers_are_reasked_and_the_third_attempt_runs() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "esc_t").await;
     let dead = "\n\n";
@@ -8035,12 +7818,11 @@ async fn two_thinking_only_turns_escalate_the_nudge() {
         .remove(0)
         .result;
     assert!(until_passes(&s, 3).await, "the chain did not finish");
-    let nudge = s.request(2);
-    assert!(
-        nudge.contains("[no progress — 2 answers in a row ran nothing]"),
-        "{nudge}"
-    );
-    assert!(nudge.contains("were only thinking"), "{nudge}");
+    for n in [1, 2] {
+        assert_eq!(last_content(&s, n), crate::model_format::default::REPORT_NO_CALL);
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(s.passes_served(), 3, "the third attempt ended it");
 }
 
 const DRIVER_TASK: &str =
@@ -8444,6 +8226,7 @@ impl Provider for EchoWords {
             Ok(ProviderEvent::Token("hel".into())),
             Ok(ProviderEvent::Token("lo".into())),
             Ok(ProviderEvent::Token(format!(" from {}", self.0))),
+            Ok(ProviderEvent::Token(" <call name=\"done\"></call>".into())),
         ];
         Ok(Box::pin(futures_util::stream::iter(toks)))
     }
@@ -8588,7 +8371,7 @@ async fn an_ai_chat_holds_the_conversation_and_completes_through_its_provider() 
         .remove(0)
         .result;
     assert_eq!(
-        r["response"], "hello from m-small",
+        r["response"], "hello from m-small <call name=\"done\"></call>",
         "no model on the chat: the provider's default: {r}"
     );
     let rec = kernel.resolve_target("chat1").unwrap().record();
@@ -8653,7 +8436,7 @@ async fn an_ai_chat_holds_the_conversation_and_completes_through_its_provider() 
         .await
         .remove(0)
         .result;
-    assert_eq!(r["response"], "hello from m-big", "{r}");
+    assert_eq!(r["response"], "hello from m-big <call name=\"done\"></call>", "{r}");
     let rows = kernel
         .operator_send(vec![Item::new(
             AgentId::from("chat1"),

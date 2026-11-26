@@ -138,11 +138,13 @@ pub(crate) enum Section {
     Working,
     /// The reason of the harness's `stop` (`{n}` attempts); not a system section.
     StopReason,
+    /// The report that re-asks an answer with no call; not a system section.
+    NoCall,
 }
 
 impl Section {
     /// Every section, in the order of the enum.
-    pub(crate) const ALL: [Self; 10] = [
+    pub(crate) const ALL: [Self; 11] = [
         Self::Env,
         Self::Send,
         Self::Reflect,
@@ -153,6 +155,7 @@ impl Section {
         Self::LineSummary,
         Self::Working,
         Self::StopReason,
+        Self::NoCall,
     ];
 }
 

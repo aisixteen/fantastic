@@ -51,10 +51,8 @@
 //!
 //! - `{type:"status", source, client_id, ts, phase, detail}` where `phase` ∈
 //!   `queued|thinking|streaming|retrying` while a call runs; a call ENDS on
-//!   `done` (reason `ok`, `cancelled`, `nothing_to_await`), `failed` (reason
-//!   `error`, `timeout`, `gave_up`), `stalled` (reason `dead_turn`: no reply) or
-//!   `awaiting` (the chain waits on its own calls, messages, answers or jobs);
-//!   outside a call, `paused` (the pause verb, or a boot whose store says paused)
+//!   `done` (reason `ok`, `cancelled`) or `failed` (reason `error`, `timeout`,
+//!   `gave_up`); outside a call, `paused` (the pause verb, or a boot whose store says paused)
 //!   and `idle` (a resume with nothing held).
 //! - `{type:"token", text, source, client_id}` — one per chunk.
 //! - `{type:"done", source, client_id}` — final event.
