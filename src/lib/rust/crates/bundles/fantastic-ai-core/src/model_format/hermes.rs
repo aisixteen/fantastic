@@ -28,7 +28,9 @@
 //! space, non-ASCII as it is. Leaves are text: the internal form types nothing
 //! (`tool_parse::typed` does, at the router), so a number, `true` or `false` a model
 //! writes becomes that literal text (`arbitrary_precision` keeps a number's text); a
-//! `null` becomes the empty tag, read as null where the schema allows null.
+//! `null` becomes the empty tag, read as null where the schema allows null — but a
+//! `reply_to` of `null` becomes the internal discard, `<reply_to>null</reply_to>`, and
+//! renders back as `null`.
 //!
 //! The cut head needs the name and the target out of an incomplete JSON text. No
 //! maintained partial-JSON crate says which strings were complete (each completes the
@@ -123,6 +125,11 @@ pub(crate) const CALL_OPEN: &str = "<tool_call>";
 /// See [`CALL_OPEN`].
 pub(crate) const CALL_CLOSE: &str = "</tool_call>";
 /// A reply body is wrapped in these, each on its own line (Q13).
+/// The internal form's discard for `reply_to`: the word `null`
+/// (`<reply_to>null</reply_to>`, as the default type's how-to spells it). A hermes
+/// `"reply_to": null` reads as it, and renders back as the JSON `null`.
+const REPLY_TO_NULL: &str = "null";
+
 const RESPONSE_OPEN: &str = "<tool_response>";
 const RESPONSE_CLOSE: &str = "</tool_response>";
 
@@ -331,7 +338,11 @@ fn write_call(name: &str, arguments: &Map<String, Value>) -> String {
         let mut routing = Map::new();
         for key in ROUTING {
             if let Some(v) = arguments.get(key) {
-                routing.insert(key.to_string(), v.clone());
+                let v = match v {
+                    Value::String(s) if key == "reply_to" && s == REPLY_TO_NULL => Value::Null,
+                    _ => v.clone(),
+                };
+                routing.insert(key.to_string(), v);
             }
         }
         let mut payload = match arguments.get("payload") {
@@ -996,7 +1007,11 @@ fn send_args(
     let mut out = Map::new();
     for key in ROUTING {
         if let Some(v) = routing.get(key) {
-            out.insert(key.to_string(), text_of(v));
+            let v = match v {
+                Value::Null if key == "reply_to" => Value::String(REPLY_TO_NULL.to_string()),
+                _ => text_of(v),
+            };
+            out.insert(key.to_string(), v);
         }
     }
     let mut p: Map<String, Value> = payload

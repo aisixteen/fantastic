@@ -162,25 +162,43 @@ fn roundtrip_reply_to() {
         }
         round_trip(&send(&args), &[("send", args.clone())]);
     }
-    // a JSON `null` a model writes is the notation's null, the empty tag: a
-    // `reply_to` of nobody (the router discards the reply), and a record field the
-    // router reads as null where its schema allows null
+    // a JSON `null` a model writes in a record field is the notation's null, the
+    // empty tag the router reads as null where its schema allows null
     let text = h_call(
-        r#"{"name": "send", "arguments": {"routing": {"target_id": "kernel", "reply_to": null}, "payload": {"type": "update_agent", "id": "hour_ai", "credentials": null}}}"#,
+        r#"{"name": "send", "arguments": {"routing": {"target_id": "kernel"}, "payload": {"type": "update_agent", "id": "hour_ai", "credentials": null}}}"#,
     );
     let outs = joined(run(&[text.as_str()]));
     let internal = bytes(&outs);
-    assert!(internal.contains("<reply_to></reply_to>"), "{internal}");
     assert!(
         internal.contains("<credentials></credentials>"),
         "{internal}"
     );
-    let want = json!({"target_id": "kernel", "reply_to": "",
+    let want = json!({"target_id": "kernel",
                       "payload": {"type": "update_agent", "id": "hour_ai", "credentials": ""}});
     assert_eq!(
         calls(&internal),
         vec![("send".to_string(), obj(&want).clone())]
     );
+}
+
+// R2b: a hermes `"reply_to": null` is the internal discard, the word the default type
+// writes (`<reply_to>null</reply_to>`), not an empty tag; the stored call renders back
+// as the JSON `null` the model wrote.
+#[test]
+fn reply_to_null_is_the_internal_discard() {
+    let json_call = r#"{"name": "send", "arguments": {"routing": {"target_id": "solver_1", "reply_to": null}, "payload": {"type": "send", "text": "go"}}}"#;
+    let outs = joined(run(&[h_call(json_call).as_str()]));
+    let internal = bytes(&outs);
+    assert!(internal.contains("<reply_to>null</reply_to>"), "{internal}");
+    let want = json!({"target_id": "solver_1", "reply_to": "null",
+                      "payload": {"type": "send", "text": "go"}});
+    let got = calls(&internal);
+    assert_eq!(got, vec![("send".to_string(), obj(&want).clone())]);
+    // the same call as the default type stores it
+    let typed = send(&want);
+    assert_eq!(calls(&typed), got);
+    assert_eq!(json_line(&Hermes.render(&internal)), serde_json::from_str::<Value>(json_call).expect("json"));
+    assert_eq!(json_line(&Hermes.render(&typed))["arguments"]["routing"]["reply_to"], Value::Null);
 }
 
 // R3

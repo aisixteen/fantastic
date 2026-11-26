@@ -43,7 +43,7 @@ sys.path.insert(
 )
 from helpers.kernel import home
 from helpers import add_lines, creds, lines, memory, probe_agent, relay, verdict  # noqa: E402
-from helpers.ai import CHAT_MODULE  # noqa: E402
+from helpers.ai import CHAT_MODULE, KNOBS, split_record  # noqa: E402
 from helpers.lines import is_unknown  # noqa: E402
 from helpers.ai import IDLE_END, QuietWatch  # noqa: E402
 from tests.agentic_advanced.E30_subai import probe as P  # noqa: E402
@@ -72,15 +72,28 @@ def solver_instructions(k: int) -> str:
     )
 
 
+#: The plug's record split as `brain` and `brain_prov` were made from it (`split_record`,
+#: #632): the provider's fields, and the chat's (its request knobs among them).
+_PROV_FIELDS, _CHAT_FIELDS = split_record(P.BK.record())
 #: What the creator copies from `brain`'s record into each solver (a CHAT: the endpoint
-#: and key are its provider's, named by `provider_id`): the handler, the model (the
+#: and key are its provider's, named by `provider_id`): the model (the
 #: chat's: it names it on each `complete`; the provider uses the call's model or its
 #: `default_model` setting, never its own record's), the provider, the conversation
-#: store and the window. A backend whose record names no model copies none.
-COPY = ["handler_module", *(["model"] if "model" in P.BK.record() else []),
-        "provider_id", "memory_store_id", "context_window"]
-#: …and into each solver's PROVIDER (copied from `brain_prov`): every field the plug put there
-PROV_COPY = [*P.BK.record(), "memory_store_id"]
+#: store, the window and the request knobs the plug sets (`max_tokens` bounds a turn
+#: inside the server's window). A backend whose record names no model copies none.
+#: NOT `handler_module`: the shells are created as chats (`CHAT_MODULE`) and the kernel
+#: never lets any caller change an agent's handler (structure fields are not updatable).
+COPY = [*(["model"] if "model" in _CHAT_FIELDS else []),
+        "provider_id", "memory_store_id", "context_window",
+        *(k for k in KNOBS if k in _CHAT_FIELDS)]
+#: …and into each solver's PROVIDER (copied from `brain_prov`): the plug's provider
+#: fields only — a request knob is the chat's, and a provider refuses it (#632)
+PROV_COPY = [*_PROV_FIELDS, "memory_store_id"]
+#: THE KEY LINE THE CHAIN NEEDS (as E31): `<solver_k>_prov` reads its key through the
+#: forced `creds: get`, and every ancestor whose tree does not hold the key store caps
+#: that call — the creator and the solver each hold the same line. The operator writes
+#: the creator's beside its `create` line; the creator hands each solver its own.
+KEY_LINE = {creds.CREDS: creds.GET}
 
 TASK = (
     "You are the CREATOR here — the mind building the structure. I am going to walk "
@@ -117,9 +130,12 @@ TASK = (
     + ". Set `description` to what the solver is for "
     "(solver k holds the ledger of `oracle_k`). Give each solver this `can`:\n"
     "  `{\"<oracle_k>\": {\"call\": [\"*\"]}, \"notes\": {\"call\": [\"*\"]}, "
-    "\"memory\": {\"call\": [\"*\"]}, \"<solver_j>\": {\"call\": [\"send\"]}, "
-    "\"<solver_i>\": {\"call\": [\"send\"]}}` — its own oracle only, `notes`, the store "
-    "its conversation lives in (`memory`), and `send` on EACH of the two other "
+    "\"memory\": {\"call\": [\"*\"]}, \"creds\": {\"call\": [\"get\"]}, "
+    "\"<solver_j>\": {\"call\": [\"send\"]}, \"<solver_i>\": {\"call\": [\"send\"]}}` — "
+    "its own oracle only, `notes`, the store its conversation lives in (`memory`), the "
+    "key store line (its provider reads its key through its own `creds` line, and the "
+    "solver is that provider's ancestor, so the call passes only when the solver holds "
+    "the line too: hand it the one you hold), and `send` on EACH of the two other "
     "solvers.\n"
     "That is: solver k reaches its own oracle and both peers; its provider is below "
     "it. You are their parent, so you reach them with no line.\n\n"
@@ -223,7 +239,7 @@ async def wire_builder(root, aid: str) -> None:
     `create` line with a narrower `who` does not let it hand out lines on the agents
     it reaches; a literal line does). Then, before the model, the writer-subset wall:
     a hand holding the creator's lines may not put a line it lacks into a solver."""
-    await add_lines(root, aid, creator_create(aid))
+    await add_lines(root, aid, {**creator_create(aid), **KEY_LINE})
     for k, sid in enumerate(SOLVERS):
         r = (await root.send([{"target": root.id, "payload": {
             "type": "create_agent", "parent_id": aid, "id": sid,
@@ -234,12 +250,12 @@ async def wire_builder(root, aid: str) -> None:
     for oid in ORACLES:
         ORACLE_BEFORE[oid] = await asyncio.to_thread(root.record, oid)
     # A hand with the creator's exact lines (and so the same `create` line) fills a
-    # shell with a line on the key store, which it holds nothing on: refused, and the
-    # shell is unchanged.
+    # shell with every verb on the key store, where it holds only `get`: refused, and
+    # the shell is unchanged.
     can = (await asyncio.to_thread(root.record, aid)).get("can") or {}
     await probe_agent(root, "creator_hand", can=can)
     r = await relay(root, "creator_hand", "kernel", {
-        "type": "update_agent", "id": SOLVERS[0], "can": {creds.CREDS: creds.GET}})
+        "type": "update_agent", "id": SOLVERS[0], "can": {creds.CREDS: lines.ALL}})
     assert ((r.get("reason") == "not_allowed" and r.get("arg") == "can")
             or is_unknown(r, creds.CREDS)), f"a line the writer lacks was handed out: {r}"
     shell = await asyncio.to_thread(root.record, SOLVERS[0])
@@ -400,6 +416,7 @@ async def main() -> None:
         prefix="multisubai_build_",
         sub_ais=list(SOLVERS),
         wire_builder=wire_builder,
+        handed=KEY_LINE,
     )
     sys.exit(0 if ok else 1)
 
