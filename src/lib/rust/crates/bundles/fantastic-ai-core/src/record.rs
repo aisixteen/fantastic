@@ -7,7 +7,9 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
+
+use crate::constants::DEFAULT_THINKING_BUDGET;
 
 /// How the conversation is fitted into the window.
 #[derive(Debug, JsonSchema)]
@@ -242,7 +244,7 @@ pub struct RequestKnobs {
     /// How much the model wants to think (xhigh needs a thinking_token_budget).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
-    /// The hard cap on thinking tokens, below max_tokens; unset, a turn sends the backend's default fitted to the call.
+    /// The hard cap on thinking tokens per pass, below max_tokens; absent, 8192 (half of max_tokens when that is lower); null, no cap.
     #[schemars(range(min = 1))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_token_budget: Option<i64>,
@@ -287,13 +289,27 @@ pub const KNOBS: [&str; 13] = [
     "max_tokens",
 ];
 
-/// The knobs a chat's record sets (a null is unset), as a `complete` carries them.
+/// The knobs a chat's record sets (a null is unset), as a `complete` carries them, with
+/// THE THINKING CAP (#782) every pass carries: the record's `thinking_token_budget`; when
+/// the record names none, [`DEFAULT_THINKING_BUDGET`] — half the chat's `max_tokens` when
+/// that is lower, so the cap can fire; a `null` on the record is no cap. One field holds
+/// all three: absent (the default), a number (the chat's), null (none).
 #[must_use]
 pub fn knobs_of(meta: &Map<String, Value>) -> Map<String, Value> {
-    KNOBS
+    let mut knobs: Map<String, Value> = KNOBS
         .iter()
         .filter_map(|k| meta.get(*k).filter(|v| !v.is_null()).map(|v| ((*k).to_string(), v.clone())))
-        .collect()
+        .collect();
+    if !meta.contains_key("thinking_token_budget") {
+        let fitted = match meta.get("max_tokens").and_then(Value::as_i64) {
+            Some(m) => DEFAULT_THINKING_BUDGET.min(m.div_euclid(2)),
+            None => DEFAULT_THINKING_BUDGET,
+        };
+        if fitted >= 1 {
+            knobs.insert("thinking_token_budget".into(), json!(fitted));
+        }
+    }
+    knobs
 }
 
 /// A write a chat's knobs cannot honour, on the MERGED record: a thinking budget not

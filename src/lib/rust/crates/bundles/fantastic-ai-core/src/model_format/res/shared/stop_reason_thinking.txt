@@ -1,0 +1,1 @@
+The thinking passed its budget of {budget} tokens twice, so the harness stopped the turn.

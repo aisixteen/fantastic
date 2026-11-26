@@ -15,7 +15,9 @@
 //! foreign for the pass's model type is re-asked, up to [`CALL_RETRIES`] times, with
 //! the failed answer and its report; nothing of a failed attempt is stored or routed.
 //! After the last one failed the harness stops the turn with the `stop` call
-//! ([`Generation::Stopped`]).
+//! ([`Generation::Stopped`]). An attempt whose thinking the harness cut at the chat's
+//! cap (`stop_reason` [`THINKING_CUT`], #782) is re-asked ONCE with a short "answer
+//! now" note and logged as a `retry`; a second cut stops the turn the same way.
 
 use crate::assembly::assemble_messages;
 use crate::constants::CALL_RETRIES;
@@ -27,7 +29,7 @@ use crate::model_format::Out;
 use crate::provider::{Provider, ProviderError, ProviderEvent};
 use crate::state::BackendState;
 use crate::stream_parts::{cut_marker, PartSplitter};
-use crate::think::without_thinking;
+use crate::think::{without_thinking, THINKING_CUT};
 use crate::used::{Accepted, Counts, Landed, Window};
 use fantastic_kernel::{current_task, AgentId, Kernel, TaskId};
 use futures_util::StreamExt;
@@ -398,11 +400,13 @@ pub async fn run_generation(
         // THE HARNESS STOP (1.8): every attempt was malformed. The model is not asked
         // again; the turn's call is the `stop`, its reason worded by the harness. Its
         // row's `used` has nothing accepted: every attempt is in `turn.rejected`.
-        Seq::Stopped { errors, .. } => {
-            let reason = crate::model_format::fill(
-                (cur.decl.texts)(crate::model_format::Section::StopReason),
-                &[("n", &errors.len().to_string())],
-            );
+        Seq::Stopped { errors, reason, .. } => {
+            let reason = reason.unwrap_or_else(|| {
+                crate::model_format::fill(
+                    (cur.decl.texts)(crate::model_format::Section::StopReason),
+                    &[("n", &errors.len().to_string())],
+                )
+            });
             let mut args = Map::new();
             args.insert("reason".to_string(), json!(reason));
             let content = crate::tool_parse::render_call("stop", &args);
@@ -747,6 +751,9 @@ enum Seq {
         errors: Vec<String>,
         window: Option<Window>,
         sent: Vec<Value>,
+        /// The harness's reason when a second thinking cut stopped it (#782); `None`,
+        /// the malformed attempts' (`res/<type>/stop_reason.txt`).
+        reason: Option<String>,
     },
     /// A failed attempt's reply named a model of another type: the pass for it.
     Restart(Box<Pass>),
@@ -780,6 +787,8 @@ async fn attempts(
     let mut reask: Vec<Value> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
     let mut window: Option<Window> = None;
+    let mut cut_before = false;
+    let mut reason: Option<String> = None;
     for attempt in 1..=1 + CALL_RETRIES {
         let mut request = typed_view.messages.clone();
         request.extend(reask.iter().cloned());
@@ -848,6 +857,12 @@ async fn attempts(
         if attempt == 1 {
             window = Window::of(&report);
         }
+        // THE THINKING CUT (#782): the harness ended a thinking past the chat's cap; the
+        // model is re-asked ONCE for its answer, a second cut stops the turn
+        let thought_cut = bad.is_none() && report.stop_reason.as_deref() == Some(THINKING_CUT);
+        if thought_cut {
+            bad = Some(thinking_note(crate::model_format::NOTICE_THINKING_CUT, view_of.meta));
+        }
         let Some(why) = bad else {
             // THE ACCEPTED ATTEMPT: calls, prose, reasoning or nothing. The pass
             // finished: its view's chain is kept, its pins go.
@@ -883,22 +898,42 @@ async fn attempts(
                 return Ok(Seq::Restart(Box::new(next)));
             }
         }
-        if attempt <= CALL_RETRIES {
-            caller
-                .discard(Some((attempt, errors.last().map_or("", String::as_str))))
-                .await;
-            reask.push(json!({"role": "assistant", "content": without_thinking(&raw)}));
-            reask.push(json!({"role": "user", "content": why}));
-        } else {
-            caller.discard(None).await;
+        if thought_cut && cut_before {
+            reason = Some(thinking_note(crate::model_format::STOP_REASON_THINKING, view_of.meta));
         }
+        cut_before |= thought_cut;
+        if attempt > CALL_RETRIES || reason.is_some() {
+            caller.discard(None).await;
+            break;
+        }
+        caller
+            .discard(Some((attempt, errors.last().map_or("", String::as_str))))
+            .await;
+        let answer = without_thinking(&raw);
+        // a cut pass is mostly thinking: an empty answer is no message
+        if !(thought_cut && answer.is_empty()) {
+            reask.push(json!({"role": "assistant", "content": answer}));
+        }
+        reask.push(json!({"role": "user", "content": why}));
     }
     drop(typed_view);
     Ok(Seq::Stopped {
         errors,
         window,
         sent,
+        reason,
     })
+}
+
+/// `template` (the re-ask after a thinking cut, [`crate::think::THINKING_CUT`], or the
+/// stop after a second one) naming the cap the chat's pass carried
+/// ([`crate::record::knobs_of`]).
+fn thinking_note(template: &str, meta: &Map<String, Value>) -> String {
+    let budget = crate::record::knobs_of(meta)
+        .get("thinking_token_budget")
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+    crate::model_format::fill(template, &[("budget", &budget.to_string())])
 }
 
 /// The calibration (`calib`, `reported`) from a sequence's window: the prompt the

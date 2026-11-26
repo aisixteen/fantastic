@@ -89,7 +89,7 @@ impl KeySource for Keys {
 }
 
 fn provider(endpoint: &str) -> VllmProvider {
-    let (sampling, _) = sampling(&Map::new());
+    let sampling = sampling(&Map::new());
     VllmProvider {
         agent_id: format!("agent@{endpoint}"),
         endpoint: endpoint.trim_end_matches('/').to_string(),
@@ -102,7 +102,7 @@ fn provider(endpoint: &str) -> VllmProvider {
         dialect: "vllm".to_string(),
         kv_ttl: KV_TTL,
         sampling,
-        explicit_budget: false,
+        budget: None,
         connect_timeout: CONNECT_TIMEOUT,
         read_clock: READ_TIMEOUT,
         report: ReportCell::default(),
@@ -658,11 +658,13 @@ async fn every_system_message_becomes_one_at_index_0() {
 }
 
 #[tokio::test]
-async fn the_default_budget_halves_on_a_smaller_call_and_none_below_the_floor() {
+async fn a_budget_not_below_the_turn_halves_and_none_below_the_floor() {
+    // the chat's default 8192 on a turn the window bounds at 8000 could never fire
     let (server, endpoint) = server_with(sse(&[delta(Some("stop"), json!({}))], true), 200).await;
-    let p = provider(&endpoint);
-    drain(&p, &hi(), None).await.expect("turn"); // max_tokens 8000 → min(16000, 4000)
-    drain(&p, &hi(), Some(2000)).await.expect("fold"); // → min(16000, 1000)
+    let mut p = provider(&endpoint);
+    p.budget = Some(8192);
+    drain(&p, &hi(), None).await.expect("turn"); // max_tokens 8000 → min(8192, 4000)
+    drain(&p, &hi(), Some(2000)).await.expect("fold"); // → min(8192, 1000)
     drain(&p, &hi(), Some(40)).await.expect("tiny"); // half is 20, under the floor → none
     let sent: Vec<Value> = bodies(&server)
         .await
@@ -674,15 +676,25 @@ async fn the_default_budget_halves_on_a_smaller_call_and_none_below_the_floor() 
     assert_eq!(last, Some(None));
 }
 
+/// A pass whose chat says `thinking_token_budget: null` (no cap, #782) sends none: the
+/// backend adds no default of its own.
 #[tokio::test]
-async fn an_explicit_budget_rules_the_turn_and_halves_on_a_side_call() {
+async fn a_pass_with_no_budget_sends_none() {
+    let (server, endpoint) = server_with(sse(&[delta(Some("stop"), json!({}))], true), 200).await;
+    let p = provider(&endpoint);
+    drain(&p, &hi(), None).await.expect("turn");
+    let body = bodies(&server).await.remove(0);
+    assert!(body.get("thinking_token_budget").is_none(), "{body}");
+    assert!(p.enforces_thinking_budget(), "vLLM ends the thinking itself");
+}
+
+#[tokio::test]
+async fn the_chats_budget_rules_the_turn_and_halves_on_a_side_call() {
     // the proxy runs' 8000: a main turn sends it as set; a fold summary bounded
     // at 2000 gets 1000 instead of being refused; a tiny call gets none
     let (server, endpoint) = server_with(sse(&[delta(Some("stop"), json!({}))], true), 200).await;
     let mut p = provider(&endpoint);
-    p.sampling
-        .insert("thinking_token_budget".into(), json!(8000));
-    p.explicit_budget = true;
+    p.budget = Some(8000);
     p.max_tokens = 65536;
     drain(&p, &hi(), None).await.expect("turn");
     drain(&p, &hi(), Some(2000)).await.expect("fold");
@@ -699,9 +711,7 @@ async fn an_explicit_budget_rules_the_turn_and_halves_on_a_side_call() {
 fn the_budget_goes_out_under_the_dialects_name() {
     // one explicit budget, three servers: each gets it under its own name
     let mut p = provider("http://unused/v1");
-    p.sampling
-        .insert("thinking_token_budget".into(), json!(4000));
-    p.explicit_budget = true;
+    p.budget = Some(4000);
     p.dialect = "vllm".into();
     let b = p.body(&hi(), 8000, false).expect("vllm body");
     assert_eq!(b["thinking_token_budget"], json!(4000));
@@ -735,7 +745,7 @@ pub(crate) fn at_the_write(meta: &Map<String, Value>, record: &Map<String, Value
 }
 
 #[test]
-fn validate_refuses_a_bad_dialect_and_a_llamacpp_pass_refuses_a_chats_budget() {
+fn validate_refuses_a_bad_dialect_and_the_harness_caps_a_llamacpp_pass() {
     let record = serde_json::Map::new();
     let meta = json!({"server_dialect": "bogus"});
     let msg = at_the_write(meta.as_object().unwrap(), &record).expect("refused");
@@ -749,14 +759,19 @@ fn validate_refuses_a_bad_dialect_and_a_llamacpp_pass_refuses_a_chats_budget() {
     });
     assert!(at_the_write(meta.as_object().unwrap(), &record).is_none());
 
-    // the budget is the chat's (#632): a pass on a llamacpp server that carries one is refused
+    // the budget is the chat's (#632): a llamacpp server takes none per request, so the
+    // harness cuts the stream at it (#782) instead of the pass ignoring it
     let pass = obj(json!({"endpoint": "http://x/v1", "model": "m", "context_window": 32768, "kv_slots": 2,
                          "kv_overflow": "evict", "server_dialect": "llamacpp", "thinking_token_budget": 4000}));
-    let Err(e) = configure(&AgentId::from("a"), &pass, Arc::new(NoKey)) else { panic!("refused") };
-    assert!(e.message.contains("llama.cpp takes the reasoning budget as a server flag"), "{e}");
-    let mut default = pass.clone();
-    default.remove("thinking_token_budget");
-    assert!(configure(&AgentId::from("a"), &default, Arc::new(NoKey)).is_ok());
+    let p = configure(&AgentId::from("a"), &pass, Arc::new(NoKey)).expect("configured");
+    assert_eq!(p.budget, Some(4000));
+    assert!(!p.enforces_thinking_budget(), "the harness enforces it");
+    for dialect in ["vllm", "strata"] {
+        let mut on = pass.clone();
+        on.insert("server_dialect".into(), json!(dialect));
+        let p = configure(&AgentId::from("a"), &on, Arc::new(NoKey)).expect("configured");
+        assert!(p.enforces_thinking_budget(), "{dialect} ends the thinking itself");
+    }
 }
 
 /// THE PASS'S KNOBS (#632): `configure` reads the sampling and the output budget from the
@@ -772,7 +787,11 @@ fn a_pass_takes_the_chats_knobs_and_defaults_the_rest() {
     assert_eq!(p.max_tokens, 4096);
     assert_eq!((p.sampling["temperature"].clone(), p.sampling["top_k"].clone()), (json!(0.9), json!(5)));
     assert_eq!((p.sampling["top_p"].clone(), p.sampling["seed"].clone()), (json!(0.8), json!(11)), "the default, and a passthrough knob");
-    assert!(!p.explicit_budget);
+    assert_eq!(p.budget, None, "no budget of the backend's own");
+    let mut capped = obj(base.clone());
+    capped.extend(obj(json!({"thinking_token_budget": 8192})));
+    let p = configure(&AgentId::from("a"), &capped, Arc::new(NoKey)).expect("configured");
+    assert_eq!((p.budget, p.max_tokens), (Some(8192), 32768), "the chat's budget, the window's bound");
     let p = configure(&AgentId::from("a"), &obj(base), Arc::new(NoKey)).expect("configured");
     assert_eq!(p.max_tokens, 32768, "260000 bounded by the window");
     assert_eq!(p.sampling["temperature"], json!(0.2));
@@ -1250,7 +1269,12 @@ async fn the_last_budget_is_per_agent_and_freed_on_delete() {
     }
     assert!(quiet >= 5, "the chain never settled");
     let mine = last(id.clone()).await;
-    assert!(mine.is_i64(), "the pass recorded what it sent: {mine}");
+    // the chat names no budget: its pass carries ai-core's default (#782)
+    assert_eq!(
+        mine,
+        json!(fantastic_ai_core::constants::DEFAULT_THINKING_BUDGET),
+        "the pass recorded what it sent"
+    );
     assert_eq!(
         last(sib.clone()).await,
         Value::Null,

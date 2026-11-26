@@ -35,6 +35,7 @@ use serde_json::{json, Map, Value};
 
 use crate::declared::{Complete, SetDefaultModel};
 use crate::provider::{Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, Unconfigured};
+use crate::think::{ThinkMeter, THINKING_CUT, THINK_CLOSE};
 
 /// The event type a provider's tokens carry on its stream.
 pub const TOKEN_EVENT: &str = "provider_token";
@@ -255,19 +256,32 @@ pub async fn complete(agent_id: &AgentId, args: &Complete, kernel: &Arc<Kernel>,
         Ok(s) => s,
         Err(e) => return failed(&rid, &e),
     };
+    let mut meter = harness_meter(args, provider.as_ref());
+    let mut cut = false;
     while let Some(ev) = stream.next().await {
         match ev {
             Ok(ProviderEvent::Token(text)) => {
+                let over = meter.as_mut().is_some_and(|m| m.feed(&text) && m.is_open());
                 kernel
                     .emit_quiet(agent_id, json!({"type": TOKEN_EVENT, "rid": rid, "text": text}))
                     .await;
+                if over {
+                    // the thinking ends here: its span is closed and the request dropped
+                    kernel
+                        .emit_quiet(agent_id, json!({"type": TOKEN_EVENT, "rid": rid, "text": THINK_CLOSE}))
+                        .await;
+                    cut = true;
+                    break;
+                }
             }
             Err(e) => return failed(&rid, &e),
         }
     }
+    drop(stream);
     let r = provider.report();
+    let stop_reason = if cut { Some(THINKING_CUT.to_string()) } else { r.stop_reason };
     let mut reply = json!({"rid": rid, "model": provider.model(), "prompt_tokens": r.prompt_tokens,
-           "completion_tokens": r.completion_tokens, "stop_reason": r.stop_reason});
+           "completion_tokens": r.completion_tokens, "stop_reason": stop_reason});
     // the cache counts, only when the endpoint has them
     for (key, n) in [("cache_read", r.cache_read), ("cache_write", r.cache_write)] {
         if let Some(n) = n {
@@ -275,6 +289,19 @@ pub async fn complete(agent_id: &AgentId, args: &Complete, kernel: &Arc<Kernel>,
         }
     }
     reply
+}
+
+/// THE HARNESS THINKING CAP (#782): a meter for a chat's TURN (no `max_tokens` of its
+/// own: a side call is bounded by that) whose knobs carry a `thinking_token_budget` the
+/// provider's server cannot enforce. Past the cap, [`complete`] closes the thinking span,
+/// drops the request and reports `stop_reason` [`THINKING_CUT`]; the chat re-asks once
+/// for the answer (`agent_loop::attempts`).
+fn harness_meter(args: &Complete, provider: &dyn Provider) -> Option<ThinkMeter> {
+    if args.max_tokens.is_some() || provider.enforces_thinking_budget() {
+        return None;
+    }
+    let budget = args.knobs.as_ref()?.thinking_token_budget?;
+    Some(ThinkMeter::new(budget))
 }
 
 fn failed(rid: &str, e: &ProviderError) -> Value {

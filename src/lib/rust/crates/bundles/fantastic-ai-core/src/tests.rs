@@ -7344,6 +7344,9 @@ mod stall;
 /// The `stop` call: the harness's and the model's (#766).
 #[path = "tests_stopped.rs"]
 mod stopped;
+/// The thinking cap per pass and the harness cut (#782).
+#[path = "tests_thinking_cap.rs"]
+mod thinking_cap;
 /// The pass path of a turn and of its helpers; retries inside the turn (#766).
 #[path = "tests_turn_retry.rs"]
 mod turn_retry;

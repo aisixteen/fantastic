@@ -243,6 +243,27 @@ fn the_body_sends_no_tools_and_only_what_the_record_set() {
     assert!(b.get("thinking").is_none());
 }
 
+/// THE CHAT'S THINKING CAP (#782) on the API's `budget_tokens`: the record's
+/// `thinking_budget` turns budgeted thinking on, the pass's cap bounds it, and no cap
+/// leaves it as the record names it. The API ends that thinking; the adaptive mode takes
+/// no budget, so the harness cuts it.
+#[test]
+fn the_chats_thinking_cap_bounds_budget_tokens() {
+    let of = |v: Value| budget_tokens_of(v.as_object().unwrap());
+    assert_eq!(of(json!({"thinking_budget": 16000, "thinking_token_budget": 8192})), Some(8192));
+    assert_eq!(of(json!({"thinking_budget": 2048, "thinking_token_budget": 8192})), Some(2048));
+    assert_eq!(of(json!({"thinking_budget": 4096})), Some(4096));
+    assert_eq!(of(json!({"thinking_token_budget": 8192})), None, "the cap turns no thinking on");
+    let mut p = provider("http://unused", Arc::new(NoKey));
+    p.max_tokens = 65536;
+    p.thinking_budget = of(json!({"thinking_budget": 16000, "thinking_token_budget": 8192}));
+    let b = p.body(&[json!({"role": "user", "content": "hi"})], None);
+    assert_eq!(b["thinking"], json!({"type": "enabled", "budget_tokens": 8192}));
+    assert!(p.enforces_thinking_budget());
+    p.thinking_display = Some("summarized".into());
+    assert!(!p.enforces_thinking_budget(), "adaptive thinking: the harness cuts it");
+}
+
 #[tokio::test]
 async fn the_key_rides_as_x_api_key_only_when_named() {
     let mut events = vec![start(), text("ok")];

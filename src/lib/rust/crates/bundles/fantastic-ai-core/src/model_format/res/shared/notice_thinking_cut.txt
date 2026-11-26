@@ -1,0 +1,1 @@
+Your thinking passed its budget of {budget} tokens and was cut. Think no further: answer now.

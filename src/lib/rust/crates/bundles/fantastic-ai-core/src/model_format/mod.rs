@@ -249,6 +249,10 @@ pub(crate) const NOTICE_SUMMARY: &str = include_str!("res/shared/notice_summary.
 pub(crate) const NOTICE_OMITTED: &str = include_str!("res/shared/notice_omitted.txt");
 /// See [`NOTICE_HEAD`].
 pub(crate) const NOTICE_STRIPPED: &str = include_str!("res/shared/notice_stripped.txt");
+/// The re-ask after the harness cut a pass's thinking at its cap (`{budget}`, #782).
+pub(crate) const NOTICE_THINKING_CUT: &str = include_str!("res/shared/notice_thinking_cut.txt");
+/// The harness's `stop` reason after a second thinking cut in one turn (`{budget}`, #782).
+pub(crate) const STOP_REASON_THINKING: &str = include_str!("res/shared/stop_reason_thinking.txt");
 
 /// A shared section's text, `None` for one that is the type's own.
 pub(crate) fn shared_text(s: Section) -> Option<&'static str> {

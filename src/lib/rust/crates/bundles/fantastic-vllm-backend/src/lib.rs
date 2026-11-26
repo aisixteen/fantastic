@@ -75,16 +75,16 @@ const CFG: BackendConfig = BackendConfig {
 /// THE SAMPLING A REQUEST SENDS: the calling chat's knobs (#632: the request knobs are
 /// the chat's, sent with each `complete`), each one the chat leaves out at this default,
 /// in python's key order — the order the request body lists them in. `reasoning_effort`
-/// is a CHAT-TEMPLATE input (a soft steer on how much the model wants to think);
-/// `thinking_token_budget` is the HARD limit, which a medium-effort agent turn (~900
-/// thinking tokens) only reaches on a runaway. vLLM takes `reasoning_effort` low, medium
-/// or xhigh ("high" answers 400): the chat's record declares that set.
-const SAMPLING_DEFAULTS: [(&str, Defaulted); 5] = [
+/// is a CHAT-TEMPLATE input (a soft steer on how much the model wants to think). The
+/// HARD limit, `thinking_token_budget`, is the chat's alone: every chat pass carries one
+/// unless its record says `null` (ai-core's default, #782), and vLLM enforces it.
+/// vLLM takes `reasoning_effort` low, medium or xhigh ("high" answers 400): the chat's
+/// record declares that set.
+const SAMPLING_DEFAULTS: [(&str, Defaulted); 4] = [
     ("temperature", Defaulted::F(0.2)),
     ("top_p", Defaulted::F(0.8)),
     ("top_k", Defaulted::I(20)),
     ("reasoning_effort", Defaulted::S("medium")),
-    ("thinking_token_budget", Defaulted::I(16000)),
 ];
 
 /// A sampling default.
@@ -442,9 +442,8 @@ struct VllmProvider {
     /// The effective sampling: the chat's knobs over the defaults, plus any
     /// PASSTHROUGH knob the chat set.
     sampling: Map<String, Value>,
-    /// Whether `thinking_token_budget` came from the CHAT (the caller's
-    /// statement — never touched) or from the default (ours to fit per call).
-    explicit_budget: bool,
+    /// The pass's `thinking_token_budget` (the chat's knob); `None`, no cap.
+    budget: Option<i64>,
     connect_timeout: f64,
     /// THE READ CLOCK: the longest the server may go without a byte, headers
     /// included — the record's `stream_idle_seconds`, else `read_timeout` (#177).
@@ -456,26 +455,21 @@ impl VllmProvider {
     /// The `thinking_token_budget` to send on a call bounded by `call_max`
     /// (python `VllmProvider._budget_for`):
     ///
-    /// - a MAIN turn with an EXPLICIT budget sends it as set — the chat's write
-    ///   keeps it below its `max_tokens`, so it can fire;
-    /// - otherwise (the DEFAULT on a main turn, or any budget on a bounded
-    ///   SIDE CALL such as a fold summary) it is `min(budget, call_max / 2)`,
-    ///   so at least half of the call's output is left for the answer (a rule
-    ///   of thumb, not tuned) — an explicit 8000 on a ~2000-token fold summary
-    ///   becomes 1000 instead of refusing the fold;
+    /// - a MAIN turn sends the chat's budget as it carries it when it is below
+    ///   `call_max` — the chat keeps it below its `max_tokens`, so it can fire;
+    /// - otherwise (a main turn bounded at or below it by the server's window, or
+    ///   any budget on a bounded SIDE CALL such as a fold summary) it is
+    ///   `min(budget, call_max / 2)`, so at least half of the call's output is
+    ///   left for the answer (a rule of thumb, not tuned) — 8192 on a ~2000-token
+    ///   fold summary becomes 1000 instead of refusing the fold;
     /// - below [`BUDGET_FLOOR`] NO budget is sent at all: a few tokens of
     ///   thinking is no thinking — the model stops with thinking only and no
     ///   answer (a dead turn).
     fn budget_for(&self, call_max: i64, side_call: bool) -> Result<Option<i64>, ProviderError> {
-        let Some(v) = self
-            .sampling
-            .get("thinking_token_budget")
-            .filter(|v| !v.is_null())
-        else {
+        let Some(budget) = self.budget else {
             return Ok(None);
         };
-        let budget = v.as_i64().unwrap_or_default();
-        if self.explicit_budget && !side_call {
+        if !side_call && budget < call_max {
             return Ok(Some(budget));
         }
         let adapted = budget.min(call_max.div_euclid(2));
@@ -623,6 +617,12 @@ impl Provider for VllmProvider {
 
     fn clear_stop_reason(&self) {
         self.report.lock().expect("report poisoned").stop_reason = None;
+    }
+
+    /// vllm and strata take the budget per request and end the thinking at it; llama.cpp
+    /// takes it only as a server flag, so the harness cuts its stream (#782).
+    fn enforces_thinking_budget(&self) -> bool {
+        self.dialect != "llamacpp"
     }
 
     async fn chat(
@@ -1049,9 +1049,8 @@ fn required_int(meta: &Map<String, Value>, key: &str) -> Result<i64, ProviderErr
 
 /// The effective sampling — the pass's knobs (the calling chat's, laid over the
 /// provider's record by `complete`) over the defaults, then any PASSTHROUGH knob the
-/// chat set — and whether `thinking_token_budget` was set by the CHAT (explicit: sent
-/// as is) or defaulted (ours to adapt).
-fn sampling(meta: &Map<String, Value>) -> (Map<String, Value>, bool) {
+/// chat set.
+fn sampling(meta: &Map<String, Value>) -> Map<String, Value> {
     let mut eff = Map::new();
     for (k, d) in SAMPLING_DEFAULTS {
         let v = meta.get(k).filter(|v| !v.is_null()).cloned().unwrap_or_else(|| d.value());
@@ -1062,10 +1061,7 @@ fn sampling(meta: &Map<String, Value>) -> (Map<String, Value>, bool) {
             eff.insert(k.to_string(), v.clone());
         }
     }
-    let explicit = meta
-        .get("thinking_token_budget")
-        .is_some_and(|v| !v.is_null());
-    (eff, explicit)
+    eff
 }
 
 /// A seconds field of the record (declared positive, with its default, in [`VllmRecord`]).
@@ -1100,7 +1096,8 @@ fn configure(
     meta: &Map<String, Value>,
     key: Arc<dyn KeySource>,
 ) -> Result<VllmProvider, ProviderError> {
-    let (sampling, explicit_budget) = sampling(meta);
+    let sampling = sampling(meta);
+    let budget = meta.get("thinking_token_budget").and_then(Value::as_i64);
     let Some(kv_overflow) = meta.get("kv_overflow").and_then(Value::as_str) else {
         return Err(ProviderError::value_error(format!(
             "{NAME}: `kv_overflow` is not on the agent record (update_agent <id> kv_overflow=…)"
@@ -1111,23 +1108,13 @@ fn configure(
         .and_then(Value::as_str)
         .unwrap_or("vllm")
         .to_string();
-    if dialect == "llamacpp" && explicit_budget {
-        return Err(ProviderError::value_error(format!(
-            "{NAME}: llama.cpp takes the reasoning budget as a server flag, not per request — \
-             unset the chat's thinking_token_budget (or use server_dialect strata/vllm)"
-        )));
-    }
     let window = required_int(meta, "context_window")?;
     // the chat's output budget, else the server's default for it: 260000, plus the chat's
     // thinking budget, never above the window (#495)
-    let explicit = meta
-        .get("thinking_token_budget")
-        .and_then(Value::as_i64)
-        .filter(|_| explicit_budget);
     let max_tokens = meta
         .get("max_tokens")
         .and_then(Value::as_i64)
-        .unwrap_or_else(|| default_max_tokens(explicit, window));
+        .unwrap_or_else(|| default_max_tokens(budget, window));
     Ok(VllmProvider {
         agent_id: agent_id.as_str().to_string(),
         endpoint: helpers::required_meta(meta, "endpoint", NAME)?
@@ -1142,7 +1129,7 @@ fn configure(
         dialect,
         kv_ttl: seconds(meta, "kv_ttl"),
         sampling,
-        explicit_budget,
+        budget,
         connect_timeout: seconds(meta, "connect_timeout"),
         read_clock: read_clock_of(meta, seconds(meta, "read_timeout")),
         report: ReportCell::default(),
