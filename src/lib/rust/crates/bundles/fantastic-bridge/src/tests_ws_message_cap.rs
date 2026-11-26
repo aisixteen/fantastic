@@ -106,8 +106,8 @@ async fn the_ws_transport_bounds_a_fragmented_message_by_the_one_frame_cap() {
 /// A one-shot relay leg (reconnect 0) dialling `port` as `A`, paired with `B`:
 /// a drop is terminal, so the end of its socket is observable.
 async fn one_shot_leg(kernel: &Arc<Kernel>, port: u16) -> Arc<RelayTransport> {
-    let no_password: PasswordReader = Arc::new(|| Box::pin(async { Ok(String::new()) }));
-    RelayTransport::connect(
+    let no_password: PasswordReader = Arc::new(|next| Box::pin(async move { next(Ok(String::new())).await }));
+    super::transport::relay::connected(
         &format!("ws://127.0.0.1:{port}"),
         "A",
         no_password,

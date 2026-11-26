@@ -10,8 +10,8 @@ use crate::constants::{BUDGET_FLOOR, NOTICE_ENVELOPE_RESERVE};
 use crate::context::{budget as agent_budget, recent_n as cfg_recent_n, resolve_context_window};
 use crate::events::to_caller;
 use crate::helpers::{agent_meta, now_secs};
-use crate::memory::{save_view, MemoryStoreError};
-use crate::model_format::pass::Pass;
+use crate::memory::MemoryStoreError;
+use crate::model_format::pass::{Pass, Pending};
 use crate::state::BackendState;
 use crate::strategies::{
     compact, fold::fold, is_known_strategy, strip::strip, truncate, ProjectionCtx,
@@ -44,6 +44,15 @@ pub enum ProjectFail {
     /// A fold's anchor cannot be known — the turn fails loud (python
     /// `member_anchor`'s `ValueError`).
     FoldAnchor(crate::folds::FoldAnchorError),
+    /// A summary's task answer has not come yet (#795): the projection's step sends
+    /// its request and runs the projection again ([`project_context`]).
+    Pending,
+}
+
+impl From<Pending> for ProjectFail {
+    fn from(_: Pending) -> Self {
+        Self::Pending
+    }
 }
 
 impl From<MemoryStoreError> for ProjectFail {
@@ -58,6 +67,7 @@ impl From<crate::strategies::fold::FoldFail> for ProjectFail {
             crate::strategies::fold::FoldFail::Store(e) => Self::Store(e),
             crate::strategies::fold::FoldFail::Summary(e) => Self::FoldSummary(e),
             crate::strategies::fold::FoldFail::Anchor(e) => Self::FoldAnchor(e),
+            crate::strategies::fold::FoldFail::Pending => Self::Pending,
         }
     }
 }
@@ -89,10 +99,45 @@ pub fn context_notice(
     )
 }
 
+/// What the projection's own reckoning gives ([`fit`]): the messages as they are (it did
+/// not fire), the `too_small` refusal with the event that says so, or the shaped body
+/// whose view row is written next.
+enum Fitted {
+    Unfired(Vec<Value>),
+    TooSmall { event: Value, refusal: Value },
+    Shaped(Shaped),
+}
+
+/// A projection that fired, before its view row is written.
+struct Shaped {
+    system_block: Vec<Value>,
+    notice: Value,
+    out_body: Vec<Value>,
+    proj: crate::strategies::Projection,
+    strat_name: String,
+    budget: i64,
+    calib: f64,
+    body_len: usize,
+}
+
+/// Who a projection is for, owned, so its steps carry it.
+#[derive(Clone)]
+struct For {
+    self_id: AgentId,
+    state: Arc<BackendState>,
+    kernel: Arc<Kernel>,
+    client_id: String,
+    name: &'static str,
+    model_window: i64,
+}
+
 /// Shape `messages` to fit the budget, prepend the notice, emit the `context`
-/// event. Returns `Ok(projected_model_messages)`, or `Err(error_value)` for
-/// the `too_small` failsafe / an unknown-strategy config error. Sets the
-/// public `state.projection` summary + the private `state.compaction_mark`.
+/// event — as STEPS (#795): the head read (a strip's seed is the stored view), the
+/// strategy's reckoning with its summaries asked as task requests
+/// ([`crate::model_format::pass::drive`]), then the view row written; `next` gets the
+/// pass back and `Ok(projected_model_messages)`, or the `too_small` failsafe / an
+/// unknown-strategy config error / a store or fold failure. Sets the public
+/// `state.projection` summary + the private `state.compaction_mark`.
 ///
 /// `store_len` is the DURABLE store's length behind `messages` (from
 /// [`crate::assembly::assemble_messages`]) — the index the reaction cursor is
@@ -101,17 +146,133 @@ pub fn context_notice(
 ///
 /// `pass`: the chat's pass path; a strategy that summarizes makes a task pass on it.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn project_context(
-    pass: &Pass,
+pub(crate) async fn project_context<R, F, Fut>(
+    pass: Pass,
     self_id: &AgentId,
     state: &Arc<BackendState>,
     kernel: &Arc<Kernel>,
     client_id: &str,
-    name: &str,
+    name: &'static str,
     model_window: i64,
     messages: Vec<Value>,
     store_len: usize,
-) -> Result<Vec<Value>, ProjectFail> {
+    rec: R,
+    next: F,
+) where
+    R: Send + 'static,
+    F: FnOnce(R, Pass, Result<Vec<Value>, ProjectFail>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let who = For {
+        self_id: self_id.clone(),
+        state: Arc::clone(state),
+        kernel: Arc::clone(kernel),
+        client_id: client_id.to_string(),
+        name,
+        model_window,
+    };
+    // A STRIP IS SEEDED FROM THE STORED VIEW: the head is read first (a step)
+    let strat = agent_meta(self_id, kernel)
+        .get("context_strategy")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if matches!(strat.as_deref(), Some("strip" | "fold")) {
+        crate::steps::head(self_id, kernel, (pass, who, messages, rec, next), move |(pass, who, messages, rec, next), r| async move {
+            if let Err(e) = r {
+                return next(rec, pass, Err(ProjectFail::Store(e))).await;
+            }
+            reckon(pass, who, messages, store_len, rec, next).await;
+        })
+        .await;
+    } else {
+        reckon(pass, who, messages, store_len, rec, next).await;
+    }
+}
+
+/// The strategy's reckoning run to its end (its summaries asked as task requests),
+/// then the projection's end ([`ended`]).
+async fn reckon<R, F, Fut>(pass: Pass, who: For, messages: Vec<Value>, store_len: usize, rec: R, next: F)
+where
+    R: Send + 'static,
+    F: FnOnce(R, Pass, Result<Vec<Value>, ProjectFail>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let (k, me) = (Arc::clone(&who.kernel), who.self_id.clone());
+    let w = who.clone();
+    let helper = move |pass: &Pass, _: &mut (R, F)| match fit(pass, &w, &messages) {
+        Err(ProjectFail::Pending) => Err(Pending),
+        other => Ok(other),
+    };
+    crate::model_format::pass::drive(k, me, pass, (rec, next), helper, move |(rec, next), pass, fitted| async move {
+        ended(pass, who, fitted, store_len, rec, next).await;
+    })
+    .await;
+}
+
+/// The projection's end: a refusal is said, a shaped body's view row is written (a
+/// step) and its state and event follow.
+async fn ended<R, F, Fut>(
+    pass: Pass,
+    who: For,
+    fitted: Result<Fitted, ProjectFail>,
+    store_len: usize,
+    rec: R,
+    next: F,
+) where
+    R: Send + 'static,
+    F: FnOnce(R, Pass, Result<Vec<Value>, ProjectFail>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let sh = match fitted {
+        Err(e) => return next(rec, pass, Err(e)).await,
+        Ok(Fitted::Unfired(m)) => return next(rec, pass, Ok(m)).await,
+        Ok(Fitted::TooSmall { event, refusal }) => {
+            to_caller(&who.kernel, &who.self_id, &who.client_id, event).await;
+            return next(rec, pass, Err(ProjectFail::Refusal(refusal))).await;
+        }
+        Ok(Fitted::Shaped(sh)) => sh,
+    };
+    // THE VIEW ARRAY, written by every projection: what the model sees, at what
+    // resolution — so the next turn (and the next process) rebuilds the same bytes.
+    // The fold rows this projection made go in the same append, before it (#766 RS5).
+    // `projection.view_ids` below is read after it, so it names the minted ids.
+    let ids: Vec<Value> = sh
+        .out_body
+        .iter()
+        .filter_map(|m| {
+            m.get("id")
+                .and_then(Value::as_i64)
+                .map(|id| json!({"id": id, "res": res_of(m)}))
+        })
+        .collect();
+    let why = format!("projection: {}", sh.strat_name);
+    let (me, k) = (who.self_id.clone(), Arc::clone(&who.kernel));
+    let folds = sh.proj.folds.clone();
+    crate::steps::save_view(&me, &k, &folds, &ids, sh.budget, &why, (pass, who, sh, rec, next), move |(pass, who, sh, rec, next), minted| async move {
+        match minted {
+            Ok(minted) => {
+                let out = shown(&who, sh, &minted, store_len).await;
+                next(rec, pass, Ok(out)).await;
+            }
+            Err(e) => next(rec, pass, Err(ProjectFail::Store(e))).await,
+        }
+    })
+    .await;
+}
+
+/// THE STRATEGY'S RECKONING, plain code over the pass's book (#795): the budget, the
+/// failsafe, the strategy, the final fit. [`ProjectFail::Pending`]: a summary's task
+/// answer has not come yet.
+fn fit(pass: &Pass, who: &For, messages: &[Value]) -> Result<Fitted, ProjectFail> {
+    let (self_id, state, kernel, client_id, name, model_window) = (
+        &who.self_id,
+        &who.state,
+        &who.kernel,
+        who.client_id.as_str(),
+        who.name,
+        who.model_window,
+    );
+    let messages = messages.to_vec();
     let meta = agent_meta(self_id, kernel);
     // EVERY SIZE IS OF THE BYTES THIS PASS'S TYPE IS SENT (`Pass::tokens`)
     let size = |m: &Value| pass.tokens(m);
@@ -130,13 +291,13 @@ pub(crate) async fn project_context(
             "trigger": TRIGGER,
             "calibration": round3(calib),
         }));
-        return Ok(messages);
+        return Ok(Fitted::Unfired(messages));
     }
     let system_block: Vec<Value> = messages.iter().take(1).cloned().collect();
     let body: Vec<Value> = messages.iter().skip(1).cloned().collect();
     if body.is_empty() {
         *state.projection.lock().expect("projection poisoned") = Some(json!({"fired": false}));
-        return Ok(messages);
+        return Ok(Fitted::Unfired(messages));
     }
     let sys_tokens = total(&system_block);
     let body_budget = b - sys_tokens;
@@ -152,11 +313,7 @@ pub(crate) async fn project_context(
         *state.projection.lock().expect("projection poisoned") =
             Some(json!({"fired": false, "too_small": true}));
         *state.compaction_mark.lock().expect("mark poisoned") = None;
-        to_caller(
-            kernel,
-            self_id,
-            client_id,
-            json!({
+        let event = json!({
                 "type": "context", "source": self_id.as_str(), "ts": now_secs(),
                 "phase": "too_small",
                 "detail": {
@@ -172,12 +329,11 @@ pub(crate) async fn project_context(
                         }),
                     "hint": hint,
                 },
-            }),
-        )
-        .await;
-        return Err(ProjectFail::Refusal(json!({
-            "error": format!("{name}: context_insufficient — {hint}")
-        })));
+            });
+        return Ok(Fitted::TooSmall {
+            event,
+            refusal: json!({"error": format!("{name}: context_insufficient — {hint}")}),
+        });
     }
     // RAW, as python's `rec.get("context_strategy", DEFAULT_STRATEGY)`: only an
     // ABSENT key means `compact`. `as_str().unwrap_or("compact")` was a fallback
@@ -218,11 +374,11 @@ pub(crate) async fn project_context(
         kernel,
         client_id,
     };
-    let proj = match strat_name.as_str() {
+    let mut proj = match strat_name.as_str() {
         "truncate" => truncate(&body, body_budget, &size),
-        "strip" => strip(&body, &pctx).await?,
-        "fold" => fold(&body, &pctx).await?,
-        _ => compact(&body, recent, body_budget, pass).await,
+        "strip" => strip(&body, &pctx),
+        "fold" => fold(&body, &pctx)?,
+        _ => compact(&body, recent, body_budget, pass)?,
     };
     let dropped_pre = body.len().saturating_sub(proj.body.len());
     let notice = context_notice(
@@ -241,7 +397,7 @@ pub(crate) async fn project_context(
     // last entry is the live turn. Taking from the front silently undoes the pin —
     // with a snug window the goal sentence would be absent from the projection
     // entirely, in both strategies.
-    let mut out_body = proj.body;
+    let mut out_body = std::mem::take(&mut proj.body);
     let over = |body: &[Value]| -> bool {
         let mut probe = system_block.clone();
         probe.push(notice.clone());
@@ -259,32 +415,43 @@ pub(crate) async fn project_context(
     while out_body.len() > 1 && over(&out_body) {
         out_body = out_body[1..].to_vec();
     }
-    // THE VIEW ARRAY, written by every projection: what the model sees, at what
-    // resolution — so the next turn (and the next process) rebuilds the same bytes.
-    // The fold rows this projection made go in the same append, before it (#766 RS5).
-    // `projection.view_ids` below is read after it, so it names the minted ids.
-    let minted = save_view(
-        self_id,
-        kernel,
-        &proj.folds,
-        &out_body
-            .iter()
-            .filter_map(|m| {
-                m.get("id")
-                    .and_then(Value::as_i64)
-                    .map(|id| json!({"id": id, "res": res_of(m)}))
-            })
-            .collect::<Vec<_>>(),
-        b,
-        &format!("projection: {strat_name}"),
-    )
-    .await?;
+    Ok(Fitted::Shaped(Shaped {
+        system_block,
+        notice,
+        out_body,
+        proj,
+        strat_name,
+        budget: b,
+        calib,
+        body_len: body.len(),
+    }))
+}
+
+/// A shaped projection whose view row is written: the minted fold ids shown, the
+/// state kept, the caller told; the messages of the request.
+async fn shown(
+    who: &For,
+    sh: Shaped,
+    minted: &std::collections::BTreeMap<i64, i64>,
+    store_len: usize,
+) -> Vec<Value> {
+    let (self_id, state, kernel, client_id) = (&who.self_id, &who.state, &who.kernel, who.client_id.as_str());
+    let Shaped {
+        system_block,
+        notice,
+        mut out_body,
+        proj,
+        strat_name,
+        budget: _,
+        calib,
+        body_len,
+    } = sh;
     // the folds' ids were minted in that append (#766, fold id order): this request
     // shows the ids the store holds
     for m in &mut out_body {
-        crate::folds::remap_ids(m, &minted);
+        crate::folds::remap_ids(m, minted);
     }
-    let dropped_n = body.len().saturating_sub(out_body.len());
+    let dropped_n = body_len.saturating_sub(out_body.len());
     let summarized = proj.summary.is_some();
     let reported = *state.reported.lock().expect("reported poisoned");
     *state.projection.lock().expect("projection poisoned") = Some(json!({
@@ -356,7 +523,7 @@ pub(crate) async fn project_context(
     let mut out = system_block;
     out.push(notice);
     out.extend(out_body);
-    Ok(out)
+    out
 }
 
 /// Read-model over the durable transcript: AFTER the last compaction notice

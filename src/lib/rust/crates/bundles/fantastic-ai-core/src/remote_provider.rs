@@ -63,68 +63,135 @@ fn store_of(agent_id: &AgentId, kernel: &Kernel) -> Option<AgentId> {
         .map(AgentId::from)
 }
 
-/// The newest `setting` row named `name` in the provider's store: its value.
-pub async fn setting_of(agent_id: &AgentId, kernel: &Arc<Kernel>, name: &str) -> Option<Value> {
-    let store = store_of(agent_id, kernel)?;
-    let r = kernel
-        .send(vec![Item::new(
-            store,
-            json!({"type": "read", "kinds": [SETTING], "match": {"name": name}, "order": "desc", "limit": 1}),
-        )])
-        .await;
-    r.first()?.result.get("rows")?.as_array()?.first()?.get("value").cloned()
+/// THE NEWEST `setting` ROW NAMED `name` in the provider's store, as a STEP (#795): one
+/// `read` to the store; `next` gets its value (`None`: no store, no such row, a refusal).
+pub async fn setting<R, F, Fut>(agent_id: &AgentId, kernel: &Arc<Kernel>, name: &str, rec: R, next: F)
+where
+    R: Send + 'static,
+    F: FnOnce(R, Option<Value>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let Some(store) = store_of(agent_id, kernel) else {
+        return next(rec, None).await;
+    };
+    let item = Item::new(
+        store,
+        json!({"type": "read", "kinds": [SETTING], "match": {"name": name}, "order": "desc", "limit": 1}),
+    );
+    crate::steps::call(kernel, item, rec, move |rec, out| async move {
+        let v = out.result.get("rows").and_then(Value::as_array).and_then(|r| r.first()).and_then(|r| r.get("value")).cloned();
+        next(rec, v).await;
+    })
+    .await;
 }
 
-/// Keep `value` as the provider's `name` setting (a `setting` row in its store). `Err` names why.
-async fn set_setting(agent_id: &AgentId, kernel: &Arc<Kernel>, name: &str, value: Value) -> Result<(), String> {
-    let store = store_of(agent_id, kernel).ok_or("the provider names no memory_store_id to keep its settings in")?;
-    let r = kernel
-        .send(vec![Item::new(
-            store,
-            json!({"type": "append", "rows": [{"kind": SETTING, "name": name, "value": value}]}),
-        )])
-        .await;
-    match r.first().map(|o| &o.result) {
-        Some(res) if res.get("error").is_none() => Ok(()),
-        Some(res) => Err(res["error"].as_str().unwrap_or("the store refused").to_string()),
-        None => Err("the store did not answer".to_string()),
-    }
+/// KEEP `value` as the provider's `name` setting (a `setting` row in its store), as a
+/// STEP (#795): `next` gets `Err` naming why it was not kept.
+async fn keep_setting<R, F, Fut>(agent_id: &AgentId, kernel: &Arc<Kernel>, name: &str, value: Value, rec: R, next: F)
+where
+    R: Send + 'static,
+    F: FnOnce(R, Result<(), String>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let Some(store) = store_of(agent_id, kernel) else {
+        return next(rec, Err("the provider names no memory_store_id to keep its settings in".to_string())).await;
+    };
+    let item = Item::new(
+        store,
+        json!({"type": "append", "rows": [{"kind": SETTING, "name": name, "value": value}]}),
+    );
+    crate::steps::call(kernel, item, rec, move |rec, out| async move {
+        let r = match out.result.get("error") {
+            None if out.status == Status::Completed => Ok(()),
+            None => Err(format!("the store did not answer: {}", out.status.as_str())),
+            Some(e) => Err(e.as_str().unwrap_or("the store refused").to_string()),
+        };
+        next(rec, r).await;
+    })
+    .await;
 }
 
-/// A provider's default model: the newest `default_model` setting in its store.
-pub async fn default_of(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Option<String> {
-    setting_of(agent_id, kernel, DEFAULT_FIELD)
-        .await?
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(String::from)
+/// A PROVIDER'S DEFAULT MODEL, as a STEP: the newest `default_model` setting in its store.
+pub async fn default_model<R, F, Fut>(agent_id: &AgentId, kernel: &Arc<Kernel>, rec: R, next: F)
+where
+    R: Send + 'static,
+    F: FnOnce(R, Option<String>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    setting(agent_id, kernel, DEFAULT_FIELD, rec, move |rec, v| {
+        next(rec, v.as_ref().and_then(Value::as_str).filter(|s| !s.is_empty()).map(String::from))
+    })
+    .await;
 }
 
-/// Keep `model` as the provider's default (a `setting` row in its store). `Err` names why.
-async fn set_default(agent_id: &AgentId, kernel: &Arc<Kernel>, model: &str) -> Result<(), String> {
-    set_setting(agent_id, kernel, DEFAULT_FIELD, json!(model)).await
+/// A PROVIDER'S KEPT USAGE (total, by_model, by_agent), as a STEP: the newest `usage`
+/// setting in its store. None: it has no store, or has kept none yet.
+pub async fn kept_usage<R, F, Fut>(agent_id: &AgentId, kernel: &Arc<Kernel>, rec: R, next: F)
+where
+    R: Send + 'static,
+    F: FnOnce(R, Option<Value>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    setting(agent_id, kernel, USAGE_FIELD, rec, move |rec, v| next(rec, v.filter(Value::is_object))).await;
 }
 
-/// A provider's kept usage (total, by_model, by_agent): the newest `usage` setting in its
-/// store. None: it has no store, or has kept none yet.
-pub async fn usage_of(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Option<Value> {
-    setting_of(agent_id, kernel, USAGE_FIELD).await.filter(Value::is_object)
-}
-
-/// Keep `usage` as the provider's usage (a `usage` setting row in its store). A provider
-/// with no store keeps none: `Ok`. `Err` names why a store refused.
-pub async fn set_usage(agent_id: &AgentId, kernel: &Arc<Kernel>, usage: &Value) -> Result<(), String> {
+/// KEEP `usage` as the provider's usage (a `usage` setting row in its store), as a
+/// STEP. A provider with no store keeps none: `Ok`. `Err` names why a store refused.
+pub async fn keep_usage<R, F, Fut>(agent_id: &AgentId, kernel: &Arc<Kernel>, usage: &Value, rec: R, next: F)
+where
+    R: Send + 'static,
+    F: FnOnce(R, Result<(), String>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
     if store_of(agent_id, kernel).is_none() {
-        return Ok(());
+        return next(rec, Ok(())).await;
     }
-    set_setting(agent_id, kernel, USAGE_FIELD, usage.clone()).await
+    keep_setting(agent_id, kernel, USAGE_FIELD, usage.clone(), rec, next).await;
 }
 
-/// For a provider that cannot ask its API for its models: `provider_verbs(…, NO_LIVE)`.
+/// For a provider that cannot ask its API for its models: `handle(…, NO_LIVE, …)`.
 pub const NO_LIVE: Option<LiveModels> = None;
 
-/// A provider's live model listing, as [`handle`] takes it.
-pub type LiveModels = fn() -> std::future::Ready<Result<Vec<String>, String>>;
+/// A provider's live model listing, as [`handle`] takes it: given the key read for the
+/// record's endpoint, the names the API serves.
+pub type LiveModels = fn(Arc<dyn crate::credentials::KeySource>) -> std::future::Ready<Result<Vec<String>, String>>;
+
+/// HOW A PROVIDER READS ITS KEY before a request: the name its refusals carry, and
+/// whether a record without `credentials` is refused rather than keyless. `None` in
+/// [`handle`]: a provider that takes no key.
+#[derive(Debug, Clone, Copy)]
+pub struct Keys {
+    /// The backend's name, the prefix of its refusals.
+    pub backend: &'static str,
+    /// A record without `credentials` is refused.
+    pub required: bool,
+}
+
+/// THE KEY OF A REQUEST TO THE RECORD'S `endpoint`, as a STEP: `next` gets it
+/// ([`crate::credentials::KeyReader::key`]); a provider that takes none gets no key.
+pub async fn key_of<R, F, Fut>(agent_id: &AgentId, kernel: &Arc<Kernel>, keys: Option<Keys>, rec: R, next: F)
+where
+    R: Send + 'static,
+    F: FnOnce(R, Arc<dyn crate::credentials::KeySource>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let endpoint = crate::helpers::agent_meta(agent_id, kernel)
+        .get("endpoint")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    match keys {
+        Some(k) => {
+            crate::credentials::key_reader(agent_id, kernel, k.backend, k.required)
+                .key(&endpoint, rec, next)
+                .await;
+        }
+        None => {
+            let none: Arc<dyn crate::credentials::KeySource> = Arc::new(crate::credentials::ReadKey::new(&endpoint, Ok(None)));
+            next(rec, none).await;
+        }
+    }
+}
 
 /// The names a provider's record lists in `models`.
 #[must_use]
@@ -135,102 +202,180 @@ pub fn listed_models(meta: &Map<String, Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// What a backend reads from its API before a pass's request, given the key and the
+/// pass's `complete` (its model chosen: the call's, else the default): the `complete`
+/// to run, or the verb's refusal. Its own I/O, in the verb's task.
+pub type Prepare = Box<
+    dyn FnOnce(Arc<dyn crate::credentials::KeySource>, Complete, Option<String>) -> futures_util::future::BoxFuture<'static, Result<Complete, Value>>
+        + Send,
+>;
+
 /// `complete`: one pass on the call's `model`, else the record's `default_model`, with the
-/// call's `knobs`. `build` makes the backend's provider from a record: the agent's, with the
-/// pass's `model` and the calling chat's knobs laid over it.
+/// call's `knobs` — as STEPS (#795): the default read, the key read, then the pass, its
+/// own I/O, in a task under this execution (its `cancel` and deadline end the stream);
+/// a model the server named becomes the default (a step), then `settle` settles it.
+/// `prepare`: what the backend reads from its API first. `build` makes the backend's
+/// provider from a record (the agent's, with the pass's `model` and the calling chat's
+/// knobs laid over it) and the key read.
 pub async fn complete_verb<B>(
     agent_id: &AgentId,
-    args: &Complete,
+    args: Complete,
     kernel: &Arc<Kernel>,
+    keys: Option<Keys>,
+    prepare: Option<Prepare>,
     build: B,
-) -> Value
-where
-    B: Fn(Map<String, Value>) -> Arc<dyn Provider>,
+    settle: crate::steps::Settle,
+) where
+    B: FnOnce(Map<String, Value>, Arc<dyn crate::credentials::KeySource>) -> Arc<dyn Provider> + Send + 'static,
 {
-    let meta = crate::helpers::agent_meta(agent_id, kernel);
     // THE MODEL OF A PASS: the user's (the chat's `model`, sent with the call), else the
     // provider's `default_model`; neither, the server's own (a vLLM or ollama server reads
     // the one it serves), which becomes the default. Nothing anywhere: refused by name.
-    let chosen = args
-        .model
-        .clone()
-        .filter(|s| !s.is_empty())
-        .or(default_of(agent_id, kernel).await);
-    let mut over = meta.clone();
-    over.remove("model");
-    if let Some(m) = &chosen {
-        over.insert("model".into(), json!(m));
-    }
-    // the request knobs are the calling chat's alone: never the provider's record
-    for k in crate::record::KNOBS {
-        over.remove(k);
-    }
-    if let Some(Value::Object(knobs)) = args.knobs.as_ref().and_then(|k| serde_json::to_value(k).ok()) {
-        over.extend(knobs);
-    }
-    let mut r = complete(agent_id, args, kernel, build(over)).await;
-    if chosen.is_none() {
-        match r.get("model").and_then(Value::as_str).filter(|s| !s.is_empty()) {
-            // the server named it: it is the default from now on
-            Some(m) => {
-                let m = m.to_string();
-                let _ = set_default(agent_id, kernel, &m).await;
-            }
-            None if r.get("kind").and_then(Value::as_str) == Some("ValueError") => {
-                r["error"] = json!(format!(
-                    "complete: no model — the chat names none, this provider has no {DEFAULT_FIELD}, \
-                     and its server names none ({})",
-                    r["error"].as_str().unwrap_or("")
-                ));
-            }
-            None => {}
+    let pass = PassCall { me: agent_id.clone(), kernel: Arc::clone(kernel), keys, prepare, build, settle };
+    match args.model.clone().filter(|s| !s.is_empty()) {
+        Some(m) => pass.keyed(args, Some(m)).await,
+        None => {
+            default_model(agent_id, kernel, (pass, args), |(pass, args), chosen| pass.keyed(args, chosen)).await;
         }
     }
-    r
 }
 
-/// `models`: the record's list, or the API's through `live` when the record names
-/// none, and the default.
-pub async fn models_verb<L, Fut>(agent_id: &AgentId, kernel: &Arc<Kernel>, live: Option<L>) -> Value
+/// One `complete` between its steps.
+struct PassCall<B> {
+    me: AgentId,
+    kernel: Arc<Kernel>,
+    keys: Option<Keys>,
+    prepare: Option<Prepare>,
+    build: B,
+    settle: crate::steps::Settle,
+}
+
+impl<B> PassCall<B>
 where
-    L: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = Result<Vec<String>, String>>,
+    B: FnOnce(Map<String, Value>, Arc<dyn crate::credentials::KeySource>) -> Arc<dyn Provider> + Send + 'static,
 {
-    let meta = crate::helpers::agent_meta(agent_id, kernel);
-    let mut names = listed_models(&meta);
-    if names.is_empty() {
-        if let Some(l) = live {
-            match l().await {
-                Ok(n) => names = n,
-                Err(e) => {
-                    let mut r = refusal(TRANSPORT_ERROR, e);
-                    with(&mut r, "default", json!(default_of(agent_id, kernel).await));
-                    return r;
+    /// The model is chosen: the key is read (a step), then the pass runs.
+    async fn keyed(self, args: Complete, chosen: Option<String>) {
+        let (me, k, keys) = (self.me.clone(), Arc::clone(&self.kernel), self.keys);
+        key_of(&me, &k, keys, (self, args, chosen), |(pass, args, chosen), key| async move {
+            pass.run(args, chosen, key);
+        })
+        .await;
+    }
+
+    /// THE PASS, the provider's own I/O, in a task under this execution.
+    fn run(self, args: Complete, chosen: Option<String>, key: Arc<dyn crate::credentials::KeySource>) {
+        let Self { me, kernel, keys: _, prepare, build, settle } = self;
+        let forker = settle.forker();
+        let owner = me.clone();
+        forker.run(&owner, "complete", async move {
+            let args = match prepare {
+                Some(p) => match p(Arc::clone(&key), args, chosen.clone()).await {
+                    Ok(a) => a,
+                    Err(refused) => return settle.reply(refused),
+                },
+                None => args,
+            };
+            let mut over = crate::helpers::agent_meta(&me, &kernel);
+            over.remove("model");
+            if let Some(m) = &chosen {
+                over.insert("model".into(), json!(m));
+            }
+            // the request knobs are the calling chat's alone: never the provider's record
+            for kn in crate::record::KNOBS {
+                over.remove(kn);
+            }
+            if let Some(Value::Object(knobs)) = args.knobs.as_ref().and_then(|kn| serde_json::to_value(kn).ok()) {
+                over.extend(knobs);
+            }
+            let mut r = complete(&me, &args, &kernel, build(over, key)).await;
+            if chosen.is_some() {
+                return settle.reply(r);
+            }
+            match r.get("model").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                // the server named it: it is the default from now on (a step)
+                Some(m) => {
+                    let m = m.to_string();
+                    keep_setting(&me, &kernel, DEFAULT_FIELD, json!(m), (r, settle), |(r, settle), _| async move {
+                        settle.reply(r);
+                    })
+                    .await;
+                }
+                None => {
+                    if r.get("kind").and_then(Value::as_str) == Some("ValueError") {
+                        r["error"] = json!(format!(
+                            "complete: no model — the chat names none, this provider has no {DEFAULT_FIELD}, \
+                             and its server names none ({})",
+                            r["error"].as_str().unwrap_or("")
+                        ));
+                    }
+                    settle.reply(r);
                 }
             }
-        }
+        });
     }
-    json!({"models": names, "default": default_of(agent_id, kernel).await})
+}
+
+/// `models`: the record's list, or the API's through `live` (given the key read for the
+/// record's endpoint, its own I/O) when the record names none, and the default — as
+/// STEPS (#795): the key and the default are reads; `settle` settles it.
+pub async fn models_verb<L, Fut>(agent_id: &AgentId, kernel: &Arc<Kernel>, keys: Option<Keys>, live: Option<L>, settle: crate::steps::Settle)
+where
+    L: FnOnce(Arc<dyn crate::credentials::KeySource>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<Vec<String>, String>> + Send + 'static,
+{
+    let meta = crate::helpers::agent_meta(agent_id, kernel);
+    let names = listed_models(&meta);
+    let (me, k) = (agent_id.clone(), Arc::clone(kernel));
+    // the default, then the answer
+    let answer = move |settle: crate::steps::Settle, listed: Result<Vec<String>, String>| async move {
+        default_model(&me, &k, settle, move |settle, default| async move {
+            settle.reply(match listed {
+                Ok(names) => json!({"models": names, "default": default}),
+                Err(e) => {
+                    let mut r = refusal(TRANSPORT_ERROR, e);
+                    with(&mut r, "default", json!(default));
+                    r
+                }
+            });
+        })
+        .await;
+    };
+    let Some(live) = live.filter(|_| names.is_empty()) else {
+        return answer(settle, Ok(names)).await;
+    };
+    let owner = agent_id.clone();
+    key_of(agent_id, kernel, keys, settle, move |settle, key| async move {
+        let forker = settle.forker();
+        forker.run(&owner, "models", async move {
+            let listed = live(key).await;
+            answer(settle, listed).await;
+        });
+    })
+    .await;
 }
 
 /// `set_default_model`: keep `model` as the default, one of the record's `models`
-/// when that list is known.
-pub async fn set_default_verb(agent_id: &AgentId, args: &SetDefaultModel, kernel: &Arc<Kernel>) -> Value {
+/// when that list is known — the write a step (#795); `settle` settles it.
+pub async fn set_default_verb(agent_id: &AgentId, args: &SetDefaultModel, kernel: &Arc<Kernel>, settle: crate::steps::Settle) {
     let meta = crate::helpers::agent_meta(agent_id, kernel);
-    let m = args.model.as_str();
+    let m = args.model.clone();
     let names = listed_models(&meta);
-    if !names.is_empty() && !names.iter().any(|n| n == m) {
+    if !names.is_empty() && !names.iter().any(|n| *n == m) {
         let mut r = refusal(
             NOT_FOUND,
             format!("set_default_model: `{m}` is not one of this provider's models {names:?}"),
         );
         with(&mut r, "arg", json!("model"));
-        return r;
+        return settle.reply(r);
     }
-    match set_default(agent_id, kernel, m).await {
-        Ok(()) => json!({"default": m}),
-        Err(e) => refusal(STORE_REFUSED, format!("set_default_model: {e}")),
-    }
+    keep_setting(agent_id, kernel, DEFAULT_FIELD, json!(m), settle, move |settle, r| async move {
+        settle.reply(match r {
+            Ok(()) => json!({"default": m}),
+            Err(e) => refusal(STORE_REFUSED, format!("set_default_model: {e}")),
+        });
+    })
+    .await;
 }
 
 /// THE PROVIDER SIDE: run one pass of `provider` for `args` and stream its
@@ -370,35 +515,70 @@ impl RemoteProvider {
     }
 }
 
-impl RemoteProvider {
-    /// THE IMAGES OF A REQUEST, on the binary path: each image part of `messages` is pulled
-    /// from the chat's store (`get_bytes`) and sent to the provider as ONE `complete` item
-    /// of this `rid` (`image: {ref, media_type}`, the bytes as the body at `data`), before
-    /// the `complete` that carries the messages. A request with no image sends nothing.
-    async fn send_images(&self, messages: &[Value], rid: &str) -> Result<(), ProviderError> {
-        for part in messages.iter().filter_map(crate::images::parts_of).flatten() {
-            let Some(image_ref) = part.get("ref").and_then(Value::as_str) else {
-                continue;
+/// THE IMAGES OF A REQUEST, on the binary path, as STEPS (#795): each image part of
+/// `messages` is pulled from the chat's store (`get_bytes`, a step) and sent to the
+/// provider as ONE `complete` item of this `rid` (`image: {ref, media_type}`, the bytes as
+/// the body at `data`, a step), before the `complete` that carries the messages; `next`
+/// runs once every one was taken, or with why one was not. A request with no image runs
+/// `next` at once.
+fn send_images<R, F, Fut>(
+    kernel: Arc<Kernel>,
+    chat: AgentId,
+    provider: AgentId,
+    mut refs: std::collections::VecDeque<String>,
+    rid: String,
+    rec: R,
+    next: F,
+) -> futures_util::future::BoxFuture<'static, ()>
+where
+    R: Send + 'static,
+    F: FnOnce(R, Result<(), ProviderError>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    Box::pin(async move {
+        let Some(image_ref) = refs.pop_front() else {
+            return next(rec, Ok(())).await;
+        };
+        let (k, me) = (Arc::clone(&kernel), chat.clone());
+        let ask = json!({"type": "get_bytes", "ref": image_ref});
+        crate::steps::store(&me, &k, ask, None, (rec, next), move |(rec, next), got| async move {
+            let (head, body) = match got {
+                Ok(r) => r,
+                Err(e) => return next(rec, Err(ProviderError::raised(e.0))).await,
             };
-            let (media, bytes) = crate::memory::get_bytes(&self.chat, &self.kernel, image_ref)
-                .await
-                .map_err(|e| ProviderError::raised(e.0))?;
+            let media = head.get("media_type").and_then(Value::as_str).unwrap_or("").to_string();
+            let Some(bytes) = body else {
+                let e = format!("{chat}: memory store returned no bytes for image `{image_ref}`");
+                return next(rec, Err(ProviderError::raised(e))).await;
+            };
             let header = json!({"type": "complete", "rid": rid, "image": {"ref": image_ref, "media_type": media}});
-            let out = self
-                .kernel
-                .send(vec![Item::new(self.provider.clone(), header).with_binary_key("data", bytes)])
-                .await
-                .remove(0);
-            if out.status != Status::Completed || out.result.get("error").is_some() {
-                return Err(ProviderError::raised(format!(
-                    "ai_chat: provider `{}` took no image `{image_ref}`: {}",
-                    self.provider.as_str(),
-                    out.result.get("error").and_then(Value::as_str).unwrap_or("it refused")
-                )));
-            }
-        }
-        Ok(())
-    }
+            let item = Item::new(provider.clone(), header).with_binary_key("data", bytes);
+            let k = Arc::clone(&kernel);
+            crate::steps::call(&k, item, (rec, next), move |(rec, next), out| async move {
+                if out.status != Status::Completed || out.result.get("error").is_some() {
+                    let e = format!(
+                        "ai_chat: provider `{}` took no image `{image_ref}`: {}",
+                        provider.as_str(),
+                        out.result.get("error").and_then(Value::as_str).unwrap_or("it refused")
+                    );
+                    return next(rec, Err(ProviderError::raised(e))).await;
+                }
+                send_images(kernel, chat, provider, refs, rid, rec, next).await;
+            })
+            .await;
+        })
+        .await;
+    })
+}
+
+/// The image refs of `messages`, in order.
+fn image_refs(messages: &[Value]) -> std::collections::VecDeque<String> {
+    messages
+        .iter()
+        .filter_map(crate::images::parts_of)
+        .flatten()
+        .filter_map(|part| part.get("ref").and_then(Value::as_str).map(String::from))
+        .collect()
 }
 
 /// The reply of a `complete`, read into the report; `Err` for a failed pass.
@@ -570,12 +750,13 @@ impl RemoteProvider {
         Ok(ctl)
     }
 
-    /// THE CHAT'S REQUEST AS A MESSAGE (#795): the `complete` call goes out through
-    /// [`Kernel::call`] and this returns its pid at once. The provider's tokens feed
-    /// `live` from a watcher of its stream that holds no lock and wakes nothing; the
-    /// settle runs `done` with the WHOLE answer the reply carries (`text`), so a token
-    /// the live view dropped never changes what is read. A call refused at launch runs
-    /// `done` with the refusal and hands back no pid.
+    /// THE CHAT'S REQUEST AS A MESSAGE (#795): the request's images go first (steps,
+    /// [`send_images`]), then the `complete` call goes out through [`Kernel::call`], and
+    /// `launched` gets its pid. The provider's tokens feed `live` from a watcher of its
+    /// stream that holds no lock and wakes nothing; the settle runs `done` with the WHOLE
+    /// answer the reply carries (`text`), so a token the live view dropped never changes
+    /// what is read. A call refused at launch, or an image not taken, runs `done` with
+    /// why, and `launched` never runs.
     pub(crate) async fn begin(
         &self,
         messages: Vec<Value>,
@@ -583,21 +764,59 @@ impl RemoteProvider {
         deadline: (std::time::Duration, f64),
         live: Arc<dyn crate::provider::Live>,
         done: crate::provider::Done,
-    ) -> Option<fantastic_kernel::TaskId> {
+        launched: crate::provider::Launched,
+    ) {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let rid = format!("{}~{n}", self.chat.as_str());
-        if let Err(e) = self.send_images(&messages, &rid).await {
-            done(Err(e)).await;
-            return None;
+        let refs = image_refs(&messages);
+        let me = self.clone_handle();
+        send_images(
+            Arc::clone(&self.kernel),
+            self.chat.clone(),
+            self.provider.clone(),
+            refs,
+            rid.clone(),
+            (me, messages, max_tokens, deadline, live, done, launched, rid),
+            |(me, messages, max_tokens, deadline, live, done, launched, rid), sent| async move {
+                match sent {
+                    Ok(()) => me.request(messages, max_tokens, deadline, live, done, launched, rid).await,
+                    Err(e) => done(Err(e)).await,
+                }
+            },
+        )
+        .await;
+    }
+
+    /// The same provider handle (its report and model cells shared).
+    fn clone_handle(&self) -> Self {
+        Self {
+            kernel: Arc::clone(&self.kernel),
+            chat: self.chat.clone(),
+            provider: self.provider.clone(),
+            report: Arc::clone(&self.report),
+            model: Arc::clone(&self.model),
+            chat_model: self.chat_model.clone(),
+            knobs: self.knobs.clone(),
         }
+    }
+
+    /// The `complete` of a request whose images were taken.
+    #[allow(clippy::too_many_arguments)]
+    async fn request(
+        &self,
+        messages: Vec<Value>,
+        max_tokens: Option<i64>,
+        deadline: (std::time::Duration, f64),
+        live: Arc<dyn crate::provider::Live>,
+        done: crate::provider::Done,
+        launched: crate::provider::Launched,
+        rid: String,
+    ) {
         // THE CHAT'S ONE WATCH on its provider: this request's tokens feed `live`
         // until its settle says it ended
         let watch = match self.chat_watch().await {
             Ok(w) => w,
-            Err(e) => {
-                done(Err(e)).await;
-                return None;
-            }
+            Err(e) => return done(Err(e)).await,
         };
         let _ = watch.send(Ctl::Open(rid.clone(), live));
         let feed_rid = rid.clone();
@@ -623,7 +842,10 @@ impl RemoteProvider {
             })
             .await;
         if out.status == Status::Accepted {
-            return out.pid;
+            if let Some(pid) = out.pid {
+                launched(pid);
+            }
+            return;
         }
         if let Some(w) = chat_watches().lock().expect("watches poisoned").get(&self.chat) {
             let (tx, _) = tokio::sync::oneshot::channel();
@@ -639,7 +861,6 @@ impl RemoteProvider {
             ))))
             .await;
         }
-        None
     }
 }
 
@@ -678,74 +899,13 @@ impl Provider for RemoteProvider {
         Some(self)
     }
 
-    /// A HELPER'S REQUEST (a fold summary, the owed recall): read as a stream inside
-    /// the pass that asks it. The chat's own requests go out by [`RemoteProvider::begin`].
-    async fn chat(&self, messages: &[Value], max_tokens: Option<i64>) -> Result<ProviderStream, ProviderError> {
-        let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let rid = format!("{}~{n}", self.chat.as_str());
-        self.send_images(messages, &rid).await?;
-        // the reader: an inbox of this request only, watching the provider's stream
-        let (reader, inbox) = self.reader(n).await?;
-        let payload = self.payload(messages, max_tokens, &rid);
-        // The helper's call runs inside the pass that asks it: it is the chat's send,
-        // judged by its grants.
-        let call = {
-            let kernel = Arc::clone(&self.kernel);
-            let provider = self.provider.clone();
-            Box::pin(async move { kernel.send(vec![Item::new(provider, Value::Object(payload))]).await })
-        };
-        let guard = Unwatch { kernel: Arc::clone(&self.kernel), provider: self.provider.clone(), reader, done: false };
-        let st = Pass { call: Some(call), inbox, rid, guard, queued: std::collections::VecDeque::new(),
-                        report: Arc::clone(&self.report), model: Arc::clone(&self.model), ended: false };
-        let stream = futures_util::stream::unfold(st, |mut st| async move {
-            loop {
-                if let Some(ev) = st.queued.pop_front() {
-                    return Some((ev, st));
-                }
-                if st.ended {
-                    return None;
-                }
-                let Some(call) = st.call.as_mut() else {
-                    st.ended = true;
-                    continue;
-                };
-                tokio::select! {
-                    out = call => {
-                        st.call = None;
-                        // tokens emitted before the reply are already queued: drain them
-                        while let Some(it) = st.inbox.try_recv() {
-                            if let Some(t) = token_of(&it.payload, &st.rid) {
-                                st.queued.push_back(Ok(ProviderEvent::Token(t)));
-                            }
-                        }
-                        st.guard.release().await;
-                        let settled = match out.into_iter().next() {
-                            // the provider's own answer, a failed pass included: its error as it wrote it
-                            Some(o) if o.status == Status::Completed || o.result.get("rid").is_some() => {
-                                settle(&o.result, &st.report, &st.model)
-                            }
-                            Some(o) => Err(ProviderError::raised(format!(
-                                "ai_chat: complete on `{}` ended {:?}: {}",
-                                st.guard.provider.as_str(),
-                                o.status,
-                                o.result
-                            ))),
-                            None => Err(ProviderError::raised("ai_chat: complete returned nothing")),
-                        };
-                        if let Err(e) = settled {
-                            st.queued.push_back(Err(e));
-                        }
-                        st.ended = true;
-                    }
-                    item = st.inbox.recv() => {
-                        if let Some(t) = item.and_then(|it| token_of(&it.payload, &st.rid)) {
-                            return Some((Ok(ProviderEvent::Token(t)), st));
-                        }
-                    }
-                }
-            }
-        });
-        Ok(Box::pin(stream))
+    /// A provider agent is asked by `complete` calls only ([`RemoteProvider::begin`],
+    /// through [`crate::provider::begin`]): no stream is read here.
+    async fn chat(&self, _messages: &[Value], _max_tokens: Option<i64>) -> Result<ProviderStream, ProviderError> {
+        Err(ProviderError::raised(format!(
+            "ai_chat: provider `{}` is an agent: its requests are `complete` calls",
+            self.provider.as_str()
+        )))
     }
 
     fn model(&self) -> String {
@@ -765,53 +925,6 @@ impl Provider for RemoteProvider {
 
     fn clear_stop_reason(&self) {
         self.report.lock().expect("report poisoned").stop_reason = None;
-    }
-}
-
-type Call = std::pin::Pin<Box<dyn std::future::Future<Output = Vec<fantastic_kernel::Outcome>> + Send>>;
-
-/// One pass in flight: the `complete` call, the reader's inbox, what is still to yield.
-struct Pass {
-    call: Option<Call>,
-    inbox: fantastic_kernel::inbox::InboxReceiver,
-    rid: String,
-    guard: Unwatch,
-    queued: std::collections::VecDeque<Result<ProviderEvent, ProviderError>>,
-    report: Arc<Mutex<ProviderReport>>,
-    model: Arc<Mutex<String>>,
-    ended: bool,
-}
-
-/// The reader's watch of the provider: released when the pass ends, or — the turn
-/// dropped or cancelled mid-pass — when the pass is dropped.
-struct Unwatch {
-    kernel: Arc<Kernel>,
-    provider: AgentId,
-    reader: AgentId,
-    done: bool,
-}
-
-impl Unwatch {
-    async fn release(&mut self) {
-        if !self.done {
-            self.done = true;
-            self.kernel.unwatch(&self.provider, &self.reader).await;
-            self.kernel.remove_inbox(&self.reader);
-        }
-    }
-}
-
-impl Drop for Unwatch {
-    fn drop(&mut self) {
-        if !self.done {
-            let (k, p, r) = (Arc::clone(&self.kernel), self.provider.clone(), self.reader.clone());
-            if let Ok(h) = tokio::runtime::Handle::try_current() {
-                h.spawn(async move {
-                    k.unwatch(&p, &r).await;
-                    k.remove_inbox(&r);
-                });
-            }
-        }
     }
 }
 
@@ -866,29 +979,43 @@ pub async fn pair_chat(kernel: &Arc<Kernel>, provider: &AgentId) -> AgentId {
 
 /// EVERY VERB OF A PROVIDER BACKEND, answered from its typed call: `boot` is the
 /// shared incarnation reset, `reflect` is the backend's own (handed in), and the
-/// rest are the provider verbs above. `build` makes the backend's provider from a
-/// record; `live` lists the models the API serves when the record names none.
+/// rest are the provider verbs above, each settled by its steps (#795). `keys`: how
+/// the backend reads its key (`None`: it takes none). `prepare`: what it reads from
+/// its API before a pass. `build` makes the backend's provider from a record and the
+/// key read; `live` lists the models the API serves when the record names none.
+#[allow(clippy::too_many_arguments)]
 pub async fn handle<B, L, Fut, R>(
     agent_id: &AgentId,
     call: crate::declared::provider::Call,
     kernel: &Arc<Kernel>,
+    keys: Option<Keys>,
+    prepare: Option<Prepare>,
     build: B,
     live: Option<L>,
     reflect: R,
 ) -> Result<Option<Value>, fantastic_kernel::bundle::BundleError>
 where
-    B: Fn(Map<String, Value>) -> Arc<dyn Provider>,
-    L: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = Result<Vec<String>, String>>,
+    B: FnOnce(Map<String, Value>, Arc<dyn crate::credentials::KeySource>) -> Arc<dyn Provider> + Send + 'static,
+    L: FnOnce(Arc<dyn crate::credentials::KeySource>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<Vec<String>, String>> + Send + 'static,
     R: FnOnce() -> Value,
 {
     use crate::declared::provider::Call;
     let reply = match call {
         Call::Reflect(_) => reflect(),
         Call::Boot(_) => crate::verbs::boot(agent_id, kernel).await,
-        Call::Complete(a) => complete_verb(agent_id, &a, kernel, build).await,
-        Call::Models(_) => models_verb(agent_id, kernel, live).await,
-        Call::SetDefaultModel(a) => set_default_verb(agent_id, &a, kernel).await,
+        Call::Complete(a) => {
+            complete_verb(agent_id, a, kernel, keys, prepare, build, crate::steps::deferred(kernel)).await;
+            Value::Null
+        }
+        Call::Models(_) => {
+            models_verb(agent_id, kernel, keys, live, crate::steps::deferred(kernel)).await;
+            Value::Null
+        }
+        Call::SetDefaultModel(a) => {
+            set_default_verb(agent_id, &a, kernel, crate::steps::deferred(kernel)).await;
+            Value::Null
+        }
     };
     Ok((!reply.is_null()).then_some(reply))
 }

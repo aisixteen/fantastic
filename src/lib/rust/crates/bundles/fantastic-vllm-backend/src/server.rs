@@ -25,7 +25,7 @@
 //! A server that does not answer refuses the verb, naming the field, the URL and
 //! what came back. The key goes only to the endpoint's host, as on a chat request.
 
-use fantastic_ai_core::credentials::{key_reader, KeySource};
+use fantastic_ai_core::credentials::KeySource;
 use crate::seconds;
 use fantastic_ai_core::helpers;
 use fantastic_kernel::refusal::{refusal, with, BAD_ARG};
@@ -357,15 +357,15 @@ pub async fn read(
     Ok(out)
 }
 
-/// Read the record's absent fields from the server and write them back. `None`
-/// when nothing is absent or all were written; otherwise the verb's refusal.
-pub async fn resolve(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Option<Value> {
+/// Read the record's absent fields from the server with `key` (read for the record's
+/// endpoint before, a step) and write them back. `None` when nothing is absent or all
+/// were written; otherwise the verb's refusal.
+pub async fn resolve(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &dyn KeySource) -> Option<Value> {
     let rec = helpers::agent_meta(agent_id, kernel);
     if missing(&rec).is_empty() {
         return None;
     }
-    let key = key_reader(agent_id, kernel, crate::NAME, false);
-    let values = match read(&rec, &key).await {
+    let values = match read(&rec, key).await {
         Ok(v) => v,
         Err(e) => {
             // a key the store refuses is permanent too: no retry mends it

@@ -21,7 +21,7 @@
 
 use async_trait::async_trait;
 use fantastic_ai_core::constants::DEFAULT_TURN_TOKENS;
-use fantastic_ai_core::credentials::{key_reader, KeySource};
+use fantastic_ai_core::credentials::KeySource;
 use fantastic_ai_core::declared::provider;
 use fantastic_ai_core::provider::{
     stream_idle_of, within, Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream,
@@ -366,7 +366,9 @@ impl Handler for OpenAiBackendBundle {
             agent_id,
             call,
             kernel,
-            |m| build_provider_with(agent_id, kernel, m),
+            Some(KEYS),
+            None,
+            build_provider_with,
             fantastic_ai_core::remote_provider::NO_LIVE,
             || reflect_reply(agent_id, kernel),
         )
@@ -388,9 +390,13 @@ impl Handler for OpenAiBackendBundle {
     }
 }
 
-/// The provider this agent is configured for, built per call. `endpoint` and
-/// `model` are REQUIRED — nothing is guessed.
-fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<String, Value>) -> Arc<dyn Provider> {
+/// How this backend reads its key: a door's, optional.
+const KEYS: fantastic_ai_core::remote_provider::Keys =
+    fantastic_ai_core::remote_provider::Keys { backend: BACKEND, required: false };
+
+/// The provider this agent is configured for, built per call with the key read for
+/// it. `endpoint` and `model` are REQUIRED — nothing is guessed.
+fn build_provider_with(meta: Map<String, Value>, key: Arc<dyn KeySource>) -> Arc<dyn Provider> {
     let (endpoint, model) = match (
         helpers::required_meta(&meta, "endpoint", BACKEND),
         helpers::required_meta(&meta, "model", BACKEND),
@@ -407,7 +413,7 @@ fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<Strin
             .and_then(|v| v.as_u64())
             .expect("max_tokens declares its default"),
         stop: stop_of(&meta),
-        key: Arc::new(key_reader(agent_id, kernel, BACKEND, false)),
+        key,
         report: ReportCell::default(),
         stream_idle: stream_idle_of(&meta),
     })

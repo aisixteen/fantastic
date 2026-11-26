@@ -31,7 +31,7 @@
 use async_trait::async_trait;
 use base64::Engine;
 use fantastic_ai_core::caching;
-use fantastic_ai_core::credentials::{key_reader, KeySource};
+use fantastic_ai_core::credentials::KeySource;
 use fantastic_ai_core::provider::{
     stream_idle_of, within, Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream,
     ReportCell, Unconfigured,
@@ -887,23 +887,34 @@ fn base_of(agent_id: &AgentId, kernel: &Kernel) -> Arc<Mutex<Usage>> {
 }
 
 /// Before the agent's counts are first read: with no sidecar, the base is what its
-/// params store kept (the read is async, `base_of` is not).
-async fn preload_base(agent_id: &AgentId, kernel: &Arc<Kernel>) {
+/// params store kept — a read, A STEP (#795): `next` runs once it is in (`base_of` reads
+/// no store).
+async fn preload_base<R, F, Fut>(agent_id: &AgentId, kernel: &Arc<Kernel>, rec: R, next: F)
+where
+    R: Send + 'static,
+    F: FnOnce(R) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
     if usage_base_table()
         .lock()
         .expect("usage base poisoned")
         .contains_key(agent_id.as_str())
         || usage_file_of(agent_id, kernel).is_some_and(|p| p.is_file())
     {
-        return;
+        return next(rec).await;
     }
-    if let Some(kept) = fantastic_ai_core::remote_provider::usage_of(agent_id, kernel).await {
-        usage_base_table()
-            .lock()
-            .expect("usage base poisoned")
-            .entry(agent_id.as_str().to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(Usage::from_json(&kept))));
-    }
+    let id = agent_id.as_str().to_string();
+    fantastic_ai_core::remote_provider::kept_usage(agent_id, kernel, rec, move |rec, kept| async move {
+        if let Some(kept) = kept {
+            usage_base_table()
+                .lock()
+                .expect("usage base poisoned")
+                .entry(id)
+                .or_insert_with(|| Arc::new(Mutex::new(Usage::from_json(&kept))));
+        }
+        next(rec).await;
+    })
+    .await;
 }
 
 /// The agent's sidecar file, in its own dir. None for an in-memory kernel, whose
@@ -1453,16 +1464,19 @@ impl SseState {
     }
 
     /// Write the running total to the agent's params store (a provider with none keeps
-    /// none). A write error does not fail the turn: it is kept in `Usage` and reported.
-    /// It runs in the provider's own dispatch (or a `spawn_inherit` task of it), so
-    /// the write is the provider's.
+    /// none) — a write, A STEP (#795): the stream goes on, and a write error, when its
+    /// settle says so, is kept in `Usage` and reported; it does not fail the turn. It
+    /// runs in the provider's own task, so the write is the provider's.
     async fn store_total(&self) {
         let id = AgentId::from(self.log.agent_id.as_str());
         let total = self.total().to_json();
-        let r = fantastic_ai_core::remote_provider::set_usage(&id, &self.log.kernel, &total).await;
-        if let Err(e) = r {
-            self.usage.lock().expect("usage poisoned").log_error = Some(e);
-        }
+        let usage = Arc::clone(&self.usage);
+        fantastic_ai_core::remote_provider::keep_usage(&id, &self.log.kernel, &total, usage, |usage, r| async move {
+            if let Err(e) = r {
+                usage.lock().expect("usage poisoned").log_error = Some(e);
+            }
+        })
+        .await;
     }
 
     /// Append this request's own counts as one JSON line to the usage log. A write
@@ -1564,6 +1578,7 @@ fn build_provider_with(
     agent_id: &AgentId,
     kernel: &Arc<Kernel>,
     meta: Map<String, Value>,
+    key: Arc<dyn KeySource>,
     caller: Option<String>,
     images: Images,
 ) -> Arc<dyn Provider> {
@@ -1573,7 +1588,7 @@ fn build_provider_with(
                 .trim_end_matches('/')
                 .to_string(),
             model: helpers::required_meta(&meta, "model", NAME)?,
-            key: Arc::new(key_reader(agent_id, kernel, NAME, false)),
+            key,
             max_tokens: pass_max_tokens(&meta)?,
             temperature: meta.get("temperature").and_then(Value::as_f64),
             thinking_budget: budget_tokens_of(&meta),
@@ -1746,25 +1761,36 @@ fn static_capability(model: &str) -> Value {
 /// for the models the record lists, its own model and its default, and any model the
 /// `capabilities` setting in the params store names. A model's entry is the setting's
 /// when it has one, else the static one; an unknown model has `images: false`.
-async fn capabilities_of(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
-    let meta = helpers::agent_meta(agent_id, kernel);
-    let kept = fantastic_ai_core::remote_provider::setting_of(agent_id, kernel, CAPABILITIES_FIELD)
-        .await
-        .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default();
-    let mut models = fantastic_ai_core::remote_provider::listed_models(&meta);
-    models.extend(meta.get("model").and_then(Value::as_str).map(String::from));
-    models.extend(fantastic_ai_core::remote_provider::default_of(agent_id, kernel).await);
-    models.extend(kept.keys().cloned());
-    let mut out = Map::new();
-    for m in models.into_iter().filter(|m| !m.is_empty()) {
-        let entry = kept
-            .get(&m)
-            .cloned()
-            .unwrap_or_else(|| static_capability(&m));
-        out.insert(m, entry);
-    }
-    Value::Object(out)
+///
+/// The setting and the default are reads, STEPS (#795): `next` gets the map.
+async fn capabilities_of<R, F, Fut>(agent_id: &AgentId, kernel: &Arc<Kernel>, rec: R, next: F)
+where
+    R: Send + 'static,
+    F: FnOnce(R, Value) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let (id, k) = (agent_id.clone(), Arc::clone(kernel));
+    fantastic_ai_core::remote_provider::setting(agent_id, kernel, CAPABILITIES_FIELD, rec, move |rec, kept| async move {
+        let kept = kept.and_then(|v| v.as_object().cloned()).unwrap_or_default();
+        fantastic_ai_core::remote_provider::default_model(&id, &k.clone(), rec, move |rec, default| async move {
+            let meta = helpers::agent_meta(&id, &k);
+            let mut models = fantastic_ai_core::remote_provider::listed_models(&meta);
+            models.extend(meta.get("model").and_then(Value::as_str).map(String::from));
+            models.extend(default);
+            models.extend(kept.keys().cloned());
+            let mut out = Map::new();
+            for m in models.into_iter().filter(|m| !m.is_empty()) {
+                let entry = kept
+                    .get(&m)
+                    .cloned()
+                    .unwrap_or_else(|| static_capability(&m));
+                out.insert(m, entry);
+            }
+            next(rec, Value::Object(out)).await;
+        })
+        .await;
+    })
+    .await;
 }
 
 /// #182 — 4.7+ and 5.x models run adaptive thinking and 400 on
@@ -1988,87 +2014,19 @@ impl Handler for AnthropicBundle {
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         use declared::Call;
-        preload_base(agent_id, kernel).await;
-        let reply = match call {
-            Call::Reflect(_) => {
-                let capabilities = capabilities_of(agent_id, kernel).await;
-                reflect_reply(agent_id, kernel, capabilities)
-            }
-            Call::Boot(_) => verbs::boot(agent_id, kernel).await,
-            // the chat's own ask: the same map `reflect` shows, with the record's model
-            Call::Capabilities(_) => {
-                let capabilities = capabilities_of(agent_id, kernel).await;
-                let model = helpers::agent_meta(agent_id, kernel)
-                    .get("model")
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                json!({"capabilities": capabilities, "model": model})
-            }
-            Call::UsageVerb(a) => usage_reply(agent_id, a.reset == Some(true), kernel),
-            Call::UsageResetVerb(_) => {
-                let out = usage_reset_reply(agent_id, kernel);
-                let zero = Usage::default().to_json();
-                if let Err(e) =
-                    fantastic_ai_core::remote_provider::set_usage(agent_id, kernel, &zero).await
-                {
-                    usage_of(agent_id).lock().expect("usage poisoned").log_error = Some(e);
-                }
-                out
-            }
-            Call::Complete(a) => {
-                // A `complete` takes its request's images out of the stash here, before any
-                // path that can refuse or fail it, so none keeps them.
-                let images = take_images(agent_id.as_str(), &a.rid);
-                // The API is read for what the record leaves to it before a turn runs; an
-                // API that does not answer refuses the verb, naming the field. The model of
-                // the pass, as `complete` resolves it: the call's, else the default.
-                let model = match a.model.as_deref().filter(|s| !s.is_empty()) {
-                    Some(m) => Some(m.to_string()),
-                    None => fantastic_ai_core::remote_provider::default_of(agent_id, kernel).await,
-                };
-                let chat_max = a.knobs.as_ref().and_then(|k| k.max_tokens);
-                let mut a = a;
-                match server::resolve(agent_id, kernel, model, chat_max).await {
-                    Err(refused) => return Ok(Some(refused)),
-                    // the API's budget for a chat that names none: this pass's
-                    Ok(Some(n)) => a.knobs.get_or_insert_with(Default::default).max_tokens = Some(n),
-                    Ok(None) => {}
-                }
-                let caller = caller_of(&a.rid);
-                fantastic_ai_core::remote_provider::complete_verb(agent_id, &a, kernel, |m| {
-                    build_provider_with(agent_id, kernel, m, caller.clone(), images.clone())
-                })
-                .await
-            }
-            Call::Models(_) => {
-                fantastic_ai_core::remote_provider::models_verb(
-                    agent_id,
-                    kernel,
-                    Some(|| async {
-                        let meta = helpers::agent_meta(agent_id, kernel);
-                        let endpoint = meta
-                            .get("endpoint")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string();
-                        server::list(&endpoint, &key_reader(agent_id, kernel, NAME, false))
-                            .await
-                            .map(|ms| {
-                                ms.iter()
-                                    .filter_map(|m| {
-                                        m.get("id").and_then(Value::as_str).map(String::from)
-                                    })
-                                    .collect()
-                            })
-                    }),
-                )
-                .await
-            }
-            Call::SetDefaultModel(a) => {
-                fantastic_ai_core::remote_provider::set_default_verb(agent_id, &a, kernel).await
-            }
-        };
-        Ok((!reply.is_null()).then_some(reply))
+        if let Call::Boot(_) = call {
+            let reply = verbs::boot(agent_id, kernel).await;
+            return Ok((!reply.is_null()).then_some(reply));
+        }
+        // EVERY OTHER VERB SETTLES BY ITS STEPS (#795): the kept usage base first (a
+        // read), then the verb's own reads and writes
+        let settle = fantastic_ai_core::steps::deferred(kernel);
+        let (id, k) = (agent_id.clone(), Arc::clone(kernel));
+        preload_base(agent_id, kernel, (call, settle), move |(call, settle)| async move {
+            run_verb(&id, call, &k, settle).await;
+        })
+        .await;
+        Ok(None)
     }
 
     /// An image's bytes for a request: a `complete` header `{rid, image: {ref,
@@ -2124,6 +2082,106 @@ impl Handler for AnthropicBundle {
         verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel).await
     }
 }
+
+/// One verb of an anthropic provider, its usage base loaded: settled by its steps.
+async fn run_verb(agent_id: &AgentId, call: declared::Call, kernel: &Arc<Kernel>, settle: fantastic_ai_core::steps::Settle) {
+    use declared::Call;
+    let (id, k) = (agent_id.clone(), Arc::clone(kernel));
+    match call {
+        Call::Boot(_) => settle.reply(verbs::boot(agent_id, kernel).await),
+        Call::Reflect(_) => {
+            capabilities_of(agent_id, kernel, settle, move |settle, capabilities| async move {
+                settle.reply(reflect_reply(&id, &k, capabilities));
+            })
+            .await;
+        }
+        // the chat's own ask: the same map `reflect` shows, with the record's model
+        Call::Capabilities(_) => {
+            capabilities_of(agent_id, kernel, settle, move |settle, capabilities| async move {
+                let model = helpers::agent_meta(&id, &k)
+                    .get("model")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                settle.reply(json!({"capabilities": capabilities, "model": model}));
+            })
+            .await;
+        }
+        Call::UsageVerb(a) => settle.reply(usage_reply(agent_id, a.reset == Some(true), kernel)),
+        Call::UsageResetVerb(_) => {
+            let out = usage_reset_reply(agent_id, kernel);
+            let zero = Usage::default().to_json();
+            fantastic_ai_core::remote_provider::keep_usage(agent_id, kernel, &zero, (out, settle), move |(out, settle), r| async move {
+                if let Err(e) = r {
+                    usage_of(&id).lock().expect("usage poisoned").log_error = Some(e);
+                }
+                settle.reply(out);
+            })
+            .await;
+        }
+        Call::Complete(a) => {
+            // A `complete` takes its request's images out of the stash here, before any
+            // path that can refuse or fail it, so none keeps them.
+            let images = take_images(agent_id.as_str(), &a.rid);
+            // The API is read for what the record leaves to it before a turn runs (with
+            // the key read for it, a step); an API that does not answer refuses the verb,
+            // naming the field. The model of the pass, as `complete` resolves it: the
+            // call's, else the default.
+            let chat_max = a.knobs.as_ref().and_then(|kn| kn.max_tokens);
+            let (pid, pk) = (agent_id.clone(), Arc::clone(kernel));
+            let prepare: fantastic_ai_core::remote_provider::Prepare = Box::new(move |key, args, model| {
+                Box::pin(async move {
+                    let mut args = args;
+                    match server::resolve(&pid, &pk, model, chat_max, key.as_ref()).await {
+                        Err(refused) => return Err(refused),
+                        // the API's budget for a chat that names none: this pass's
+                        Ok(Some(n)) => args.knobs.get_or_insert_with(Default::default).max_tokens = Some(n),
+                        Ok(None) => {}
+                    }
+                    Ok(args)
+                })
+            });
+            let caller = caller_of(&a.rid);
+            fantastic_ai_core::remote_provider::complete_verb(
+                agent_id,
+                a,
+                kernel,
+                Some(KEYS),
+                Some(prepare),
+                move |m, key| build_provider_with(&id, &k, m, key, caller, images),
+                settle,
+            )
+            .await;
+        }
+        Call::Models(_) => {
+            let endpoint = helpers::agent_meta(agent_id, kernel)
+                .get("endpoint")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            fantastic_ai_core::remote_provider::models_verb(
+                agent_id,
+                kernel,
+                Some(KEYS),
+                Some(move |key: Arc<dyn KeySource>| async move {
+                    server::list(&endpoint, key.as_ref()).await.map(|ms| {
+                        ms.iter()
+                            .filter_map(|m| m.get("id").and_then(Value::as_str).map(String::from))
+                            .collect()
+                    })
+                }),
+                settle,
+            )
+            .await;
+        }
+        Call::SetDefaultModel(a) => {
+            fantastic_ai_core::remote_provider::set_default_verb(agent_id, &a, kernel, settle).await;
+        }
+    }
+}
+
+/// How this backend reads its key: optional (an endpoint behind no key).
+const KEYS: fantastic_ai_core::remote_provider::Keys =
+    fantastic_ai_core::remote_provider::Keys { backend: NAME, required: false };
 
 #[cfg(test)]
 mod tests;

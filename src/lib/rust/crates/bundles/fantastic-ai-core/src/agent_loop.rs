@@ -95,6 +95,10 @@ impl From<crate::assembly::BlockFail> for GenFailure {
             crate::assembly::BlockFail::PromptFile(e) => Self::PromptFile(e),
             crate::assembly::BlockFail::FoldSummary(e) => Self::FoldSummary(e),
             crate::assembly::BlockFail::FoldAnchor(e) => Self::FoldAnchor(e),
+            // the helper's steps answer every task request before they end
+            crate::assembly::BlockFail::Pending => Self::Store(MemoryStoreError(
+                "a helper's task request was left unanswered".to_string(),
+            )),
         }
     }
 }
@@ -467,24 +471,36 @@ impl Prep {
             let store = run.history.clone();
             return self.assemble(store).await;
         }
-        let recalled = crate::retrieval::context_recall(
-            &run.self_id,
+        let (k, me) = (Arc::clone(&run.kernel), run.self_id.clone());
+        let (decl, window, client) = (self.pass.decl, run.cfg.model_window, run.client_id.clone());
+        let unread: Vec<i64> = run.tail.iter().map(|a| a.row_id).collect();
+        let reflected = run.me.clone();
+        let Self { run, caching, pass } = self;
+        crate::retrieval::context_recall(
+            &me,
             false,
-            &run.kernel,
-            Some(&self.pass),
-            self.pass.decl,
-            run.cfg.model_window,
-            Some(&run.client_id),
-            &run.tail.iter().map(|a| a.row_id).collect::<Vec<_>>(),
-            &run.me,
+            &k,
+            Some(pass),
+            decl,
+            window,
+            Some(client),
+            unread,
+            reflected,
+            (run, caching),
+            |(run, caching), pass, recalled| async move {
+                let Some(pass) = pass else { return };
+                if !crate::life::is_current(&run.self_id, run.epoch) {
+                    return;
+                }
+                if let Err(e) = recalled {
+                    return failed(run, e.into()).await;
+                }
+                // a recall rewrote the view and the head: the history is read again
+                let (k, me) = (Arc::clone(&run.kernel), run.self_id.clone());
+                crate::steps::history(&me, &k, Self { run, caching, pass }, Self::assemble).await;
+            },
         )
         .await;
-        if let Err(e) = recalled {
-            return failed(self.run, e.into()).await;
-        }
-        // a recall rewrote the view and the head: the history is read again
-        let (k, me) = (Arc::clone(&self.run.kernel), self.run.self_id.clone());
-        crate::steps::history(&me, &k, self, Self::assemble).await;
     }
 
     /// THE ASSEMBLY over `store`, the history the pass read: the view over it (the tail
@@ -495,10 +511,41 @@ impl Prep {
             return;
         }
         let Self { run, caching, pass } = self;
-        match prepared(&run, pass, caching, store).await {
-            Ok(prep) => ask(Box::new(PassRec::new(run, prep))).await,
-            Err(f) => failed(run, f).await,
-        }
+        let (messages, store_len, newest) = match assembled(&run, caching.0, store) {
+            Ok(a) => a,
+            Err(f) => return failed(run, f).await,
+        };
+        // Context-overflow projection: shape what the MODEL sees this pass to fit the
+        // window (steps: its summaries are task requests, its view row a store write).
+        let (k, me, st, client) = (
+            Arc::clone(&run.kernel),
+            run.self_id.clone(),
+            Arc::clone(&run.state),
+            run.client_id.clone(),
+        );
+        let (name, window) = (run.cfg.name, run.cfg.model_window);
+        crate::projection::project_context(
+            pass,
+            &me,
+            &st,
+            &k,
+            &client,
+            name,
+            window,
+            messages,
+            store_len,
+            (run, caching, newest),
+            |(run, caching, newest), pass, projected| async move {
+                if !crate::life::is_current(&run.self_id, run.epoch) {
+                    return;
+                }
+                match projected.map_err(projection_failure).map(|m| prepared(&run, pass, caching, m, newest)) {
+                    Ok(prep) => ask(Box::new(PassRec::new(run, prep))).await,
+                    Err(f) => failed(run, f).await,
+                }
+            },
+        )
+        .await;
     }
 }
 
@@ -569,14 +616,13 @@ impl PassRec {
     }
 }
 
-/// The pass assembled over `store`: its view, fitted to the window, its counts seeded
-/// from the newest row it read, its cache marks and its live parts.
-async fn prepared(
+/// The pass's messages assembled over `store`, the history it read: the messages, the
+/// store's length behind them, and the counts of the newest row it read.
+fn assembled(
     run: &Run,
-    pass: Pass,
-    (caching, primer): (crate::caching::Caching, Option<i64>),
+    caching: crate::caching::Caching,
     store: crate::memory::MemResult<Vec<Value>>,
-) -> Result<Prepared, GenFailure> {
+) -> Result<(Vec<Value>, usize, Option<Value>), GenFailure> {
     let (kernel, self_id, state) = (&run.kernel, &run.self_id, &run.state);
     let store = store?;
     // a restart keeps counting from the newest row the pass read (#766, 1.7)
@@ -594,30 +640,34 @@ async fn prepared(
             messages.push(crate::history_view::mark_keep(last));
         }
     }
-    // Context-overflow projection: shape what the MODEL sees this pass to fit the window.
-    let mut model_messages = match crate::projection::project_context(
-        &pass,
-        self_id,
-        state,
-        kernel,
-        &run.client_id,
-        run.cfg.name,
-        run.cfg.model_window,
-        messages,
-        store_len,
-    )
-    .await
-    {
-        Ok(m) => m,
-        Err(crate::projection::ProjectFail::Refusal(e)) => return Err(GenFailure::Projection(e)),
-        Err(crate::projection::ProjectFail::Store(e)) => return Err(GenFailure::Store(e)),
-        Err(crate::projection::ProjectFail::FoldSummary(e)) => {
-            return Err(GenFailure::FoldSummary(e))
-        }
-        Err(crate::projection::ProjectFail::FoldAnchor(e)) => {
-            return Err(GenFailure::FoldAnchor(e))
-        }
-    };
+    Ok((messages, store_len, newest_totals))
+}
+
+/// A projection that produced no view, as the pass's failure.
+fn projection_failure(f: crate::projection::ProjectFail) -> GenFailure {
+    use crate::projection::ProjectFail;
+    match f {
+        ProjectFail::Refusal(e) => GenFailure::Projection(e),
+        ProjectFail::Store(e) => GenFailure::Store(e),
+        ProjectFail::FoldSummary(e) => GenFailure::FoldSummary(e),
+        ProjectFail::FoldAnchor(e) => GenFailure::FoldAnchor(e),
+        // the projection's steps answer every summary before they end
+        ProjectFail::Pending => GenFailure::Store(MemoryStoreError(
+            "a helper's task request was left unanswered".to_string(),
+        )),
+    }
+}
+
+/// The pass assembled: its projected view, its counts seeded from the newest row it
+/// read, its cache marks and its live parts.
+fn prepared(
+    run: &Run,
+    pass: Pass,
+    (caching, primer): (crate::caching::Caching, Option<i64>),
+    mut model_messages: Vec<Value>,
+    newest_totals: Option<Value>,
+) -> Prepared {
+    let (kernel, self_id, state) = (&run.kernel, &run.self_id, &run.state);
     // read after the projection: a compaction makes the next request a checkpoint
     let prev_request = state
         .prev_request
@@ -645,14 +695,14 @@ async fn prepared(
     if let Some(c) = state.current_meta.lock().expect("current poisoned").as_mut() {
         c.parts = Some(Arc::clone(&parts));
     }
-    Ok(Prepared {
+    Prepared {
         pass,
         model_messages,
         meta,
         parts,
         prev_request,
         seed,
-    })
+    }
 }
 
 /// SEND THE REQUEST of the attempt `rec.attempt`: its step ends here. The settle comes
@@ -692,19 +742,17 @@ fn ask(rec: Box<PassRec>) -> futures_util::future::BoxFuture<'static, ()> {
         let deadline = (within, crate::constants::send_timeout_secs());
         let done: crate::provider::Done =
             Box::new(move |r| Box::pin(async move { settled(rec, feed, r).await }));
-        let pid = crate::provider::begin(
-            provider,
-            &kernel,
-            &self_id,
-            request,
-            None,
-            deadline,
-            abort,
-            live as Arc<dyn crate::provider::Live>,
-            done,
-        )
-        .await;
-        if let Some(pid) = pid.filter(|_| crate::life::is_current(&self_id, epoch)) {
+        // ITS EXECUTION, once it exists (after the request's images, steps): kept for
+        // `stop` and `cancel`; a pass that ended meanwhile cancels it at once
+        let k = Arc::clone(&kernel);
+        let me = self_id.clone();
+        let launched: crate::provider::Launched = Box::new(move |pid| {
+            if !crate::life::is_current(&me, epoch) {
+                fantastic_kernel::spawn_inherit(async move {
+                    k.cancel_task(&pid).await;
+                });
+                return;
+            }
             if let Some(c) = state
                 .current_meta
                 .lock()
@@ -714,7 +762,20 @@ fn ask(rec: Box<PassRec>) -> futures_util::future::BoxFuture<'static, ()> {
             {
                 c.task_id = Some(pid.0.to_string());
             }
-        }
+        });
+        crate::provider::begin(
+            provider,
+            &kernel,
+            &self_id,
+            request,
+            None,
+            deadline,
+            abort,
+            live as Arc<dyn crate::provider::Live>,
+            done,
+            launched,
+        )
+        .await;
     })
 }
 

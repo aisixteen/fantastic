@@ -96,7 +96,7 @@ pub mod helpers;
 pub mod history_view;
 mod images;
 mod life;
-mod steps;
+pub mod steps;
 pub mod line_summary;
 pub mod memory;
 mod model_format;

@@ -31,7 +31,7 @@ use crate::folds::{
     row_role, unanchored, FoldAnchorError,
 };
 use crate::memory::MemoryStoreError;
-use crate::model_format::pass::Pass;
+use crate::model_format::pass::{Pass, Pending};
 use fantastic_bundle::{py_split_whitespace, py_splitlines, py_strip};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
@@ -239,11 +239,20 @@ pub enum FoldFail {
     /// A member of the span has no known place (python `member_anchor`'s
     /// `ValueError`).
     Anchor(FoldAnchorError),
+    /// A summary's task answer has not come yet (#795): the step that runs the fold
+    /// sends its request and runs the fold again ([`crate::model_format::pass::drive`]).
+    Pending,
 }
 
 impl From<MemoryStoreError> for FoldFail {
     fn from(e: MemoryStoreError) -> Self {
         Self::Store(e)
+    }
+}
+
+impl From<Pending> for FoldFail {
+    fn from(_: Pending) -> Self {
+        Self::Pending
     }
 }
 
@@ -321,13 +330,14 @@ fn body_only(text: &str) -> Option<String> {
 /// writes both, as before.
 ///
 /// # Errors
-/// The summary would not fit after every re-summarise.
-pub(crate) async fn summarize(
+/// The summary would not fit after every re-summarise ([`FoldFail::Summary`]); a task
+/// answer has not come yet ([`FoldFail::Pending`]).
+pub(crate) fn summarize(
     pass: &Pass,
     rows: &[Value],
     chain: &[usize],
     line: Option<&str>,
-) -> Result<(String, String, bool), FoldSummaryError> {
+) -> Result<(String, String, bool), FoldFail> {
     let degraded = || {
         let t = titles_of(rows, chain);
         Ok((line.map_or_else(|| cut_title(&t), str::to_string), t, true))
@@ -338,21 +348,19 @@ pub(crate) async fn summarize(
         (FOLD_PROMPT, RESUMMARIZE, RESUMMARIZE_CUT)
     };
     let budget = SUMMARY_BUDGET;
-    let ask = |content: String| async move {
+    let ask = |content: String| -> Result<(String, bool), Pending> {
         let (text, cut) = crate::strategies::summarize(
             pass,
             &[json!({"role": "user", "content": content})],
             Some(budget + THINK_ALLOWANCE),
-        )
-        .await;
-        (py_strip(&text).to_string(), cut)
+        )?;
+        Ok((py_strip(&text).to_string(), cut))
     };
     let (mut text, mut cut) = ask(format!(
         "{}{}",
         prompt.replace("{budget}", &budget.to_string()),
         chain_text(rows, chain)
-    ))
-    .await;
+    ))?;
     if text.is_empty() {
         return degraded();
     }
@@ -361,7 +369,7 @@ pub(crate) async fn summarize(
     while cut || got > budget {
         if retries == SUMMARY_RETRIES {
             let ids: Vec<i64> = chain.iter().filter_map(|&i| row_id(&rows[i])).collect();
-            return Err(FoldSummaryError(format!(
+            return Err(FoldFail::Summary(FoldSummaryError(format!(
                 "fold: the summary of rows {}…{} was {} its {budget}-token budget after \
                  {SUMMARY_RETRIES} re-summarises — nothing folded",
                 ids.first().copied().unwrap_or(0),
@@ -371,7 +379,7 @@ pub(crate) async fn summarize(
                 } else {
                     format!("~{got} tokens, over")
                 }
-            )));
+            ))));
         }
         retries += 1;
         let tell = if cut {
@@ -381,7 +389,7 @@ pub(crate) async fn summarize(
                 .replace("{got}", &got.to_string())
                 .replace("{budget}", &budget.to_string())
         };
-        let (again, again_cut) = ask(format!("{tell}{text}")).await;
+        let (again, again_cut) = ask(format!("{tell}{text}"))?;
         cut = again_cut;
         if !again.is_empty() {
             text = again;
@@ -407,14 +415,14 @@ pub(crate) async fn summarize(
 /// member — that is how folds nest: the next fold over this stretch of the view
 /// takes the earlier fold as one of its rows, and its level is one above the
 /// deepest member.
-pub async fn summarize_fold(
+pub fn summarize_fold(
     ctx: &ProjectionCtx<'_>,
     rows: &[Value],
     idxs: &[usize],
 ) -> Result<Value, FoldFail> {
     let anchor = member_anchor(rows, idxs).map_err(FoldFail::Anchor)?;
     let line = crate::line_summary::of_span(ctx.self_id, ctx.kernel, rows, idxs);
-    let (title, text, degraded) = summarize_span(ctx.pass, rows, idxs, line.as_deref()).await?;
+    let (title, text, degraded) = summarize_span(ctx.pass, rows, idxs, line.as_deref())?;
     Ok(fold_row(rows, idxs, anchor, &title, &text, degraded))
 }
 
@@ -423,8 +431,8 @@ pub async fn summarize_fold(
 /// span's latest `line_summary`, its title when given ([`summarize`]).
 ///
 /// # Errors
-/// The summary would not fit after every re-summarise.
-pub(crate) async fn summarize_span(
+/// The summary would not fit after every re-summarise; a task answer has not come yet.
+pub(crate) fn summarize_span(
     pass: &Pass,
     rows: &[Value],
     idxs: &[usize],
@@ -432,9 +440,7 @@ pub(crate) async fn summarize_span(
 ) -> Result<(String, String, bool), FoldFail> {
     // THE INDEX RIDES BESIDE THE SUMMARY, outside its budget.
     let index = mechanical_index(rows, idxs);
-    let (title, mut text, degraded) = summarize(pass, rows, idxs, line)
-        .await
-        .map_err(FoldFail::Summary)?;
+    let (title, mut text, degraded) = summarize(pass, rows, idxs, line)?;
     if !index.is_empty() {
         text = format!("{text}\n\n{index}");
     }
@@ -552,8 +558,9 @@ pub fn next_span(
 /// which holds folds without their members, keeps every fold in place.
 ///
 /// # Errors
-/// A summary would not fit, or a span member has no known place.
-pub async fn fold_down(
+/// A summary would not fit, or a span member has no known place; a summary's task
+/// answer has not come yet.
+pub fn fold_down(
     rows: &[Value],
     ctx: &ProjectionCtx<'_>,
     budget: i64,
@@ -574,7 +581,7 @@ pub async fn fold_down(
             if span.is_empty() {
                 break;
             }
-            let fr = summarize_fold(ctx, &rows, &span).await?;
+            let fr = summarize_fold(ctx, &rows, &span)?;
             rows.push(fr.clone());
             folds.push(fr);
             view = render(&rows);
@@ -593,7 +600,7 @@ pub async fn fold_down(
         if span.is_empty() || !span.iter().all(|&i| is_fold(&rows[i])) {
             break;
         }
-        let fr = summarize_fold(ctx, &rows, &span).await?;
+        let fr = summarize_fold(ctx, &rows, &span)?;
         rows.push(fr.clone());
         folds.push(fr);
         view = render(&rows);
@@ -605,11 +612,11 @@ pub async fn fold_down(
 /// Fold the oldest stretches of the view down to the low watermark, tidy the
 /// head, then hand what is left to `strip`. The fold rows ride the projection
 /// ([`Projection::folds`]) to the view row they are written with.
-pub async fn fold(body: &[Value], ctx: &ProjectionCtx<'_>) -> Result<Projection, FoldFail> {
-    let (_, view, folds, lost) = fold_down(body, ctx, ctx.budget - NOTICE_ENVELOPE_RESERVE).await?;
+pub fn fold(body: &[Value], ctx: &ProjectionCtx<'_>) -> Result<Projection, FoldFail> {
+    let (_, view, folds, lost) = fold_down(body, ctx, ctx.budget - NOTICE_ENVELOPE_RESERVE)?;
     // Stage two and three: strip bodies in what is left, then cut — strip's own
     // logic.
-    let out = strip(&view, ctx).await?;
+    let out = strip(&view, ctx);
     Ok(Projection {
         body: out.body,
         summary: None,
@@ -687,6 +694,22 @@ mod tests {
 
     fn one(content: &str) -> Vec<Value> {
         vec![json!({"role": "user", "id": 1, "content": content})]
+    }
+
+    /// The fold summary run to its end, its task requests read here.
+    async fn summarize(
+        dp: &Pass,
+        rows: &[Value],
+        chain: &[usize],
+        line: Option<&str>,
+    ) -> Result<(String, String, bool), FoldSummaryError> {
+        crate::model_format::pass::settled(dp, None, |p| match super::summarize(p, rows, chain, line) {
+            Ok(v) => Ok(Ok(v)),
+            Err(FoldFail::Summary(e)) => Ok(Err(e)),
+            Err(FoldFail::Pending) => Err(Pending),
+            Err(other) => panic!("a summary fails only by its budget: {other:?}"),
+        })
+        .await
     }
 
     fn rows6() -> Vec<Value> {

@@ -221,7 +221,8 @@ where
 /// A HANDLER THAT ANSWERS LATER (#795): its execution defers, and `settle` is how its
 /// steps settle it — once, from whichever step ends the work. `None` in a kernel
 /// bookkeeping run, which answers no call: the steps run, nothing settles.
-pub(crate) fn deferred(kernel: &Arc<Kernel>) -> Settle {
+#[must_use]
+pub fn deferred(kernel: &Arc<Kernel>) -> Settle {
     Settle {
         kernel: Arc::clone(kernel),
         d: kernel.defer().ok(),
@@ -229,7 +230,7 @@ pub(crate) fn deferred(kernel: &Arc<Kernel>) -> Settle {
 }
 
 /// How a deferred handler settles ([`deferred`]).
-pub(crate) struct Settle {
+pub struct Settle {
     kernel: Arc<Kernel>,
     d: Option<fantastic_kernel::Deferred>,
 }
@@ -239,6 +240,80 @@ impl Settle {
     /// makes (`failed`, `{error, raised}`).
     pub(crate) fn with<E: Into<fantastic_kernel::bundle::BundleError>>(self, result: Result<Value, E>) {
         crate::verbs::settle_with(&self.kernel, self.d, result);
+    }
+
+    /// Settle the handler's execution with its reply, as a handler's returned reply
+    /// settles: `errored` when it is a refusal, else `completed`.
+    pub fn reply(self, v: Value) {
+        let Some(d) = self.d else { return };
+        let status = if fantastic_kernel::is_refused(&v) {
+            Status::Errored
+        } else {
+            Status::Completed
+        };
+        self.kernel
+            .settle_deferred(d.pid(), Outcome::new(Some(d.pid()), status, v));
+    }
+
+    /// Settle the handler's execution with its reply and the reply's body (the bytes a
+    /// reply carries), as [`Self::reply`] settles.
+    pub fn reply_with(self, v: Value, body: Option<fantastic_kernel::Blob>) {
+        let Some(d) = self.d else { return };
+        let status = if fantastic_kernel::is_refused(&v) {
+            Status::Errored
+        } else {
+            Status::Completed
+        };
+        self.kernel
+            .settle_deferred(d.pid(), Outcome::new(Some(d.pid()), status, v).with_body(body));
+    }
+
+    /// The deferred execution (`None`: a kernel bookkeeping run, nothing deferred):
+    /// what a settle that comes from elsewhere later names
+    /// ([`Kernel::settle_deferred`]).
+    #[must_use]
+    pub fn pid(&self) -> Option<fantastic_kernel::TaskId> {
+        self.d.map(|d| d.pid())
+    }
+
+    /// Where the handler's own I/O runs after a step ([`Forker::run`]).
+    #[must_use]
+    pub fn forker(&self) -> Forker {
+        Forker {
+            kernel: Arc::clone(&self.kernel),
+            pid: self.d.map(|d| d.pid()),
+        }
+    }
+}
+
+/// THE HANDLER'S OWN I/O, after a step (#795): [`Forker::run`].
+#[derive(Clone)]
+pub struct Forker {
+    kernel: Arc<Kernel>,
+    pid: Option<fantastic_kernel::TaskId>,
+}
+
+impl Forker {
+    /// `work` runs as a task of `owner`'s under the deferred execution, so its `cancel`
+    /// and its deadline end the work with it (an HTTP stream, a socket). An execution
+    /// already ended runs nothing; a kernel bookkeeping run (nothing deferred) runs
+    /// `work` as its own task.
+    pub fn run<W>(&self, owner: &AgentId, verb: &str, work: W)
+    where
+        W: Future<Output = ()> + Send + 'static,
+    {
+        match self.pid {
+            Some(pid) if self.kernel.tasks.contains(&pid) => {
+                let k = Arc::clone(&self.kernel);
+                fantastic_kernel::CURRENT_TASK.sync_scope(pid, || {
+                    k.spawn_task(owner, verb, work);
+                });
+            }
+            Some(_) => {}
+            None => {
+                fantastic_kernel::spawn_inherit(work);
+            }
+        }
     }
 }
 

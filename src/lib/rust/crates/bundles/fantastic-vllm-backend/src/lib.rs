@@ -35,7 +35,7 @@
 //!   `credentials`.
 
 use async_trait::async_trait;
-use fantastic_ai_core::credentials::{key_reader, KeySource};
+use fantastic_ai_core::credentials::KeySource;
 use fantastic_ai_core::provider::{
     Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell, Stalled,
     Unconfigured,
@@ -1082,9 +1082,13 @@ fn read_clock_of(meta: &Map<String, Value>, read_timeout: f64) -> f64 {
         .unwrap_or(read_timeout)
 }
 
-/// [`build_provider`] from a record (`complete` lays the pass's `model` over the agent's).
-fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<String, Value>) -> Arc<dyn Provider> {
-    let key: Arc<dyn KeySource> = Arc::new(key_reader(agent_id, kernel, NAME, false));
+/// How this backend reads its key: optional (a keyless local server).
+const KEYS: fantastic_ai_core::remote_provider::Keys =
+    fantastic_ai_core::remote_provider::Keys { backend: NAME, required: false };
+
+/// [`build_provider`] from a record (`complete` lays the pass's `model` over the agent's)
+/// and the key read for the pass.
+fn build_provider_with(agent_id: &AgentId, meta: Map<String, Value>, key: Arc<dyn KeySource>) -> Arc<dyn Provider> {
     match configure(agent_id, &meta, key) {
         Ok(p) => Arc::new(p),
         Err(e) => Arc::new(Unconfigured(e)),
@@ -1364,26 +1368,51 @@ impl Handler for VllmBundle {
             Call::Boot(_) => verbs::boot(agent_id, kernel).await,
             Call::UsageVerb(a) => usage_reply(agent_id.as_str(), a.reset == Some(true)),
             Call::Complete(a) => {
-                // A verb that runs a turn first reads what the record leaves to the server;
-                // a server that does not answer refuses the verb, naming the field.
-                if let Some(refused) = server::resolve(agent_id, kernel).await {
-                    return Ok(Some(refused));
-                }
-                fantastic_ai_core::remote_provider::complete_verb(agent_id, &a, kernel, |m| {
-                    build_provider_with(agent_id, kernel, m)
-                })
-                .await
+                // A verb that runs a turn first reads what the record leaves to the server
+                // (with the key read for it, a step); a server that does not answer
+                // refuses the verb, naming the field.
+                let (id, k) = (agent_id.clone(), Arc::clone(kernel));
+                let prepare: fantastic_ai_core::remote_provider::Prepare = Box::new(move |key, args, _chosen| {
+                    Box::pin(async move {
+                        match server::resolve(&id, &k, key.as_ref()).await {
+                            Some(refused) => Err(refused),
+                            None => Ok(args),
+                        }
+                    })
+                });
+                let id = agent_id.clone();
+                fantastic_ai_core::remote_provider::complete_verb(
+                    agent_id,
+                    a,
+                    kernel,
+                    Some(KEYS),
+                    Some(prepare),
+                    move |m, key| build_provider_with(&id, m, key),
+                    fantastic_ai_core::steps::deferred(kernel),
+                )
+                .await;
+                Value::Null
             }
             Call::Models(_) => {
                 fantastic_ai_core::remote_provider::models_verb(
                     agent_id,
                     kernel,
+                    Some(KEYS),
                     fantastic_ai_core::remote_provider::NO_LIVE,
+                    fantastic_ai_core::steps::deferred(kernel),
                 )
-                .await
+                .await;
+                Value::Null
             }
             Call::SetDefaultModel(a) => {
-                fantastic_ai_core::remote_provider::set_default_verb(agent_id, &a, kernel).await
+                fantastic_ai_core::remote_provider::set_default_verb(
+                    agent_id,
+                    &a,
+                    kernel,
+                    fantastic_ai_core::steps::deferred(kernel),
+                )
+                .await;
+                Value::Null
             }
         };
         Ok((!reply.is_null()).then_some(reply))

@@ -460,14 +460,18 @@ pub trait Live: Send + Sync {
     async fn token(&self, t: &str);
 }
 
+/// What runs once a request's execution exists: its id, for `stop` and `cancel`.
+pub type Launched = Box<dyn FnOnce(fantastic_kernel::TaskId) + Send>;
+
 /// ONE REQUEST AS A MESSAGE (#795): `messages` go out and this returns at once; `done`
 /// gets the whole answer when the request settles. A provider agent is called through
-/// the kernel ([`crate::remote_provider::RemoteProvider::begin`]); an in-process
-/// provider's stream is read in a task of `owner`'s, its own I/O, watched by `abort`.
-/// `deadline` is how long the request may take (what is left of its pass's ceiling,
-/// `ceiling` seconds whole): past it, `done` gets the timeout. The execution the request
-/// runs as is handed back for `stop` and `cancel` (`None`: it was refused before one
-/// existed, and `done` has its error).
+/// the kernel ([`crate::remote_provider::RemoteProvider::begin`]: the request's images
+/// first, each a step); an in-process provider's stream is read in a task of `owner`'s,
+/// its own I/O, watched by `abort`. `deadline` is how long the request may take (what
+/// is left of its pass's ceiling, `ceiling` seconds whole): past it, `done` gets the
+/// timeout. `launched` gets the execution the request runs as, once it exists, for
+/// `stop` and `cancel` (never, when it was refused before one existed: `done` has its
+/// error).
 #[allow(clippy::too_many_arguments)]
 pub async fn begin(
     provider: Arc<dyn Provider>,
@@ -479,17 +483,13 @@ pub async fn begin(
     abort: Arc<tokio::sync::Notify>,
     live: Arc<dyn Live>,
     done: Done,
-) -> Option<fantastic_kernel::TaskId> {
-    if provider.remote().is_some() {
-        let remote = Arc::clone(&provider);
-        return remote
-            .remote()
-            .expect("checked above")
-            .begin(messages, max_tokens, deadline, live, done)
-            .await;
+    launched: Launched,
+) {
+    if let Some(remote) = provider.remote() {
+        return remote.begin(messages, max_tokens, deadline, live, done, launched).await;
     }
     let done = DoneOnce(Some(done), fantastic_kernel::Inherited::capture());
-    Some(kernel.spawn_task(owner, "complete", async move {
+    let pid = kernel.spawn_task(owner, "complete", async move {
         let mut done = done;
         let read = async {
             let mut stream = provider.chat(&messages, max_tokens).await?;
@@ -513,7 +513,8 @@ pub async fn begin(
         if let Some(done) = done.0.take() {
             done(read).await;
         }
-    }))
+    });
+    launched(pid);
 }
 
 /// A request's [`Done`] that runs once: when the task reading it is dropped first (a
