@@ -83,7 +83,6 @@ export const terminalView: ViewBundle = {
     cwd: ".",
     inherit_env: ["*"],
     shell: "login",
-    ingress_rule: "allow_all_ingress",
   },
 
   async mount(ctx: ViewContext): Promise<ViewHandle> {

@@ -21,8 +21,6 @@ pub struct Record {
     /// What the bridge exposes, relative to `root`: a file, or everything under a directory (`.` is the whole root). No list, or an empty one, exposes nothing.
     #[schemars(inner(length(min = 1), regex(pattern = r"^(?:(?:[^./][^/]*|\.|\.[^./][^/]*|\.\.[^/]+)/+)*(?:[^./][^/]*|\.|\.[^./][^/]*|\.\.[^/]+)/*$")))]
     pub allow: Option<Vec<String>>,
-    /// Who may reach the bridge; absent, the bridge is sealed.
-    pub ingress_rule: Option<fantastic_io_bridge::authorizer::EnvelopelessIngress>,
     /// A view's bridge: the agent id of the file bridge it shows.
     pub bridge: Option<String>,
     /// A view's path, relative to its bridge's root.

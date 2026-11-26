@@ -8,24 +8,20 @@ loaders:
       agents:
         - id: shell_term
           handler_module: exec_bridge.tools
-          ingress_rule: allow_all_ingress
           cwd: "."
           env: {SHELL: /bin/sh}
           shell: true
         - id: login_term
           handler_module: exec_bridge.tools
-          ingress_rule: allow_all_ingress
           cwd: "."
           env: {SHELL: /bin/sh}
           shell: login
         - id: bare_env_term
           handler_module: exec_bridge.tools
-          ingress_rule: allow_all_ingress
           cwd: "."
           shell: true
         - id: allow_term
           handler_module: exec_bridge.tools
-          ingress_rule: allow_all_ingress
           cwd: "."
           env: {SHELL: /bin/sh}
           allowed: ['/bin/echo .*']

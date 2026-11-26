@@ -33,7 +33,7 @@ sys.path.insert(
 )
 from backends import backend as _resolve_backend
 from helpers import Limits, add_lines, connect, drive, human_line, lines, probe_agent, relay, verdict
-from helpers.lines import is_unknown
+from helpers.lines import is_not_allowed
 from helpers.facts_arm import store_rows
 from helpers.kernel import open_kernel, home
 
@@ -74,14 +74,11 @@ async def main():
 
         for payload in (
             {"type": "create_agent", "parent_id": home(root), "id": FB,
-             "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-             "ingress_rule": "allow_all_ingress"},
+             "handler_module": "file_bridge.tools", "allow": ["."], "root": "."},
             {"type": "create_agent", "parent_id": home(root), "id": "editor",
-             "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-             "ingress_rule": "allow_all_ingress"},
+             "handler_module": "file_bridge.tools", "allow": ["."], "root": "."},
             {"type": "create_agent", "parent_id": home(root), "id": RUNNER,
-             "handler_module": "exec_bridge.tools", "cwd": os.getcwd(), "inherit_env": ["PATH", "HOME"],
-             "ingress_rule": "allow_all_ingress", "allowed": ["git .*"],
+             "handler_module": "exec_bridge.tools", "cwd": os.getcwd(), "inherit_env": ["PATH", "HOME"], "allowed": ["git .*"],
              "description": lines.runs(["git .*"])},
         ):
             r = await _call(root, root.id, payload)
@@ -129,10 +126,11 @@ async def main():
         await human_line(root, c.id)
         await add_lines(root, "ai_rev", {"ai": lines.call("send")})
         # THE REVIEWER'S LINE IS `send` ONLY (harness, before the model): a hand
-        # holding exactly that line reads no other coder verb — the unknown answer.
+        # holding exactly that line reads no other coder verb — `not_allowed`
+        # naming the verb (it sees the coder through its `send` line).
         await probe_agent(root, "rev_hand", can={"ai": lines.call("send")})
         hist = await relay(root, "rev_hand", "ai", {"type": "history"})
-        assert is_unknown(hist, "ai"), f"a send-only line must not reach the coder's history: {hist}"
+        assert is_not_allowed(hist, "history"), f"a send-only line must not reach the coder's history: {hist}"
         gone = await _call(root, root.id, {"type": "delete_agent", "id": "rev_hand"})
         assert not gone.get("error"), f"delete rev_hand: {gone}"
         # THE TASK COMES FROM THE HUMAN — gated, ledgered, a real sender.

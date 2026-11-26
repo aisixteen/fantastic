@@ -36,8 +36,7 @@ OUTSIDE = "files"
 def _exec(agent_id: str, **extra: Any) -> dict:
     """A real exec bridge record: loads with no model and no key."""
     return {
-        "id": agent_id, "handler_module": "exec_bridge.tools", "cwd": ".", "inherit_env": ["*"], "shell": "login",
-        "ingress_rule": "allow_all_ingress", "allowed": ["^echo e2e$"],
+        "id": agent_id, "handler_module": "exec_bridge.tools", "cwd": ".", "inherit_env": ["*"], "shell": "login", "allowed": ["^echo e2e$"],
         "api_key": SECRET, "guid": "guid-" + agent_id, "started_at": "2026-01-01T00:00:00Z",
         "history": [ROW], "rows": [{"text": ROW}], **extra,
     }

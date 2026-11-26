@@ -208,7 +208,8 @@ then root the bridge at the relative dir:
 ```sh
 cp /opt/fantastic/head/index.html "$FANTASTIC_WORKDIR/head/"     # into the workdir
 $BIN <web> create_agent handler_module=file_bridge.tools id=head \
-     root=head readonly=true allow='["index.html"]' ingress_rule=allow_all_ingress
+     root=head readonly=true allow='["index.html"]'
+# (python keeps the old model, #170: add ingress_rule=allow_all_ingress there)
 # → http://<host>:8088/head/file/index.html  (piped via read_stream, chunked)
 ```
 

@@ -162,8 +162,7 @@ def main() -> int:
 
     try:
         rec = hk.create(parent_id="rest", handler_module="file_bridge.tools", id="fb",
-                        root="box", allow=["docs", "top.txt"],
-                        ingress_rule="allow_all_ingress")
+                        root="box", allow=["docs", "top.txt"])
         need(rec.get("id") == "fb", f"create fb: {str(rec)[:200]}")
 
         # 1 · open: one agent per path, under the chosen ids

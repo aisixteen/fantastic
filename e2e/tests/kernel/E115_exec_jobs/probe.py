@@ -117,8 +117,7 @@ def main() -> int:
     broken = work / ".fantastic/agents/web/agents/rest/agents/ex_broken"
     broken.mkdir(parents=True)
     (broken / "agent.yaml").write_text(yaml.safe_dump({
-        "id": "ex_broken", "handler_module": "exec_bridge.tools", "parent_id": "rest",
-        "ingress_rule": "allow_all_ingress", "cwd": str(run_dir), "env": ENV,
+        "id": "ex_broken", "handler_module": "exec_bridge.tools", "parent_id": "rest", "cwd": str(run_dir), "env": ENV,
         "allowed": [PY_LINE + " -c (.*"],
     }, sort_keys=False))
     hk = HostKernel(spec, work).boot()
@@ -148,7 +147,7 @@ def main() -> int:
     seen: list = []
     try:
         rec = hk.create(parent_id="rest", handler_module="exec_bridge.tools", id="ex",
-                        ingress_rule="allow_all_ingress", cwd=str(run_dir), env=ENV,
+                        cwd=str(run_dir), env=ENV,
                         allowed=ALLOWED)
         need(rec.get("id") == "ex", f"create ex: {str(rec)[:200]}")
         seen = watch(hk.port, "ex")

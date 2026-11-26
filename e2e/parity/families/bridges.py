@@ -72,8 +72,7 @@ def run(ctx) -> None:  # noqa: C901
     try:
         (ctx.work / "a.txt").write_text("a\n")
         rec.json("setup/readings", k.create(parent_id=k.home, id="readings",
-                                            handler_module="file_bridge.tools", allow=["."], root=".",
-                                            **OPEN))
+                                            handler_module="file_bridge.tools", allow=["."], root="."))
         # The live peer, exactly as `wire` writes it.
         rec.json("setup/wsb", k.create(
             parent_id=k.home, id="wsb", handler_module="ws_bridge.tools", **OPEN,

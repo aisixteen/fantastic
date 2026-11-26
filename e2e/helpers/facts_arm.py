@@ -367,12 +367,10 @@ async def fixture(root, fb: str):
         {
             "type": "create_agent", "parent_id": home(root), "id": fb,
             "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-            "ingress_rule": "allow_all_ingress",
         },
         {
             "type": "create_agent", "parent_id": home(root), "id": "notes",
             "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-            "ingress_rule": "allow_all_ingress",
         },
     ):
         r = await call(root, root.id, payload)

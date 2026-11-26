@@ -59,8 +59,8 @@ def roster(stub_url: str, interp: str) -> list:
         # The same bundle with a FALSY argument — a different branch everywhere.
         ("totals2", "file_bridge.tools", dict(allow=["."], root=".", description="")),
         ("sched", "scheduler.tools", {}),
-        ("wsb", "ws_bridge.tools", dict(url="ws://127.0.0.1:9/nowhere")),
-        ("relay", "relay_connector.tools", dict(url="ws://127.0.0.1:9/nowhere")),
+        ("wsb", "ws_bridge.tools", dict(url="ws://127.0.0.1:9/nowhere", **OPEN)),
+        ("relay", "relay_connector.tools", dict(url="ws://127.0.0.1:9/nowhere", **OPEN)),
         ("sload", "static_loader.tools", dict(root=".")),
         ("sload2", "static_loader.tools", dict(root=".", display_name="")),
         ("cli", "cli.tools", {}),
@@ -96,8 +96,7 @@ def run(ctx) -> None:
         rec.json("root_boot_reflect_full",
                  call(k, k.root_id, {"type": "reflect", "detail": "full"}))
         for aid, hm, meta in agents:
-            m = {"parent_id": k.home, "handler_module": hm, "id": aid,
-                 **OPEN, **meta}
+            m = {"parent_id": k.home, "handler_module": hm, "id": aid, **meta}
             rec.json(f"create_{aid}", k.create(**m))
         time.sleep(1.5)
 

@@ -279,23 +279,6 @@ fn tilde_root_is_literal_not_home() {
     );
 }
 
-#[test]
-fn gate_seals_by_default_and_opens_with_allow_all() {
-    let id = AgentId::from("fb");
-    // No ingress_rule ⇒ SEALED: every verb but `reflect` denied.
-    let bare = Map::new();
-    assert!(gate(&bare, &id, "read_stream").is_some());
-    assert!(gate(&bare, &id, "write_stream").is_some());
-    assert!(gate(&bare, &id, "list").is_some());
-    let denied = gate(&bare, &id, "list").unwrap();
-    assert_eq!(denied["reason"], "unauthorized");
-    // ingress_rule=allow_all_ingress ⇒ OPEN.
-    let mut open = Map::new();
-    open.insert("ingress_rule".into(), json!("allow_all_ingress"));
-    assert!(gate(&open, &id, "read_stream").is_none());
-    assert!(gate(&open, &id, "write_stream").is_none());
-}
-
 // ─── kernel-driven ───────────────────────────────────────────────────
 
 use serde_json::Map as JsonMap;
@@ -305,7 +288,7 @@ use serde_json::Map as JsonMap;
 async fn mk_kernel(tmp: &tempfile::TempDir) -> Arc<Kernel> {
     mk_kernel_with(
         tmp,
-        json!({"ingress_rule": "allow_all_ingress", "allow": ["."]}),
+        json!({"allow": ["."]}),
     )
     .await
 }
@@ -795,20 +778,6 @@ fn root_ok(p: &Path) -> Result<PathBuf, String> {
     at(p)
 }
 
-/// The gate presents NO record token: a persisted `auth_token` opens nothing.
-#[test]
-fn a_record_token_opens_nothing() {
-    let mut pw = Map::new();
-    pw.insert("ingress_rule".into(), json!("password_ingress"));
-    pw.insert("token_env".into(), json!("FANTASTIC_GROUP_TOKEN_FILE_UNIT"));
-    pw.insert("auth_token".into(), json!("s3cret"));
-    std::env::set_var("FANTASTIC_GROUP_TOKEN_FILE_UNIT", "s3cret");
-    let denied =
-        gate(&pw, &AgentId::from("fb"), "list").expect("record token must not open the leg");
-    assert_eq!(denied["reason"], "unauthorized");
-    std::env::remove_var("FANTASTIC_GROUP_TOKEN_FILE_UNIT");
-}
-
 #[tokio::test]
 async fn reflect_key_order_matches_python() {
     // Python's key order, docstring verbs and the
@@ -824,7 +793,7 @@ async fn reflect_key_order_matches_python() {
         .unwrap()
         .keys()
         .map(String::as_str)
-        .take(9)
+        .take(7)
         .collect();
     assert_eq!(
         keys,
@@ -836,8 +805,6 @@ async fn reflect_key_order_matches_python() {
             "allow_count",
             "edit_grammar",
             "compose",
-            "ingress_rule",
-            "egress_rule",
         ]
     );
     assert_eq!(
@@ -847,8 +814,6 @@ async fn reflect_key_order_matches_python() {
             .display()
             .to_string())
     );
-    assert_eq!(r["ingress_rule"], "allow_all_ingress");
-    assert_eq!(r["egress_rule"], "silent_egress");
     assert_eq!(
         r["sentence"], crate::MAN
     );
@@ -929,23 +894,8 @@ async fn reflect_root_is_resolved_absolute_path() {
     assert!(r.get("root_error").is_none());
 }
 
-#[test]
-fn reflect_posture_names_the_rules_the_gate_resolves() {
-    let mut meta = Map::new();
-    meta.insert("ingress_rule".into(), json!("allow_all_ingress"));
-    let r = reflect_reply(&AgentId::from("fb"), &meta, &Ok(PathBuf::from("/")));
-    assert_eq!(r["ingress_rule"], "allow_all_ingress");
-    assert_eq!(r["egress_rule"], "silent_egress");
-    // No posture at all => sealed by default.
-    let r = reflect_reply(&AgentId::from("fb"), &Map::new(), &Ok(PathBuf::from("/")));
-    assert_eq!(r["ingress_rule"], "deny_ingress");
-    assert_eq!(r["egress_rule"], "silent_egress");
-}
-
 #[tokio::test]
-async fn unknown_verb_on_sealed_bridge_is_unhandled() {
-    // The verb lookup runs BEFORE the gate, so a sealed bridge still says
-    // "unknown verb" instead of "unauthorized".
+async fn an_unknown_verb_is_unhandled() {
     let tmp = tempfile::TempDir::new().unwrap();
     served(&tmp);
     let kernel = mk_kernel_with(&tmp, json!({})).await;
@@ -961,17 +911,61 @@ async fn unknown_verb_on_sealed_bridge_is_unhandled() {
     );
 }
 
+/// Two in-kernel callers of `fb`, siblings of it under the root: `stranger` holds
+/// no line on it, `reader` holds `call: ["*"]`.
+fn callers(kernel: &Arc<Kernel>) {
+    for (id, can) in [("stranger", json!({})), ("reader", json!({"fb": {"call": ["*"]}}))] {
+        fantastic_kernel::test_support::register(
+            kernel,
+            Agent::new(
+                AgentId::from(id),
+                None,
+                Some(AgentId::from("kernel_state")),
+                json!({"can": can}).as_object().cloned().unwrap(),
+                PathBuf::new(),
+                false,
+            ),
+        );
+    }
+}
+
+/// `payload` to `fb`, sent AS the agent `who` (judged by its lines).
+async fn call_as(kernel: &Arc<Kernel>, who: &str, payload: Value) -> Value {
+    fantastic_kernel::test_support::as_agent(
+        AgentId::from(who),
+        kernel.operator_send(vec![Item::new(AgentId::from("fb"), payload)]),
+    )
+    .await
+    .remove(0)
+    .result
+}
+
+/// Only the caller's `can` lines decide who reaches the bridge: a caller with no
+/// line gets the unknown answer (the same as a missing id) and touches nothing; a
+/// caller with a line runs the verb. The bridge's record holds no rule of its own.
 #[tokio::test]
-async fn a_sealed_leg_denies_every_verb_but_reflect() {
-    // The gate exemption covers `reflect` only.
+async fn only_a_line_on_the_bridge_lets_an_agent_call_it() {
     let tmp = tempfile::TempDir::new().unwrap();
-    served(&tmp);
-    let kernel = mk_kernel_with(&tmp, json!({})).await;
-    let r = call(&kernel, json!({"type": "list"})).await;
-    assert_eq!(r["reason"], "unauthorized", "{r}");
-    // reflect still answers on a sealed leg.
-    let r = call(&kernel, json!({"type": "reflect"})).await;
-    assert_eq!(r["ingress_rule"], "deny_ingress", "{r}");
+    let dir = served(&tmp);
+    std::fs::write(dir.join("a.txt"), b"A").unwrap();
+    let kernel = mk_kernel(&tmp).await;
+    callers(&kernel);
+    let unknown = fantastic_kernel::refusal::unknown_agent("fb");
+    for payload in [
+        json!({"type": "list"}),
+        json!({"type": "read", "path": "a.txt"}),
+        json!({"type": "read_stream", "path": "a.txt"}),
+        json!({"type": "write", "path": "a.txt", "bytes": "B"}),
+    ] {
+        let r = call_as(&kernel, "stranger", payload.clone()).await;
+        assert_eq!(r, unknown, "{payload} → {r}");
+    }
+    assert_eq!(std::fs::read(dir.join("a.txt")).unwrap(), b"A");
+    let w = call_as(&kernel, "reader", json!({"type": "write", "path": "a.txt", "bytes": "B"})).await;
+    assert!(w.get("error").is_none(), "{w}");
+    assert_eq!(std::fs::read(dir.join("a.txt")).unwrap(), b"B");
+    let l = call_as(&kernel, "reader", json!({"type": "list"})).await;
+    assert!(l["files"].is_array(), "{l}");
 }
 
 #[tokio::test]
@@ -981,7 +975,7 @@ async fn readonly_wins_over_root_escape() {
     served(&tmp);
     let kernel = mk_kernel_with(
         &tmp,
-        json!({"ingress_rule": "allow_all_ingress", "readonly": true, "root": "../outside"}),
+        json!({"readonly": true, "root": "../outside"}),
     )
     .await;
     for payload in [
@@ -1174,7 +1168,7 @@ fn site(tmp: &tempfile::TempDir) {
 
 async fn bridge(tmp: &tempfile::TempDir, allow: Option<Value>) -> Arc<Kernel> {
     site(tmp);
-    let mut meta = json!({"ingress_rule": "allow_all_ingress"});
+    let mut meta = json!({});
     if let Some(a) = allow {
         meta["allow"] = a;
     }
@@ -1370,7 +1364,7 @@ async fn a_readonly_leg_refuses_a_binary_write_before_judging_the_chunk() {
     let dir = served(&tmp);
     let kernel = mk_kernel_with(
         &tmp,
-        json!({"ingress_rule": "allow_all_ingress", "allow": ["."], "readonly": true}),
+        json!({"allow": ["."], "readonly": true}),
     )
     .await;
     for header in [
@@ -1451,7 +1445,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
 
 // ─── one prologue, two channels ─────────────────────────────────────────────
 //
-// `handle` and `handle_binary` each run the agent lookup → meta snapshot → gate
+// `handle` and `handle_binary` each run the agent lookup → meta snapshot
 // → clamp → readonly/exposure prologue. These pin, per refusal, that the BINARY
 // channel answers byte-for-byte what the TEXT channel answers (and no body).
 
@@ -1473,34 +1467,33 @@ async fn both(
     )
 }
 
+/// A caller with no line on the bridge is refused identically on both channels:
+/// the unknown answer, and no body.
 #[tokio::test]
-async fn a_sealed_leg_denies_both_channels_identically() {
+async fn a_caller_with_no_line_is_refused_identically_on_both_channels() {
     let tmp = tempfile::TempDir::new().unwrap();
-    served(&tmp);
+    std::fs::write(served(&tmp).join("a.txt"), b"A").unwrap();
     let kernel = mk_kernel_with(&tmp, json!({"allow": ["."]})).await;
+    callers(&kernel);
+    let unknown = fantastic_kernel::refusal::unknown_agent("fb").to_string();
     for header in [
         json!({"type": "read_stream", "path": "a.txt"}),
         json!({"type": "read", "path": "a.txt"}),
         json!({"type": "list"}),
     ] {
-        let (txt, bin, body) = both(&kernel, header.clone(), b"x").await;
-        assert_eq!(bin, txt, "{header}");
-        assert!(bin.contains(r#""reason":"unauthorized""#), "{bin}");
-        assert_eq!(body, None, "{header}");
+        let txt = call_as(&kernel, "stranger", header.clone()).await;
+        let bin = fantastic_kernel::test_support::as_agent(
+            AgentId::from("stranger"),
+            kernel.operator_send(vec![
+                Item::new(AgentId::from("fb"), header.clone()).with_binary_key("bytes", b"x".to_vec())
+            ]),
+        )
+        .await
+        .remove(0);
+        assert_eq!(txt.to_string(), unknown, "{header}");
+        assert_eq!(bin.result.to_string(), unknown, "{header}");
+        assert_eq!(bin.body.map(|b| b.bytes), None, "{header}");
     }
-    // the exact denial, once
-    let (_, bin, _) = both(
-        &kernel,
-        json!({"type": "read_stream", "path": "a.txt"}),
-        b"",
-    )
-    .await;
-    assert_eq!(
-        bin,
-        call(&kernel, json!({"type": "read_stream", "path": "a.txt"}))
-            .await
-            .to_string()
-    );
 }
 
 #[tokio::test]
@@ -1511,7 +1504,7 @@ async fn a_path_outside_the_allow_list_is_refused_identically_on_both_channels()
     std::fs::write(dir.join("secret.txt"), b"s").unwrap();
     let kernel = mk_kernel_with(
         &tmp,
-        json!({"ingress_rule": "allow_all_ingress", "allow": ["pub"]}),
+        json!({"allow": ["pub"]}),
     )
     .await;
     let (txt, bin, body) = both(
@@ -1534,7 +1527,7 @@ async fn a_readonly_leg_refuses_writes_identically_on_both_channels() {
     served(&tmp);
     let kernel = mk_kernel_with(
         &tmp,
-        json!({"ingress_rule": "allow_all_ingress", "allow": ["."], "readonly": true}),
+        json!({"allow": ["."], "readonly": true}),
     )
     .await;
     let (txt, bin, body) = both(

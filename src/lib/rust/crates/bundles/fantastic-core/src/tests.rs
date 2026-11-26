@@ -418,7 +418,7 @@ async fn make_store(kernel: &Arc<Kernel>, extra: serde_json::Value) {
     let mut create = json!({
         "type": "create_agent", "parent_id": "kernel", "id": "store",
         "handler_module": "file_bridge.tools", "root": ".fantastic",
-        "allow": ["."], "ingress_rule": "allow_all_ingress",
+        "allow": ["."],
     });
     for (k, v) in extra.as_object().unwrap() {
         create[k] = v.clone();

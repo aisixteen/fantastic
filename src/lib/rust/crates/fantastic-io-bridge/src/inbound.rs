@@ -9,7 +9,7 @@
 //! (by the leg's own lines). Whoever is on the other end of
 //! the wire is not an identity in this kernel; the leg is.
 //!
-//! The leg's `ingress_rule` has already judged the frame (`gate_inbound`) before
+//! The leg's `ingress_rule` has already judged the external frame before
 //! the transport hands it in. These verbs are gated like any other: the
 //! transport's hand-in is the operator's (ungated); an agent calling them needs
 //! the grant on the leg like any verb.

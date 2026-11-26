@@ -283,7 +283,7 @@ def step_terminal(run: Run, root: str, step: float) -> str:
     # a terminal sits under `user`, as the app's terminal does (kern/terminal.rs)
     made = call(root, {
         "type": "create_agent", "parent_id": "user", "handler_module": "exec_bridge.tools", "id": TERM_ID,
-        "shell": True, "cwd": WORK_DIR, "inherit_env": ["*"], "ingress_rule": "allow_all_ingress",
+        "shell": True, "cwd": WORK_DIR, "inherit_env": ["*"],
     })
     if isinstance(made, dict) and "error" in made:
         raise bc.Fail(f"create_agent {TERM_ID} answered {made['error']!r}")

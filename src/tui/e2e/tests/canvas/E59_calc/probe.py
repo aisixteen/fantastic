@@ -136,8 +136,8 @@ def exec_record() -> dict:
     calc lines, carrying its OWN view — the six-button panel, the verbs it calls."""
     return {"id": "calc_exec", "handler_module": "exec_bridge.tools", "parent_id": "canvas_root",
             "allowed": [r"^python3 calc\.py (det|factor|simpson|roots|fib_mod|gcd_lcm) \S+$", r"^python3 test_calc\.py$"],
-            # the panel's calls arrive as `user`; an exec leg is sealed until its rule opens it
-            "cwd": ".", "inherit_env": ["*"], "callable_by": {"user": ["*"]}, "ingress_rule": "allow_all_ingress",
+            # the panel's calls arrive as `user`
+            "cwd": ".", "inherit_env": ["*"], "callable_by": {"user": ["*"]},
             "view": {"kind": "html", "bytes": panel_html(), "calls": ["start", "watch"]}}
 
 

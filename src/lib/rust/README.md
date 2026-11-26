@@ -194,10 +194,10 @@ Bundles that compile under either tier:
 | `fantastic-sqlite-store`       | the DURABLE MEMORY STORE — `ram_store`'s tables, keys and verbs over one SQLite file per store (the record's `path`, relative to the project dir); a caller cannot tell the two apart, except that this one survives the process; the stop folds the WAL into the file (`close_all`) |
 | `fantastic-credential-store`   | SECRETS BY REF — a ref holds named fields bound to ONE host; a ref is declared only on the store's record, never created by a call; secret values are recorded as `[secret]`; the file is read through ONE `O_NOFOLLOW` open judged on its own descriptor. Every AI backend reads its key here before each request. Verbs, fields and defaults: `reflect` / `docs of=<id>` |
 | `fantastic-static-loader`      | declarative YAML roster loader — hydrates the declared agents at boot as kernel bookkeeping (the root's `create_agent` run directly) |
-| `fantastic-file`               | filesystem-as-agent (the fs edge of the io family; sealed by default, deny-all `allow` list) + text editing with versions |
+| `fantastic-file`               | filesystem-as-agent (the fs edge of the io family; the callers' `can` lines decide who calls it, deny-all `allow` list) + text editing with versions |
 | `fantastic-web`                | axum HTTP host — rendering routes; mounts child call surfaces; the file route hands each fetch to the host (`fetch_file`), which reads AS ITSELF |
-| `fantastic-web-ws`             | WS verb channel (mounted onto a parent web); sealed by default; an admitted frame is handed to the leg and sent onward AS THE LEG |
-| `fantastic-web-rest`           | REST verb channel (mounted onto a parent web); sealed by default; the gate runs BEFORE the body is read, and a body past 16 MiB (io_bridge `MAX_FRAME`) is a 413; an admitted call is handed to the leg and sent onward AS THE LEG |
+| `fantastic-web-ws`             | WS verb channel (mounted onto a parent web); sealed to its WS clients by default (`ingress_rule`; never judges an in-kernel caller); an admitted frame is handed to the leg and sent onward AS THE LEG |
+| `fantastic-web-rest`           | REST verb channel (mounted onto a parent web); sealed to its HTTP clients by default (`ingress_rule`; never judges an in-kernel caller); the gate runs BEFORE the body is read, and a body past 16 MiB (io_bridge `MAX_FRAME`) is a 413; an admitted call is handed to the leg and sent onward AS THE LEG |
 | `fantastic-scheduler`          | recurring tasks on a tokio tick; a schedule fires AS THE SCHEDULER (its `can_call` decides), and every caller the gate admits sees and drives every schedule |
 | `fantastic-bridge`             | cross-kernel bridge — two bundles, `ws_bridge.tools` and `relay_connector.tools` — WS-only, asymmetric (memory / WS); an inbound `call` frame is served AS THE LEG (its `can_call`, the target's `callable_by`); a leg's rules are read off its record per frame; a relay leg reads its password from a credential_store ref before every dial |
 | `fantastic-ollama-backend`     | local LLM via ollama |
@@ -212,7 +212,7 @@ Full-tier-only bundles (subprocess; excluded from the embedded slice):
 
 | crate                          | role |
 |--------------------------------|------|
-| `fantastic-exec-bridge`        | the process edge — a general-purpose command runner, sealed, gated by a regex allowlist; a terminal is a PTY job (flow control, UTF-8 incremental decode, image-paste); any caller the gate admits drives a job |
+| `fantastic-exec-bridge`        | the process edge — a general-purpose command runner, bound by a regex allowlist (the callers' `can` lines decide who calls it); a terminal is a PTY job (flow control, UTF-8 incremental decode, image-paste); any caller the gate admits drives a job |
 | `fantastic-py-agent`           | the base a folder bundle (`bundles/<name>/bundle.yaml`, `base: py_agent`) extends — runs the folder's program per instance and reaches it only through its declared verbs |
 
 Internal / test crates:

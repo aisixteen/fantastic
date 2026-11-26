@@ -78,7 +78,7 @@ pub fn http_class(status: u16) -> ErrorClass {
 #[must_use]
 pub fn reason_class(reason: Option<&str>) -> ErrorClass {
     use fantastic_kernel::refusal::{
-        DISABLED, NOT_FOUND, TRANSPORT_ERROR, UNAUTHORIZED, UNKNOWN_AGENT,
+        DISABLED, NOT_ALLOWED, NOT_FOUND, TRANSPORT_ERROR, UNAUTHORIZED, UNKNOWN_AGENT,
     };
     match reason {
         Some(TRANSPORT_ERROR) => ErrorClass::Transient,
@@ -86,6 +86,7 @@ pub fn reason_class(reason: Option<&str>) -> ErrorClass {
         Some(NOT_FOUND) => ErrorClass::Permanent(NOT_FOUND),
         Some(DISABLED) => ErrorClass::Permanent(DISABLED),
         Some(UNKNOWN_AGENT) => ErrorClass::Permanent(UNKNOWN_AGENT),
+        Some(NOT_ALLOWED) => ErrorClass::Permanent(NOT_ALLOWED),
         _ => ErrorClass::Turn,
     }
 }

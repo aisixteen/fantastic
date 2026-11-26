@@ -1,9 +1,8 @@
 //! Process edge of the io family — rust mirror of the canonical python
 //! `io/exec_bridge` (which is canonical; on disagreement this crate is wrong).
 //!
-//! Crossing kernel↔subprocess is gated like any io_bridge leg: **SEALED BY
-//! DEFAULT** (absent `ingress_rule` ⇒ every verb except `reflect` denies
-//! `{reason:"unauthorized"}`), and bound by a **regex command ALLOWLIST**:
+//! Who may call the bridge is the kernel's `can` lines alone (and the ancestor
+//! cap); the bridge itself is bound by a **regex command ALLOWLIST**:
 //! `allowed` on the record is a list of regexes, and `start {command, args}`
 //! refuses unless the shell-joined line fullmatches one. No per-call override,
 //! no default, no PATH fallback — an empty `allowed` runs nothing.
@@ -241,35 +240,7 @@ fn shell_permits(
 pub struct ExecBridgeBundle;
 
 /// What the bundle is for — its one short man text.
-const MAN: &str = "A process edge: runs allowlisted commands as background jobs (pipe or terminal), sealed by default; a job's program may declare verbs of its own and receive them as mail.";
-
-/// The name of a call's verb, for the gate.
-fn verb_name(call: &verbs::Call) -> &str {
-    use verbs::Call;
-    match call {
-        Call::Reflect(_) => "reflect",
-        Call::Shutdown(_) => "shutdown",
-        Call::Start(_) => "start",
-        Call::Run(_) => "run",
-        Call::Status(_) => "status",
-        Call::Stop(_) => "stop",
-        Call::Interrupt(_) => "interrupt",
-        Call::Clear(_) => "clear",
-        Call::Write(_) => "write",
-        Call::Resize(_) => "resize",
-        Call::Ack(_) => "ack",
-        Call::Output(_) => "output",
-        Call::Tail(_) => "tail",
-        Call::Grep(_) => "grep",
-        Call::PasteImage(_) => "paste_image",
-        Call::Connector(_) => "connector",
-        Call::Monitor(_) => "monitor",
-        Call::Monitors(_) => "monitors",
-        Call::Unmonitor(_) => "unmonitor",
-        Call::DeclareVerbs(_) => "declare_verbs",
-        Call::Dynamic(c) => &c.name,
-    }
-}
+const MAN: &str = "A process edge: runs allowlisted commands as background jobs (pipe or terminal); a job's program may declare verbs of its own and receive them as mail.";
 
 #[async_trait]
 impl Handler for ExecBridgeBundle {
@@ -336,26 +307,6 @@ impl Handler for ExecBridgeBundle {
         kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<Blob>), BundleError> {
         use verbs::Call;
-        // AUTH GATE — the process edge, gated like any io_bridge leg (SEALED by
-        // default). `reflect` and `connector` are UNGATED: discovery must work on a
-        // sealed bridge. Every other verb is gated, MAIL INCLUDED (python `handler`):
-        // a sealed leg delivers nothing to its program — the relay's inbox drain
-        // refuses the same mail, since the substrate's fanout reaches it before this
-        // handler runs.
-        if !matches!(call, Call::Reflect(_) | Call::Connector(_)) {
-            let meta = snapshot_meta(agent_id, kernel);
-            if let Some(denied) = gate(&meta, agent_id, verb_name(&call)) {
-                // The fanout has queued a copy of this mail for the program already:
-                // note the refusal now so the drain drops it whatever the record
-                // says when it dequeues.
-                if let Call::Dynamic(c) = &call {
-                    if relay::has_owner_inbox(agent_id) {
-                        relay::note_refused(agent_id, &mail::payload_of(c));
-                    }
-                }
-                return Ok((Some(denied), None));
-            }
-        }
         let reply = match call {
             Call::Reflect(_) => reflect_reply(agent_id, kernel),
             Call::Shutdown(_) => Value::Null,
@@ -461,44 +412,6 @@ impl Handler for ExecBridgeBundle {
     }
 }
 
-// ── the auth gate (io_bridge leg — SEALED by default) ───────────────
-
-/// Deny an owned verb on a sealed leg. Same shape as `fantastic-file`'s gate:
-/// absent `ingress_rule` resolves to deny-inbound, and every denial
-/// teaches the fix. `kind="spawn"` — that is what is being authorized; no rule
-/// inspects the kind, so a new one costs nothing and the audit trail is honest.
-///
-/// The reply FORWARDS the rule's own `Denial` — reason, hint, see. A hint
-/// hand-rolled here would teach a different repair per bundle and per runtime;
-/// the rule that refused is the thing that knows the repair.
-fn gate(meta: &Map<String, Value>, agent_id: &AgentId, verb: &str) -> Option<Value> {
-    let rules = fantastic_io_bridge::authorizer::Rules::of(meta).unwrap_or_default();
-    let rule = fantastic_io_bridge::authorizer::ingress::resolve(&rules);
-    let action = fantastic_io_bridge::authorizer::Action {
-        kind: "spawn",
-        target: agent_id.0.as_str(),
-        verb,
-        // NO CREDENTIAL. A token is a WIRE-ENVELOPE fact and the process
-        // edge has no envelope; reading one off the RECORD would let a leg satisfy
-        // its own password rule with a secret it stores itself. python's
-        // `gate_inbound` here is handed an Action with `token=None`.
-        token: None,
-    };
-    if let fantastic_io_bridge::authorizer::Decision::Deny(d) =
-        fantastic_io_bridge::gate_inbound(&rule, &action)
-    {
-        let mut out = refusal(UNAUTHORIZED, d.reason);
-        if !d.hint.is_empty() {
-            with(&mut out, "hint", json!(d.hint));
-        }
-        if !d.see.is_empty() {
-            with(&mut out, "see", json!(d.see));
-        }
-        return Some(out);
-    }
-    None
-}
-
 // ── snapshot helpers ────────────────────────────────────────────────
 
 /// Snapshot the agent record's meta map. Returns an empty map if the
@@ -521,7 +434,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         .values()
         .filter(|j| &j.owner == agent_id && jobs::alive(j))
         .count();
-    let mut out = json!({
+    json!({
         "id": agent_id.as_str(),
         "sentence": MAN,
         "cwd": cwd_val,
@@ -533,21 +446,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         // (none), true ($SHELL bare) or "login" ($SHELL -l).
         "shell": record::RECORD.get(&meta, "shell"),
         "running": running,
-    });
-    // The auth POSTURE, python's `describe(rec)` — `**_describe(rec)` is the last
-    // thing python's reflect spreads, so these keys land last and in its order.
-    if let (Some(o), Some(posture)) = (
-        out.as_object_mut(),
-        fantastic_io_bridge::authorizer::Rules::of(&meta)
-            .unwrap_or_default()
-            .describe()
-            .as_object(),
-    ) {
-        for (k, v) in posture {
-            o.insert(k.clone(), v.clone());
-        }
-    }
-    out
+    })
 }
 
 pub mod jobs;
@@ -773,8 +672,7 @@ async fn start_job(
     };
     if let Some(mut why) = why {
         // An AUTHORIZATION denial, not a bad argument: the command line is
-        // well-formed and the LEG refused it. Same code the ingress gate answers,
-        // so one branch covers "the operator has not opened this".
+        // well-formed and the LEG refused it: the operator has not permitted it.
         if let Some(tail) = shell_tail(&meta) {
             // Say what `shell` DOES permit, so a caller that passed extra args (or
             // a pipe job) learns why the shell permission did not cover it. The

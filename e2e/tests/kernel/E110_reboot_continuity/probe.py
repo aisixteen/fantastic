@@ -145,7 +145,7 @@ def main() -> int:
 
     def create_files(hk: HostKernel) -> None:
         create(hk, parent_id="rest", handler_module="file_bridge.tools", id="files",
-               root=".", allow=["data"], ingress_rule="allow_all_ingress")
+               root=".", allow=["data"])
 
     want_files = {f"data/f_{i:02d}.txt" for i in range(N) if i != 3} | {
         "data/sub/deep.txt", "data/blob.bin"}
@@ -176,10 +176,9 @@ def main() -> int:
         need(not diff, f"{tag}: every field of top round-trips, the update kept: {diff or 'all equal'}")
         need(top.get("can") == TOP_CAN, f"{tag}: top's can: {top.get('can')}")
         fb = recs.get("files") or {}
-        need(fb.get("root") == "." and fb.get("allow") == ["data"]
-             and fb.get("ingress_rule") == "allow_all_ingress",
-             f"{tag}: the file_bridge record (root, allow, ingress_rule): "
-             f"{ {k: fb.get(k) for k in ('root', 'allow', 'ingress_rule')} }")
+        need(fb.get("root") == "." and fb.get("allow") == ["data"],
+             f"{tag}: the file_bridge record (root, allow): "
+             f"{ {k: fb.get(k) for k in ('root', 'allow')} }")
         rf = hk.send("kernel", {"type": "reflect", "tree": "none"})
         need(isinstance(rf, dict) and rf.get("id") == hk.root_id and "guid" not in rf,
              f"{tag}: rest's root reflect carries no guid (operator only): {str(rf)[:200]}")

@@ -142,3 +142,74 @@ fn the_record_declaration_judges_the_ingress_rule() {
         assert!(check(json!({"ingress_rule": ok})).is_ok(), "{ok}");
     }
 }
+
+/// The leg's `ingress_rule` is the door for EXTERNAL HTTP clients only. An
+/// in-kernel agent's call to the leg meets the kernel's `can` lines alone: a leg
+/// sealed to the outside (or behind a password) answers a caller holding a line,
+/// and a caller with no line gets the unknown answer, whatever the rule says.
+#[tokio::test]
+async fn the_ingress_rule_never_judges_an_in_kernel_caller() {
+    for rule in [None, Some("deny_ingress"), Some("password_ingress")] {
+        let mut kernel = Kernel::new();
+        kernel.bundles.register("web_rest.tools", WebRestBundle);
+        let kernel = Arc::new(kernel);
+        let root = Agent::new(
+            AgentId::from("kernel_state"),
+            None,
+            None,
+            Map::new(),
+            std::path::PathBuf::new(),
+            false,
+        );
+        fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
+        kernel.set_root(root);
+        let mut leg = Map::new();
+        if let Some(r) = rule {
+            leg.insert("ingress_rule".into(), json!(r));
+        }
+        let agents = vec![
+            ("rest", Some("web_rest.tools".to_string()), leg),
+            ("stranger", None, Map::new()),
+            (
+                "holder",
+                None,
+                json!({"can": {"rest": {"call": ["*"]}}}).as_object().cloned().unwrap(),
+            ),
+        ];
+        for (id, hm, meta) in agents {
+            fantastic_kernel::test_support::register(
+                &kernel,
+                Agent::new(
+                    AgentId::from(id),
+                    hm,
+                    Some(AgentId::from("kernel_state")),
+                    meta,
+                    std::path::PathBuf::new(),
+                    false,
+                ),
+            );
+        }
+        let ask = |who: &'static str| {
+            let kernel = Arc::clone(&kernel);
+            async move {
+                fantastic_kernel::test_support::as_agent(
+                    AgentId::from(who),
+                    kernel.operator_send(vec![fantastic_kernel::Item::new(
+                        AgentId::from("rest"),
+                        json!({"type": "get_routes"}),
+                    )]),
+                )
+                .await
+                .remove(0)
+                .result
+            }
+        };
+        let held = ask("holder").await;
+        assert!(held["routes"].is_array(), "{rule:?}: {held}");
+        assert_eq!(
+            ask("stranger").await,
+            fantastic_kernel::refusal::unknown_agent("rest"),
+            "{rule:?}"
+        );
+    }
+}

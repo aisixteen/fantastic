@@ -163,7 +163,6 @@ async fn wire(kernel: &Arc<Kernel>, store_root: &Path, desk: &str) {
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "id": "store",
                 "root": store_root.to_string_lossy(),
-                "ingress_rule": "allow_all_ingress",
             }),
         )])
         .await;

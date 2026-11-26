@@ -16,14 +16,14 @@ The script is the call sequence E160 asks a model to find:
 3. `kernel` `create_agent` of it under the AI, with no line field: the AI's `create`
    line on itself names the bundle, and the new agent is in its tree (position);
 4. `kernel` `update_agent` of the AI's own `can`, widened with a line on `sha`:
-   refused, the unknown answer (an agent never writes its own `can`);
+   refused, `not_allowed` naming `can` (an agent never writes its own `can`);
 5. `sha` `reflect part=schema` (#719);
 6. `sha` `sha256` on a token minted at test time;
 7. the answer with the digest, then `done`.
 
 Checks: the files land verbatim and the folder is listed (`reflect rest bundles=all`)
 as a py_agent bundle; the record exists (handler_module, parent); the self-widening is
-the unknown answer and the AI's `can` is unchanged; `reflect part=schema` declares the
+`not_allowed` naming `can` and the AI's `can` is unchanged; `reflect part=schema` declares the
 verb and the AI's reflect reply carried it; the verb's reply carries the SHA-256 the
 harness computes; the AI's stored answer carries it; no request follows `done`; the
 lines are exact (E160's `grant_faults`: the AI's `can` is unchanged, the new agent's

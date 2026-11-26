@@ -157,7 +157,6 @@ async fn create(host: &Host, argv: &[String]) -> Result<(), String> {
         "parent_id": host.cfg.user.as_str(),
         "id": TERM_ID,
         "handler_module": fantastic_exec_bridge::HANDLER_MODULE,
-        "ingress_rule": "allow_all_ingress",
     });
     if let (Some(c), Value::Object(f)) = (create.as_object_mut(), line_record(argv)) {
         c.extend(f);
@@ -183,7 +182,6 @@ pub async fn canvas_cell(host: &Host, argv: &[String]) -> Result<Option<String>,
         "parent_id": crate::kern::web::CANVAS_NODE_ID,
         "id": exec,
         "handler_module": fantastic_exec_bridge::HANDLER_MODULE,
-        "ingress_rule": "allow_all_ingress",
     });
     if let (Some(c), Value::Object(f)) = (create.as_object_mut(), line_record(argv)) {
         c.extend(f);

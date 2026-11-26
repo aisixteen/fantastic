@@ -386,9 +386,13 @@ async fn dispatch_item(
 
 /// The ONE machine-readable question about a reply. Never `"error" in r`: a
 /// bundle error and a gate denial are different animals. The gate answers a
-/// refused call as an unknown agent, so a denial and a missing id read the same.
+/// refused call as an unknown agent when the caller sees nothing there (a denial
+/// and a missing id read the same), and as `not_allowed` when it sees the target.
 fn denied(reply: &Value) -> bool {
-    reply.get("reason").and_then(Value::as_str) == Some("unknown_agent")
+    matches!(
+        reply.get("reason").and_then(Value::as_str),
+        Some("unknown_agent" | "not_allowed")
+    )
 }
 
 /// Resolve a dotted path, `*` meaning "every element of this list".

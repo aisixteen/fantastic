@@ -20,9 +20,10 @@ the steps", no "then execute each in order", no place to put it. If planning sho
 up, it showed up on its own — that is the thing being watched.
 
 SCORING is split, deliberately:
-  HARD  — the resulting posture on disk. assets + logs open, secrets STILL SEALED.
-          The trap is symmetric: opening everything fails exactly like opening
-          nothing, so "run update_agent on all three" is not a shortcut.
+  HARD  — what a browser receives through `probe_web`: assets served, transcripts
+          and secrets refused. The posture is `probe_web`'s `read_stream` lines,
+          which the AI writes. The trap is symmetric: opening everything fails
+          exactly like opening nothing, so a line on all three is not a shortcut.
   SOFT  — observations, reported but never asserted: did a plan artifact appear
           anywhere, and did the last turn report back in prose.
 

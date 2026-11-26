@@ -19,8 +19,8 @@
 //! that mark and files the monitor under the one monitors lock, so no monitor is ever
 //! filed after its job's end went out. RAM only, like the job it watches.
 //!
-//! A DELIVERY THE TARGET REFUSES (the call gate: `unauthorized`; no such agent:
-//! `unknown_agent`) ENDS the monitor — never a silent drop. The refusal is LOUD
+//! A DELIVERY THE TARGET REFUSES (the call gate: `unauthorized`, `not_allowed`;
+//! no such agent: `unknown_agent`; no such verb: `unhandled`) ENDS the monitor — never a silent drop. The refusal is LOUD
 //! three ways: a python `logger.warning` line naming monitor, job, target and
 //! refusal; a `monitor_dead` event on this bridge's inbox (its watchers see it); and
 //! the dead monitor stays in `monitors` with `status: "dead"` and the refusal as
@@ -49,7 +49,12 @@ enum Msg {
 }
 
 /// What a refused delivery answers — the target will never take one.
-const REFUSED: [&str; 2] = ["unauthorized", "unknown_agent"];
+const REFUSED: [&str; 4] = [
+    fantastic_kernel::refusal::UNAUTHORIZED,
+    fantastic_kernel::refusal::UNKNOWN_AGENT,
+    fantastic_kernel::refusal::NOT_ALLOWED,
+    fantastic_kernel::refusal::UNHANDLED,
+];
 
 struct Mon {
     owner: AgentId,

@@ -58,11 +58,10 @@ fn py_start(py: &Path, code: &str, with_connector: bool) -> Value {
 }
 
 /// A kernel + one exec_bridge agent with a permissive `allowed=[".*"]` (the
-/// operator opening the leg to any command) and the ingress rule OPEN. The seal +
-/// the allowlist refusal are covered by dedicated tests.
+/// operator opening the leg to any command). The `can` gate and the allowlist
+/// refusal are covered by dedicated tests.
 async fn mk_kernel(tmp: &TempDir) -> (Arc<Kernel>, AgentId) {
     let mut extra = Map::new();
-    extra.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
     extra.insert("allowed".to_string(), json!([".*"]));
     // a bare command is found on the CHILD's PATH only
     extra.insert("inherit_env".to_string(), json!(["PATH"]));
@@ -193,10 +192,6 @@ async fn the_record_declaration_shapes_the_fields() {
         ("env", json!({"A": ["no"]}), "env.A"),
         ("inherit_env", json!([""]), "inherit_env[0]"),
         ("inherit_env", json!("PATH"), "inherit_env"),
-        // a leg with no wire envelope takes no password rule; no other name is a rule
-        ("ingress_rule", json!("password_ingress"), "ingress_rule"),
-        ("ingress_rule", json!("open_sesame"), "ingress_rule"),
-        ("ingress_rule", json!({"type": "allow_all_ingress"}), "ingress_rule"),
     ] {
         let r = kernel.operator_send(vec![Item::new(
                 AgentId::from("kernel_state"),
@@ -251,7 +246,6 @@ async fn reflect_advertises_the_allowlist_not_interpreters() {
 async fn every_start_refusal_carries_a_code() {
     let tmp = TempDir::new().unwrap();
     let mut meta = Map::new();
-    meta.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
     meta.insert("allowed".to_string(), json!(["echo( .*)?"]));
     let (kernel, a) = mk_kernel_with(&tmp, meta).await;
     let ask = |p: Value| {
@@ -380,13 +374,11 @@ async fn a_job_id_is_the_jobs_task_id_and_nothing_else_names_it() {
 }
 
 /// A command that matches no `allowed` pattern is refused, naming the patterns, and
-/// nothing is spawned. And a SEALED leg (no ingress_rule) denies `start` before the
-/// allowlist is even consulted, while `reflect` still answers.
+/// nothing is spawned.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn start_refuses_unlisted_command_and_sealed_leg_denies() {
+async fn start_refuses_unlisted_command() {
     let tmp = TempDir::new().unwrap();
     let mut meta = Map::new();
-    meta.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
     meta.insert("allowed".to_string(), json!(["ls( .*)?"])); // only ls
     let (kernel, a) = mk_kernel_with(&tmp, meta).await;
     let r = kernel.operator_send(vec![Item::new(
@@ -410,37 +402,67 @@ async fn start_refuses_unlisted_command_and_sealed_leg_denies() {
         Some(0),
         "a refused start left a job row: {st}"
     );
+}
 
-    // SEALED BY DEFAULT — a fresh leg (no ingress_rule) denies every owned verb
-    // except reflect, and the denial teaches the fix.
-    let tmp2 = TempDir::new().unwrap();
-    let (k2, sealed) = mk_kernel_with(&tmp2, Map::new()).await;
-    let d = k2
-        .operator_send(vec![Item::new(
-            sealed.clone(),
-            json!({"type": "start", "command": "ls"}),
-        )])
+/// Two in-kernel callers of the bridge `a`, siblings of it under the root:
+/// `stranger` holds no line on it, `holder` holds `call: ["*"]`.
+fn callers(kernel: &Arc<Kernel>, a: &AgentId) {
+    for (id, can) in [
+        ("stranger", json!({})),
+        ("holder", json!({a.as_str(): {"call": ["*"]}})),
+    ] {
+        fantastic_kernel::test_support::register(
+            kernel,
+            Agent::new(
+                AgentId::from(id),
+                None,
+                Some(AgentId::from("kernel_state")),
+                json!({"can": can}).as_object().cloned().unwrap(),
+                std::path::PathBuf::new(),
+                false,
+            ),
+        );
+    }
+}
+
+/// `payload` to `a`, sent AS the agent `who` (judged by its lines).
+async fn send_as(kernel: &Arc<Kernel>, who: &str, a: &AgentId, payload: Value) -> Value {
+    fantastic_kernel::test_support::as_agent(
+        AgentId::from(who),
+        kernel.operator_send(vec![Item::new(a.clone(), payload)]),
+    )
+    .await
+    .remove(0)
+    .result
+}
+
+/// Only the caller's `can` lines decide who drives the bridge: a caller with no
+/// line gets the unknown answer (the same as a missing id) for every verb,
+/// `reflect` included, and nothing is spawned; a caller with a line runs the job.
+/// The bridge's record holds no rule of its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_a_line_on_the_bridge_lets_an_agent_run_a_job() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    callers(&kernel, &a);
+    let unknown = fantastic_kernel::refusal::unknown_agent(a.as_str());
+    for p in [
+        json!({"type": "start", "command": "echo", "args": ["x"]}),
+        json!({"type": "status"}),
+        json!({"type": "reflect"}),
+    ] {
+        let r = send_as(&kernel, "stranger", &a, p.clone()).await;
+        assert_eq!(r, unknown, "{p} → {r}");
+    }
+    let st = send_as(&kernel, "holder", &a, json!({"type": "status"})).await;
+    assert_eq!(st["jobs"].as_array().map(Vec::len), Some(0), "the stranger spawned: {st}");
+    let mut rx = inbox(&kernel, &a);
+    let r = send_as(&kernel, "holder", &a, json!({"type": "start", "command": "echo", "args": ["x"]})).await;
+    assert!(!r["job_id"].is_null(), "the holder's start must run: {r}");
+    let done = until(&mut rx, |v| v["type"] == "job_done", 25)
         .await
-        .remove(0)
-        .result;
-    assert_eq!(d["reason"], json!("unauthorized"), "{d}");
-    assert!(
-        d["hint"]
-            .as_str()
-            .unwrap_or("")
-            .contains("ingress_rule=allow_all_ingress"),
-        "the denial must teach how to open: {d}"
-    );
-    let refl = k2
-        .operator_send(vec![Item::new(sealed.clone(), json!({"type": "reflect"}))])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(refl["ingress_rule"], json!("deny_ingress"), "{refl}");
-    assert!(
-        refl["allowed"].is_array(),
-        "discovery must work sealed: {refl}"
-    );
+        .expect("no job_done");
+    assert!(crate::jobs::printed(&a, &done, "stdout").contains('x'), "{done}");
 }
 
 /// SIGINT reaches the job — the program catches it and exits cleanly.
@@ -718,7 +740,6 @@ async fn a_bare_command_is_found_on_the_childs_path_only() {
     let bin = TempDir::new().unwrap();
     crate::sys::echo_script(bin.path(), "ft_only_here", "found-by-child-path");
     let mut extra = Map::new();
-    extra.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
     extra.insert("allowed".to_string(), json!([".*"]));
     let (kernel, a) = mk_kernel_with(&tmp, extra.clone()).await;
     let r = kernel.operator_send(vec![Item::new(
@@ -1023,8 +1044,7 @@ async fn the_program_is_gated_as_its_runner_not_as_the_operator() {
         let _ = kernel.operator_send(vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({"type": "create_agent", "parent_id": "kernel_state", "id": id,
-                       "handler_module": "exec_bridge.tools",
-                       "ingress_rule": "allow_all_ingress"}),
+                       "handler_module": "exec_bridge.tools"}),
             )])
             .await
             .remove(0)
@@ -1176,8 +1196,7 @@ async fn a_stream_chunk_crosses_the_wire_raw() {
     let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel", "id": a.as_str(),
-                   "handler_module": HANDLER_MODULE,
-                   "ingress_rule": "allow_all_ingress", "allowed": [".*"],
+                   "handler_module": HANDLER_MODULE, "allowed": [".*"],
                    "cwd": tmp.path().to_string_lossy(),
                    "can": {"blob": {"call": ["*"]}}}),
         )])
@@ -1248,8 +1267,7 @@ async fn a_text_sends_bytes_reply_comes_back_raw() {
     let a = AgentId::from(agent_id_for(&tmp).as_str());
     for rec in [
         json!({"type": "create_agent", "parent_id": "kernel", "id": a.as_str(),
-               "handler_module": HANDLER_MODULE,
-               "ingress_rule": "allow_all_ingress", "allowed": [".*"],
+               "handler_module": HANDLER_MODULE, "allowed": [".*"],
                "cwd": tmp.path().to_string_lossy(),
                "can": {"blob": {"call": ["*"]}}}),
         json!({"type": "create_agent", "parent_id": "kernel_state", "id": "blob",
@@ -1325,7 +1343,6 @@ async fn a_text_read_stream_is_answered_by_one_binary_frame() {
         (
             json!({"type": "create_agent", "parent_id": "kernel", "id": a.as_str(),
                    "handler_module": HANDLER_MODULE,
-                   "ingress_rule": "allow_all_ingress",
                    "cwd": tmp.path().to_string_lossy(),
                    "can": {"fb": {"call": ["*"]}}}),
             a.as_str(),
@@ -1333,7 +1350,6 @@ async fn a_text_read_stream_is_answered_by_one_binary_frame() {
         (
             json!({"type": "create_agent", "parent_id": "kernel_state", "id": "fb",
                    "handler_module": "file_bridge.tools", "allow": ["."],
-                   "ingress_rule": "allow_all_ingress",
                    "root": served.to_string_lossy()}),
             "fb",
         ),
@@ -1452,7 +1468,7 @@ async fn a_denied_watch_reaches_the_program_and_registers_nothing() {
     let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel", "id": "secret",
-                   "handler_module": HANDLER_MODULE, "ingress_rule": "allow_all_ingress"}),
+                   "handler_module": HANDLER_MODULE}),
         )])
         .await;
 
@@ -1528,14 +1544,14 @@ async fn stopping_a_watching_program_leaves_no_proxy_or_watcher() {
     }
 }
 
-/// The seal covers every verb but `reflect`/`connector`, MAIL
-/// INCLUDED. The substrate's fanout reaches the program's `_xbself_` proxy BEFORE
-/// the handler, so the relay's inbox drain drops what the gate refuses: a sealed
-/// leg's program receives nothing, and receives again once the leg is reopened.
+/// Mail is a call like any other: a caller with no line on the bridge gets the
+/// unknown answer and its mail never reaches the program (the kernel refuses it
+/// before the fanout); a caller with a line has its mail delivered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_sealed_leg_refuses_mail_and_relays_nothing() {
+async fn mail_without_a_line_never_reaches_the_program() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
+    callers(&kernel, &a);
     crate::mail::declare_for_test(&a, &["probe_mail", "after"]);
     let (mut child, stop, relay) = wire(&kernel, &a, 9006);
     wire_write(&mut child, &json!({"op": "onmessage"})).await;
@@ -1548,30 +1564,17 @@ async fn a_sealed_leg_refuses_mail_and_relays_nothing() {
         kernel.inboxes.contains_key(&proxy),
         "the owner proxy never registered"
     );
-    let rule = |r: &str| {
-        Item::new(
-            AgentId::from("kernel_state"),
-            json!({"type": "update_agent", "id": a.as_str(), "ingress_rule": r}),
-        )
-    };
-    let up = kernel.operator_send(vec![rule("deny_ingress")]).await.remove(0);
-    assert_eq!(up.result["updated"], true, "{}", up.result);
+    let unknown = fantastic_kernel::refusal::unknown_agent(a.as_str());
     for p in [
         json!({"type": "status"}),
         json!({"type": "probe_mail", "x": "TEST-VALUE-MAIL"}),
-        json!({"type": "probe_mail", "x": "TEST-VALUE-MAIL"}),
         json!({"type": "probe_mail", "x": "TEST-VALUE-MAIL-2"}),
     ] {
-        let out = kernel.operator_send(vec![Item::new(a.clone(), p.clone())])
-            .await
-            .remove(0)
-            .result;
-        assert_eq!(out["reason"], "unauthorized", "{p} → {out}");
+        let out = send_as(&kernel, "stranger", &a, p.clone()).await;
+        assert_eq!(out, unknown, "{p} → {out}");
     }
-    kernel.operator_send(vec![rule("allow_all_ingress")]).await;
-    kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "after"}))])
-        .await;
-    // the first frame down the fd is the mail sent AFTER the reopen
+    send_as(&kernel, "holder", &a, json!({"type": "after"})).await;
+    // the first frame down the fd is the holder's mail
     assert_eq!(
         wire_read(&mut child).await,
         json!({"op": "inbox", "payload": {"type": "after"}})
@@ -1596,16 +1599,6 @@ fn manual_owner_inbox(
     rx
 }
 
-async fn set_rule(kernel: &Arc<Kernel>, owner: &AgentId, r: &str) {
-    let up = kernel.operator_send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({"type": "update_agent", "id": owner.as_str(), "ingress_rule": r}),
-        )])
-        .await
-        .remove(0);
-    assert_eq!(up.result["updated"], true, "{}", up.result);
-}
-
 async fn send_to(kernel: &Arc<Kernel>, owner: &AgentId, p: Value) -> Value {
     kernel.operator_send(vec![Item::new(owner.clone(), p)])
         .await
@@ -1613,82 +1606,30 @@ async fn send_to(kernel: &Arc<Kernel>, owner: &AgentId, p: Value) -> Value {
         .result
 }
 
-/// The refusal is bound to the SEND-time rule: a leg reopened before the drain
-/// dequeues the refused item must not deliver it.
+/// A mail no line permits is never queued for the program: the owner inbox holds
+/// only the mail of a caller with a line.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_refused_mail_is_dropped_even_if_the_leg_reopens_before_the_drain_runs() {
+async fn a_refused_mail_is_never_queued_for_the_program() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
+    callers(&kernel, &a);
     crate::mail::declare_for_test(&a, &["probe_mail", "after"]);
     let mut rx = manual_owner_inbox(&kernel, &a, 9101);
     let proxy = AgentId::from("_xbself_9101");
     assert!(fantastic_kernel::send::as_operator(kernel.watch(&a, proxy)).await.is_none());
-    set_rule(&kernel, &a, "deny_ingress").await;
-    let out = send_to(&kernel, &a, json!({"type": "probe_mail"})).await;
-    assert_eq!(out["reason"], "unauthorized", "{out}");
-    set_rule(&kernel, &a, "allow_all_ingress").await;
-    send_to(&kernel, &a, json!({"type": "after"})).await;
-    let first = rx.recv().await.expect("probe_mail queued");
-    let second = rx.recv().await.expect("after queued");
-    assert_eq!(first.payload, json!({"type": "probe_mail"}));
+    let out = send_as(&kernel, "stranger", &a, json!({"type": "probe_mail"})).await;
+    assert_eq!(out, fantastic_kernel::refusal::unknown_agent(a.as_str()), "{out}");
+    send_as(&kernel, "holder", &a, json!({"type": "after"})).await;
+    let first = rx.recv().await.expect("after queued");
+    assert_eq!(first.payload, json!({"type": "after"}));
     assert_eq!(
-        crate::relay::drain_verdict(&first.payload, &a, &kernel),
-        None,
-        "refused mail must not reach the fd"
-    );
-    assert_eq!(
-        crate::relay::drain_verdict(&second.payload, &a, &kernel),
+        crate::relay::drain_verdict(&first.payload, &a),
         Some(json!({"op": "inbox", "payload": {"type": "after"}}))
     );
 }
 
-/// One ledger entry per refused copy: only the copy sent after the reopen is delivered.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_refused_mail_entry_is_consumed_once() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, a) = mk_kernel(&tmp).await;
-    crate::mail::declare_for_test(&a, &["probe_mail"]);
-    let mut rx = manual_owner_inbox(&kernel, &a, 9102);
-    assert!(fantastic_kernel::send::as_operator(kernel
-        .watch(&a, AgentId::from("_xbself_9102")))
-        .await
-        .is_none());
-    let mail = json!({"type": "probe_mail", "x": 1});
-    set_rule(&kernel, &a, "deny_ingress").await;
-    send_to(&kernel, &a, mail.clone()).await;
-    send_to(&kernel, &a, mail.clone()).await;
-    set_rule(&kernel, &a, "allow_all_ingress").await;
-    send_to(&kernel, &a, mail.clone()).await;
-    let mut verdicts = Vec::new();
-    for _ in 0..3 {
-        let it = rx.recv().await.expect("queued");
-        verdicts.push(crate::relay::drain_verdict(&it.payload, &a, &kernel));
-    }
-    assert_eq!(
-        verdicts,
-        vec![None, None, Some(json!({"op": "inbox", "payload": mail}))]
-    );
-}
-
-/// Tearing the owner inbox down leaves no stale refusal behind.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_refused_ledger_is_released_with_the_owner_inbox() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, a) = mk_kernel(&tmp).await;
-    crate::mail::declare_for_test(&a, &["probe_mail"]);
-    let _rx = manual_owner_inbox(&kernel, &a, 9103);
-    set_rule(&kernel, &a, "deny_ingress").await;
-    send_to(&kernel, &a, json!({"type": "probe_mail"})).await;
-    assert_eq!(crate::relay::refused_len(&a), 1);
-    crate::relay::release_owner_inbox(&kernel, &a, TaskId(9103)).await;
-    assert_eq!(crate::relay::refused_len(&a), 0);
-    // and with no inbox registered nothing is noted at all
-    send_to(&kernel, &a, json!({"type": "probe_mail"})).await;
-    assert_eq!(crate::relay::refused_len(&a), 0);
-}
-
 /// A verb the agent answers itself (`write`) is no mail: the fanout mirrors it to the
-/// owner inbox, and the drain never hands it to the program, sealed or open.
+/// owner inbox, and the drain never hands it to the program.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_builtin_verb_is_never_mail() {
     let tmp = TempDir::new().unwrap();
@@ -1702,47 +1643,7 @@ async fn a_builtin_verb_is_never_mail() {
     let w = json!({"type": "write", "job_id": 1, "data": "keys\n"});
     send_to(&kernel, &a, w).await;
     let it = rx.recv().await.expect("write queued");
-    assert_eq!(crate::relay::drain_verdict(&it.payload, &a, &kernel), None);
-}
-
-/// The drain may dequeue and drop an item BEFORE the handler notes its refusal; the
-/// late note must not linger and swallow a later, legitimate identical mail.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_late_refusal_note_does_not_swallow_later_identical_mail() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, a) = mk_kernel(&tmp).await;
-    crate::mail::declare_for_test(&a, &["probe_mail"]);
-    let _rx = manual_owner_inbox(&kernel, &a, 9105);
-    let mail = json!({"type": "probe_mail", "x": 7});
-    set_rule(&kernel, &a, "deny_ingress").await;
-    // the drain wins: live gate drops it, nothing noted yet
-    assert_eq!(crate::relay::drain_verdict(&mail, &a, &kernel), None);
-    // the handler then refuses the same send and notes it late
-    crate::relay::note_refused(&a, &mail);
-    assert_eq!(crate::relay::refused_len(&a), 0);
-    set_rule(&kernel, &a, "allow_all_ingress").await;
-    assert_eq!(
-        crate::relay::drain_verdict(&mail, &a, &kernel),
-        Some(json!({"op": "inbox", "payload": mail}))
-    );
-}
-
-#[test]
-fn the_refused_ledger_is_bounded() {
-    let owner = AgentId::from("ledger_bound_owner");
-    for i in 0..crate::relay::REFUSED_CAP + 50 {
-        crate::relay::note_refused(&owner, &json!({"type": "m", "i": i}));
-    }
-    assert_eq!(crate::relay::refused_len(&owner), crate::relay::REFUSED_CAP);
-    // the oldest was evicted, the newest kept
-    assert!(!crate::relay::take_refused(
-        &owner,
-        &json!({"type": "m", "i": 0})
-    ));
-    assert!(crate::relay::take_refused(
-        &owner,
-        &json!({"type": "m", "i": crate::relay::REFUSED_CAP + 49})
-    ));
+    assert_eq!(crate::relay::drain_verdict(&it.payload, &a), None);
 }
 
 /// The fanout mirrors every payload sent to the leg into the owner inbox; the program
@@ -1964,45 +1865,6 @@ async fn stop_releases_the_proxies_a_real_job_held() {
     }
 }
 
-#[test]
-fn a_typeless_rule_object_seals_like_python() {
-    // python's `parse_spec` reads `{env: 'X'}` as no rule at all, which is a
-    // plain SEAL — never an `{error}` without a `reason` nothing could branch on.
-    let mut meta = Map::new();
-    meta.insert("ingress_rule".into(), json!({"env": "X"}));
-    let denied = gate(&meta, &AgentId::from("px"), "start").expect("a type-less rule seals");
-    assert_eq!(denied["reason"], "unauthorized", "{denied}");
-    assert_eq!(denied["error"], "edge sealed by policy");
-    // …and the WRITE is accepted, as python accepts it.
-    assert!(ExecBridgeBundle.validate_meta(&meta, &Map::new()).is_none());
-}
-
-#[test]
-fn reflect_reports_egress_posture() {
-    // Every io leg's reflect answers python's `describe`: the two rule
-    // names and `sealed`, in that order, at the end of the reply.
-    let kernel = Kernel::new();
-    let id = AgentId::from("px");
-    let root = fantastic_kernel::Agent::new(
-        id.clone(),
-        Some(HANDLER_MODULE.to_string()),
-        None,
-        Map::new(),
-        std::path::PathBuf::new(),
-        false,
-    );
-    let kernel = Arc::new(kernel);
-    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
-    let r = reflect_reply(&id, &kernel);
-    let keys: Vec<&str> = r.as_object().unwrap().keys().map(String::as_str).collect();
-    assert_eq!(
-        &keys[keys.len() - 2..],
-        ["ingress_rule", "egress_rule"]
-    );
-    assert_eq!(r["ingress_rule"], "deny_ingress");
-    assert_eq!(r["egress_rule"], "silent_egress");
-}
-
 // ─── python parity ───────────────────────────────────────────────
 //
 // Each test below pins a text, a coercion or an ordering to the canonical python
@@ -2015,7 +1877,6 @@ fn reflect_reports_egress_posture() {
 async fn reflect_reports_the_record_as_written() {
     let tmp = TempDir::new().unwrap();
     let mut meta = Map::new();
-    meta.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
     meta.insert("cwd".to_string(), json!("/wd"));
     meta.insert("inherit_env".to_string(), json!(["PATH"]));
     meta.insert("allowed".to_string(), json!(["ls"]));
@@ -2027,7 +1888,6 @@ async fn reflect_reports_the_record_as_written() {
 
     let tmp2 = TempDir::new().unwrap();
     let mut m2 = Map::new();
-    m2.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
     m2.insert("cwd".to_string(), Value::Null);
     let (k2, b) = mk_kernel_with(&tmp2, m2).await;
     let r2 = reflect_reply(&b, &k2);
@@ -2551,7 +2411,6 @@ async fn a_missing_cwd_is_named_not_the_command() {
     let tmp = TempDir::new().unwrap();
     let gone = tmp.path().join("no_such_dir");
     let mut extra = Map::new();
-    extra.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
     extra.insert("allowed".to_string(), json!([".*"]));
     extra.insert("cwd".to_string(), json!(gone.to_string_lossy()));
     let (kernel, a) = mk_kernel_with(&tmp, extra).await;
@@ -2587,7 +2446,6 @@ async fn caller_env_cannot_override_the_control_vars() {
     };
     let tmp = TempDir::new().unwrap();
     let mut meta = Map::new();
-    meta.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
     meta.insert("allowed".to_string(), json!([".*"]));
     // the operator's record `env` cannot claim the control vars either
     meta.insert(
@@ -2617,27 +2475,6 @@ async fn caller_env_cannot_override_the_control_vars() {
         !out.contains("FD 0"),
         "the caller chose the control fd: {done}"
     );
-}
-
-/// The ingress gate never takes a credential from the RECORD. A token is a
-/// wire-envelope fact and the process edge has no envelope; reading one off the
-/// record would let a leg satisfy its own password rule with a secret it stores.
-#[test]
-fn the_record_auth_token_is_never_a_credential() {
-    let env = "FANTASTIC_GROUP_TOKEN_EXEC_A4_16";
-    std::env::set_var(env, "s3cret");
-    let mut meta = Map::new();
-    meta.insert("ingress_rule".to_string(), json!("password_ingress"));
-    meta.insert("token_env".to_string(), json!(env));
-    meta.insert("auth_token".to_string(), json!("s3cret"));
-    let denied = gate(&meta, &AgentId::from("px"), "start")
-        .expect("a record-held token must not satisfy the rule");
-    assert_eq!(denied["reason"], "unauthorized", "{denied}");
-    assert_eq!(
-        denied["error"], "invalid or missing group token",
-        "{denied}"
-    );
-    std::env::remove_var(env);
 }
 
 /// The relay coerces like python: a FALSY payload becomes `{}` and a FALSY
@@ -2848,7 +2685,6 @@ async fn arg_refusals_are_byte_exact_in_key_order() {
     };
     let open = || {
         let mut extra = Map::new();
-        extra.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
         extra.insert("allowed".to_string(), json!([".*"]));
         extra
     };

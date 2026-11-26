@@ -75,7 +75,6 @@ async def _arm(name: str, answer: str):
             "handler_module": "file_bridge.tools", "allow": ["."],
             "id": "kernel_store",
             "root": ".",
-            "ingress_rule": "allow_all_ingress",
         },
         {
             # THE HUMAN. `answer` is the whole policy — one bundle serves both
@@ -96,7 +95,6 @@ async def _arm(name: str, answer: str):
             "handler_module": "file_bridge.tools", "allow": ["."],
             "id": "prefs",
             "root": ".",
-            "ingress_rule": "allow_all_ingress",
             "description": "The user's preference files.",
         },
     ):

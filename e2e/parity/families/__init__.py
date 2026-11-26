@@ -22,7 +22,8 @@ from helpers.lines import ALL, PROVIDER, call as line_call, create as line_creat
 #: the measured one against it). A line names it: `kernel` is the reserved
 #: ADDRESS of the root, never a line target.
 ROOT_ID = "kernel_state"
-#: The ingress rule an agent needs before any leg may call it.
+#: The ingress rule a WIRE leg (`ws_bridge`, `relay_connector`) opens to its remote
+#: peers with. An in-kernel call is judged by the caller's `can` lines alone.
 OPEN = {"ingress_rule": "allow_all_ingress"}
 #: THE MEMORY STORE `spec.CaptureKernel.seed` writes: one ram_store for the
 #: kernel's rows and every AI agent's conversation.

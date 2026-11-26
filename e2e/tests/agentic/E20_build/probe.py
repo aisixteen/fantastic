@@ -208,7 +208,6 @@ async def wire_executor_leg(
                         "id": agent_id,
                         "cwd": os.getcwd(),
                         "inherit_env": ["PATH", "HOME"],
-                        "ingress_rule": "allow_all_ingress",
                         # THE GATE: run THIS interpreter against a file argument. A model reflects
                         # the leg, reads the exact interpreter path in its description (a `call`
                         # line shows identity keys, never the `allowed` field), and runs
@@ -420,7 +419,6 @@ async def run(
                         # the command runner's cwd, so `<interp> <file>` and open('readings/..') both
                         # resolve by relative name. (The store also holds the AI's chat sidecars.)
                         "root": ".",
-                        "ingress_rule": "allow_all_ingress",
                     },
                 }
             ]
@@ -443,7 +441,6 @@ async def run(
                         "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "readings",
                         "root": "readings",
-                        "ingress_rule": "allow_all_ingress",
                         "description": "Sensor readings — one integer per file.",
                     },
                 }
@@ -484,7 +481,6 @@ async def run(
                         "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "totals",
                         "root": ".",
-                        "ingress_rule": "allow_all_ingress",
                         "description": "Durable store for computed results.",
                     },
                 }

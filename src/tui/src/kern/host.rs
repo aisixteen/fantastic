@@ -1325,7 +1325,7 @@ mod tests {
             "kernel",
             json!({"type": "create_agent", "parent_id": root, "id": "store",
                    "handler_module": "file_bridge.tools", "root": ".fantastic",
-                   "allow": ["."], "ingress_rule": "allow_all_ingress"}),
+                   "allow": ["."]}),
         )
         .await;
         assert_eq!(store["id"], "store", "{store}");
