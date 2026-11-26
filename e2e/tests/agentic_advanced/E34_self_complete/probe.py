@@ -54,7 +54,6 @@ async def main():
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "id": "kernel_store",
                 "root": ".",
-                "ingress_rule": "allow_all_ingress",
             },
             {
                 "type": "create_agent",
@@ -62,7 +61,6 @@ async def main():
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "id": "notes",
                 "root": ".",
-                "ingress_rule": "allow_all_ingress",
                 "description": "This run's files.",
             },
         ):

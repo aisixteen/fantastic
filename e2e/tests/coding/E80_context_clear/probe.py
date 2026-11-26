@@ -51,16 +51,13 @@ PAD = 4000
 
 async def _fixture(root):
     r = await call(root, root.id, {"type": "create_agent", "parent_id": home(root), "id": FB,
-                                    "handler_module": "file_bridge.tools", "allow": ["."], "root": ".fantastic",
-                                    "ingress_rule": "allow_all_ingress"})
+                                    "handler_module": "file_bridge.tools", "allow": ["."], "root": ".fantastic"})
     assert not r.get("error"), f"create {FB}: {r}"
     r = await call(root, root.id, {"type": "create_agent", "parent_id": home(root), "id": "work_fb",
-                                    "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-                                    "ingress_rule": "allow_all_ingress"})
+                                    "handler_module": "file_bridge.tools", "allow": ["."], "root": "."})
     assert not r.get("error"), f"create work_fb: {r}"
     r = await call(root, root.id, {"type": "create_agent", "parent_id": home(root), "id": "notes",
-                                    "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-                                    "ingress_rule": "allow_all_ingress"})
+                                    "handler_module": "file_bridge.tools", "allow": ["."], "root": "."})
     assert not r.get("error"), f"create notes: {r}"
     await call(root, root.id, {"type": "boot"})
     # the human's line on the agent is written once the agent exists

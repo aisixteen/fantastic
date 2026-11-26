@@ -824,7 +824,7 @@ fn daemon_keeps_lock_records_and_store_in_the_state_dir_given() {
                 json!({
                     "type": "create_agent", "parent_id": "kernel",
                     "handler_module": "file_bridge.tools", "allow": ["."],
-                    "id": "store", "root": ".", "ingress_rule": "allow_all_ingress",
+                    "id": "store", "root": ".",
                 }),
             )])
             .await;

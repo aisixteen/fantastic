@@ -244,14 +244,11 @@ async def one(ex: Path, lang: str, runtime: str) -> dict:
 
         for payload in (
             {"type": "create_agent", "parent_id": home(root), "id": FB,
-             "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-             "ingress_rule": "allow_all_ingress"},
+             "handler_module": "file_bridge.tools", "allow": ["."], "root": "."},
             {"type": "create_agent", "parent_id": home(root), "id": "editor",
-             "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-             "ingress_rule": "allow_all_ingress"},
+             "handler_module": "file_bridge.tools", "allow": ["."], "root": "."},
             {"type": "create_agent", "parent_id": home(root), "id": RUNNER,
-             "handler_module": "exec_bridge.tools", "cwd": os.getcwd(), "inherit_env": ["PATH", "HOME"],
-             "ingress_rule": "allow_all_ingress", "allowed": L.allow,
+             "handler_module": "exec_bridge.tools", "cwd": os.getcwd(), "inherit_env": ["PATH", "HOME"], "allowed": L.allow,
              "description": lines.runs(list(L.allow))},
         ):
             r = await _call(root, root.id, payload)

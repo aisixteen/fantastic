@@ -273,8 +273,7 @@ def setup(k: HostKernel, peer_port: int) -> None:
     for aid, cb in (("fb", fb_cb), ("fb_closed", dict(OPEN))):
         rec = k.send(k.root_id, {"type": "create_agent", "parent_id": "rest",
                                  "handler_module": "file_bridge.tools", "id": aid,
-                                 "root": "data", "allow": ["."],
-                                 "ingress_rule": "allow_all_ingress", "callable_by": cb})
+                                 "root": "data", "allow": ["."], "callable_by": cb})
         need(rec.get("id") == aid, f":{k.port} create {aid}: {short(rec)}")
     rec = k.create(parent_id="rest", handler_module="ws_bridge.tools", id="br",
                    host="127.0.0.1", port=peer_port, peer_id="ws",

@@ -68,8 +68,7 @@ def main() -> bool:
     cell = {"id": CELL, "handler_module": "terminal_view.ts", "backend_id": BACKEND, "owns_backend": False,
             "command": py_job("ticker.py")[0], "can_call": {"$self": "*", BACKEND: VERBS}, "callable_by": {"$self": "*"},
             "x": 40, "y": 40, "width": 600, "height": 300}
-    host = {"id": BACKEND, "handler_module": "exec_bridge.tools", "cwd": ".", "inherit_env": ["*"], "shell": "login",
-            "ingress_rule": "allow_all_ingress", "allowed": [py_job("ticker.py")[1]], "can_call": {"$self": "*"},
+    host = {"id": BACKEND, "handler_module": "exec_bridge.tools", "cwd": ".", "inherit_env": ["*"], "shell": "login", "allowed": [py_job("ticker.py")[1]], "can_call": {"$self": "*"},
             "callable_by": {"$self": "*", "mcp": ["*"], "user": ["*"], "canvas_root": ["*"], "canvas_ws": ["watch"]}}
     rig.init(cells=[cell], host_agents=[(FOLDER, host)])
     sys.path.insert(0, str(Path(__file__).resolve().parents[6] / "e2e" / "runners"))

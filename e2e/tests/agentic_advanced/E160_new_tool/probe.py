@@ -217,7 +217,6 @@ async def main():
             "id": BUNDLES,
             "root": ".fantastic/bundles",
             "allow": ["."],
-            "ingress_rule": "allow_all_ingress",
             "description": "This kernel's bundles folder, .fantastic/bundles/.",
         },
         {

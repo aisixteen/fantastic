@@ -229,7 +229,6 @@ async def main() -> None:
         made = (await root.send([{"target": root.id, "payload": {
             "type": "create_agent", "parent_id": home(root), "id": QUEUE,
             "handler_module": "file_bridge.tools", "allow": ["."], "root": queue_dir,
-            "ingress_rule": "allow_all_ingress",
             "description": "The task queue: one folder per task, README.task.md in each.",
         }}]))[0]["result"]
         assert not (made or {}).get("error"), made

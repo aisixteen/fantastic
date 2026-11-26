@@ -140,7 +140,7 @@ def main() -> int:
 
     try:
         rec = hk.create(parent_id="rest", handler_module="file_bridge.tools", id=FILES,
-                        root="files", allow=["."], ingress_rule="allow_all_ingress")
+                        root="files", allow=["."])
         need(rec.get("id") == FILES, f"create {FILES}: {str(rec)[:200]}")
         # the AI's own lines; the root line is capped by `rest` and `web`, which hold it
         can = {"memory": ALL, ROOT: call("reflect"), FILES: ALL}

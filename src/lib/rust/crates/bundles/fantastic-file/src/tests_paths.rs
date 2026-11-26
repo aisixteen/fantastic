@@ -82,8 +82,7 @@ async fn two_folder_kernel(tmp: &tempfile::TempDir, roots: &[(&str, &str)]) -> A
         let r = kernel.operator_send(vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({"type": "create_agent", "parent_id": "kernel",
-                       "handler_module": HANDLER_MODULE, "id": name, "root": root,
-                       "ingress_rule": "allow_all_ingress", "allow": ["."]}),
+                       "handler_module": HANDLER_MODULE, "id": name, "root": root, "allow": ["."]}),
             )])
             .await
             .remove(0)

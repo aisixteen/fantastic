@@ -10,7 +10,6 @@ description = "Filesystem-as-agent — text verbs, streams, list/delete/rename/m
 # python-format helpers: repr/str/truthiness/OSError text, python-canonical.
 fantastic-bundle = { path = "../../fantastic-bundle" }
 fantastic-kernel = { path = "../../fantastic-kernel" }
-fantastic-io-bridge = { path = "../../fantastic-io-bridge" }
 serde_json = { workspace = true }
 serde = { workspace = true }
 schemars = { workspace = true }

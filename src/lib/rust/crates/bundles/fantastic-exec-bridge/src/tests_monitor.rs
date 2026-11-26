@@ -136,7 +136,7 @@ async fn setup(tmp: &TempDir) -> (Arc<Kernel>, Ear) {
         &kernel,
         "kernel_state",
         json!({"type": "create_agent", "parent_id": "kernel",
-        "id": runner, "handler_module": HANDLER_MODULE, "ingress_rule": "allow_all_ingress",
+        "id": runner, "handler_module": HANDLER_MODULE,
         "cwd": tmp.path().to_string_lossy(), "inherit_env": ["PATH"], "allowed": [".*"],
         "can": {ear_id.clone(): {"call": ["send"]}}}),
     )

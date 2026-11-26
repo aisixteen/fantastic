@@ -242,8 +242,7 @@ class HostKernel:
             (w / "agents" / RECORDS).mkdir(parents=True, exist_ok=True)
             (w / "agents" / RECORDS / "agent.yaml").write_text(_dump(
                 {"id": RECORDS, "handler_module": "file_bridge.tools",
-                 "parent_id": self.root_id, "root": ".fantastic", "allow": ["."],
-                 "ingress_rule": "allow_all_ingress"}))
+                 "parent_id": self.root_id, "root": ".fantastic", "allow": ["."]}))
             (rest_dir / "agents" / creds.CREDS).mkdir(parents=True, exist_ok=True)
             (rest_dir / "agents" / creds.CREDS / "agent.yaml").write_text(_dump(
                 creds.store_record("rest", creds.env_refs())))

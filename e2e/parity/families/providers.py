@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import time
 
-from families import ALL, MEMORY, OPEN, VLLM, ai, ai_split, call, save_kernel_log, vllm
+from families import ALL, MEMORY, VLLM, ai, ai_split, call, save_kernel_log, vllm
 from helpers.creds import credentials
 from spec import CTX_RESERVE, CTX_WINDOW
 from stubs.ollama_chat import Handler as OllamaHandler, OllamaStub
@@ -83,16 +83,15 @@ def drive(ctx, provider: str, case: str, stub, handler_meta: dict, env_drop,
                  env_drop=tuple(env_drop), creds=keyed)
     try:
         rec.json(f"{rel}/create_readings", k.create(
-            parent_id=k.home, id="readings", handler_module="file_bridge.tools", allow=["."], root=".",
-            **OPEN))
+            parent_id=k.home, id="readings", handler_module="file_bridge.tools", allow=["."], root="."))
         # the provider (the backend's own fields) and the chat `ai` naming it
         handler = handler_meta["handler_module"]
         prov, chat = ai_split("ai", handler, {
             **ai(can={"readings": ALL}),
             "context_window": CTX_WINDOW, "output_reserve": CTX_RESERVE,
             **{f: v for f, v in handler_meta.items() if f != "handler_module"}})
-        rec.json(f"{rel}/create_ai_provider", k.create(parent_id=k.home, **OPEN, **prov))
-        rec.json(f"{rel}/create_ai", k.create(parent_id=k.home, **OPEN, **chat))
+        rec.json(f"{rel}/create_ai_provider", k.create(parent_id=k.home, **prov))
+        rec.json(f"{rel}/create_ai", k.create(parent_id=k.home, **chat))
         time.sleep(0.8)
         rec.json(f"{rel}/reflect", call(k, "ai", {"type": "reflect"}))
         t0 = time.monotonic()

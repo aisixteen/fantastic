@@ -188,8 +188,7 @@ def main() -> int:
     ]
     try:
         rec = hk.create(parent_id="rest", handler_module="file_bridge.tools", id=BUNDLES,
-                        root=".fantastic/bundles", allow=["."],
-                        ingress_rule="allow_all_ingress")
+                        root=".fantastic/bundles", allow=["."])
         need(rec.get("id") == BUNDLES, f"create {BUNDLES}: {short(rec)}")
         rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV,
                         endpoint=m.url, model=MODEL,

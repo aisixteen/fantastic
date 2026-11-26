@@ -76,12 +76,12 @@ runs:
           item0_not_allowed: readonly
       # its own bridge over the work folder, and its own runner, UNDER canvas_root
       - tool: send
-        args: {items: [{target: kernel, payload: {type: create_agent, parent_id: canvas_root, id: e15_files, handler_module: file_bridge.tools, root: ".", allow: [note.txt], ingress_rule: allow_all_ingress}}]}
+        args: {items: [{target: kernel, payload: {type: create_agent, parent_id: canvas_root, id: e15_files, handler_module: file_bridge.tools, root: ".", allow: [note.txt]}}]}
         expect:
           is_error: false
           item0.status: completed
       - tool: send
-        args: {items: [{target: kernel, payload: {type: create_agent, parent_id: canvas_root, id: e15_exec, handler_module: exec_bridge.tools, allowed: [".*"], cwd: ".", inherit_env: ["*"], ingress_rule: allow_all_ingress}}]}
+        args: {items: [{target: kernel, payload: {type: create_agent, parent_id: canvas_root, id: e15_exec, handler_module: exec_bridge.tools, allowed: [".*"], cwd: ".", inherit_env: ["*"]}}]}
         expect:
           is_error: false
           item0.status: completed
@@ -214,12 +214,12 @@ runs:
         expect: {result.protocolVersion: "2025-11-25", result.serverInfo.name: fantastic}
       - notify: notifications/initialized
       - tool: send
-        args: {items: [{target: kernel, payload: {type: create_agent, parent_id: canvas_root, id: e15_files, handler_module: file_bridge.tools, root: ".", allow: [w.txt], ingress_rule: allow_all_ingress}}]}
+        args: {items: [{target: kernel, payload: {type: create_agent, parent_id: canvas_root, id: e15_files, handler_module: file_bridge.tools, root: ".", allow: [w.txt]}}]}
         expect:
           is_error: false
           item0.status: completed
       - tool: send
-        args: {items: [{target: kernel, payload: {type: create_agent, parent_id: canvas_root, id: e15_exec, handler_module: exec_bridge.tools, allowed: [".*"], cwd: ".", inherit_env: ["*"], ingress_rule: allow_all_ingress}}]}
+        args: {items: [{target: kernel, payload: {type: create_agent, parent_id: canvas_root, id: e15_exec, handler_module: exec_bridge.tools, allowed: [".*"], cwd: ".", inherit_env: ["*"]}}]}
         expect:
           is_error: false
           item0.status: completed

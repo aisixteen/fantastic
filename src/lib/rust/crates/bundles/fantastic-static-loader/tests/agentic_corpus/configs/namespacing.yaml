@@ -11,17 +11,14 @@ loaders:
           handler_module: file_bridge.tools
           allow: ['.']
           root: .fantastic
-          ingress_rule: allow_all_ingress
         - id: notes_a
           handler_module: file_bridge.tools
           allow: ['.']
           root: notes/a
-          ingress_rule: allow_all_ingress
         - id: space_a
           handler_module: file_bridge.tools
           allow: ['.']
           root: rooms/a
-          ingress_rule: allow_all_ingress
 
   - id: wing_b
     file: wing_b.yaml
@@ -31,9 +28,7 @@ loaders:
           handler_module: file_bridge.tools
           allow: ['.']
           root: notes/b
-          ingress_rule: allow_all_ingress
         - id: space_b
           handler_module: file_bridge.tools
           allow: ['.']
           root: rooms/b
-          ingress_rule: allow_all_ingress

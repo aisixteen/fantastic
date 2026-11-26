@@ -32,8 +32,7 @@ def terminal_pair() -> tuple[dict, tuple[str, dict]]:
     cell = {"id": CELL, "handler_module": "terminal_view.ts", "backend_id": BACKEND, "owns_backend": False,
             "can_call": {"$self": "*", BACKEND: TERM_VERBS}, "callable_by": {"$self": "*"},
             "x": 520, "y": 120, "width": 360, "height": 220}
-    host = (FOLDER, {"id": BACKEND, "handler_module": "exec_bridge.tools", "cwd": ".", "inherit_env": ["*"], "shell": "login",
-                     "ingress_rule": "allow_all_ingress", "can_call": {"$self": "*"},
+    host = (FOLDER, {"id": BACKEND, "handler_module": "exec_bridge.tools", "cwd": ".", "inherit_env": ["*"], "shell": "login", "can_call": {"$self": "*"},
                      "callable_by": {"$self": "*", "mcp": ["*"], "user": ["*"], "canvas_root": ["*"], "canvas_ws": ["watch"]}})
     return cell, host
 

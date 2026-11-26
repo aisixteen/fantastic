@@ -152,7 +152,6 @@ def main() -> int:
             handler_module="file_bridge.tools",
             id=bridge,
             allow=[path],
-            ingress_rule="allow_all_ingress",
         )
         need(rec.get("id") == bridge, f"create {bridge}: {str(rec)[:200]}")
         rec = hk.create(

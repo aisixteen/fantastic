@@ -11,4 +11,4 @@ description: >
 
 expect:
   hydration: boot_error
-  error_contains: "ingress_rule"
+  error_contains: "readonly"

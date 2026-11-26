@@ -116,8 +116,7 @@ def main() -> int:
 
     try:
         rec = hk.create(parent_id="rest", handler_module="file_bridge.tools", id="fb",
-                        root="box", allow=["pub", "bin"],
-                        ingress_rule="allow_all_ingress")
+                        root="box", allow=["pub", "bin"])
         need(rec.get("id") == "fb", f"create fb: {str(rec)[:200]}")
         r = fb({"type": "read", "path": "pub/a.txt"})
         need([x.get("text") for x in r.get("lines") or []] == ["alpha", "beta"],

@@ -1,16 +1,14 @@
 //! file_bridge — the fs-transport member of the io family.
 //!
-//! The disk is OUTSIDE the trust domain: crossing kernel↔disk is an IO edge,
-//! gated exactly like a bridge leg — SEALED BY DEFAULT (absent `ingress_rule` ⇒
-//! every verb except `reflect` denies with the teaching shape). Open it
-//! consciously with `ingress_rule=allow_all_ingress`. Even open, the LAW is
-//! running-dir only: the `root` AND every path are clamped inside the kernel's
+//! The disk is OUTSIDE the trust domain: crossing kernel↔disk is an IO edge. Who
+//! may call the bridge is the kernel's `can` lines alone (and the ancestor cap).
+//! The LAW is running-dir only: the `root` AND every path are clamped inside the kernel's
 //! running dir (`@state` and `@self` roots are under the state folder and the bridge's own
 //! folder; every other root is under the work folder; `../`, absolute escapes, outward symlinks all refuse).
 //!
 //! Each file_bridge owns a `root` directory and a `readonly` flag. The disk
-//! clamp + raw IO live in [`fs`] — the ONE disk surface; this bundle is the GATE
-//! (ingress rule) + the verb shape over it, and never touches the disk directly.
+//! clamp + raw IO live in [`fs`] — the ONE disk surface; this bundle is the verb
+//! shape over it (the `allow` list, `readonly`), and never touches the disk directly.
 //!
 //! ## Verbs
 //!
@@ -50,7 +48,7 @@ use std::sync::Arc;
 pub const HANDLER_MODULE: &str = "file_bridge.tools";
 
 /// What the bundle is for — its one short man text.
-const MAN: &str = "The filesystem edge: it serves one directory (`root`) to the agents that are granted it, only the paths its `allow` list exposes, sealed until opened. Text documents are read and edited in place, raw bytes move over streams, and every file or folder can be opened as a view agent.";
+const MAN: &str = "The filesystem edge: it serves one directory (`root`) to the agents that are granted it, only the paths its `allow` list exposes. Text documents are read and edited in place, raw bytes move over streams, and every file or folder can be opened as a view agent.";
 
 /// The filesystem bundle. Holds the text verbs' RAM state (undo slots, document
 /// locks) for the kernel it is registered in.
@@ -179,8 +177,7 @@ impl Handler for FileBundle {
             None => return Ok((Some(json!({"error": format!("no agent {agent_id}")})), None)),
         };
         let meta = agent.record().meta.clone();
-        // A VIEW is answered by its own verbs, before the bridge's gate (python
-        // `file_bridge.tools.handler`): a view is not sealed, its gate is its grant.
+        // A VIEW is answered by its own verbs (python `file_bridge.tools.handler`).
         if let Some(kind) = agent
             .record()
             .meta
@@ -191,13 +188,6 @@ impl Handler for FileBundle {
             let reply = views::dispatch(kernel, &self.views, agent_id, &kind, call).await;
             return Ok((Some(reply), None));
         }
-        // GATE — the fs edge is an io_bridge leg: SEALED by default. Discovery
-        // (`reflect`) is the only exemption.
-        if verb != "reflect" {
-            if let Some(denied) = gate(&meta, agent_id, verb) {
-                return Ok((Some(denied), None));
-            }
-        }
         // A bridge reads and writes the file a call NAMES (only a view has a file of its own).
         if matches!(
             &call,
@@ -205,7 +195,7 @@ impl Handler for FileBundle {
         ) {
             return Ok((Some(rf::missing(verb, "path")), None));
         }
-        // THE PATH GATE FOR A VIEW CALLER — python `tools._view_scope`, after the gate.
+        // THE PATH GATE FOR A VIEW CALLER — python `tools._view_scope`.
         if let Some(rel) = scoped_path(&call) {
             if let Some(refused) =
                 view_scope(kernel, agent_id, current_origin().as_ref(), verb, rel)
@@ -326,36 +316,6 @@ fn view_scope(
     );
     rf::with(&mut r, "path", json!(rel));
     Some(r)
-}
-
-/// The sealed-by-default GATE — the fs edge is an io_bridge leg. Mirrors py
-/// file_bridge's `gate_inbound` choke point. Returns `Some(error)` on deny,
-/// `None` to admit. Shared by the text (`handle`) and binary (`handle_binary`)
-/// channels so a sealed bridge refuses streamed bytes exactly like a text call.
-fn gate(meta: &Map<String, Value>, agent_id: &AgentId, verb: &str) -> Option<Value> {
-    let rules = fantastic_io_bridge::authorizer::Rules::of(meta).unwrap_or_default();
-    let rule = fantastic_io_bridge::authorizer::ingress::resolve(&rules);
-    // NO token: the fs edge has no wire envelope, so nothing can present one.
-    // The gate never reads the record for a credential: a persisted secret in
-    // the portable workdir satisfying a `password_ingress` leg is the one thing
-    // the password rule exists to prevent. `password_ingress` is not a name of
-    // this edge's record.
-    let action = fantastic_io_bridge::authorizer::Action {
-        kind: "call",
-        target: agent_id.0.as_str(),
-        verb,
-        token: None,
-    };
-    // FORWARDED, not re-worded. This hint was hardcoded to say "the fs edge" for
-    // whichever leg reached this gate, and it was a second, shorter wording of a
-    // repair the RULE already states — so the same seal read differently per edge
-    // and differently from python.
-    if let fantastic_io_bridge::authorizer::Decision::Deny(d) =
-        fantastic_io_bridge::gate_inbound(&rule, &action)
-    {
-        return Some(d.to_refusal());
-    }
-    None
 }
 
 /// The clamped root, or the transport refusal python answers when the configured
@@ -517,8 +477,8 @@ fn write_stream_reply(
 /// BOTH ENDS RUN AS THIS BRIDGE: `read_stream` on the source and `write_stream`
 /// on the sink are sent from this bridge's own dispatch, so they are its sends —
 /// the bridge's own lines decide (its own tree it reaches by position, so a pump
-/// within itself needs no line). Each end SELF-gates + SELF-clamps — the pump only coordinates, never touching bytes, so
-/// a sealed end refuses it. A pump ONTO ITS OWN SOURCE (the sink is the source and
+/// within itself needs no line). Each end SELF-clamps — the pump only coordinates, never touching bytes, so
+/// an end that refuses refuses the pump. A pump ONTO ITS OWN SOURCE (the sink is the source and
 /// `sink_path` names the same file) is refused. Mirrors py `_pump`.
 async fn pump_reply(agent_id: &AgentId, a: &verbs::Pump, kernel: &Arc<Kernel>) -> Value {
     // an end the call leaves out is this bridge; the sink file is the source's by default
@@ -838,16 +798,6 @@ fn reflect_reply(
     out.insert("allow_count".to_string(), json!(allow_list(meta).len()));
     out.insert("edit_grammar".to_string(), json!(EDIT_GRAMMAR));
     out.insert("compose".to_string(), json!(COMPOSE));
-    // The auth POSTURE, python's `describe(rec)`: rule NAMES (never config),
-    // keyed by the field a caller WRITES (read-key == write-key), + `sealed`.
-    if let Some(posture) = fantastic_io_bridge::authorizer::Rules::of(meta)
-        .unwrap_or_default()
-        .describe()
-        .as_object() {
-        for (k, v) in posture {
-            out.insert(k.clone(), v.clone());
-        }
-    }
     if let Some(e) = root_error {
         out.insert("root_error".to_string(), json!(e));
     }

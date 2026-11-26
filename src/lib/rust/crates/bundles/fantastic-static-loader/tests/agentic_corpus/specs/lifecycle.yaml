@@ -24,7 +24,7 @@ expect:
     - name: the doomed agent is reachable while it exists
       reach: {from: warden, to: doomed, send: {type: list, path: ""}}
       expect: {allow: true}
-    - name: an ingress-open agent no line names is still unreachable
+    - name: an agent no line names is unreachable
       reach: {from: warden, to: stranger, send: {type: list, path: ""}}
       expect: {allow: false}
     - name: being called BY warden confers no reach back onto warden

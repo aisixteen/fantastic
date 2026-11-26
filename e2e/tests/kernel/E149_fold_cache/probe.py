@@ -205,7 +205,7 @@ def main() -> int:
     try:
         # ── wiring ────────────────────────────────────────────────────────────
         rec = hk.create(parent_id="rest", handler_module="file_bridge.tools", id=FILES,
-                        root="files", allow=["."], ingress_rule="allow_all_ingress")
+                        root="files", allow=["."])
         need(rec.get("id") == FILES, f"create {FILES}: {str(rec)[:200]}")
         rec = hk.create(parent_id="rest", handler_module=BUNDLE, id=BIGDOC)
         need(rec.get("id") == BIGDOC, f"create {BIGDOC} (the bigdoc bundle): {str(rec)[:200]}")

@@ -31,8 +31,7 @@ async fn kernel(tmp: &tempfile::TempDir, allow: Value) -> Arc<Kernel> {
     let r = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE,
-                   "id": "fb", "root": tmp.path().join("served").display().to_string(),
-                   "ingress_rule": "allow_all_ingress", "allow": allow}),
+                   "id": "fb", "root": tmp.path().join("served").display().to_string(), "allow": allow}),
         )])
         .await
         .remove(0)

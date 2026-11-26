@@ -14,7 +14,7 @@ AI, which reaches its own tree by position; the system block names no other agen
 `open` takes `code:str`; only its DETAILED docs say how the code is made from the
 `serial` its reflect shows (backwards, prefixed `V-`); since #719 a oneliners reply
 carries each verb's schema too, so the detail may reach the model without a
-`detailed` pull — the task done is the proof it did. Structural rooms are sealed file legs
+`detailed` pull — the task done is the proof it did. Structural rooms are file legs
 with a `description` — readable in the tree, called by nobody.
 
 SCORED ON THE MODEL'S OWN CALLS (parsed from its turns) and on the FILE:
@@ -138,7 +138,6 @@ async def main():
             "allow": ["."],
             "id": "desk",
             "root": ".",
-            "ingress_rule": "allow_all_ingress",
             "description": "The desk: write answers here.",
         },
         {

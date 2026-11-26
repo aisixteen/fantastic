@@ -30,8 +30,7 @@ async fn bridge(k: &Arc<Kernel>, tmp: &tempfile::TempDir, id: &str, meta: Value)
     std::fs::create_dir_all(&dir).unwrap();
     let mut p = json!({"type": "create_agent", "parent_id": "kernel",
                        "handler_module": HANDLER_MODULE, "id": id,
-                       "root": dir.display().to_string(), "allow": ["."],
-                       "ingress_rule": "allow_all_ingress"});
+                       "root": dir.display().to_string(), "allow": ["."]});
     for (key, v) in meta.as_object().cloned().unwrap() {
         p[key] = v;
     }

@@ -139,7 +139,7 @@ def main() -> int:
         r = update("creds",
                    refs={p: {"host": m.host, "env": {"api_key": KEY_VAR}} for p, m in mocks.items()})
         need(r.get("updated") is True, f"creds: one ref per mock: {str(r)[:200]}")
-        # the sibling with no line: sealed by default
+        # the sibling with no line: the unknown answer
         rec = hk.create(parent_id="rest", handler_module="user_probe.tools", id=KEYLESS)
         need(rec.get("id") == KEYLESS and not record(KEYLESS).get("can"),
              f"create {KEYLESS} (no line): {str(rec)[:200]}")

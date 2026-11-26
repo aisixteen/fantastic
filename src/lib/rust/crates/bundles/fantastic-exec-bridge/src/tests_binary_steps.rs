@@ -247,8 +247,7 @@ async fn a_job_round_trips_a_literal_key_through_the_kernel() {
     let a = AgentId::from(agent_id_for(&tmp).as_str());
     for rec in [
         json!({"type": "create_agent", "parent_id": "kernel", "id": a.as_str(),
-               "handler_module": HANDLER_MODULE,
-               "ingress_rule": "allow_all_ingress", "allowed": [".*"],
+               "handler_module": HANDLER_MODULE, "allowed": [".*"],
                "cwd": tmp.path().to_string_lossy(),
                "can": {"echo": {"call": ["*"]}}}),
         json!({"type": "create_agent", "parent_id": "kernel_state", "id": "echo",

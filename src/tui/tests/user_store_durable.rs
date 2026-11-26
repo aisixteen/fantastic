@@ -34,8 +34,7 @@ fn seed(dir: &std::path::Path) {
     );
     write(
         &under.join("store").join("agent.yaml"),
-        &json!({"id":"store","handler_module":"file_bridge.tools","root":".fantastic","allow":["."],
-                "ingress_rule":"allow_all_ingress"}),
+        &json!({"id":"store","handler_module":"file_bridge.tools","root":".fantastic","allow":["."]}),
     );
     write(
         &under.join("home").join("agent.yaml"),
