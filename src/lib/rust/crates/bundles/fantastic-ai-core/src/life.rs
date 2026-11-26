@@ -26,85 +26,108 @@ use crate::memory::MemResult;
 use crate::state::{state_for, Arrival};
 
 /// A message to store and wake on.
-pub(crate) struct Incoming<'a> {
+pub(crate) struct Incoming {
     /// Its text, as the model reads it (with its `[from …]` header).
-    pub(crate) text: &'a str,
+    pub(crate) text: String,
     /// The sanitised client id it came with.
-    pub(crate) client_id: &'a str,
+    pub(crate) client_id: String,
     /// The sender (the calling agent, else the client id).
-    pub(crate) origin: &'a str,
+    pub(crate) origin: String,
     /// This layer's own text to its own agent: stored as `kind: "notice"`.
     pub(crate) notice: bool,
     /// The images it attached.
-    pub(crate) attached: Option<&'a crate::images::Attached>,
+    pub(crate) attached: Option<crate::images::Attached>,
 }
 
-/// THE ARRIVAL: `m` stored as a row of `self_id`'s memory, put on its unread list and,
-/// when `wakes`, a pass started if none runs. The row's id.
-///
-/// # Errors
-/// The memory store refused the row: nothing was put on the list.
-pub(crate) async fn arrive(
+/// THE ARRIVAL, as a step: `m` stored as a row of `self_id`'s memory, then — once the
+/// store took it — put on the unread list and, when `wakes`, a pass started if none
+/// runs. The next step gets the row's id, or the store's refusal (nothing was put on
+/// the list).
+pub(crate) async fn arrive<R, F, Fut>(
     kernel: &Arc<Kernel>,
     self_id: &AgentId,
-    m: &Incoming<'_>,
+    m: Incoming,
     wakes: bool,
-) -> MemResult<i64> {
-    let row_id = store(kernel, self_id, m).await?;
-    if wakes {
-        let state = state_for(self_id);
-        state
-            .life
-            .lock()
-            .expect("life poisoned")
-            .unread
-            .push(Arrival {
-                row_id,
-                client_id: m.client_id.to_string(),
-                origin: m.origin.to_string(),
-                text: m.text.to_string(),
-                send_id: mint_send_id(),
-                at: now_secs(),
-                notice: m.notice,
-            });
-        state.changed();
-        wake(kernel, self_id);
-    }
-    Ok(row_id)
-}
-
-/// The incoming row of `m`, stored: its id. Stamped now (its `ts` and UTC offset), its
-/// images and its sender on it, minted at the append.
-async fn store(kernel: &Arc<Kernel>, self_id: &AgentId, m: &Incoming<'_>) -> MemResult<i64> {
+    rec: R,
+    next: F,
+) where
+    R: Send + 'static,
+    F: FnOnce(R, MemResult<i64>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    // THE ROW ID IS MINTED AT THE APPEND: stamped now (its `ts` and UTC offset), its
+    // images and its sender on it
     let id = kernel.mint_id();
     let mut row = crate::images::stamped(
         crate::agent_loop::incoming_row(
-            m.text,
+            &m.text,
             id,
-            crate::agent_loop::incoming_parent(m.text),
+            crate::agent_loop::incoming_parent(&m.text),
             m.notice,
         ),
-        m.attached,
+        m.attached.as_ref(),
     );
     crate::row_attrs::Stamp::now().apply(&mut row);
-    let row = crate::row_attrs::with_source(row, m.origin);
-    crate::memory::save_history(self_id, kernel, &[row]).await?;
-    Ok(id)
+    let row = crate::row_attrs::with_source(row, &m.origin);
+    let (k, me) = (Arc::clone(kernel), self_id.clone());
+    // owed while its row is out: the agent is not idle with a message in flight
+    owe(self_id, 1);
+    crate::steps::append(self_id, kernel, &[row], (rec, m), move |(rec, m), r| async move {
+        let r = r.map(|_| id);
+        if r.is_ok() && wakes {
+            let state = state_for(&me);
+            state
+                .life
+                .lock()
+                .expect("life poisoned")
+                .unread
+                .push(Arrival {
+                    row_id: id,
+                    client_id: m.client_id,
+                    origin: m.origin,
+                    text: m.text,
+                    send_id: mint_send_id(),
+                    at: now_secs(),
+                    notice: m.notice,
+                });
+            state.changed();
+            wake(&k, &me);
+        }
+        owe(&me, -1);
+        next(rec, r).await;
+    })
+    .await;
+}
+
+/// TESTS: [`arrive`] driven to its end — the row's id, or the store's refusal.
+#[cfg(test)]
+pub(crate) async fn arrived(kernel: &Arc<Kernel>, self_id: &AgentId, m: Incoming, wakes: bool) -> MemResult<i64> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    arrive(kernel, self_id, m, wakes, (), move |(), r| async move {
+        let _ = tx.send(r);
+    })
+    .await;
+    rx.await
+        .unwrap_or_else(|_| Err(crate::memory::MemoryStoreError("the arrival was dropped".into())))
 }
 
 /// Harness text to the agent itself (a restart's dead letters, an undelivered inquiry
 /// answer): stored as a notice and woken on. A store that refuses it is said.
 pub(crate) async fn notice(kernel: &Arc<Kernel>, self_id: &AgentId, text: &str, client_id: &str) {
     let m = Incoming {
-        text,
-        client_id,
-        origin: self_id.as_str(),
+        text: text.to_string(),
+        client_id: client_id.to_string(),
+        origin: self_id.as_str().to_string(),
         notice: true,
         attached: None,
     };
-    if let Err(e) = arrive(kernel, self_id, &m, true).await {
-        eprintln!("  [ai] {self_id}: a notice could not be stored: {}", e.0);
-    }
+    let me = self_id.clone();
+    arrive(kernel, self_id, m, true, (), move |(), r| async move {
+        if let Err(e) = r {
+            eprintln!("  [ai] {me}: a notice could not be stored: {}", e.0);
+        }
+    })
+    .await;
 }
 
 /// WAKE: start ONE pass over everything unread, when no pass runs and the agent is
@@ -187,23 +210,6 @@ pub(crate) fn owe(self_id: &AgentId, delta: isize) {
         life.open = life.open.saturating_add_signed(delta);
     }
     state.changed();
-}
-
-/// Work of the agent's own that will bring it a message (an exec job it watches): owed
-/// while this lives.
-pub(crate) struct Owing(AgentId);
-
-impl Owing {
-    pub(crate) fn new(self_id: &AgentId) -> Self {
-        owe(self_id, 1);
-        Self(self_id.clone())
-    }
-}
-
-impl Drop for Owing {
-    fn drop(&mut self) {
-        owe(&self.0, -1);
-    }
 }
 
 /// Paused (`true`) or resumed: a paused agent stores its arrivals and runs no pass.

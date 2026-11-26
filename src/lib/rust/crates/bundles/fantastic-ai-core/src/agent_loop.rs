@@ -2,9 +2,10 @@
 //! message to the next, never a task that waits.
 //!
 //! 1. [`start`] (woken by [`crate::life::wake`]): the pass takes every unread message
-//!    (its TAIL, already stored), assembles its view from history, folds it to fit the
-//!    window, and sends its request to the model ([`crate::provider::begin`]). The step
-//!    ENDS there.
+//!    (its TAIL, already stored) and reads what it needs — its history and its own
+//!    `reflect` — each as a STEP ([`crate::steps`]: one call, whose settle is the next
+//!    step); then it assembles its view, folds it to fit the window, and sends its
+//!    request to the model ([`crate::provider::begin`]). The step ENDS there.
 //! 2. The request's SETTLE is the next step ([`settled`]): the WHOLE answer is read once
 //!    with the type's reader — the stream fed only the live view. An answer whose calls
 //!    are malformed or foreign, or that has no call, is re-asked with a second request,
@@ -13,9 +14,10 @@
 //!    pass with the `stop` call. An attempt whose thinking the harness cut at the
 //!    chat's cap (`stop_reason` [`THINKING_CUT`], #782) is re-asked ONCE with a short
 //!    "answer now" note; a second cut stops it the same way.
-//! 3. An ACCEPTED answer is stored as the pass's assistant row, the pass ENDS
-//!    ([`crate::life::end`]), and its calls go out ([`crate::route::route_reply`]),
-//!    each through [`fantastic_kernel::Kernel::call`]; each reply is a later message.
+//! 3. An ACCEPTED answer is stored as the pass's assistant row (a step), its trace rows
+//!    written (steps), the pass ENDS ([`crate::life::end`]), and its calls go out
+//!    ([`crate::route::route_reply`]), each through [`fantastic_kernel::Kernel::call`];
+//!    each reply is a later message.
 //!
 //! A failed request (the link, the provider, its deadline) ends the pass with its error
 //! row and a `failed` status; a link failure is first retried, visibly, up to the
@@ -24,7 +26,7 @@
 use crate::constants::CALL_RETRIES;
 use crate::context::estimate_tokens;
 use crate::events::{emit_status, to_caller, PartPublisher, PassParts};
-use crate::memory::{save_history, MemoryStoreError};
+use crate::memory::MemoryStoreError;
 use crate::model_format::cache::View;
 use crate::model_format::pass::{Mode, Pass};
 use crate::model_format::{Out, Outbound};
@@ -130,6 +132,10 @@ pub(crate) struct Run {
     /// When the pass's ceiling (`send_timeout`) ends: its attempts share it; a link
     /// retry starts it again.
     deadline: std::time::Instant,
+    /// The conversation the pass reads, as its history step read it ([`gather`]).
+    history: crate::memory::MemResult<Vec<Value>>,
+    /// The agent's own `reflect`, as its reflect step read it: the system block's self.
+    me: Value,
     /// A test that drives one pass reads how it ended here, and its answer is not routed.
     #[cfg_attr(not(test), allow(dead_code))]
     observe: Observer,
@@ -166,13 +172,13 @@ pub(crate) async fn run_generation(
     cfg: BackendConfig,
 ) -> Result<Generation, GenFailure> {
     let m = crate::life::Incoming {
-        text: user_text,
-        client_id,
-        origin: client_id,
+        text: user_text.to_string(),
+        client_id: client_id.to_string(),
+        origin: client_id.to_string(),
         notice: false,
         attached: None,
     };
-    let row_id = crate::life::arrive(kernel, self_id, &m, false).await?;
+    let row_id = crate::life::arrived(kernel, self_id, m, false).await?;
     let epoch = {
         let mut life = state.life.lock().expect("life poisoned");
         life.running = true;
@@ -231,7 +237,7 @@ async fn begin_pass(
     kernel: Arc<Kernel>,
     self_id: AgentId,
     epoch: u64,
-    mut tail: Vec<Arrival>,
+    tail: Vec<Arrival>,
     observe: Observer,
 ) {
     let state = state_for(&self_id);
@@ -244,76 +250,143 @@ async fn begin_pass(
     let client_id = tail
         .first()
         .map_or_else(fantastic_kernel::inquiry::default_client_id, |a| a.client_id.clone());
-    // THE REQUEST ENDS WITH A USER MESSAGE: a tail that arrived while the last pass
-    // worked lies before its answer row, so a notice follows that row
-    let last_role = match crate::memory::load_history(&self_id, &kernel, false).await {
-        Ok(rows) => rows
-            .last()
-            .and_then(|r| r.get("role"))
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        Err(_) => None,
-    };
-    if last_role.as_deref() == Some("assistant") && !tail.is_empty() {
-        let text = arrived_notice(tail.len());
-        let m = crate::life::Incoming {
-            text: &text,
-            client_id: &client_id,
-            origin: self_id.as_str(),
-            notice: true,
-            attached: None,
-        };
-        if let Ok(row_id) = crate::life::arrive(&kernel, &self_id, &m, false).await {
-            tail.push(Arrival {
-                row_id,
-                client_id: client_id.clone(),
-                origin: self_id.as_str().to_string(),
-                text,
-                send_id: crate::helpers::mint_send_id(),
-                at: crate::helpers::now_secs(),
-                notice: true,
-            });
-        }
-    }
-    let (Some(first), Some(last)) = (tail.first().cloned(), tail.last().cloned()) else {
-        crate::life::end(&kernel, &self_id, epoch);
-        return;
-    };
-    *state.current_meta.lock().expect("current poisoned") = Some(CurrentEntry {
-        client_id: client_id.clone(),
-        text: last.text.clone(),
-        send_id: first.send_id.clone(),
-        queued_at: first.at,
-        origin: last.origin.clone(),
-        started_at: crate::helpers::now_secs(),
-        phase: "thinking".to_string(),
-        text_so_far: String::new(),
-        last_tool: None,
-        task_id: None,
-        parts: None,
-        stopped_by: None,
-        notice: tail.iter().all(|a| a.notice),
-        abort: Arc::new(tokio::sync::Notify::new()),
-        answers: last.row_id,
-        request: 0,
-    });
-    emit_status(&kernel, &state, &self_id, &client_id, "thinking", Map::new()).await;
-    let provider = (machine.provider)(&client_id);
-    let run = Run {
-        kernel,
-        self_id,
+    let b = Begin {
+        kernel: Arc::clone(&kernel),
+        self_id: self_id.clone(),
         state,
-        cfg: machine.cfg,
-        provider,
+        machine,
         epoch,
         tail,
         client_id,
-        parent: last.row_id,
-        retried: 0,
-        deadline: ceiling_from_now(),
         observe,
     };
-    prepare_and_ask(run).await;
+    // THE REQUEST ENDS WITH A USER MESSAGE: the history is read first (a step), and a
+    // tail that arrived while the last pass worked lies before its answer row
+    crate::steps::history(&self_id, &kernel, b, |b, rows| b.read(rows)).await;
+}
+
+/// A pass starting: what its first steps hand on until its run is built.
+struct Begin {
+    kernel: Arc<Kernel>,
+    self_id: AgentId,
+    state: Arc<BackendState>,
+    machine: crate::state::Machine,
+    epoch: u64,
+    tail: Vec<Arrival>,
+    client_id: String,
+    observe: Observer,
+}
+
+impl Begin {
+    /// The history read: a tail after the last answer row gets the wake notice after
+    /// that row (a step), then the run is built.
+    async fn read(self, rows: crate::memory::MemResult<Vec<Value>>) {
+        let last_role = rows.as_ref().ok().and_then(|rows| {
+            rows.last()
+                .and_then(|r| r.get("role"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+        if last_role.as_deref() != Some("assistant") || self.tail.is_empty() {
+            return self.run().await;
+        }
+        let text = arrived_notice(self.tail.len());
+        let m = crate::life::Incoming {
+            text: text.clone(),
+            client_id: self.client_id.clone(),
+            origin: self.self_id.as_str().to_string(),
+            notice: true,
+            attached: None,
+        };
+        let (k, me) = (Arc::clone(&self.kernel), self.self_id.clone());
+        crate::life::arrive(&k, &me, m, false, self, move |mut b, r| async move {
+            if let Ok(row_id) = r {
+                b.tail.push(Arrival {
+                    row_id,
+                    client_id: b.client_id.clone(),
+                    origin: b.self_id.as_str().to_string(),
+                    text,
+                    send_id: crate::helpers::mint_send_id(),
+                    at: crate::helpers::now_secs(),
+                    notice: true,
+                });
+            }
+            b.run().await;
+        })
+        .await;
+    }
+
+    /// The pass's entry is set, `thinking` said, and its run gathered and asked.
+    async fn run(self) {
+        let Begin { kernel, self_id, state, machine, epoch, tail, client_id, observe } = self;
+        let (Some(first), Some(last)) = (tail.first().cloned(), tail.last().cloned()) else {
+            crate::life::end(&kernel, &self_id, epoch);
+            return;
+        };
+        *state.current_meta.lock().expect("current poisoned") = Some(CurrentEntry {
+            client_id: client_id.clone(),
+            text: last.text.clone(),
+            send_id: first.send_id.clone(),
+            queued_at: first.at,
+            origin: last.origin.clone(),
+            started_at: crate::helpers::now_secs(),
+            phase: "thinking".to_string(),
+            text_so_far: String::new(),
+            last_tool: None,
+            task_id: None,
+            parts: None,
+            stopped_by: None,
+            notice: tail.iter().all(|a| a.notice),
+            abort: Arc::new(tokio::sync::Notify::new()),
+            answers: last.row_id,
+            request: 0,
+        });
+        let provider = (machine.provider)(&client_id);
+        let run = Run {
+            kernel,
+            self_id,
+            state,
+            cfg: machine.cfg,
+            provider,
+            epoch,
+            tail,
+            client_id,
+            parent: last.row_id,
+            retried: 0,
+            deadline: ceiling_from_now(),
+            history: Ok(Vec::new()),
+            me: Value::Null,
+            observe,
+        };
+        emit_status(&run.kernel, &run.state, &run.self_id, &run.client_id, "thinking", Map::new()).await;
+        gather(run).await;
+    }
+}
+
+/// WHAT THE PASS READS, as STEPS (#795): its conversation (the history step) and its own
+/// `reflect` (the system block's self), each one call whose settle is the next step;
+/// then the pass is assembled and asked. A link retry gathers again.
+fn gather(run: Run) -> futures_util::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        let (k, me) = (Arc::clone(&run.kernel), run.self_id.clone());
+        crate::steps::history(&me, &k, run, |mut run, rows| async move {
+            // a `stop` meanwhile ended the pass: nothing of it goes on
+            if !crate::life::is_current(&run.self_id, run.epoch) {
+                return;
+            }
+            run.history = rows;
+            let (k, me) = (Arc::clone(&run.kernel), run.self_id.clone());
+            crate::steps::own_reflect(&me, &k, run, |mut run, reflected| async move {
+                if !crate::life::is_current(&run.self_id, run.epoch) {
+                    return;
+                }
+                run.me = reflected;
+                prepare_and_ask(run).await;
+            })
+            .await;
+        })
+        .await;
+    })
 }
 
 /// The pass's ceiling (`send_timeout`), from now.
@@ -429,11 +502,19 @@ async fn prepare(run: &Run) -> Result<Prepared, GenFailure> {
             run.cfg.model_window,
             Some(&run.client_id),
             &run.tail.iter().map(|a| a.row_id).collect::<Vec<_>>(),
+            &run.me,
         )
         .await?;
     }
+    // THE HISTORY THE PASS'S STEP READ ([`gather`]); a recall rewrote the view and the
+    // head, so the history is read again after one
+    let store = if due {
+        crate::memory::load_history(self_id, kernel, false).await?
+    } else {
+        run.history.clone()?
+    };
     let (mut messages, store_len, read) =
-        crate::assembly::assemble_read(self_id, state, kernel, &run.client_id, caching).await?;
+        crate::assembly::assemble_read(self_id, state, kernel, caching, store, &run.me).await?;
     // WHAT THIS PASS READS IS READ (#795): a message stored after the tail was taken and
     // before the history read is in this request; it wakes no pass after
     crate::life::read_by_pass(self_id, &read);
@@ -803,38 +884,43 @@ async fn stopped(rec: Box<PassRec>) {
         message_id,
         request_parts,
     );
-    if let Err(e) = save_history(&run.self_id, &run.kernel, &[row]).await {
-        let PassRec { run, .. } = *rec;
-        return failed(run, GenFailure::Store(e)).await;
-    }
-    landing.stored();
-    *run.state.prev_request.lock().expect("prev_request poisoned") = Some(next);
-    let events = crate::model_format::trace::of_turn(&rec.pass, rec.restarted.as_ref());
-    crate::model_format::trace::write(
-        &run.self_id,
-        &run.kernel,
-        &run.state,
-        &run.client_id,
-        Some(message_id),
-        events,
-    )
-    .await;
-    #[cfg(test)]
-    {
-        let mut rec = rec;
-        let how = Generation::Stopped {
-            reason: reason.clone(),
-            message_id,
-        };
-        if observed(&mut rec.run, Ok(how)) {
-            crate::life::end(&rec.run.kernel, &rec.run.self_id, rec.run.epoch);
-            return;
+    // THE ROW IS WRITTEN AS A STEP (#795): the pass ends once the store took it
+    let (k, me) = (Arc::clone(&run.kernel), run.self_id.clone());
+    crate::steps::append(&me, &k, &[row], (rec, landing, next), move |(rec, landing, next), r| async move {
+        if let Err(e) = r {
+            let PassRec { run, .. } = *rec;
+            return failed(run, GenFailure::Store(e)).await;
         }
-        let run = &rec.run;
-        give_up_and_end(run, &reason).await;
-    }
-    #[cfg(not(test))]
-    give_up_and_end(run, &reason).await;
+        landing.stored();
+        *rec.run.state.prev_request.lock().expect("prev_request poisoned") = Some(next);
+        // THE PASS'S TRACE ROWS (#766, 1.10), as steps; the give-up once they are written
+        let events = crate::model_format::trace::of_turn(&rec.pass, rec.restarted.as_ref());
+        let (me, k, state, cid) = (
+            rec.run.self_id.clone(),
+            Arc::clone(&rec.run.kernel),
+            Arc::clone(&rec.run.state),
+            rec.run.client_id.clone(),
+        );
+        crate::model_format::trace::write(&me, &k, &state, &cid, Some(message_id), events, rec, move |rec| async move {
+            #[cfg(test)]
+            {
+                let mut rec = rec;
+                let how = Generation::Stopped {
+                    reason: reason.clone(),
+                    message_id,
+                };
+                if observed(&mut rec.run, Ok(how)) {
+                    crate::life::end(&rec.run.kernel, &rec.run.self_id, rec.run.epoch);
+                    return;
+                }
+                give_up_and_end(&rec.run, &reason).await;
+            }
+            #[cfg(not(test))]
+            give_up_and_end(&rec.run, &reason).await;
+        })
+        .await;
+    })
+    .await;
 }
 
 /// THE PASS GIVES UP (a harness stop, a failure no retry mends): its entry goes first,
@@ -922,23 +1008,48 @@ async fn answered(
         message_id,
         request_parts,
     );
-    if let Err(e) = save_history(&run.self_id, &run.kernel, &[row]).await {
-        let PassRec { run, .. } = *rec;
-        return failed(run, GenFailure::Store(e)).await;
-    }
-    landing.stored();
-    *run.state.prev_request.lock().expect("prev_request poisoned") = Some(next);
+    // THE ROW IS WRITTEN AS A STEP (#795): the pass ends, and its calls go out, once the
+    // store took it
+    let (k, me) = (Arc::clone(&run.kernel), run.self_id.clone());
+    let done = Answered { last_text, message_id, call_streams, cut: cut_calls.is_some() };
+    crate::steps::append(&me, &k, &[row], (rec, landing, next, done), move |(rec, landing, next, done), r| async move {
+        if let Err(e) = r {
+            let PassRec { run, .. } = *rec;
+            return failed(run, GenFailure::Store(e)).await;
+        }
+        landing.stored();
+        *rec.run.state.prev_request.lock().expect("prev_request poisoned") = Some(next);
+        stored(rec, done).await;
+    })
+    .await;
+}
+
+/// The accepted answer, as its row write hands it on.
+struct Answered {
+    last_text: String,
+    message_id: i64,
+    call_streams: Vec<(String, String)>,
+    cut: bool,
+}
+
+/// THE ANSWER ROW IS STORED: the pass's trace rows (steps), then the route.
+async fn stored(rec: Box<PassRec>, done: Answered) {
     // THE PASS'S TRACE ROWS (#766, 1.10), its helpers' included, once its rows are stored
     let events = crate::model_format::trace::of_turn(&rec.pass, rec.restarted.as_ref());
-    crate::model_format::trace::write(
-        &run.self_id,
-        &run.kernel,
-        &run.state,
-        &run.client_id,
-        Some(message_id),
-        events,
-    )
-    .await;
+    let (me, k, state, cid) = (
+        rec.run.self_id.clone(),
+        Arc::clone(&rec.run.kernel),
+        Arc::clone(&rec.run.state),
+        rec.run.client_id.clone(),
+    );
+    let row = done.message_id;
+    crate::model_format::trace::write(&me, &k, &state, &cid, Some(row), events, (rec, done), |(rec, done)| traced(rec, done))
+        .await;
+}
+
+/// The trace rows are written: the pass ends, and its calls go out.
+async fn traced(rec: Box<PassRec>, done: Answered) {
+    let Answered { last_text, message_id, call_streams, cut } = done;
     // a driven pass (tests) is told, and its answer is not routed
     #[cfg(test)]
     let rec = {
@@ -946,7 +1057,7 @@ async fn answered(
         let how = Generation::Answered {
             text: last_text.clone(),
             message_id,
-            cut: cut_calls.is_some(),
+            cut,
         };
         if observed(&mut rec.run, Ok(how)) {
             crate::life::end(&rec.run.kernel, &rec.run.self_id, rec.run.epoch);
@@ -954,7 +1065,7 @@ async fn answered(
         }
         rec
     };
-    route(rec, last_text, message_id, call_streams, cut_calls.is_some())
+    route(rec, last_text, message_id, call_streams, cut)
 }
 
 /// THE PASS ENDS with its row written, and its calls go out: the route is owed work
@@ -1026,20 +1137,23 @@ fn failed(run: Run, f: GenFailure) -> futures_util::future::BoxFuture<'static, (
                     detail("error", &pe.message)
                 };
                 emit_status(&kernel, &state, &self_id, &run.client_id, "failed", d).await;
-                // A FAILED PASS stores its own error row (#177); a REFUSED RECORD
-                // (`ValueError`: the record cannot run) never opened a pass and stores
-                // nothing.
-                if pe.kind != "ValueError" {
-                    if let Err(e) = store_failed_pass(&run, &pe.message).await {
-                        eprintln!("  [ai] {self_id}: the pass's error row could not be stored: {e}");
-                    }
-                }
                 // A PROVIDER FAILURE NO RETRY MENDS gives up at once, its error the reason
-                if pe.permanent_code().is_some() {
-                    give_up_and_end(&run, &pe.message).await;
+                let permanent = pe.permanent_code().is_some();
+                // A FAILED PASS stores its own error row (#177), as a step; a REFUSED
+                // RECORD (`ValueError`: the record cannot run) never opened a pass and
+                // stores nothing.
+                if pe.kind != "ValueError" {
+                    let row = failed_row(&run, &pe.message);
+                    crate::steps::append(&self_id, &kernel, &[row], run, move |run, r| async move {
+                        if let Err(e) = r {
+                            eprintln!("  [ai] {}: the pass's error row could not be stored: {e}", run.self_id);
+                        }
+                        told(run, pe.message, permanent).await;
+                    })
+                    .await;
                     return;
                 }
-                pe.message
+                return told(run, pe.message, permanent).await;
             }
             // THE SEAM'S OWN WORDS: the projection refused (too small a window, an
             // unknown strategy)
@@ -1065,19 +1179,29 @@ fn failed(run: Run, f: GenFailure) -> futures_util::future::BoxFuture<'static, (
                 e.0
             }
         };
-        // AN INQUIRY THIS PASS READ tells its asker (#722): no answer comes from it
-        let mut body = Map::new();
-        body.insert(
-            "error".to_string(),
-            json!(format!("{}'s turn failed: {why}", self_id.as_str())),
-        );
-        let mut clients: Vec<String> = run.tail.iter().map(|a| a.client_id.clone()).collect();
-        clients.dedup();
-        for c in clients {
-            crate::route::close_inquiry(&kernel, self_id.as_str(), &c, body.clone()).await;
-        }
-        crate::life::end(&kernel, &self_id, run.epoch);
+        told(run, why, false).await;
     })
+}
+
+/// THE FAILURE IS SAID (its status, its error row): a failure no retry mends gives up;
+/// else an inquiry this pass read tells its asker (#722) — no answer comes from it —
+/// and the pass ends.
+async fn told(run: Run, why: String, permanent: bool) {
+    if permanent {
+        return give_up_and_end(&run, &why).await;
+    }
+    let (kernel, self_id) = (&run.kernel, &run.self_id);
+    let mut body = Map::new();
+    body.insert(
+        "error".to_string(),
+        json!(format!("{}'s turn failed: {why}", self_id.as_str())),
+    );
+    let mut clients: Vec<String> = run.tail.iter().map(|a| a.client_id.clone()).collect();
+    clients.dedup();
+    for c in clients {
+        crate::route::close_inquiry(kernel, self_id.as_str(), &c, body.clone()).await;
+    }
+    crate::life::end(kernel, self_id, run.epoch);
 }
 
 /// A LINK FAILURE, RETRIED (#198 part 2): a visible notice row, the `retrying` status,
@@ -1089,19 +1213,26 @@ async fn retry(mut run: Run, message: String) {
         .expect("transport_retries declares its default") as u32;
     run.retried += 1;
     let attempt = run.retried;
-    let _ = save_history(
-        &run.self_id,
-        &run.kernel,
-        &[json!({
-            "role": "user",
-            "parent": Value::Null,
-            "kind": "notice",
-            "content": format!(
-                "[retry {attempt}/{retries}] the link dropped ({message}) — retrying the turn"
-            ),
-        })],
-    )
+    let row = json!({
+        "role": "user",
+        "parent": Value::Null,
+        "kind": "notice",
+        "content": format!(
+            "[retry {attempt}/{retries}] the link dropped ({message}) — retrying the turn"
+        ),
+    });
+    // the visible notice row is a step; the retry goes on once the store took it
+    let (k, me) = (Arc::clone(&run.kernel), run.self_id.clone());
+    crate::steps::append(&me, &k, &[row], run, move |run, _| async move {
+        retry_after(run, retries, message).await;
+    })
     .await;
+}
+
+/// The retry's notice is stored: `retrying` said, a short backoff, then the pass
+/// gathered and asked again.
+async fn retry_after(mut run: Run, retries: u32, message: String) {
+    let attempt = run.retried;
     let mut detail = Map::new();
     detail.insert("attempt".to_string(), json!(attempt));
     detail.insert("of".to_string(), json!(retries));
@@ -1119,13 +1250,13 @@ async fn retry(mut run: Run, message: String) {
         return;
     }
     run.deadline = ceiling_from_now();
-    prepare_and_ask(run).await;
+    gather(run).await;
 }
 
-/// A pass that ends in a failure stores its error row (#177), after the rows it read,
-/// so the model reads the failure on its next pass and the operator sees it.
-async fn store_failed_pass(run: &Run, reason: &str) -> Result<(), String> {
-    let row = json!({
+/// The error row of a pass that ends in a failure (#177), after the rows it read, so
+/// the model reads the failure on its next pass and the operator sees it.
+fn failed_row(run: &Run, reason: &str) -> Value {
+    json!({
         "role": "user",
         "kind": "error",
         "content": format!(
@@ -1134,11 +1265,7 @@ async fn store_failed_pass(run: &Run, reason: &str) -> Result<(), String> {
         ),
         "id": run.kernel.mint_id(),
         "parent": run.parent,
-    });
-    save_history(&run.self_id, &run.kernel, &[row])
-        .await
-        .map(|_| ())
-        .map_err(|e| e.0)
+    })
 }
 
 /// A FAILED ATTEMPT IS MARKED, THEN ITS PARTS GO (Q40): the `retrying` status

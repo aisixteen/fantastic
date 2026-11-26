@@ -495,7 +495,7 @@ async fn burst(kernel: &Arc<Kernel>, agent: &AgentId, client: &str, n: usize) {
     let state = crate::state::state_for(agent);
     as_agent(
         agent.clone(),
-        trace::write(agent, kernel, &state, client, None, ev.into_rows()),
+        trace::written(agent, kernel, &state, client, None, ev.into_rows()),
     )
     .await;
 }
@@ -1089,7 +1089,7 @@ async fn dropped_why() {
     let state = crate::state::state_for(&a);
     as_agent(
         a.clone(),
-        trace::write(&a, &kernel, &state, "e12", Some(99), ev.into_rows()),
+        trace::written(&a, &kernel, &state, "e12", Some(99), ev.into_rows()),
     )
     .await;
     let rows = traces_of(&kernel, &a, "e12").await;

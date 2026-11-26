@@ -10,6 +10,21 @@ use super::*;
 use crate::provider::ProviderReport;
 use fantastic_kernel::test_support::as_agent;
 
+/// `text` ARRIVES at `ai` as a send's would (#795: stored, then the pass woken), with
+/// the provider the test wired.
+async fn arrive(kernel: &Arc<Kernel>, ai: &AgentId, text: &str) {
+    let m = crate::life::Incoming {
+        text: text.to_string(),
+        client_id: "cli".to_string(),
+        origin: "cli".to_string(),
+        notice: false,
+        attached: None,
+    };
+    as_agent(ai.clone(), crate::life::arrived(kernel, ai, m, true))
+        .await
+        .expect("stored");
+}
+
 async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
     kernel.operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
@@ -134,15 +149,7 @@ async fn a_turn_records_what_the_endpoint_reported() {
     .await;
     let provider: Arc<dyn Provider> = Arc::new(Reporting(777));
     crate::tests::wire(&ai, provider, CFG);
-    let out = as_agent(ai.clone(), crate::verbs::send(
-        &ai,
-        &serde_json::from_value(json!({"text": "hello"})).expect("a send"),
-        &kernel,
-        CFG,
-    ))
-    .await
-    .expect("send");
-    assert!(out.get("error").is_none(), "{out}");
+    arrive(&kernel, &ai, "hello").await;
     assert!(crate::tests::settle(&kernel).await, "the pass ran");
     let state = crate::state::state_for(&ai);
     assert!(state.calib.lock().unwrap().is_some_and(|c| c > 0.0));
@@ -251,15 +258,7 @@ async fn a_turns_rows_are_minted_when_appended_so_id_order_is_append_order() {
         agent: ai.clone(),
     });
     crate::tests::wire(&ai, provider, CFG);
-    let out = as_agent(ai.clone(), crate::verbs::send(
-        &ai,
-        &serde_json::from_value(json!({"text": "hello"})).expect("a send"),
-        &kernel,
-        CFG,
-    ))
-    .await
-    .expect("send");
-    assert!(out.get("error").is_none(), "{out}");
+    arrive(&kernel, &ai, "hello").await;
     assert!(crate::tests::settle(&kernel).await, "the pass ran");
     let hist = fantastic_kernel::test_support::as_agent(
         ai.clone(),

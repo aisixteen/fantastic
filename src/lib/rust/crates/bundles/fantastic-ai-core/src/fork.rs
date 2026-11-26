@@ -58,7 +58,7 @@ fn refuse(verb: &str, code: &str, why: &str, hint: &str, at: Option<i64>) -> Val
 fn mid_turn(agent_id: &AgentId) -> bool {
     let st = crate::state::state_for(agent_id);
     let life = st.life.lock().expect("life poisoned");
-    life.running || !life.unread.is_empty() || crate::state::is_generating(agent_id)
+    life.running || !life.unread.is_empty()
 }
 
 /// A conversation row: a chat turn (a fold included), not bookkeeping and not

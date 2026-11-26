@@ -57,6 +57,8 @@ fn py_start(py: &Path, code: &str, with_connector: bool) -> Value {
     })
 }
 
+pub(crate) use crate::test_support::started;
+
 /// A kernel + one exec_bridge agent with a permissive `allowed=[".*"]` (the
 /// operator opening the leg to any command). The `can` gate and the allowlist
 /// refusal are covered by dedicated tests.
@@ -314,13 +316,7 @@ async fn a_job_id_is_the_jobs_task_id_and_nothing_else_names_it() {
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let r = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            py_start(&py, "import time; time.sleep(30)", false),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let r = started(&kernel, &a.clone(), py_start(&py, "import time; time.sleep(30)", false)).await;
     let jid = r["job_id"]
         .as_i64()
         .unwrap_or_else(|| panic!("an int job_id: {r}"));
@@ -381,13 +377,7 @@ async fn start_refuses_unlisted_command() {
     let mut meta = Map::new();
     meta.insert("allowed".to_string(), json!(["ls( .*)?"])); // only ls
     let (kernel, a) = mk_kernel_with(&tmp, meta).await;
-    let r = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            json!({"type": "start", "command": "/bin/rm", "args": ["-rf", "/"]}),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let r = started(&kernel, &a.clone(), json!({"type": "start", "command": "/bin/rm", "args": ["-rf", "/"]})).await;
     assert!(
         r["error"].as_str().unwrap_or("").contains("not allowed"),
         "an unlisted command must refuse naming the patterns: {r}"
@@ -482,10 +472,7 @@ signal.signal(getattr(signal, "SIGBREAK", signal.SIGINT), h)
 for _ in range(300):
     time.sleep(0.1)
 "#;
-    let r = kernel.operator_send(vec![Item::new(pid.clone(), py_start(&py, code, false))])
-        .await
-        .remove(0)
-        .result;
+    let r = started(&kernel, &pid.clone(), py_start(&py, code, false)).await;
     assert!(r["job_id"].is_i64(), "start failed: {r}");
     tokio::time::sleep(Duration::from_millis(800)).await;
 
@@ -519,13 +506,7 @@ async fn stop_sigkills_the_job() {
     let tmp = TempDir::new().unwrap();
     let (kernel, pid) = mk_kernel(&tmp).await;
     let mut rx = inbox(&kernel, &pid);
-    let r = kernel.operator_send(vec![Item::new(
-            pid.clone(),
-            py_start(&py, "import time; time.sleep(30)", false),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let r = started(&kernel, &pid.clone(), py_start(&py, "import time; time.sleep(30)", false)).await;
     assert!(r["job_id"].is_i64(), "start failed: {r}");
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -742,13 +723,7 @@ async fn a_bare_command_is_found_on_the_childs_path_only() {
     let mut extra = Map::new();
     extra.insert("allowed".to_string(), json!([".*"]));
     let (kernel, a) = mk_kernel_with(&tmp, extra.clone()).await;
-    let r = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            json!({"type": "start", "command": "echo", "args": ["x"]}),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let r = started(&kernel, &a.clone(), json!({"type": "start", "command": "echo", "args": ["x"]})).await;
     assert_eq!(
         (&r["reason"], &r["arg"]),
         (&json!("missing_arg"), &json!("PATH")),
@@ -762,14 +737,7 @@ async fn a_bare_command_is_found_on_the_childs_path_only() {
     );
     let (k2, b) = mk_kernel_with(&tmp2, extra).await;
     let mut rx = inbox(&k2, &b);
-    let r = k2
-        .operator_send(vec![Item::new(
-            b.clone(),
-            json!({"type": "start", "command": "ft_only_here"}),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let r = started(&k2, &b.clone(), json!({"type": "start", "command": "ft_only_here"})).await;
     assert!(r["job_id"].is_i64(), "{r}");
     let done = until(&mut rx, |p| p["type"] == "job_done", 10)
         .await
@@ -782,35 +750,23 @@ async fn a_bare_command_is_found_on_the_childs_path_only() {
         "{done}"
     );
     // …and one only the kernel's PATH holds is not found.
-    let r = k2
-        .operator_send(vec![Item::new(
-            b.clone(),
-            json!({"type": "start", "command": "echo", "args": ["x"]}),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let r = started(&k2, &b.clone(), json!({"type": "start", "command": "echo", "args": ["x"]})).await;
     assert_eq!(r["reason"], "transport_error", "{r}");
     assert!(r["error"].as_str().unwrap().contains("No such file"), "{r}");
 }
 
-/// `start` returns AT ONCE — that is the contract. It also RECORDS what ran:
-/// `command`/`args` surface in `status` so a caller can re-issue verbatim.
+/// `start` announces its job AT ONCE (`job_started`; its settle is the job's end). It
+/// also RECORDS what ran: `command`/`args` surface in `status` so a caller can re-issue
+/// verbatim.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn start_returns_a_job_id_immediately_and_records_the_invocation() {
+async fn a_start_announces_its_job_at_once_and_records_the_invocation() {
     let Some(py) = find_real_python() else {
         return;
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let t0 = std::time::Instant::now();
-    let r = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            py_start(&py, "import time; time.sleep(30)", false),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let r = started(&kernel, &a.clone(), py_start(&py, "import time; time.sleep(30)", false)).await;
     assert!(r["job_id"].is_i64(), "no job_id: {r}");
     assert_eq!(r["status"], "running");
     assert!(t0.elapsed() < Duration::from_secs(5), "start blocked");
@@ -835,17 +791,11 @@ async fn progress_streams_per_line_with_a_shared_counter() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let mut rx = inbox(&kernel, &a);
-    let _ = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            py_start(
+    let _ = started(&kernel, &a.clone(), py_start(
                 &py,
                 "import sys\nprint('o1')\nprint('e1', file=sys.stderr)\nprint('o2')\n",
                 false,
-            ),
-        )])
-        .await
-        .remove(0)
-        .result;
+            )).await;
     let done = until(&mut rx, |v| v["type"] == "job_done", 20)
         .await
         .expect("no job_done");
@@ -871,17 +821,11 @@ async fn the_program_can_send_to_another_agent_and_read_the_reply() {
     let (kernel, a) = mk_kernel(&tmp).await;
     fantastic_kernel::test_support::grant(&kernel, a.as_str(), "kernel_state", json!({"call": ["reflect"]}));
     let mut rx = inbox(&kernel, &a);
-    let _ = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            py_start(
+    let _ = started(&kernel, &a.clone(), py_start(
                 &py,
                 "r = kernel.send('kernel_state', {'type': 'reflect'})\nprint('GOT', r.get('id'))\n",
                 true,
-            ),
-        )])
-        .await
-        .remove(0)
-        .result;
+            )).await;
     let done = until(&mut rx, |v| v["type"] == "job_done", 25)
         .await
         .expect("no job_done");
@@ -917,10 +861,7 @@ def _on(m):
 kernel.on_message(_on)
 threading.Event().wait()
 "#;
-    let _ = kernel.operator_send(vec![Item::new(a.clone(), py_start(&py, code, true))])
-        .await
-        .remove(0)
-        .result;
+    let _ = started(&kernel, &a.clone(), py_start(&py, code, true)).await;
     wait_inbox_ready(&kernel, &a, 30).await;
     let ack = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "ping"}))])
         .await
@@ -963,10 +904,7 @@ def _on(m):
 kernel.on_message(_on)
 threading.Event().wait()
 "#;
-    let _ = kernel.operator_send(vec![Item::new(a.clone(), py_start(&py, code, true))])
-        .await
-        .remove(0)
-        .result;
+    let _ = started(&kernel, &a.clone(), py_start(&py, code, true)).await;
     // Sent as soon as the program declared `ping`: it is still in its 2.5 s startup sleep.
     wait_declared(&a, 30).await;
     let ack = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "ping"}))])
@@ -1052,18 +990,12 @@ async fn the_program_is_gated_as_its_runner_not_as_the_operator() {
     }
     fantastic_kernel::test_support::grant(&kernel, a.as_str(), "ok_sib", json!({"call": ["reflect"]}));
     let mut rx = inbox(&kernel, &a);
-    let _ = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            py_start(
+    let _ = started(&kernel, &a.clone(), py_start(
                 &py,
                 "r = kernel.send('sib', {'type': 'reflect'})\nprint('SIB', r.get('reason'))\n\
                  r2 = kernel.send('ok_sib', {'type': 'reflect'})\nprint('CORE', r2.get('id'))\n",
                 true,
-            ),
-        )])
-        .await
-        .remove(0)
-        .result;
+            )).await;
     let done = until(&mut rx, |v| v["type"] == "job_done", 25)
         .await
         .expect("no job_done");
@@ -1212,9 +1144,7 @@ async fn a_stream_chunk_crosses_the_wire_raw() {
         .remove(0)
         .result;
     let mut rx = inbox(&kernel, &a);
-    let _ = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            py_start(
+    let _ = started(&kernel, &a.clone(), py_start(
                 &py,
                 "raw = bytes(range(256)) * 3\n\
                  w = kernel.send('blob', {'type': 'write_stream', 'path': 'b', 'bytes': raw})\n\
@@ -1222,11 +1152,7 @@ async fn a_stream_chunk_crosses_the_wire_raw() {
                  print('WROTE', w['written'], 'READ', len(r['bytes']), r['bytes'] == raw, \
                  type(r['bytes']).__name__)\n",
                 true,
-            ),
-        )])
-        .await
-        .remove(0)
-        .result;
+            )).await;
     let done = until(&mut rx, |v| v["type"] == "job_done", 25)
         .await
         .expect("no job_done");
@@ -1280,9 +1206,7 @@ async fn a_text_sends_bytes_reply_comes_back_raw() {
         assert!(r.get("error").is_none(), "{r}");
     }
     let mut rx = inbox(&kernel, &a);
-    let _ = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            py_start(
+    let _ = started(&kernel, &a.clone(), py_start(
                 &py,
                 "raw = bytes(range(256))\n\
                  kernel.send('blob', {'type': 'write_stream', 'path': 'b', 'bytes': raw})\n\
@@ -1290,11 +1214,7 @@ async fn a_text_sends_bytes_reply_comes_back_raw() {
                  print('READ', r.get('error'), type(r.get('bytes')).__name__, \
                  r.get('bytes') == raw)\n",
                 true,
-            ),
-        )])
-        .await
-        .remove(0)
-        .result;
+            )).await;
     let done = until(&mut rx, |v| v["type"] == "job_done", 25)
         .await
         .expect("no job_done");
@@ -1764,13 +1684,7 @@ async fn a_cancelled_job_finalises_to_stopped_and_clear_removes_it() {
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let r = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            py_start(&py, "import time; time.sleep(30)", false),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let r = started(&kernel, &a.clone(), py_start(&py, "import time; time.sleep(30)", false)).await;
     // The job's id IS its task id: `cancel` takes it as it is.
     let job_id = TaskId(r["job_id"].as_i64().expect("job_id"));
     let task_id = job_id.get();
@@ -1823,20 +1737,14 @@ async fn stop_releases_the_proxies_a_real_job_held() {
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let r = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            py_start(
+    let r = started(&kernel, &a.clone(), py_start(
                 &py,
                 "import threading\n\
                  kernel.watch(kernel.self_id, lambda p: None)\n\
                  kernel.on_message(lambda p: None)\n\
                  threading.Event().wait()\n",
                 true,
-            ),
-        )])
-        .await
-        .remove(0)
-        .result;
+            )).await;
     let job_id = r["job_id"].as_i64().expect("job_id");
     let proxies = [
         AgentId::from(format!("_xbw_{job_id}_{a}").as_str()),
@@ -2114,16 +2022,10 @@ async fn status_lists_jobs_in_start_order() {
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let mut started = Vec::new();
+    let mut ids = Vec::new();
     for _ in 0..3 {
-        let r = kernel.operator_send(vec![Item::new(
-                a.clone(),
-                py_start(&py, "import time; time.sleep(30)", false),
-            )])
-            .await
-            .remove(0)
-            .result;
-        started.push(r["job_id"].as_i64().expect("job_id"));
+        let r = started(&kernel, &a.clone(), py_start(&py, "import time; time.sleep(30)", false)).await;
+        ids.push(r["job_id"].as_i64().expect("job_id"));
     }
     let st = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "status"}))])
         .await
@@ -2135,7 +2037,7 @@ async fn status_lists_jobs_in_start_order() {
         .iter()
         .filter_map(|j| j["job_id"].as_i64())
         .collect();
-    assert_eq!(listed, started, "status must list jobs in start order");
+    assert_eq!(listed, ids, "status must list jobs in start order");
     let _ = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
         .await
         .remove(0)
@@ -2151,13 +2053,7 @@ async fn status_job_id_is_the_integer_task_id() {
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let _ = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            py_start(&py, "import time; time.sleep(30)", false),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let _ = started(&kernel, &a.clone(), py_start(&py, "import time; time.sleep(30)", false)).await;
     let st = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "status"}))])
         .await
         .remove(0)
@@ -2183,13 +2079,7 @@ async fn a_named_clear_refuses_a_running_job() {
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let r = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            py_start(&py, "import time; time.sleep(30)", false),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let r = started(&kernel, &a.clone(), py_start(&py, "import time; time.sleep(30)", false)).await;
     let jid = r["job_id"].as_i64().expect("job_id");
     let clear = || async {
         kernel.operator_send(vec![Item::new(
@@ -2253,17 +2143,11 @@ async fn output_is_collected_raw_like_python() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let mut rx = inbox(&kernel, &a);
-    let _ = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            py_start(
+    let _ = started(&kernel, &a.clone(), py_start(
                 &py,
                 "import sys\nsys.stdout.buffer.write(b'a\\r\\nb\\xff')\n",
                 false,
-            ),
-        )])
-        .await
-        .remove(0)
-        .result;
+            )).await;
     let done = until(&mut rx, |v| v["type"] == "job_done", 20)
         .await
         .expect("no job_done");
@@ -2286,13 +2170,7 @@ async fn an_overlong_line_is_read_whole() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let mut rx = inbox(&kernel, &a);
-    let _ = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            py_start(&py, "print('x' * 200000)\n", false),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let _ = started(&kernel, &a.clone(), py_start(&py, "print('x' * 200000)\n", false)).await;
     let done = until(&mut rx, |v| v["type"] == "job_done", 25)
         .await
         .expect("no job_done");
@@ -2320,13 +2198,7 @@ async fn a_killed_job_reports_negative_signal_exit_code() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let mut rx = inbox(&kernel, &a);
-    let _ = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            py_start(&py, "import time; time.sleep(30)", false),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let _ = started(&kernel, &a.clone(), py_start(&py, "import time; time.sleep(30)", false)).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     let _ = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
         .await
@@ -2349,17 +2221,11 @@ async fn liveness_is_process_exit_not_pipe_eof() {
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let _ = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            py_start(
+    let _ = started(&kernel, &a.clone(), py_start(
                 &py,
                 "import os, sys, time\nsys.stdout.flush()\nos.close(1)\nos.close(2)\ntime.sleep(4)\n",
                 false,
-            ),
-        )])
-        .await
-        .remove(0)
-        .result;
+            )).await;
     // Give both pipes time to hit EOF while the process is still sleeping.
     tokio::time::sleep(Duration::from_millis(800)).await;
     assert_eq!(
@@ -2389,13 +2255,7 @@ async fn liveness_is_process_exit_not_pipe_eof() {
 async fn spawn_failure_text_matches_python() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let r = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            json!({"type": "start", "command": "nope"}),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let r = started(&kernel, &a.clone(), json!({"type": "start", "command": "nope"})).await;
     assert_eq!(
         r["error"],
         "exec_bridge: spawn failed: [Errno 2] No such file or directory: 'nope'"
@@ -2414,13 +2274,7 @@ async fn a_missing_cwd_is_named_not_the_command() {
     extra.insert("allowed".to_string(), json!([".*"]));
     extra.insert("cwd".to_string(), json!(gone.to_string_lossy()));
     let (kernel, a) = mk_kernel_with(&tmp, extra).await;
-    let r = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            json!({"type": "start", "command": "/bin/echo", "args": ["x"]}),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let r = started(&kernel, &a.clone(), json!({"type": "start", "command": "/bin/echo", "args": ["x"]})).await;
     // `[Errno 2] No such file or directory` — chdir's ENOENT; on Windows
     // CreateProcessW's ERROR_DIRECTORY, `[Errno 20] Not a directory`
     assert_eq!(
@@ -2454,17 +2308,11 @@ async fn caller_env_cannot_override_the_control_vars() {
     );
     let (kernel, a) = mk_kernel_with(&tmp, meta).await;
     let mut rx = inbox(&kernel, &a);
-    let _ = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            json!({
+    let _ = started(&kernel, &a.clone(), json!({
                 "type": "start",
                 "command": py.to_string_lossy(),
                 "args": ["-u", "-c", "import os; print('ID', os.environ['FANTASTIC_SELF_ID'], 'FD', os.environ['FANTASTIC_CTRL_FD'])"],
-            }),
-        )])
-        .await
-        .remove(0)
-        .result;
+            })).await;
     let done = until(&mut rx, |v| v["type"] == "job_done", 25)
         .await
         .expect("no job_done");
@@ -2758,20 +2606,14 @@ async fn tail_and_grep_read_a_running_job() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let mut rx = inbox(&kernel, &a);
-    let started = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            py_start(
+    let job = started(&kernel, &a.clone(), py_start(
                 &py,
                 "import sys, time\nfor i in range(6):\n    print(f'step {i} ok', flush=True)\n\
                  print('ERROR disk full', file=sys.stderr, flush=True)\nprint('step 6 ok', flush=True)\n\
                  time.sleep(30)\n",
                 false,
-            ),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let jid = started["job_id"].clone();
+            )).await;
+    let jid = job["job_id"].clone();
     let _ = until(&mut rx, |v| v["type"] == "progress" && v["n"] == 8, 20)
         .await
         .expect("8 lines never printed");
@@ -2802,74 +2644,59 @@ async fn tail_and_grep_read_a_running_job() {
 
 /// A broken `allowed` pattern permits nothing, even one the fullmatch wrapper
 /// would balance into match-everything (python `re.fullmatch` raises).
-/// `status` with `wait_s` returns once the job is no longer running — no polling.
+/// `start` SETTLES WHEN ITS JOB EXITS (#795), as `run` does: the job is announced
+/// (`job_started`) while it runs, and the call's settle is its end — not `running`,
+/// with its exit code and its last lines.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn status_wait_returns_when_the_job_ends() {
+async fn start_settles_when_its_job_exits() {
     let Some(py) = find_real_python() else {
         return;
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let started = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            py_start(&py, "import time; time.sleep(0.5)", false),
-        )])
+    let mut rx = inbox(&kernel, &a);
+    let program = format!("{LF_STDIO}import time, sys; time.sleep(0.5); print('bye'); sys.exit(4)");
+    let (k, item) = (
+        Arc::clone(&kernel),
+        Item::new(a.clone(), json!({"type": "start", "command": py.to_string_lossy(), "args": ["-u", "-c", program]})),
+    );
+    let settle = tokio::spawn(async move { k.operator_send(vec![item]).await.remove(0).result });
+    let ann = until(&mut rx, |v| v["type"] == "job_started", 10).await.expect("no job_started");
+    assert!(!settle.is_finished(), "the start settled before its job ended");
+    let r = tokio::time::timeout(Duration::from_secs(20), settle)
         .await
-        .remove(0)
-        .result;
-    let jid = started["job_id"].as_i64().expect("job_id");
-    let t0 = std::time::Instant::now();
-    let st = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            json!({"type": "status", "job_id": jid, "wait_s": 10}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let took = t0.elapsed();
-    assert_ne!(st["jobs"][0]["status"], "running", "{st}");
-    assert!(took < std::time::Duration::from_secs(5), "took {took:?}");
+        .expect("the start never settled")
+        .expect("the start panicked");
+    assert_eq!(r["job_id"], ann["job_id"], "{r}");
+    assert_ne!(r["status"], "running", "{r}");
+    assert_eq!(r["exit_code"], 4, "{r}");
+    assert!(r["lines"].to_string().contains("bye"), "{r}");
 }
 
-/// A `wait_s` shorter than the job's life gives up at the deadline and still
-/// reports the job running.
+/// `status` is a SNAPSHOT: on a running job it answers at once, the job still running.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn status_wait_gives_up_at_the_deadline() {
+async fn status_is_a_snapshot_of_a_running_job() {
     let Some(py) = find_real_python() else {
         return;
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let started = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            py_start(&py, "import time; time.sleep(30)", false),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let jid = started["job_id"].as_i64().expect("job_id");
+    let job = started(&kernel, &a, py_start(&py, "import time; time.sleep(30)", false)).await;
+    let jid = job["job_id"].as_i64().expect("job_id");
     let t0 = std::time::Instant::now();
-    let st = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            json!({"type": "status", "job_id": jid, "wait_s": 0.5}),
-        )])
+    let st = kernel
+        .operator_send(vec![Item::new(a.clone(), json!({"type": "status", "job_id": jid}))])
         .await
         .remove(0)
         .result;
-    let took = t0.elapsed();
     assert_eq!(st["jobs"][0]["status"], "running", "{st}");
-    assert!(took < std::time::Duration::from_secs(3), "took {took:?}");
-    let _ = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            json!({"type": "stop", "job_id": jid}),
-        )])
-        .await
-        .remove(0)
-        .result;
+    assert!(t0.elapsed() < Duration::from_secs(1), "took {:?}", t0.elapsed());
+    let _ = kernel
+        .operator_send(vec![Item::new(a.clone(), json!({"type": "stop", "job_id": jid}))])
+        .await;
 }
 
-/// `status` on a job this agent never had answers at once, even with `wait_s`:
-/// the reply is `not_found`, not a wait for a job that will never run.
+/// `status` on a job this agent never had answers at once: `not_found`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn status_of_an_unknown_job_answers_at_once() {
     let tmp = TempDir::new().unwrap();
@@ -2877,7 +2704,7 @@ async fn status_of_an_unknown_job_answers_at_once() {
     let t0 = std::time::Instant::now();
     let st = kernel.operator_send(vec![Item::new(
             a.clone(),
-            json!({"type": "status", "job_id": 999_999, "wait_s": 60}),
+            json!({"type": "status", "job_id": 999_999}),
         )])
         .await
         .remove(0)
@@ -2887,136 +2714,28 @@ async fn status_of_an_unknown_job_answers_at_once() {
     assert_eq!(st["reason"], "not_found", "{st}");
 }
 
-/// A `status` wait on a job that is cleared (reaped) after it ended answers at
-/// once with `not_found`: the wait does not hang on a job that is gone.
+/// A STOPPED job ends its `start`: the call settles with the job's end, so a starter
+/// never waits on a job that is gone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_wait_ends_when_the_job_is_reaped() {
+async fn a_stopped_job_settles_its_start() {
     let Some(py) = find_real_python() else {
         return;
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let started = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            py_start(&py, "import time; time.sleep(0.2)", false),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let jid = started["job_id"].as_i64().expect("job_id");
-    // Wait for it to end, then reap it.
-    let _ = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            json!({"type": "status", "job_id": jid, "wait_s": 10}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let _ = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            json!({"type": "clear", "job_id": jid}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let t0 = std::time::Instant::now();
-    let st = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            json!({"type": "status", "job_id": jid, "wait_s": 60}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let took = t0.elapsed();
-    assert!(took < std::time::Duration::from_secs(5), "took {took:?}");
-    assert_eq!(st["reason"], "not_found", "{st}");
-}
-
-/// A `wait_s` on a job that is still running waits up to `wait_s` (about one
-/// second here) before answering with the job still running.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_wait_on_a_running_job_still_waits_up_to_wait_s() {
-    let Some(py) = find_real_python() else {
-        return;
-    };
-    let tmp = TempDir::new().unwrap();
-    let (kernel, a) = mk_kernel(&tmp).await;
-    let started = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            py_start(&py, "import time; time.sleep(30)", false),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let jid = started["job_id"].as_i64().expect("job_id");
-    let t0 = std::time::Instant::now();
-    let st = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            json!({"type": "status", "job_id": jid, "wait_s": 1}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let took = t0.elapsed();
-    assert_eq!(st["jobs"][0]["status"], "running", "{st}");
-    assert!(
-        took >= std::time::Duration::from_millis(900),
-        "took {took:?}"
-    );
-    assert!(took < std::time::Duration::from_secs(5), "took {took:?}");
-    let _ = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            json!({"type": "stop", "job_id": jid}),
-        )])
+    let mut rx = inbox(&kernel, &a);
+    let (k, item) = (Arc::clone(&kernel), Item::new(a.clone(), py_start(&py, "import time; time.sleep(30)", false)));
+    let settle = tokio::spawn(async move { k.operator_send(vec![item]).await.remove(0).result });
+    let ann = until(&mut rx, |v| v["type"] == "job_started", 10).await.expect("no job_started");
+    let _ = kernel
+        .operator_send(vec![Item::new(a.clone(), json!({"type": "stop", "job_id": ann["job_id"]}))])
         .await;
-}
-
-/// A `wait_s` that is not a number in 0..=120, or has no job to wait for, is a
-/// bad argument.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn status_wait_refuses_a_bad_value() {
-    let Some(py) = find_real_python() else {
-        return;
-    };
-    let tmp = TempDir::new().unwrap();
-    let (kernel, a) = mk_kernel(&tmp).await;
-    // a real job, so the range and type checks are what refuse — not the
-    // missing job_id
-    let started = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            py_start(&py, "import time; time.sleep(30)", false),
-        )])
+    let r = tokio::time::timeout(Duration::from_secs(10), settle)
         .await
-        .remove(0)
-        .result;
-    let jid = started["job_id"].as_i64().expect("job_id");
-    for bad in [json!(-1), json!(500), json!("x")] {
-        let r = kernel.operator_send(vec![Item::new(
-                a.clone(),
-                json!({"type": "status", "job_id": jid, "wait_s": bad}),
-            )])
-            .await
-            .remove(0)
-            .result;
-        assert_eq!(r["reason"], "bad_arg", "{r}");
-        assert_eq!(r["arg"], "wait_s", "{r}");
-    }
-    let r = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            json!({"type": "status", "wait_s": 1}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(r["reason"], "bad_arg", "{r}");
-    assert_eq!(r["arg"], "wait_s", "{r}");
-    let _ = kernel.operator_send(vec![Item::new(
-            a.clone(),
-            json!({"type": "stop", "job_id": jid}),
-        )])
-        .await
-        .remove(0)
-        .result;
+        .expect("a stopped job's start never settled")
+        .expect("the start panicked");
+    assert_eq!(r["job_id"], ann["job_id"], "{r}");
+    assert_ne!(r["status"], "running", "{r}");
 }
 
 #[test]

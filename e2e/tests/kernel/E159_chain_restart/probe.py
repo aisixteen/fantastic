@@ -108,9 +108,7 @@ def main() -> int:
         return False
 
     def idle(bound: float = 90) -> bool:
-        return until("the chains to settle", lambda: not [
-            t for t in hk.send("kernel", {"type": "ps"}).get("tasks") or []
-            if t.get("agent") in (LEAD, WORKER, EX)], bound)
+        return until("the chains to settle", lambda: hk.quiet(LEAD, WORKER, EX), bound)
 
     try:
         rec = hk.create(parent_id="rest", handler_module="exec_bridge.tools", id=EX,

@@ -87,27 +87,46 @@ pub fn reflect_base(
 
 /// A reply that answers a call of a chain that is over — a previous incarnation's,
 /// or one a stop / clear / lost wake ended — is kept as a `late` row in this
-/// agent's own store and wakes nothing.
-pub(crate) async fn save_late(
-    agent_id: &AgentId,
-    kernel: &Arc<Kernel>,
-    raw: &str,
-) -> Result<(), BundleError> {
-    crate::memory::save_history(
-        agent_id,
-        kernel,
-        &[json!({
-            "role": "user",
-            "parent": Value::Null,
-            "kind": "late",
-            "content": format!(
-                "[late reply — answered a call of a chain that has ended; \
-                 recorded, not acted on]\n{raw}"
-            ),
-        })],
-    )
-    .await?;
-    Ok(())
+/// agent's own store and wakes nothing. A STEP: `next` gets the store's word.
+pub(crate) async fn save_late<R, F, Fut>(agent_id: &AgentId, kernel: &Arc<Kernel>, raw: &str, rec: R, next: F)
+where
+    R: Send + 'static,
+    F: FnOnce(R, MemResult<()>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let row = json!({
+        "role": "user",
+        "parent": Value::Null,
+        "kind": "late",
+        "content": format!(
+            "[late reply — answered a call of a chain that has ended; \
+             recorded, not acted on]\n{raw}"
+        ),
+    });
+    crate::steps::append(agent_id, kernel, &[row], rec, move |rec, r| next(rec, r.map(|_| ()))).await;
+}
+
+/// A HANDLER'S DEFERRED SETTLE: the execution `d` settles with `result` — an `Err` is
+/// the raise a handler's error makes (`failed`, `{error, raised}`), a store's refusal
+/// that of its `MemoryStoreError`. `None`: the handler ran as the kernel's bookkeeping
+/// (an `await_set` wake), which answers no call — nothing settles, and an `Err` is said.
+fn settle_with<E: Into<BundleError>>(kernel: &Kernel, d: Option<fantastic_kernel::Deferred>, result: Result<Value, E>) {
+    let Some(d) = d else {
+        if let Err(e) = result {
+            eprintln!("  [ai] a message the kernel handed over was not taken: {}", e.into());
+        }
+        return;
+    };
+    let pid = d.pid();
+    let out = match result {
+        Ok(v) => fantastic_kernel::Outcome::new(Some(pid), fantastic_kernel::Status::Completed, v),
+        Err(e) => fantastic_kernel::Outcome::new(
+            Some(pid),
+            fantastic_kernel::Status::Failed,
+            json!({"error": e.into().to_string(), "raised": true}),
+        ),
+    };
+    kernel.settle_deferred(pid, out);
 }
 
 /// `status` verb.
@@ -756,43 +775,91 @@ pub async fn send(
         with(&mut r, "client_id", json!(client_id));
         return Ok(r);
     }
+    // THE ACK IS THE STORED ROW (#795): this call settles once the store took the
+    // message; the steps between are calls of their own, and nothing here waits. A
+    // kernel's own hand-over (bookkeeping) answers no call: its steps run, nothing settles
+    let d = kernel.defer().ok();
     if args.late == Some(true) {
         // A reply to a call a PREVIOUS incarnation made (see `route::deliver`): recorded
         // in this agent's own store, never a pass.
-        save_late(agent_id, kernel, &args.text).await?;
-        return Ok(json!({"late": true, "client_id": client_id}));
+        let k = Arc::clone(kernel);
+        save_late(agent_id, kernel, &args.text, client_id, move |cid, r| async move {
+            settle_with(&k, d, r.map(|()| json!({"late": true, "client_id": cid})));
+        })
+        .await;
+        return Ok(Value::Null);
     }
-    let state = state_for(agent_id);
-    // WHAT THE PROVIDER CAN DO is read from it when the chat starts and when its provider
-    // or model changed, and the images of this send are brought inside the model's limits
-    // (#622)
-    crate::images::refresh(agent_id, kernel, &state).await;
-    let attached = match crate::images::attach(agent_id, kernel, args.images.as_deref()).await {
-        Ok(a) => a,
-        Err(e) => {
-            let mut r = refusal(BAD_ARG, e);
-            with(&mut r, "arg", json!("images"));
-            with(&mut r, "client_id", json!(client_id));
-            return Ok(r);
-        }
-    };
     // A notice is this agent's own harness text: honoured only when the agent sent it to
     // itself (or the operator did), so no peer can hide a message from a person's view.
     let notice = args.notice == Some(true)
         && fantastic_kernel::current_origin().is_none_or(|s| s == *agent_id);
-    let m = crate::life::Incoming {
-        text: &text,
-        client_id: &client_id,
-        origin: &origin_id,
+    let a = Accepting {
+        kernel: Arc::clone(kernel),
+        me: agent_id.clone(),
+        d,
+        text,
+        client_id,
+        origin: origin_id,
         notice,
-        attached: attached.as_ref(),
     };
-    let row = crate::life::arrive(kernel, agent_id, &m, true).await?;
-    // PAUSED (#219): stored, read by the pass the resume starts
-    if state.life.lock().expect("life poisoned").paused {
-        return Ok(json!({"held": crate::life::unread_count(agent_id), "paused": true}));
+    let state = state_for(agent_id);
+    let images = args.images.clone();
+    // WHAT THE PROVIDER CAN DO is read from it when the chat starts and when its provider
+    // or model changed, and the images of this send are brought inside the model's limits
+    // (#622)
+    crate::images::refresh(agent_id, kernel, state, a, move |a| async move {
+        let (k, me) = (Arc::clone(&a.kernel), a.me.clone());
+        crate::images::attach(&me, &k, images, a, |a, attached| a.attached(attached)).await;
+    })
+    .await;
+    Ok(Value::Null)
+}
+
+/// A `send` being accepted: the steps from its images to its stored row, and the
+/// execution that settles with the ack.
+struct Accepting {
+    kernel: Arc<Kernel>,
+    me: AgentId,
+    d: Option<fantastic_kernel::Deferred>,
+    text: String,
+    client_id: String,
+    origin: String,
+    notice: bool,
+}
+
+impl Accepting {
+    /// The images are attached (or refused): the message is stored, then acked.
+    async fn attached(self, attached: crate::images::AttachResult) {
+        let attached = match attached {
+            Ok(a) => a,
+            Err(e) => {
+                let mut r = refusal(BAD_ARG, e);
+                with(&mut r, "arg", json!("images"));
+                with(&mut r, "client_id", json!(self.client_id));
+                return settle_with(&self.kernel, self.d, Ok::<_, BundleError>(r));
+            }
+        };
+        let m = crate::life::Incoming {
+            text: self.text,
+            client_id: self.client_id.clone(),
+            origin: self.origin,
+            notice: self.notice,
+            attached,
+        };
+        let (k, me, d, cid) = (Arc::clone(&self.kernel), self.me.clone(), self.d, self.client_id);
+        crate::life::arrive(&self.kernel, &self.me, m, true, (), move |(), r| async move {
+            let reply = r.map(|row| {
+                // PAUSED (#219): stored, read by the pass the resume starts
+                if state_for(&me).life.lock().expect("life poisoned").paused {
+                    json!({"held": crate::life::unread_count(&me), "paused": true})
+                } else {
+                    json!({"accepted": true, "re": row, "client_id": cid})
+                }
+            });
+            settle_with(&k, d, reply);
+        })
+        .await;
     }
-    Ok(json!({"accepted": true, "re": row, "client_id": client_id}))
 }
 
 // ── inquiry ─────────────────────────────────────────────────────────────────
@@ -877,18 +944,25 @@ pub async fn inquiry_accept(
         );
     let origin = asker.unwrap_or_else(|| client.clone());
     let m = crate::life::Incoming {
-        text,
-        client_id: &client,
-        origin: &origin,
+        text: text.to_string(),
+        client_id: client,
+        origin,
         notice: false,
         attached: None,
     };
-    crate::life::arrive(kernel, agent_id, &m, true).await?;
-    Ok(json!({
+    // acked once its row is stored (#795): a deferred settle, nothing waits
+    let d = kernel.defer().ok();
+    let k = Arc::clone(kernel);
+    let reply = json!({
         "accepted": true,
         "re": task.map_or(Value::Null, |t| json!(t.0)),
         "request_id": request_id,
-    }))
+    });
+    crate::life::arrive(kernel, agent_id, m, true, (), move |(), r| async move {
+        settle_with(&k, d, r.map(|_| reply));
+    })
+    .await;
+    Ok(Value::Null)
 }
 
 // ── boot, the row event, context by grant ───────────────────────────────────
@@ -1062,16 +1136,15 @@ where
                 let p = provider_for(&fantastic_kernel::inquiry::default_client_id());
                 Some(Pass::new(p, agent_id, &state_for(agent_id), kernel).await)
             };
-            crate::retrieval::context_recall(
-                agent_id,
-                dry,
-                kernel,
-                pass.as_ref(),
-                cfg.model_window,
-                None,
-                &[],
-            )
-            .await?
+            // its own `reflect` is a step (#795); the recall settles this call once it ran
+            let d = kernel.defer().ok();
+            let (k, me, window) = (Arc::clone(kernel), agent_id.clone(), cfg.model_window);
+            crate::steps::own_reflect(agent_id, kernel, (d, pass), move |(d, pass), reflected| async move {
+                let r = crate::retrieval::context_recall(&me, dry, &k, pass.as_ref(), window, None, &[], &reflected).await;
+                settle_with(&k, d, r);
+            })
+            .await;
+            Value::Null
         }
         // A new thread on the same store: the view starts here, nothing is deleted.
         Call::ContextClear(a) => {

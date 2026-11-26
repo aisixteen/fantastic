@@ -19,8 +19,8 @@
 //! The bridge publishes a WIRE — the inherited `FANTASTIC_CTRL_FD`, framed
 //! `[4-byte BE length | kind | rest]` (T = JSON, B = raw bytes) — and nothing else. A program that wants a
 //! `kernel` global includes the reference wire client ([`CONNECTOR_SRC`]) in its
-//! own source; the bridge prepends nothing. `start` spawns in the BACKGROUND and
-//! returns `{job_id, status:"running"}` at once, streaming `progress` / `job_done`;
+//! own source; the bridge prepends nothing. `start` spawns in the BACKGROUND and its
+//! call settles when the job EXITS, as `run`'s does, streaming `progress` / `job_done`;
 //! `boot` is a no-op (nothing auto-restarts — a command is started by a caller,
 //! not the record). A verb the running program declared is MAIL for it
 //! (`{queued:true}`); jobs are kernel TASKS (`ps`/`cancel`, `on_cancel`
@@ -52,6 +52,8 @@ use fantastic_kernel::refusal::{
 use fantastic_kernel::{body_at, AgentId, Blob, Kernel, TaskId};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
+
+pub use started::start_announced;
 
 /// The child-side connector, VENDORED VERBATIM from python's
 /// `exec_bridge/_connector.py`.
@@ -311,10 +313,14 @@ impl Handler for ExecBridgeBundle {
             Call::Reflect(_) => reflect_reply(agent_id, kernel),
             Call::Shutdown(_) => Value::Null,
             Call::Start(a) => {
-                start_reply(agent_id, a.command.as_deref(), a.args, a.pty, kernel).await
+                let started = start_job(agent_id, a.command.as_deref(), a.args, a.pty, kernel).await;
+                reply_at_exit(agent_id, started, verbs::RUN_TAIL, kernel)
             }
-            Call::Run(a) => run_reply(agent_id, a, kernel).await,
-            Call::Status(a) => status_reply(agent_id, &a).await,
+            Call::Run(a) => {
+                let started = start_job(agent_id, a.command.as_deref(), a.args, a.pty, kernel).await;
+                reply_at_exit(agent_id, started, a.tail, kernel)
+            }
+            Call::Status(a) => status_reply(agent_id, &a),
             Call::Clear(a) => clear_reply(agent_id, a.job_id.map(JobRef::of).as_ref()),
             Call::Interrupt(a) => interrupt_reply(agent_id, a.job_id.map(JobRef::of).as_ref()),
             Call::Stop(a) => stop_reply(agent_id, a.job_id.map(JobRef::of).as_ref()),
@@ -456,7 +462,9 @@ pub mod pty;
 pub mod record;
 pub mod relay;
 pub mod spawn;
+mod started;
 mod sys;
+pub mod test_support;
 mod tail;
 pub mod verbs;
 
@@ -581,22 +589,6 @@ fn cwd_refusal(cwd: &str, why: &str) -> Value {
     );
     with(&mut v, "arg", json!("cwd"));
     v
-}
-
-/// `start` as the answer a caller reads: the job started, or the refusal.
-async fn start_reply(
-    agent_id: &AgentId,
-    command: Option<&str>,
-    args: Option<Vec<String>>,
-    pty: Option<verbs::Terminal>,
-    kernel: &Arc<Kernel>,
-) -> Value {
-    match start_job(agent_id, command, args, pty, kernel).await {
-        Ok((job_id, is_pty)) => {
-            json!({"job_id": job_id.get(), "status": "running", "pty": is_pty})
-        }
-        Err(refused) => refused,
-    }
 }
 
 /// Start the job: its task id and whether it runs on a terminal, or the refusal.
@@ -924,31 +916,10 @@ pub fn child_env(meta: &Map<String, Value>) -> Map<String, Value> {
     env
 }
 
-/// `status` — one job (full output) or all of THIS agent's jobs.
-///
-/// `wait_s` (0–120, with a `job_id`) waits for the job to stop RUNNING before
-/// answering, so a caller does not have to poll.
-async fn status_reply(agent_id: &AgentId, a: &verbs::Status) -> Value {
+/// `status` — one job (full output) or all of THIS agent's jobs: a snapshot, now. A
+/// job's end is the settle of the `start` or `run` that started it.
+fn status_reply(agent_id: &AgentId, a: &verbs::Status) -> Value {
     let want = a.job_id.map(JobRef::of);
-    if let Some(secs) = a.wait_s {
-        let Some(jid) = &want else {
-            return bad("status", "wait_s", "a job_id to wait for");
-        };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(secs);
-        loop {
-            let live = {
-                let g = jobs::jobs();
-                match jid.find(&g, agent_id) {
-                    Some(j) => j.status == "running" || j.status == "stopping",
-                    None => false,
-                }
-            };
-            if !live || std::time::Instant::now() >= deadline {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        }
-    }
     let g = jobs::jobs();
     match want {
         Some(jid) => match jid.find(&g, agent_id) {
@@ -972,20 +943,25 @@ async fn status_reply(agent_id: &AgentId, a: &verbs::Status) -> Value {
     }
 }
 
-/// `run` — start, and answer with the output when the job ENDS (#795).
+/// `start` and `run` — the job started, and the call answered when the job ENDS (#795).
 ///
-/// The reply is the job's end: its handler defers its settle and returns, and the
+/// The reply is the job's end: the handler defers its settle and returns, and the
 /// job's pump settles it when the process exits — `{job_id, status, exit_code,
-/// lines}`, the last `tail` (default 200, 1–500) lines. Nothing polls and nothing
-/// waits: the call's own deadline bounds it (past it the kernel cancels the call,
-/// and the job with it). A job that ended before the deferral is answered at once.
-async fn run_reply(agent_id: &AgentId, a: verbs::Run, kernel: &Arc<Kernel>) -> Value {
-    let (job_id, _) =
-        match start_job(agent_id, a.command.as_deref(), a.args, a.pty, kernel).await {
-            Ok(started) => started,
-            // A refusal from `start` (no command, not allowed, no cwd) is the answer.
-            Err(refused) => return refused,
-        };
+/// lines}`, the last `tail` lines — delivered to the starter as a message. Nothing
+/// polls and nothing waits: the call's own deadline bounds it (past it the kernel
+/// cancels the call, and the job with it). While it runs, `status` lists the job and
+/// `job_started` announced its id. A job that ended before the deferral is answered at
+/// once; a refusal from the start (no command, not allowed, no cwd) is the answer.
+fn reply_at_exit(
+    agent_id: &AgentId,
+    started: Result<(TaskId, bool), Value>,
+    tail: u64,
+    kernel: &Arc<Kernel>,
+) -> Value {
+    let job_id = match started {
+        Ok((job_id, _)) => job_id,
+        Err(refused) => return refused,
+    };
     let deferred = {
         let mut g = jobs::jobs();
         match g.get_mut(&(agent_id.clone(), job_id)) {
@@ -994,7 +970,7 @@ async fn run_reply(agent_id: &AgentId, a: verbs::Run, kernel: &Arc<Kernel>) -> V
                 Ok(d) => {
                     j.run_end = Some(jobs::RunEnd {
                         pid: d.pid(),
-                        tail: a.tail,
+                        tail,
                         kernel: Arc::clone(kernel),
                     });
                     true
@@ -1007,7 +983,7 @@ async fn run_reply(agent_id: &AgentId, a: verbs::Run, kernel: &Arc<Kernel>) -> V
     if deferred {
         return Value::Null;
     }
-    jobs::run_reply_of(agent_id, job_id, a.tail)
+    jobs::run_reply_of(agent_id, job_id, tail)
 }
 
 /// `clear` — forget this agent's FINISHED rows: one named job, or every one.

@@ -111,10 +111,18 @@ async def main():
         # refusal, and the job runs on; `rest`, whose tree holds it, cancels it.
         r = await _call(root, root.id, {**runner, "parent_id": home(root), "id": "bg_runner"})
         assert not r.get("error"), f"create bg_runner: {r}"
-        bg = await _call(root, "bg_runner", {"type": "start", "command": INTERP,
-                                             "args": ["-c", "import time; time.sleep(60)"]})
-        job = bg.get("job_id")
-        assert job is not None, f"bg_runner start: {bg}"
+        # `start` settles when its job EXITS (#795): it goes out as a task, and the job
+        # is the one `status` lists
+        bg = asyncio.create_task(_call(root, "bg_runner", {"type": "start", "command": INTERP,
+                                                           "args": ["-c", "import time; time.sleep(60)"]}))
+        job = None
+        for _ in range(100):
+            jobs = (await _call(root, "bg_runner", {"type": "status"})).get("jobs") or []
+            if jobs or bg.done():
+                job = (jobs or [{}])[0].get("job_id")
+                break
+            await asyncio.sleep(0.05)
+        assert job is not None, f"bg_runner start: {bg.result() if bg.done() else 'no job listed'}"
         await probe_agent(root, "ai_hand", parent=conn.id)
         out = await relay(root, "ai_hand", "kernel", {"type": "cancel", "task_id": job})
         assert out == {"cancelled": False, "killed": []}, (

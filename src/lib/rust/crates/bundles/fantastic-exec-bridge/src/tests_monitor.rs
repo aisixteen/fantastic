@@ -93,6 +93,7 @@ async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
         .result
 }
 
+
 /// Per-test agent ids: the bundle's tables are process-wide (ONE KERNEL PER
 /// PROCESS), and the tests run in parallel.
 fn ids(tmp: &TempDir) -> (String, String) {
@@ -146,14 +147,12 @@ async fn setup(tmp: &TempDir) -> (Arc<Kernel>, Ear) {
 }
 
 async fn printer(k: &Arc<Kernel>, rn: &str, n: u32, gap: f64, fatal: &str, hold: f64) -> i64 {
-    let r = call(
-        k,
-        rn,
-        json!({"type": "start", "command": python().to_string_lossy(),
+    // the job as its `job_started` names it, at once (#795: the start settles at exit)
+    let r = crate::start_announced(k, &AgentId::from(rn), json!({"type": "start", "command": python().to_string_lossy(),
         "args": ["-c", PRINTER, n.to_string(), gap.to_string(),
-                 if fatal.is_empty() { "-" } else { fatal }, hold.to_string()]}),
-    )
-    .await;
+                 if fatal.is_empty() { "-" } else { fatal }, hold.to_string()]}))
+    .await
+    .unwrap_or_else(|e| panic!("{e}"));
     r["job_id"].as_i64().unwrap_or_else(|| panic!("{r}"))
 }
 

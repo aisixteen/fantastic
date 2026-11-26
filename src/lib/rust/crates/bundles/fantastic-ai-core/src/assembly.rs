@@ -21,7 +21,7 @@ use crate::model_format::{Decl, Section};
 use crate::prompt_file::PromptFileError;
 use crate::state::BackendState;
 use fantastic_bundle::{py_split_whitespace, py_strip};
-use fantastic_kernel::{AgentId, Item, Kernel};
+use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -153,15 +153,16 @@ fn fill(
 /// The live parts of the system block, built only where `need` names them —
 /// python `_parts`. `{howto}` is the how-to as sections: the pass's type writes them
 /// ([`crate::model_format::map::system`]), so a type switch maps the same block again.
-async fn parts(
+fn parts(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
     need: &[&str],
     env: Option<Env>,
+    me: &Value,
 ) -> HashMap<&'static str, SysBody> {
     let mut out: HashMap<&'static str, SysBody> = HashMap::new();
     if need.contains(&"self") {
-        out.insert("self", SysBody::Text(self_part(self_id, kernel).await));
+        out.insert("self", SysBody::Text(self_text(self_id, me)));
     }
     let meta = crate::helpers::agent_meta(self_id, kernel);
     let store = meta
@@ -211,19 +212,20 @@ async fn parts(
 }
 
 /// A prompt with its placeholders filled for this agent and this turn — python
-/// `_render_prompt`.
-async fn render_prompt(
+/// `_render_prompt`. `me`: the agent's own `reflect`.
+fn render_prompt(
     text: &str,
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
     literal: &'static str,
     env: Option<Env>,
+    me: &Value,
 ) -> Vec<SysPiece> {
     let need = named(text);
     if need.is_empty() {
         return vec![piece(literal, text)];
     }
-    fill(text, &parts(self_id, kernel, &need, env).await, literal)
+    fill(text, &parts(self_id, kernel, &need, env, me), literal)
 }
 
 /// The DEFAULT system block as `decl` writes it: `{self}\n\n{howto}` — this agent's own
@@ -241,20 +243,36 @@ pub(crate) async fn default_system_content(
     decl: &Decl<'_>,
 ) -> Result<String, MemoryStoreError> {
     let env = thread_env(self_id, kernel).await?;
+    let me = self_reflect(self_id, kernel).await;
     Ok(crate::model_format::map::system(
         decl,
-        &default_pieces(self_id, kernel, env).await,
+        &default_pieces(self_id, kernel, env, &me),
     ))
+}
+
+/// TESTS: the agent's own `reflect`, read inline (a pass reads it as a step,
+/// [`crate::steps::own_reflect`]).
+#[cfg(test)]
+pub(crate) async fn self_reflect(self_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
+    kernel
+        .send(vec![fantastic_kernel::Item::new(
+            self_id.clone(),
+            json!({"type": "reflect", "tree": "none"}),
+        )])
+        .await
+        .remove(0)
+        .result
 }
 
 /// The default block as its pieces: this agent's own reflect and the how-to
 /// sections, a blank line between.
-async fn default_pieces(
+fn default_pieces(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
     env: Option<Env>,
+    me: &Value,
 ) -> Vec<SysPiece> {
-    let mut p = parts(self_id, kernel, &["self", "howto"], env).await;
+    let mut p = parts(self_id, kernel, &["self", "howto"], env, me);
     vec![
         SysPiece {
             part: "self_reflect".into(),
@@ -268,16 +286,9 @@ async fn default_pieces(
     ]
 }
 
-/// `You are <id>. ` + this agent's own reflect, cut to who it is.
-async fn self_part(self_id: &AgentId, kernel: &Arc<Kernel>) -> String {
-    let me = kernel
-        .send(vec![Item::new(
-            self_id.clone(),
-            json!({"type": "reflect", "tree": "none"}),
-        )])
-        .await
-        .remove(0)
-        .result;
+/// `You are <id>. ` + this agent's own reflect `me`, cut to who it is.
+pub(crate) fn self_text(self_id: &AgentId, me: &Value) -> String {
+    let me = me.clone();
     // WHO YOU ARE, not how you are tuned: identity and memory — nothing that changes
     // during a run (grants change on every spawn; `reflect` reads them live). The rest of
     // the agent's own reflect (sampling, kv table, timeouts, endpoint) is operator
@@ -323,11 +334,12 @@ pub(crate) async fn system_content(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
     decl: &Decl<'_>,
+    me: &Value,
 ) -> Result<String, BlockFail> {
     let env = thread_env(self_id, kernel).await?;
     Ok(crate::model_format::map::system(
         decl,
-        &system_pieces(self_id, kernel, env).await?,
+        &system_pieces(self_id, kernel, env, me).await?,
     ))
 }
 
@@ -337,13 +349,14 @@ pub(crate) async fn system_pieces(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
     env: Option<Env>,
+    me: &Value,
 ) -> Result<Vec<SysPiece>, PromptFileError> {
     // THE WRAP: the record's `pre_system_prompt` goes BEFORE
     // whichever prompt is in force and `post_system_prompt` AFTER it, each read
     // live and taken verbatim — no placeholders, and neither replaces anything.
     // Absent or null adds nothing (python `_system_content`).
     let meta = crate::helpers::agent_meta(self_id, kernel);
-    let inner = inner_system_pieces(self_id, kernel, env).await?;
+    let inner = inner_system_pieces(self_id, kernel, env, me).await?;
     let wrap = |key: &str| {
         crate::record::record_wrap_prompt(&meta, key).map(|s| vec![piece("system_text", s)])
     };
@@ -376,17 +389,18 @@ async fn inner_system_pieces(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
     env: Option<Env>,
+    me: &Value,
 ) -> Result<Vec<SysPiece>, PromptFileError> {
     if let Some(s) =
         crate::record::record_system_prompt(&crate::helpers::agent_meta(self_id, kernel))
     {
-        return Ok(render_prompt(&s, self_id, kernel, "system_text", env).await);
+        return Ok(render_prompt(&s, self_id, kernel, "system_text", env, me));
     }
     // Set and unusable is an `Err` — the turn fails, never the default below.
     if let Some(s) = crate::prompt_file::text(self_id, kernel).await? {
-        return Ok(render_prompt(&s, self_id, kernel, "prompt_file", env).await);
+        return Ok(render_prompt(&s, self_id, kernel, "prompt_file", env, me));
     }
-    Ok(default_pieces(self_id, kernel, env).await)
+    Ok(default_pieces(self_id, kernel, env, me))
 }
 
 /// Why a turn's block or view could not be built: the memory store failed, or a
@@ -461,24 +475,29 @@ pub(crate) async fn assemble_messages(
     client_id: &str,
     caching: Caching,
 ) -> Result<(Vec<Value>, usize), BlockFail> {
-    assemble_read(self_id, state, kernel, client_id, caching)
+    let _ = client_id;
+    let store = load_history(self_id, kernel, false).await?;
+    let me = self_reflect(self_id, kernel).await;
+    assemble_read(self_id, state, kernel, caching, store, &me)
         .await
         .map(|(messages, store_len, _)| (messages, store_len))
 }
 
-/// [`assemble_messages`], and the ids of the rows the history read held: a pass reads
-/// every message stored by then, the ones that arrived after its tail was taken too.
+/// [`assemble_messages`] over `store`, the history the pass read (a step,
+/// [`crate::steps::history`]), and `me`, its own `reflect`: the messages, the head's
+/// length and the ids of the rows the history read held — a pass reads every message
+/// stored by then, the ones that arrived after its tail was taken too.
 pub(crate) async fn assemble_read(
     self_id: &AgentId,
     state: &Arc<BackendState>,
     kernel: &Arc<Kernel>,
-    _client_id: &str,
     caching: Caching,
+    store: Vec<Value>,
+    me: &Value,
 ) -> Result<(Vec<Value>, usize, Vec<i64>), BlockFail> {
     // A trimmed VIEW, not a rewrite of the store: stale whole-state reads deduped,
     // identical bodies stubbed, and answered reflects reduced to a stub — the
     // model's own distillation carries the facts forward.
-    let store = load_history(self_id, kernel, false).await?;
     let store_len = store.len();
     let read: Vec<i64> = store.iter().filter_map(|r| r.get("id").and_then(Value::as_i64)).collect();
     // THE DATE THE THREAD BEGAN: its first row's, which is the first message's; a first
@@ -489,7 +508,7 @@ pub(crate) async fn assemble_read(
     } else {
         store.first().and_then(Env::of)
     };
-    let pieces = system_pieces(self_id, kernel, env).await?;
+    let pieces = system_pieces(self_id, kernel, env, me).await?;
     let mut messages = vec![json!({"role": "system", "sys": pieces})];
     // THE VIEW ARRAY IS THE STATE. When a projection (or a recall) has written
     // one, the body is exactly what it chose — each listed row at its recorded

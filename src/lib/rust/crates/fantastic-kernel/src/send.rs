@@ -116,6 +116,13 @@ pub async fn as_operator<F: std::future::Future>(work: F) -> F::Output {
 }
 
 tokio::task_local! {
+    /// A HANDLER RUN AS KERNEL BOOKKEEPING ([`Kernel::bookkeeping`]): it answers no
+    /// call of its own, so it has no execution to [`Kernel::defer`] — the running task
+    /// is its caller's, whose execution is not its to settle.
+    pub(crate) static IN_BOOKKEEPING: bool;
+}
+
+tokio::task_local! {
     /// THE KERNEL'S OWN SHUTDOWN TRAFFIC. `shutdown_agents` sets the drain flag
     /// FIRST (so nothing new enters while it works) and only then sends every
     /// agent its `shutdown` verb — which the drain gate would otherwise refuse
@@ -1240,13 +1247,16 @@ impl Kernel {
         if let Some(b) = &body {
             let _ = b.take(&mut for_handler);
         }
-        let run = crate::secret::CURRENT_SECRET.scope(
-            Arc::new(Vec::new()),
-            CURRENT_ORIGIN.scope(
-                origin,
-                CURRENT_SENDER.scope(
-                    Some(agent.id.clone()),
-                    dispatch(Arc::clone(self), Arc::clone(agent), for_handler, body),
+        let run = IN_BOOKKEEPING.scope(
+            true,
+            crate::secret::CURRENT_SECRET.scope(
+                Arc::new(Vec::new()),
+                CURRENT_ORIGIN.scope(
+                    origin,
+                    CURRENT_SENDER.scope(
+                        Some(agent.id.clone()),
+                        dispatch(Arc::clone(self), Arc::clone(agent), for_handler, body),
+                    ),
                 ),
             ),
         );

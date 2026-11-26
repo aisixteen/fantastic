@@ -27,7 +27,7 @@ Only your ANSWER acts: a `<call>` in your thinking does not run; write it in you
 after thinking; every call in it runs. An answer with no call is asked again. End it with
 `<call name="done"></call>` when you have nothing more to do now (a finished task checked as
 under Working): the next message wakes you (a reply to your calls, an answer you asked for,
-a `job_done` from `exec start`); what you wait for is in flight, not lost. When the work
+the reply of an `exec start` when its job exits); what you wait for is in flight, not lost. When the work
 cannot be done, end it with
 <call name="stop"><reason>WHY</reason></call> and say why.
 

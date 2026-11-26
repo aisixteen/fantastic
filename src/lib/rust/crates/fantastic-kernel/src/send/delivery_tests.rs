@@ -432,6 +432,26 @@ async fn a_deferred_settle_settles_later() {
     assert!(current_task().is_none());
 }
 
+/// A handler run as KERNEL BOOKKEEPING answers no call: inside a dispatch's own task
+/// (a kernel hand-over made there), `defer` is refused — the running execution is the
+/// caller's, never the bookkeeping handler's to settle.
+#[tokio::test]
+async fn defer_is_refused_in_a_bookkeeping_run() {
+    let seen = Arc::new(Seen::default());
+    let k = mk(&seen);
+    agent(&k, "b", Value::Null).await;
+    let b = k.resolve_target("b").expect("b");
+    // as it runs inside a dispatch: the task is that dispatch's
+    let run = crate::tasks::CURRENT_TASK.scope(
+        crate::tasks::TaskId(4242),
+        k.bookkeeping(&b, json!({"type": "defer"}), None),
+    );
+    let out = crate::send::as_operator(run).await;
+    assert_ne!(out.status, Status::Completed, "{}", out.result);
+    assert!(out.result.to_string().contains("bookkeeping"), "{}", out.result);
+    assert!(seen.deferred.lock().unwrap().is_empty(), "a bookkeeping run deferred");
+}
+
 #[tokio::test]
 async fn a_late_settle_wakes_nothing() {
     let seen = Arc::new(Seen::default());

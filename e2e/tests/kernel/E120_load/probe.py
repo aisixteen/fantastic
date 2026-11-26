@@ -207,8 +207,7 @@ def main() -> int:
             return got
 
         def quiet() -> bool:
-            return not any(x.get("agent") == AI
-                           for x in hk.send("kernel", {"type": "ps"}).get("tasks") or [])
+            return hk.quiet(AI)
 
         end = t_sent + BOUNDS["batch_500"] * 2
         while time.monotonic() < end and not (

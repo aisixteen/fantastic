@@ -154,8 +154,15 @@ impl Kernel {
     /// `cancel` ends it. Refused outside a dispatch.
     ///
     /// # Errors
-    /// No dispatch is running here, or this one already deferred.
+    /// No dispatch is running here (a bookkeeping run included), or this one already
+    /// deferred.
     pub fn defer(&self) -> Result<Deferred, Value> {
+        if super::IN_BOOKKEEPING.try_with(|b| *b).unwrap_or(false) {
+            return Err(crate::refusal::refusal(
+                crate::refusal::BAD_ARG,
+                "defer: a kernel bookkeeping run answers no call, so it has no settle to defer",
+            ));
+        }
         let Some(pid) = current_task() else {
             return Err(crate::refusal::refusal(
                 crate::refusal::BAD_ARG,

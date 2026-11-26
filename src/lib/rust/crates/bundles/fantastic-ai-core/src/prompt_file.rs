@@ -245,41 +245,54 @@ async fn arm(self_id: &AgentId, kernel: &Arc<Kernel>, file: (String, String)) {
     }
 }
 
-/// The whole file through `read_stream`: its bytes, or why not.
-pub(crate) async fn read_bytes(
-    kernel: &Arc<Kernel>,
-    bridge: &str,
-    path: &str,
-) -> Result<Vec<u8>, String> {
-    let mut bytes: Vec<u8> = Vec::new();
-    let mut offset: u64 = 0;
-    loop {
-        let out = kernel
-            .send(vec![Item::new(
-                AgentId::from(bridge),
-                json!({"type": "read_stream", "path": path, "offset": offset}),
-            )])
-            .await
-            .remove(0);
-        if failed(out.status, &out.result) {
-            return Err(format!(
-                "{bridge} read_stream {path}: {}",
-                why(out.status, &out.result)
-            ));
-        }
-        if let Some(b) = out.body.as_ref().and_then(|b| b.at("bytes")) {
-            bytes.extend_from_slice(b);
-        }
-        if out.result.get("eof").and_then(Value::as_bool) == Some(true) {
-            break;
-        }
-        offset = out
-            .result
-            .get("next_offset")
-            .and_then(Value::as_u64)
-            .unwrap_or(offset);
-    }
-    Ok(bytes)
+/// The whole file through `read_stream`, as STEPS (#795): one page per call, each
+/// settle the next step; `next` gets its bytes, or why not.
+pub(crate) async fn read_bytes<R, F, Fut>(kernel: &Arc<Kernel>, bridge: String, path: String, rec: R, next: F)
+where
+    R: Send + 'static,
+    F: FnOnce(R, Result<Vec<u8>, String>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let next: ReadNext<R> = Box::new(move |rec, r| Box::pin(next(rec, r)));
+    read_page(Arc::clone(kernel), bridge, path, 0, Vec::new(), rec, next).await;
+}
+
+/// The step that gets a whole file's bytes.
+type ReadNext<R> =
+    Box<dyn FnOnce(R, Result<Vec<u8>, String>) -> futures_util::future::BoxFuture<'static, ()> + Send>;
+
+/// One page of [`read_bytes`] from `offset`, `bytes` read so far.
+fn read_page<R: Send + 'static>(
+    kernel: Arc<Kernel>,
+    bridge: String,
+    path: String,
+    offset: u64,
+    bytes: Vec<u8>,
+    rec: R,
+    next: ReadNext<R>,
+) -> futures_util::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        let item = Item::new(
+            AgentId::from(bridge.as_str()),
+            json!({"type": "read_stream", "path": path, "offset": offset}),
+        );
+        let k = Arc::clone(&kernel);
+        crate::steps::call(&kernel, item, (rec, bytes), move |(rec, mut bytes), out| async move {
+            if failed(out.status, &out.result) {
+                let why = format!("{bridge} read_stream {path}: {}", why(out.status, &out.result));
+                return next(rec, Err(why)).await;
+            }
+            if let Some(b) = out.body.as_ref().and_then(|b| b.at("bytes")) {
+                bytes.extend_from_slice(b);
+            }
+            if out.result.get("eof").and_then(Value::as_bool) == Some(true) {
+                return next(rec, Ok(bytes)).await;
+            }
+            let at = out.result.get("next_offset").and_then(Value::as_u64).unwrap_or(offset);
+            read_page(k, bridge, path, at, bytes, rec, next).await;
+        })
+        .await;
+    })
 }
 
 /// The whole file through the view's `read`, page by page: its lines joined again,

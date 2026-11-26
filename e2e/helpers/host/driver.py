@@ -346,6 +346,21 @@ class HostKernel:
             tail = raw[-4000:].decode("utf-8", "replace")
             print(tail if len(raw) <= 4000 else "…\n" + tail, flush=True)
 
+    def quiet(self, *ids: str) -> bool:
+        """Is each of `ids` QUIET now: no task of its own in `ps`, and — for an AI agent —
+        no pass in flight and nothing unread (its `status`)? A pass's plumbing calls are
+        STEPS that hold no task of the agent's (#795), so `ps` alone misses a pass between
+        its steps; `status` `generating` is set from the pass's first step. An agent with
+        no such `status` (an exec bridge, a store) is judged by `ps` alone."""
+        tasks = self.send("kernel", {"type": "ps"}).get("tasks") or []
+        if any(t.get("agent") in ids for t in tasks):
+            return False
+        for aid in ids:
+            st = self.send(aid, {"type": "status"})
+            if isinstance(st, dict) and (st.get("generating") or st.get("pending_from")):
+                return False
+        return True
+
     def send(self, target: str, payload: dict, timeout: float = 300,
              execution_id: str | None = None) -> dict:
         """One POST per call.

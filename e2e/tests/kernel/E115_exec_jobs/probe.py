@@ -7,6 +7,8 @@ seeded `rest` line; `ex` keeps no list of callers):
   1. the allowlist: an allow-listed command runs as a job; a line that matches no
      pattern is refused `unauthorized` and starts nothing; a record whose only
      pattern is a BROKEN regex permits nothing; `update_agent` refuses a broken one;
+     `start`'s reply is the job's END (#795): it settles when the job exits, and a
+     `job_started` event named the job while it ran;
   2. `job_done` is exactly {type, job_id, exit_code, ok, lines, last_line} — no
      stdout/stderr — for a clean exit and a failing one;
   3. `tail`/`grep` on a job that printed > 256 KiB: the ring keeps the newest
@@ -134,7 +136,21 @@ def main() -> int:
         return r if isinstance(r, dict) else {"error": f"non-dict reply {r!r}"}
 
     def start(program: str, **kw) -> dict:
+        """A job to its END: `start` settles when its job exits (#795)."""
         return ex({"type": "start", "command": PY, "args": ["-c", program], **kw})
+
+    def started_event(jid):
+        return next((e for e in list(seen) if e.get("type") == "job_started"
+                     and e.get("job_id") == jid), None)
+
+    def started(program: str, **kw):
+        """A job that RUNS ON: its `start` (the reply comes when it exits) goes out in a
+        thread, and the job is named by the `job_started` the ws watch sees."""
+        mark = len(seen)
+        threading.Thread(target=lambda: start(program, **kw), daemon=True).start()
+        ev = poll(lambda: next((e for e in list(seen)[mark:] if e.get("type") == "job_started"), None),
+                  "job_started")
+        return (ev or {}).get("job_id")
 
     def status(jid: int) -> dict:
         jobs = ex({"type": "status", "job_id": jid}).get("jobs") or [{}]
@@ -157,8 +173,9 @@ def main() -> int:
         s = start(ONE_TWO)
         jid = s.get("job_id")
         need(isinstance(jid, int) and not isinstance(jid, bool)
-             and s.get("status") == "running" and s.get("pty") is False,
-             f"an allow-listed line starts a job: {s}")
+             and s.get("status") == "done" and s.get("exit_code") == 0
+             and [x.get("line") for x in s.get("lines") or []] == ["one", "two"],
+             f"an allow-listed line runs a job, and its start's reply is the job's end: {s}")
         ev = poll(lambda: done_event(jid), "job_done of the first job", timeout=5)
         if ev is None:
             # The watch may have registered after the job ended: one more job.
@@ -197,6 +214,8 @@ def main() -> int:
                    "sys.stderr.buffer.write(b'err1\\n'); sys.stderr.flush()\n"
                    "sys.stdout.buffer.write(b'out2\\n'); sys.exit(3)").get("job_id")
         ev2 = poll(lambda: done_event(j2), "job_done of the failing job") or {}
+        # (a job started once the watch is live, so its announcement is seen)
+        need(started_event(j2) is not None, "job_started named the job while it ran")
         need(set(ev2) == DONE_KEYS and ev2.get("exit_code") == 3 and ev2.get("ok") is False
              and ev2.get("lines") == 3,
              f"a failing job's job_done: {ev2}")
@@ -247,9 +266,8 @@ def main() -> int:
         need(r.get("reason") == "bad_arg", f"grep with a broken regex refused: {str(r)[:120]}")
 
         # 4 · a PTY job
-        sp = start("x = input(); print('got:' + x)", pty={"cols": 100, "rows": 30})
-        jp = sp.get("job_id")
-        need(isinstance(jp, int) and sp.get("pty") is True, f"a PTY start: {sp}")
+        jp = started("x = input(); print('got:' + x)", pty={"cols": 100, "rows": 30})
+        need(isinstance(jp, int), f"a PTY start names its job: {jp}")
         sj = status(jp)
         need(sj.get("pty") is True and sj.get("cols") == 100 and sj.get("rows") == 30,
              f"PTY status carries cols/rows: {sj}")
@@ -267,9 +285,9 @@ def main() -> int:
              f"output replays the PTY ring: {str(o)[:160]}")
 
         # 5 · cancel a running job
-        jc = start("import os, sys, time\n"
-                   "sys.stdout.buffer.write(b'%d\\n' % os.getpid()); sys.stdout.flush()\n"
-                   "time.sleep(60)").get("job_id")
+        jc = started("import os, sys, time\n"
+                     "sys.stdout.buffer.write(b'%d\\n' % os.getpid()); sys.stdout.flush()\n"
+                     "time.sleep(60)")
         pid_line = poll(lambda: (ex({"type": "tail", "job_id": jc}).get("lines") or [None])[0],
                         "the sleeper's pid")
         pid = int(pid_line["line"]) if pid_line and pid_line.get("line", "").isdigit() else None

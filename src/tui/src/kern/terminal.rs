@@ -236,20 +236,28 @@ pub async fn open(host: &Host, cols: u16, rows: u16) -> Result<Attach, String> {
         return Ok(Attach { job_id, replay });
     }
 
-    let r = host
-        .operator(
-            TERM_ID,
-            json!({"type": "start", "command": argv[0], "args": &argv[1..], "pty": {"cols": cols, "rows": rows}}),
-        )
-        .await;
-    if let Some(e) = r.result.get("error").and_then(Value::as_str) {
-        let why = r.result.get("reason").and_then(Value::as_str).unwrap_or(e);
-        return Err(format!("`{TERM_ID}` did not start {}: {why}", argv.join(" ")));
+    let start = json!({"type": "start", "command": argv[0], "args": &argv[1..], "pty": {"cols": cols, "rows": rows}});
+    match started(host, start).await {
+        Ok(job_id) => Ok(Attach { job_id, replay: String::new() }),
+        Err(r) => {
+            let e = r.get("error").and_then(Value::as_str);
+            let why = r.get("reason").and_then(Value::as_str).or(e);
+            match why {
+                Some(why) => Err(format!("`{TERM_ID}` did not start {}: {why}", argv.join(" "))),
+                None => Err(format!("`{TERM_ID}` start named no job: {r}")),
+            }
+        }
     }
-    match r.result.get("job_id").and_then(Value::as_i64) {
-        Some(j) => Ok(Attach { job_id: j, replay: String::new() }),
-        None => Err(format!("`{TERM_ID}` start answered no job_id: {}", r.result)),
-    }
+}
+
+/// `start` the PTY job. Its call SETTLES WHEN THE JOB EXITS (#795), so the pane learns
+/// the job from `term`'s `job_started` announcement
+/// ([`fantastic_exec_bridge::start_announced`]); the shell's end comes to the pane as
+/// `job_done`. A start that settles before any announcement (refused) is the `Err`.
+async fn started(host: &Host, start: Value) -> Result<i64, Value> {
+    let id = fantastic_kernel::AgentId::from(TERM_ID);
+    let ann = fantastic_exec_bridge::start_announced(&host.kernel, &id, start).await?;
+    ann.get("job_id").and_then(Value::as_i64).ok_or(ann)
 }
 
 /// The first running PTY job in a `status` reply.

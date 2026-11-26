@@ -68,6 +68,12 @@ async fn call(kernel: &Arc<Kernel>, id: &str, p: Value) -> Value {
         .result
 }
 
+/// `start` acks and settles when its job exits (#795): the job it started, as
+/// [`crate::tests::started`] reads it.
+async fn start_call(kernel: &Arc<Kernel>, id: &str, p: Value) -> Value {
+    crate::tests::started(kernel, &AgentId::from(id), p).await
+}
+
 /// Collect `output` text until `pred`, returning it.
 async fn output_until(
     rx: &mut fantastic_kernel::inbox::InboxReceiver,
@@ -102,12 +108,8 @@ async fn next_of(rx: &mut fantastic_kernel::inbox::InboxReceiver, ty: &str) -> V
 }
 
 async fn start(kernel: &Arc<Kernel>, id: &str, py: &Path) -> i64 {
-    let r = call(
-        kernel,
-        id,
-        json!({"type": "start", "command": py.to_string_lossy(), "args": ["-c", CHILD],
-               "pty": {"cols": 91, "rows": 37}}),
-    )
+    let r = start_call(kernel, id, json!({"type": "start", "command": py.to_string_lossy(), "args": ["-c", CHILD],
+               "pty": {"cols": 91, "rows": 37}}))
     .await;
     assert_eq!(r["pty"], json!(true), "{r}");
     r["job_id"].as_i64().unwrap()
@@ -230,18 +232,10 @@ async fn a_pty_job_is_gated_like_any_start_and_its_verbs_want_a_pty_job() {
         )]}),
     )
     .await;
-    let r = call(
-        &k,
-        "term_g",
-        json!({"type": "start", "command": "/bin/sh", "args": ["-i"], "pty": {"cols": 80, "rows": 24}}),
-    )
+    let r = start_call(&k, "term_g", json!({"type": "start", "command": "/bin/sh", "args": ["-i"], "pty": {"cols": 80, "rows": 24}}))
     .await;
     assert_eq!(r["reason"], "unauthorized", "{r}");
-    let r = call(
-        &k,
-        "term_g",
-        json!({"type": "start", "command": py.to_string_lossy(), "args": ["-c", "0"], "pty": {"cols": 0, "rows": 24}}),
-    )
+    let r = start_call(&k, "term_g", json!({"type": "start", "command": py.to_string_lossy(), "args": ["-c", "0"], "pty": {"cols": 0, "rows": 24}}))
     .await;
     assert_eq!(r["reason"], "bad_arg", "{r}");
     let r = call(
@@ -251,11 +245,7 @@ async fn a_pty_job_is_gated_like_any_start_and_its_verbs_want_a_pty_job() {
     )
     .await;
     assert_eq!(r["reason"], "not_found", "{r}");
-    let pipe = call(
-        &k,
-        "term_g",
-        json!({"type": "start", "command": py.to_string_lossy(), "args": ["-c", "input()"]}),
-    )
+    let pipe = start_call(&k, "term_g", json!({"type": "start", "command": py.to_string_lossy(), "args": ["-c", "input()"]}))
     .await;
     let r = call(
         &k,
@@ -331,11 +321,7 @@ async fn the_kernel_env_reaches_a_child_only_by_name() {
         let extra = if inherit.is_null() { json!({}) } else { json!({"inherit_env": inherit}) };
         let k = kernel_with(&tmp, id, extra).await;
         let mut rx = k.ensure_inbox(&AgentId::from(id));
-        call(
-            &k,
-            id,
-            json!({"type": "start", "command": command, "args": args}),
-        )
+        start_call(&k, id, json!({"type": "start", "command": command, "args": args}))
         .await;
         let done = next_of(&mut rx, "job_done").await;
         // a console program on Windows ends its line with `\r\n`
@@ -353,11 +339,7 @@ async fn the_kernel_env_reaches_a_child_only_by_name() {
 async fn a_leg_with_no_cwd_runs_nothing() {
     let tmp = TempDir::new().unwrap();
     let k = kernel_with(&tmp, "nocwd", json!({"cwd": null})).await;
-    let r = call(
-        &k,
-        "nocwd",
-        json!({"type": "start", "command": "/bin/sh", "args": ["-c", "true"]}),
-    )
+    let r = start_call(&k, "nocwd", json!({"type": "start", "command": "/bin/sh", "args": ["-c", "true"]}))
     .await;
     assert_eq!(
         (&r["reason"], &r["arg"]),
@@ -429,12 +411,8 @@ async fn every_teardown_kills_the_whole_session() {
     for (aid, end) in [("sh_stop", "stop"), ("sh_delete", "delete_agent")] {
         let tmp = TempDir::new().unwrap();
         let k = kernel_with(&tmp, aid, json!({"env": env})).await;
-        let r = call(
-            &k,
-            aid,
-            json!({"type": "start", "command": command, "args": args,
-                   "pty": {"cols": 80, "rows": 24}}),
-        )
+        let r = start_call(&k, aid, json!({"type": "start", "command": command, "args": args,
+                   "pty": {"cols": 80, "rows": 24}}))
         .await;
         let jid = r["job_id"].as_i64().expect("job_id");
         let leader = crate::jobs::jobs()
@@ -487,11 +465,7 @@ async fn stop_and_delete_kill_everything_a_job_launched() {
     for (aid, end) in [("pipe_stop", "stop"), ("pipe_delete", "delete_agent")] {
         let tmp = TempDir::new().unwrap();
         let k = kernel_with(&tmp, aid, json!({"env": env})).await;
-        let r = call(
-            &k,
-            aid,
-            json!({"type": "start", "command": command, "args": args}),
-        )
+        let r = start_call(&k, aid, json!({"type": "start", "command": command, "args": args}))
         .await;
         let jid = r["job_id"].as_i64().expect("job_id");
         let leader = crate::jobs::jobs()
@@ -693,12 +667,8 @@ async fn replay_clears_the_backlog(id: &str, program: &str) {
     let k = kernel_with(&tmp, id, json!({})).await;
     let mut rx = k.ensure_inbox(&AgentId::from(id));
     let spawn = tokio::time::Instant::now();
-    let r = call(
-        &k,
-        id,
-        json!({"type": "start", "command": py.to_string_lossy(), "args": ["-c", program],
-               "pty": {"cols": 80, "rows": 24}}),
-    )
+    let r = start_call(&k, id, json!({"type": "start", "command": py.to_string_lossy(), "args": ["-c", program],
+               "pty": {"cols": 80, "rows": 24}}))
     .await;
     let jid = r["job_id"].as_i64().unwrap();
     let pty = crate::jobs::jobs()
@@ -795,12 +765,8 @@ async fn printed(kernel: &Arc<Kernel>, id: &str, jid: i64) -> String {
 
 /// Start `program` as a PTY job of `id`, returning its id.
 async fn start_program(kernel: &Arc<Kernel>, id: &str, py: &Path, program: &str) -> i64 {
-    let r = call(
-        kernel,
-        id,
-        json!({"type": "start", "command": py.to_string_lossy(), "args": ["-c", program],
-               "pty": {"cols": 80, "rows": 24}}),
-    )
+    let r = start_call(kernel, id, json!({"type": "start", "command": py.to_string_lossy(), "args": ["-c", program],
+               "pty": {"cols": 80, "rows": 24}}))
     .await;
     r["job_id"].as_i64().unwrap()
 }

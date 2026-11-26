@@ -1,5 +1,6 @@
 //! #306: an agent that starts an exec job ends its answer with `done` (#795), and the
-//! job's end wakes its owner once with `job_done`. Self-contained like `tests_pause.rs`.
+//! job's end wakes its owner once: the `start` call settles when its job exits, and that
+//! settle is delivered to the starter as its reply. Self-contained like `tests_pause.rs`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -38,15 +39,46 @@ fn served_for(agent: &str) -> Arc<Served> {
     Arc::clone(map.lock().unwrap().entry(agent.to_string()).or_default())
 }
 
-/// Fake exec jobs that may finish, keyed by exec agent id. A job runs until released.
-static RELEASED: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
-
-fn released() -> &'static Mutex<HashMap<String, bool>> {
-    RELEASED.get_or_init(|| Mutex::new(HashMap::new()))
+/// A fake exec job: running until released, then ended. A `start` that found it
+/// running deferred its settle here, and the release settles it (as the exec bridge's
+/// pump settles a `start` or a `run` at its job's exit).
+#[derive(Default)]
+struct FakeJob {
+    released: bool,
+    waiting: Option<(fantastic_kernel::TaskId, Arc<Kernel>)>,
 }
 
+static JOBS: OnceLock<Mutex<HashMap<String, FakeJob>>> = OnceLock::new();
+
+fn jobs() -> &'static Mutex<HashMap<String, FakeJob>> {
+    JOBS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The job's end, as its `start` is answered: its exit code and its last lines.
+fn ended() -> Value {
+    json!({
+        "job_id": 1,
+        "status": "done",
+        "exit_code": 0,
+        "lines": [{"n": 39, "stream": "stdout", "line": "hello from the job"}],
+        "printed": 39
+    })
+}
+
+/// The job of `exec` ends: a `start` waiting for it settles now.
 fn release(exec: &str) {
-    released().lock().unwrap().insert(exec.to_string(), true);
+    let waiting = {
+        let mut g = jobs().lock().unwrap();
+        let j = g.entry(exec.to_string()).or_default();
+        j.released = true;
+        j.waiting.take()
+    };
+    if let Some((pid, kernel)) = waiting {
+        kernel.settle_deferred(
+            pid,
+            fantastic_kernel::Outcome::new(Some(pid), fantastic_kernel::Status::Completed, ended()),
+        );
+    }
 }
 
 struct Mock {
@@ -130,8 +162,8 @@ impl Handler for MockBundle {
     }
 }
 
-/// The fake exec agent. `start` runs job 1; `status` reports it done once released
-/// (and otherwise sleeps briefly, as a live wait would); `tail` returns its output.
+/// The fake exec agent. `start` runs job 1 and settles when it ends (at once when it
+/// was released already); `status` and `tail` are snapshots.
 struct FakeExec;
 
 /// `start` of the fake exec agent: a command to run.
@@ -185,33 +217,25 @@ impl Handler for FakeExec {
         &self,
         agent_id: &AgentId,
         call: Self::Call,
-        _kernel: &Arc<Kernel>,
+        kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         use exec_verbs::Call;
         let id = agent_id.as_str().to_string();
+        let done = jobs().lock().unwrap().get(&id).is_some_and(|j| j.released);
         let reply = match call {
             Call::Reflect(_) => json!({"id": id}),
-            Call::StartJob(_) => json!({"job_id": 1, "status": "running", "pty": false}),
-            Call::JobStatus(_) => {
-                let done = released()
-                    .lock()
-                    .unwrap()
-                    .get(&id)
-                    .copied()
-                    .unwrap_or(false);
-                if done {
-                    json!({"jobs": [{"job_id": 1, "status": "done", "exit_code": 0}]})
-                } else {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    json!({"jobs": [{"job_id": 1, "status": "running"}]})
-                }
+            Call::StartJob(_) if done => ended(),
+            Call::StartJob(_) => {
+                let d = kernel.defer().map_err(|e| format!("defer: {e}"))?;
+                jobs().lock().unwrap().entry(id).or_default().waiting =
+                    Some((d.pid(), Arc::clone(kernel)));
+                Value::Null
             }
-            Call::TailJob(_) => json!({
-                "job_id": 1,
-                "status": "done",
-                "lines": [{"n": 39, "stream": "stdout", "line": "hello from the job"}],
-                "printed": 39
-            }),
+            Call::JobStatus(_) if done => {
+                json!({"jobs": [{"job_id": 1, "status": "done", "exit_code": 0}]})
+            }
+            Call::JobStatus(_) => json!({"jobs": [{"job_id": 1, "status": "running"}]}),
+            Call::TailJob(_) => ended(),
         };
         Ok(Some(reply))
     }
@@ -341,8 +365,8 @@ fn last_request_with(served: &Arc<Served>, needle: &str) -> Option<String> {
         .find(|s| s.contains(needle))
 }
 
-/// The wake a job's end delivers. Its text is `job_done {json}`.
-const WAKE: &str = "job_done {";
+/// The wake a job's end delivers: the reply of the `start` that started it.
+const WAKE: &str = "_exec start";
 
 fn wakes(served: &Arc<Served>) -> usize {
     served
@@ -355,12 +379,11 @@ fn wakes(served: &Arc<Served>) -> usize {
         .unwrap_or(0)
 }
 
-fn owns_job(owner: &str) -> bool {
-    crate::route::running_jobs()
-        .lock()
-        .unwrap()
-        .get(owner)
-        .is_some_and(|v| !v.is_empty())
+/// The agent owes a call whose reply has not come: its job's `start` is open.
+fn owes(owner: &str) -> bool {
+    let state = crate::state::state_for(&AgentId::from(owner));
+    let open = state.life.lock().unwrap().open;
+    open > 0
 }
 
 /// A status event of `phase` whose detail carries `reason`.
@@ -375,10 +398,10 @@ fn ended_done(seen: &[Value]) -> bool {
     seen.iter().any(|e| status_is(e, "done", "ok"))
 }
 
-/// `done` with a job running: the pass ends, the job stays recorded, and nothing wakes
-/// the owner before the job ends.
+/// `done` with a job running: the pass ends, the `start` stays open (owed), and nothing
+/// wakes the owner before the job ends.
 #[tokio::test]
-async fn done_with_a_running_job_ends_and_the_job_stays_recorded() {
+async fn done_with_a_running_job_ends_and_its_start_stays_open() {
     let tmp = TempDir::new().unwrap();
     let (owner, exec) = ("st306_w1_job", "st306_w1_exec");
     let kernel = setup(&tmp, &[owner], exec).await;
@@ -392,13 +415,13 @@ async fn done_with_a_running_job_ends_and_the_job_stays_recorded() {
     )
     .await;
     let waiting = poll_events(&mut rx, &mut seen, |seen| {
-        owns_job(owner) && ended_done(seen)
+        owes(owner) && ended_done(seen)
     })
     .await;
     assert!(
         waiting,
-        "the pass did not end with the job recorded: recorded={} events={seen:?}",
-        owns_job(owner)
+        "the pass did not end with the start open: owed={} events={seen:?}",
+        owes(owner)
     );
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(
@@ -428,18 +451,46 @@ async fn a_finished_job_wakes_its_owner_once() {
         woken.contains("exit_code"),
         "no exit code in the wake: {woken}"
     );
+    assert!(woken.contains("[reply to "), "the job's end is not the start's reply: {woken}");
     assert!(
         woken.contains("hello from the job"),
         "no tail in the wake: {woken}"
     );
     // the job printed 39 lines, of which the tail shows the last
-    assert!(
-        woken.contains(r#"\"lines\":39"#) || woken.contains(r#""lines":39"#),
-        "no line total in the wake: {woken}"
-    );
+    assert!(woken.contains("printed") && woken.contains("39"), "no line total in the wake: {woken}");
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(wakes(&served), 1, "the owner was woken more than once");
-    assert!(!owns_job(owner), "a finished job is still recorded");
+    assert!(!owes(owner), "a finished job's start is still owed");
+}
+
+/// The job ends AFTER the owner's pass ended with `done`: its `start` settles then, and
+/// that settle wakes the idle owner once (#795: no watcher, no poll).
+#[tokio::test]
+async fn a_job_that_ends_later_wakes_its_idle_owner_once() {
+    let tmp = TempDir::new().unwrap();
+    let (owner, exec) = ("st306_w6_job", "st306_w6_exec");
+    let kernel = setup(&tmp, &[owner], exec).await;
+    let served = served_for(owner);
+    let mut rx = kernel.ensure_inbox(&AgentId::from(owner));
+    let mut seen = Vec::new();
+    let _ = send(
+        &kernel,
+        owner,
+        json!({"type": "send", "text": "run the job", "client_id": CLIENT}),
+    )
+    .await;
+    assert!(
+        poll_events(&mut rx, &mut seen, |seen| owes(owner) && ended_done(seen)).await,
+        "the pass did not end with the start open: {seen:?}"
+    );
+    assert_eq!(served.requests.lock().unwrap().len(), 1);
+    release(exec);
+    let woken = await_request(&served, WAKE).await.expect("the job's end never woke its owner");
+    assert!(woken.contains("hello from the job"), "no tail in the wake: {woken}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(wakes(&served), 1, "the owner was woken more than once");
+    assert_eq!(served.requests.lock().unwrap().len(), 2, "one pass per job end");
+    assert!(!owes(owner), "a finished job's start is still owed");
 }
 
 /// `done` with nothing running ends visibly, and nothing wakes the agent again.
@@ -465,7 +516,7 @@ async fn done_with_no_job_ends_visibly_and_nothing_wakes_it() {
         1,
         "a done with nothing running woke the agent again"
     );
-    assert!(!owns_job(idle), "an idle agent has a job recorded");
+    assert!(!owes(idle), "an idle agent owes a call");
 }
 
 #[tokio::test]
@@ -500,11 +551,12 @@ async fn a_job_started_by_another_agent_does_not_wake_this_one() {
         0,
         "a bystander was woken by another agent's job"
     );
-    assert!(!owns_job(other), "a job was recorded for the bystander");
+    assert!(!owes(other), "the bystander owes a call");
 }
 
+/// A deleted owner is not woken by its job's end: the `start` it made settles to no one.
 #[tokio::test]
-async fn a_deleted_owner_stops_recording_its_job() {
+async fn a_deleted_owner_is_not_woken_by_its_jobs_end() {
     let tmp = TempDir::new().unwrap();
     let (owner, exec) = ("st306_w5_job", "st306_w5_exec");
     let kernel = setup(&tmp, &[owner], exec).await;
@@ -517,10 +569,11 @@ async fn a_deleted_owner_stops_recording_its_job() {
     )
     .await;
     let waiting = poll_events(&mut rx, &mut seen, |seen| {
-        owns_job(owner) && ended_done(seen)
+        owes(owner) && ended_done(seen)
     })
     .await;
-    assert!(waiting, "the job was never recorded: {seen:?}");
+    assert!(waiting, "the start was never open: {seen:?}");
+    let served = served_for(owner);
     let _ = send(
         &kernel,
         "kernel_state",
@@ -529,8 +582,6 @@ async fn a_deleted_owner_stops_recording_its_job() {
     .await;
     release(exec);
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(
-        !owns_job(owner),
-        "a deleted owner still has its job recorded"
-    );
+    assert_eq!(wakes(&served), 0, "a deleted owner was woken by its job's end");
+    assert_eq!(served.requests.lock().unwrap().len(), 1, "a deleted owner ran a pass");
 }

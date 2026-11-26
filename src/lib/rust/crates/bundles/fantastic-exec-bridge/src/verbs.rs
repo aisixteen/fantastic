@@ -104,8 +104,11 @@ impl Mime {
     }
 }
 
+/// The lines a `run`'s reply carries by default, and every `start`'s reply.
+pub(crate) const RUN_TAIL: u64 = 200;
+
 fn two_hundred() -> u64 {
-    200
+    RUN_TAIL
 }
 fn twenty() -> u64 {
     20
@@ -125,7 +128,7 @@ fn both() -> Stream {
 #[serde(deny_unknown_fields)]
 pub struct Shutdown {}
 
-/// Spawn a command in the BACKGROUND and return at once with {job_id, status, pty}. The FULL line (command + args) must fullmatch one of the record's `allowed` regexes, or be the shell line the record's `shell` permits. Where it runs and with what environment are the record's, never the call's.
+/// Spawn a command in the BACKGROUND; its reply comes when it EXITS, as run's: {job_id, status, exit_code, lines}, the last 200 lines. While it runs, status lists it (its job_id for write, stop, tail). The call's own deadline bounds it. The FULL line (command + args) must fullmatch one of the record's `allowed` regexes, or be the shell line the record's `shell` permits. Where it runs and with what environment are the record's, never the call's.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Start {
@@ -153,7 +156,7 @@ impl JsonSchema for Start {
         props.insert("args".into(), serde_json::json!({
             "type": "array", "items": {"type": "string"}, "description": "Its arguments, one item each.",
         }));
-        command_or_pty(gen, "Spawn a command in the BACKGROUND and return at once with {job_id, status, pty}. The FULL line (command + args) must fullmatch one of the record's `allowed` regexes, or be the shell line the record's `shell` permits. Where it runs and with what environment are the record's, never the call's.", props)
+        command_or_pty(gen, "Spawn a command in the BACKGROUND; its reply comes when it EXITS, as run's: {job_id, status, exit_code, lines}, the last 200 lines. While it runs, status lists it (its job_id for write, stop, tail). The call's own deadline bounds it. The FULL line (command + args) must fullmatch one of the record's `allowed` regexes, or be the shell line the record's `shell` permits. Where it runs and with what environment are the record's, never the call's.", props)
     }
 }
 
@@ -201,9 +204,6 @@ impl JsonSchema for Run {
 pub struct Status {
     /// The job; absent, every job of this agent.
     pub job_id: Option<i64>,
-    /// With `job_id`: return as soon as the job is no longer running, or when this many seconds end; use it instead of polling.
-    #[schemars(range(min = 0, max = 120))]
-    pub wait_s: Option<f64>,
 }
 
 /// SIGKILL one job (its whole session: the command and everything it launched) or ALL running jobs on this agent. Returns {killed}.
