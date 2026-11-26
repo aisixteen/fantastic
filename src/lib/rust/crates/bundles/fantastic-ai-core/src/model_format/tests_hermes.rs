@@ -869,7 +869,8 @@ const SEND_JSON: &str = r#"{"name": "send", "arguments": {"routing": {"target_id
 #[test]
 fn bad_block_prose() {
     let r = bad_of(&format!("{CALL_OPEN}\n{SEND_JSON}\nand then\n{CALL_CLOSE}"));
-    assert_eq!(r, REPORT_BLOCK);
+    // prose after the JSON is quoted back, so the model sees exactly what to take out
+    assert_eq!(r, fill(super::hermes::REPORT_TRAILING, &[("after", "and then")]));
 }
 
 // S24
@@ -1265,7 +1266,7 @@ fn repair_adds_missing_brace() {
         read_same(&reply),
         vec![
             Out::Text("\n\n".into()),
-            Out::Repaired { added: "}".into() },
+            Out::Repaired { added: "}".into(), removed: String::new() },
             Out::Call { text: want.clone() },
             Out::Text("\n".into()),
         ]
@@ -1290,7 +1291,7 @@ fn repair_adds_the_brace_before_a_bytes_block() {
         assert_eq!(
             read_same(&h_call(json)),
             vec![
-                Out::Repaired { added: "}".into() },
+                Out::Repaired { added: "}".into(), removed: String::new() },
                 Out::Call { text: want }
             ],
             "{json}"
@@ -1301,7 +1302,7 @@ fn repair_adds_the_brace_before_a_bytes_block() {
         assert_eq!(
             read_same(&h_call(&format!("{json}\n<bytes>{body}</bytes>"))),
             vec![
-                Out::Repaired { added: "}".into() },
+                Out::Repaired { added: "}".into(), removed: String::new() },
                 Out::Call { text: want.clone() }
             ],
             "{json}"
@@ -1335,7 +1336,8 @@ fn repair_adds_several_closers() {
         read_same(&h_call(json)),
         vec![
             Out::Repaired {
-                added: "]}}}".into()
+                added: "]}}}".into(),
+                removed: String::new(),
             },
             Out::Call { text: want },
         ]
@@ -1482,4 +1484,41 @@ fn the_first_reply_block_of_a_message_is_wrapped() {
         "[reply to 5 · notes read]\n<tool_response>\nbody one\n</tool_response>\n\n\
          [reply to 6 · notes list]\n<tool_response>\nbody two\n</tool_response>"
     );
+}
+
+
+// The E37 case: the JSON is whole and ONE surplus `}` follows it. The surplus is cut and
+// the call reads as the JSON without it, after an `Out::Repaired` naming the cut brace.
+#[test]
+fn a_surplus_closer_after_a_whole_call_is_cut() {
+    let whole = r#"{"name": "send", "arguments": {"routing": {"target_id": "kernel"}, "payload": {"type": "reflect", "can": {"creds": {"call": ["get"]}}}}}"#;
+    assert!(serde_json::from_str::<Value>(whole).is_ok());
+    let want = call_of(&h_call(whole));
+    let reply = format!("{CALL_OPEN}\n{whole}}}\n{CALL_CLOSE}");
+    assert_eq!(
+        read_same(&reply),
+        vec![
+            Out::Repaired { added: String::new(), removed: "}".into() },
+            Out::Call { text: want },
+        ]
+    );
+    // two surplus closers, mixed, with whitespace between: both cut, in order
+    let reply = format!("{CALL_OPEN}\n{whole} }} ]\n{CALL_CLOSE}");
+    assert!(matches!(
+        read_same(&reply).first(),
+        Some(Out::Repaired { removed, .. }) if removed == "}]"
+    ));
+}
+
+// Anything but closers after a whole call is never dropped: it stays a report.
+#[test]
+fn other_text_after_a_whole_call_is_still_reported() {
+    let whole = r#"{"name": "send", "arguments": {"routing": {"target_id": "kernel"}, "payload": {"type": "reflect"}}}"#;
+    for tail in ["} x", "}, {}", "oops"] {
+        let reply = format!("{CALL_OPEN}\n{whole}{tail}\n{CALL_CLOSE}");
+        assert!(
+            read_same(&reply).iter().any(|o| matches!(o, Out::Bad { .. })),
+            "{tail:?} was accepted"
+        );
+    }
 }

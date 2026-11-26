@@ -71,11 +71,14 @@ pub(crate) enum Out {
         /// Its target, when it was written whole.
         target: Option<String>,
     },
-    /// The call that follows was read after a repair that added closing brackets and
-    /// braces to its JSON, nothing else (`hermes`): the turn's `repaired` trace event.
+    /// The call that follows was read after a repair of the closing brackets and braces
+    /// at the end of its JSON, nothing else (`hermes`): the turn's `repaired` trace event.
     Repaired {
-        /// The closers added, in order.
+        /// The closers added, in order (empty when none were).
         added: String,
+        /// The surplus closers cut after the complete call, in order (empty when none
+        /// were).
+        removed: String,
     },
 }
 
