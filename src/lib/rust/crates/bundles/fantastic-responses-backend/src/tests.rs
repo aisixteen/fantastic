@@ -577,9 +577,9 @@ async fn send_streams_tokens_raw_on_both_channels() {
         tokens, "<think>pondering</think>hello",
         "streamed raw, both channels"
     );
-    // python `_send` returns the RAW text (`response: last_text`); only the stored
-    // assistant row is stripped — ai-core's business, not this provider's.
-    assert_eq!(r["response"], "<think>pondering</think>hello", "{r}");
+    // the reply is the answer: thinking never leaves the agent (ai-core's
+    // business, not this provider's)
+    assert_eq!(r["response"], "hello", "{r}");
 }
 
 /// `endpoint` is REQUIRED on the record — refused AT THE WRITE (the kind's

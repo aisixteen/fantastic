@@ -1760,6 +1760,14 @@ async fn route_reply_gated(
                         .map(|t| t.0.to_string())
                         .unwrap_or_else(|| "-".to_string());
                     let mut shown = reply_as_text(out);
+                    // ANOTHER AGENT'S THINKING NEVER LANDS HERE: a peer's rows
+                    // (`recall`, `rows`) are read without it. This agent's own
+                    // read of its own rows keeps it.
+                    if u.target != self_id.as_str() {
+                        if let Some(clean) = crate::think::without_thinking_fields(&shown) {
+                            shown = std::borrow::Cow::Owned(clean);
+                        }
+                    }
                     if u.verb == "reflect" {
                         if let Some(trimmed) = hide_view_body(&shown) {
                             shown = std::borrow::Cow::Owned(trimmed);

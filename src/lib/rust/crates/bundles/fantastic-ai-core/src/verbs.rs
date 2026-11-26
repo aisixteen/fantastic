@@ -1378,9 +1378,10 @@ pub async fn send(
         Ok(Ok(Generation::Dead { text: final_text })) => {
             dead_turn = true;
             // python `_run`'s dead-turn reply: no `message_id` — nothing was
-            // stored, so there is no row to name.
+            // stored, so there is no row to name. THE ANSWER ONLY (see below):
+            // a dead turn's answer is empty.
             json!({
-                "response": final_text,
+                "response": crate::think::without_thinking(&final_text),
                 "client_id": client_id,
                 "dead_turn": true,
             })
@@ -1397,8 +1398,12 @@ pub async fn send(
             // Rust computed it (routing needs it to parent the next turn) and
             // then dropped it on the floor, so a caller could not name the row
             // its own send produced.
+            // THE ANSWER, NEVER THE THINKING: this reply is what leaves the
+            // agent — the caller's reply (a peer's batch row, an awaited reply),
+            // every held sender's, and the text routing hands a `send_to`. The
+            // thinking stays on the stored row, for this agent's own `recall`.
             let reply = json!({
-                "response": final_text,
+                "response": crate::think::without_thinking(&final_text),
                 "client_id": client_id,
                 "message_id": tid,
             });
