@@ -149,46 +149,30 @@ pub(crate) fn note_model_stop(pass: &Pass, answer: &str) {
         .push(Mode::Turn.name(), pass.kind, "stop", fields);
 }
 
-/// THE TURN'S TRACE ROWS, written: `events` with the send's `client_id` and, when the
-/// turn stored one, its assistant row's id as `row`, in one `append` under the chat's
-/// key; then the oldest beyond the cap pruned by id. Called after the turn's rows are
-/// stored. A refusal anywhere ends the write and never reaches the turn.
-pub(crate) async fn write(
+/// THE TURN'S TRACE ROWS, written as STEPS (#795): `events` with the send's `client_id`
+/// and, when the turn stored one, its assistant row's id as `row`, in one `append` under
+/// the chat's key; then the oldest beyond the cap pruned by id. Each store call is one
+/// step; `next` runs when the write ended. A refusal anywhere ends the write and never
+/// reaches the turn.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn write<R, F, Fut>(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
-    state: &BackendState,
+    state: &Arc<BackendState>,
     client_id: &str,
     row: Option<i64>,
     events: Vec<Value>,
-) {
-    write_capped(
-        self_id,
-        kernel,
-        state,
-        client_id,
-        row,
-        events,
-        cap_of(self_id),
-    )
-    .await;
-}
-
-/// [`write`] under the cap `cap`: 0 writes nothing.
-pub(crate) async fn write_capped(
-    self_id: &AgentId,
-    kernel: &Arc<Kernel>,
-    state: &BackendState,
-    client_id: &str,
-    row: Option<i64>,
-    events: Vec<Value>,
-    cap: usize,
-) {
+    rec: R,
+    next: F,
+) where
+    R: Send + 'static,
+    F: FnOnce(R) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let cap = cap_of(self_id);
     if events.is_empty() || cap == 0 {
-        return;
+        return next(rec).await;
     }
-    let Some(count) = count_of(self_id, kernel, state).await else {
-        return;
-    };
     let rows: Vec<Value> = events
         .into_iter()
         .map(|mut e| {
@@ -203,65 +187,119 @@ pub(crate) async fn write_capped(
             e
         })
         .collect();
-    let n = rows.len();
-    if store_call(self_id, kernel, json!({"type": "append", "rows": rows}))
-        .await
-        .is_err()
-    {
-        return;
-    }
-    let mut count = count + n;
-    if count > cap {
-        count = count.saturating_sub(prune_oldest(self_id, kernel, count - cap).await);
-    }
-    *state.trace_count.lock().expect("trace_count poisoned") = Some(count);
-}
-
-/// The chat's trace rows in its store: the RAM count, else read once.
-async fn count_of(self_id: &AgentId, kernel: &Arc<Kernel>, state: &BackendState) -> Option<usize> {
-    let ram = *state.trace_count.lock().expect("trace_count poisoned");
-    if ram.is_some() {
-        return ram;
-    }
-    let res = store_call(
-        self_id,
-        kernel,
-        json!({"type": "read", "kinds": [KIND], "limit": 1}),
-    )
-    .await
-    .ok()?;
-    let n = res
-        .get("total")
-        .and_then(Value::as_u64)
-        .and_then(|n| usize::try_from(n).ok())?;
-    *state.trace_count.lock().expect("trace_count poisoned") = Some(n);
-    Some(n)
-}
-
-/// The `over` oldest trace rows read and pruned by their ids: how many went.
-async fn prune_oldest(self_id: &AgentId, kernel: &Arc<Kernel>, over: usize) -> usize {
-    let Ok(res) = store_call(
-        self_id,
-        kernel,
-        json!({"type": "read", "kinds": [KIND], "order": "asc", "limit": over}),
-    )
-    .await
-    else {
-        return 0;
+    let w = Writing {
+        me: self_id.clone(),
+        kernel: Arc::clone(kernel),
+        state: Arc::clone(state),
+        cap,
+        next: Box::new(move || Box::pin(next(rec))),
     };
-    let ids: Vec<i64> = rows_of(&res, self_id)
-        .iter()
-        .filter_map(|r| r.get("id").and_then(Value::as_i64))
-        .collect();
-    if ids.is_empty() {
-        return 0;
+    // THE COUNT: the RAM one, else read once (a step)
+    let ram = *state.trace_count.lock().expect("trace_count poisoned");
+    match ram {
+        Some(count) => w.append(count, rows).await,
+        None => {
+            let ask = json!({"type": "read", "kinds": [KIND], "limit": 1});
+            crate::steps::store(self_id, kernel, ask, None, (w, rows), |(w, rows), r| async move {
+                let n = r
+                    .ok()
+                    .and_then(|(res, _)| res.get("total").and_then(Value::as_u64))
+                    .and_then(|n| usize::try_from(n).ok());
+                match n {
+                    Some(n) => {
+                        *w.state.trace_count.lock().expect("trace_count poisoned") = Some(n);
+                        w.append(n, rows).await;
+                    }
+                    None => w.end().await,
+                }
+            })
+            .await;
+        }
     }
-    store_call(self_id, kernel, json!({"type": "prune", "ids": ids}))
-        .await
-        .ok()
-        .and_then(|res| res.get("pruned").and_then(Value::as_u64))
-        .and_then(|n| usize::try_from(n).ok())
-        .unwrap_or(0)
+}
+
+/// A trace write in flight.
+struct Writing {
+    me: AgentId,
+    kernel: Arc<Kernel>,
+    state: Arc<BackendState>,
+    cap: usize,
+    next: Box<dyn FnOnce() -> futures_util::future::BoxFuture<'static, ()> + Send>,
+}
+
+impl Writing {
+    async fn end(self) {
+        (self.next)().await;
+    }
+
+    /// The rows appended (a step), then the oldest beyond the cap pruned.
+    async fn append(self, count: usize, rows: Vec<Value>) {
+        let n = rows.len();
+        let (me, k) = (self.me.clone(), Arc::clone(&self.kernel));
+        crate::steps::store(&me, &k, json!({"type": "append", "rows": rows}), None, self, move |w, r| async move {
+            if r.is_err() {
+                return w.end().await;
+            }
+            let count = count + n;
+            if count <= w.cap {
+                *w.state.trace_count.lock().expect("trace_count poisoned") = Some(count);
+                return w.end().await;
+            }
+            w.prune(count).await;
+        })
+        .await;
+    }
+
+    /// The `count - cap` oldest trace rows read and pruned by their ids (two steps).
+    async fn prune(self, count: usize) {
+        let over = count - self.cap;
+        let (me, k) = (self.me.clone(), Arc::clone(&self.kernel));
+        let ask = json!({"type": "read", "kinds": [KIND], "order": "asc", "limit": over});
+        crate::steps::store(&me, &k, ask, None, self, move |w, r| async move {
+            let ids: Vec<i64> = r
+                .map(|(res, _)| {
+                    rows_of(&res, &w.me)
+                        .iter()
+                        .filter_map(|r| r.get("id").and_then(Value::as_i64))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if ids.is_empty() {
+                *w.state.trace_count.lock().expect("trace_count poisoned") = Some(count);
+                return w.end().await;
+            }
+            let (me, k) = (w.me.clone(), Arc::clone(&w.kernel));
+            crate::steps::store(&me, &k, json!({"type": "prune", "ids": ids}), None, w, move |w, r| async move {
+                let pruned = r
+                    .ok()
+                    .and_then(|(res, _)| res.get("pruned").and_then(Value::as_u64))
+                    .and_then(|n| usize::try_from(n).ok())
+                    .unwrap_or(0);
+                *w.state.trace_count.lock().expect("trace_count poisoned") = Some(count.saturating_sub(pruned));
+                w.end().await;
+            })
+            .await;
+        })
+        .await;
+    }
+}
+
+/// TESTS: [`write`] driven to its end.
+#[cfg(test)]
+pub(crate) async fn written(
+    self_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    state: &Arc<BackendState>,
+    client_id: &str,
+    row: Option<i64>,
+    events: Vec<Value>,
+) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    write(self_id, kernel, state, client_id, row, events, (), move |()| async move {
+        let _ = tx.send(());
+    })
+    .await;
+    let _ = rx.await;
 }
 
 /// The cap of `self_id`'s traces: [`TRACE_CAP`], or a test's own.

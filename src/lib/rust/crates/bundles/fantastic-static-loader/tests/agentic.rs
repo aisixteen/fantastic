@@ -669,11 +669,16 @@ async fn run_steps(h: &Hydration, sc: &Scenario, pinned: &mut BTreeMap<String, u
                 a["to"].as_str().unwrap().to_string(),
             );
             let send = a["send"].clone();
+            // `reach: true`: sent AS `from`, gated by its lines (as a `reach` step is)
+            let gated = a.get("reach").and_then(Value::as_bool) == Some(true);
             let handle = tokio::spawn(async move {
                 as_agent(AgentId::from(from.as_str()), async move {
-                    let out = k.operator_send(vec![Item::new(AgentId::from(to.as_str()), send)])
-                        .await
-                        .remove(0);
+                    let item = vec![Item::new(AgentId::from(to.as_str()), send)];
+                    let out = if gated {
+                        k.send(item).await.remove(0)
+                    } else {
+                        k.operator_send(item).await.remove(0)
+                    };
                     json!({"pid": out.pid.map(|p| p.0), "status": format!("{:?}", out.status).to_lowercase(), "result": out.result})
                 })
                 .await
@@ -684,15 +689,20 @@ async fn run_steps(h: &Hydration, sc: &Scenario, pinned: &mut BTreeMap<String, u
             // Block until the started send is visible in `ps`. A fixed sleep is
             // a race that passes on a fast machine and fails on a loaded one.
             let want_agent = a.get("agent").and_then(Value::as_str).unwrap_or("");
+            // `spawned: true`: a task the agent's dispatch spawned (its row names a
+            // parent) — an exec job's pump, not the `start` call that runs it
+            let spawned = a.get("spawned").and_then(Value::as_bool) == Some(true);
+            let want_verb = a.get("verb").and_then(Value::as_str);
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             let mut found: Option<Value> = None;
             while std::time::Instant::now() < deadline {
                 let rows = operator(&h.kernel, "kernel", json!({"type": "ps"})).await;
                 if let Some(list) = rows.get("tasks").and_then(Value::as_array) {
-                    if let Some(row) = list
-                        .iter()
-                        .find(|t| t.get("agent").and_then(Value::as_str) == Some(want_agent))
-                    {
+                    if let Some(row) = list.iter().find(|t| {
+                        t.get("agent").and_then(Value::as_str) == Some(want_agent)
+                            && (!spawned || t.get("parent").is_some_and(|p| !p.is_null()))
+                            && want_verb.is_none_or(|v| t.get("verb").and_then(Value::as_str) == Some(v))
+                    }) {
                         found = Some(row.clone());
                         break;
                     }

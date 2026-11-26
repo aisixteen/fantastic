@@ -100,8 +100,7 @@ def main() -> int:
         """Poll (bounded) until neither agent has a task in flight (`ps`)."""
         end = time.monotonic() + bound
         while time.monotonic() < end:
-            tasks = hk.send("kernel", {"type": "ps"}).get("tasks") or []
-            if not any(t.get("agent") in (AI, BOSS) for t in tasks):
+            if hk.quiet(AI, BOSS):
                 return True
             time.sleep(0.05)
         return False

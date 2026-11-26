@@ -96,6 +96,7 @@ pub mod helpers;
 pub mod history_view;
 mod images;
 mod life;
+mod steps;
 pub mod line_summary;
 pub mod memory;
 mod model_format;
@@ -139,3 +140,5 @@ mod tests_model_window;
 mod tests_pause;
 #[cfg(test)]
 mod tests_st306;
+#[cfg(test)]
+mod tests_steps;

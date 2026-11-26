@@ -9,8 +9,8 @@
 // (This replaces the old `_bridge.js`, which bypassed the JS kernel by dialing the
 // host directly — never again.)
 //
-//   const { job_id } = await fantastic.send("exec_bridge_x", { type:"start", command:"python3", args:["-c","print(1+1)"] });
-//   fantastic.watch("exec_bridge_x", (ev) => { if (ev.job_id===job_id) render(ev); }); // live progress
+//   fantastic.watch("exec_bridge_x", (ev) => render(ev));                 // live progress (job_started, progress, job_done)
+//   const end = await fantastic.send("exec_bridge_x", { type:"start", command:"python3", args:["-c","print(1+1)"] }); // answered when it EXITS
 //   fantastic.emit("panel2", { type:"value", value });                     // → another agent
 //   const off = fantastic.watch("exec_bridge_x", (ev) => …);            // ← agent events
 //   fantastic.onMessage((p) => …);                                         // ← messages sent to ME

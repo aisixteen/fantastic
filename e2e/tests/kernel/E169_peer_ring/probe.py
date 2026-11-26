@@ -138,8 +138,7 @@ def main() -> int:
         return False
 
     def quiet() -> bool:
-        tasks = hk.send("kernel", {"type": "ps"}).get("tasks") or []
-        return not [t for t in tasks if t.get("agent") in PEERS]
+        return hk.quiet(*PEERS)
 
     def passes(p: str) -> list[dict]:
         return [t for t in mocks[p].turns() if not is_recall(t["body"])]

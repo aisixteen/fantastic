@@ -86,11 +86,10 @@ def main() -> int:
             bad.append(what)
 
     def idle(bound: float = 60) -> bool:
-        """Poll (bounded) until the agent has no task in flight (`ps`)."""
+        """Poll (bounded) until the agent is quiet (`HostKernel.quiet`)."""
         end = time.monotonic() + bound
         while time.monotonic() < end:
-            tasks = hk.send("kernel", {"type": "ps"}).get("tasks") or []
-            if not any(t.get("agent") == AI for t in tasks):
+            if hk.quiet(AI):
                 return True
             time.sleep(0.05)
         return False

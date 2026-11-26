@@ -461,17 +461,32 @@ export const terminalView: ViewBundle = {
     };
     // START the cell's program (its first placement, or the human's ▶): once
     // started, the cell records it — later it waits for ▶ instead
+    // `start` SETTLES WHEN ITS JOB EXITS (#795): the job is named by its `job_started`
+    // announcement, and a start that settles before one came was refused
     const startJob = async (): Promise<boolean> => {
-      const r = (await host.call(backend, {
-        type: "start",
-        ...(argv.length ? { command: argv[0]!, args: argv.slice(1) } : {}),
-        pty: { cols: term.cols, rows: term.rows },
-      })) as { job_id?: number; error?: string; reason?: string };
-      if (typeof r?.job_id !== "number") {
+      let offStarted: () => void = () => {};
+      const named = new Promise<{ job_id: number }>((res) => {
+        offStarted = host.on(backend, "job_started", (e) => {
+          if (typeof e["job_id"] === "number") res({ job_id: e["job_id"] });
+        });
+      });
+      const settled = host
+        .call(backend, {
+          type: "start",
+          ...(argv.length ? { command: argv[0]!, args: argv.slice(1) } : {}),
+          pty: { cols: term.cols, rows: term.rows },
+        })
+        .then((r) => ({ settled: r as { job_id?: number; error?: string; reason?: string } }));
+      const first = await Promise.race([named, settled]);
+      offStarted();
+      // a settle that names a job: it ran, and ended before its announcement was read
+      const ran = "job_id" in first ? first.job_id : first.settled?.job_id;
+      if (typeof ran !== "number") {
+        const r = "settled" in first ? first.settled : undefined;
         term.write(`\r\n[${argv.length ? argv.join(" ") : "the login shell"} did not start: ${r?.error ?? JSON.stringify(r)}]\r\n`);
         return false;
       }
-      jobId = r.job_id;
+      jobId = ran;
       if (!started) {
         started = true;
         kernel.updateMeta(selfId, { started: true } as never);
@@ -482,7 +497,7 @@ export const terminalView: ViewBundle = {
       if (jobId !== undefined) return;
       term.reset();
       const ok = await startJob();
-      // what the program wrote before the start's reply named its job (a
+      // what the program wrote before its announcement named its job (a
       // shell's first prompt, on a slow host) was held: it is drawn now
       drainEarly(0);
       if (!ok) return;

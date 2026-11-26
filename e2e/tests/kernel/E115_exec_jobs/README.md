@@ -8,6 +8,8 @@ What it proves (details in `probe.py`'s docstring):
 - an allow-listed line runs as a job; an unmatched line is refused `unauthorized` and
   starts nothing; a record (seeded on disk) whose only pattern is a broken regex
   permits nothing; `update_agent` refuses a broken regex and leaves the list as it was;
+- `start` settles when its job EXITS (#795): its reply is the job's end, and a
+  `job_started` event names the job while it runs;
 - `job_done` is exactly `{type, job_id, exit_code, ok, lines, last_line}` — no
   stdout/stderr — for a clean and a failing exit; a PTY job's is `{type, job_id, exit_code, ok}`;
 - `tail`/`grep` over a job that printed 20000 lines (~660 KB): the ring keeps the newest

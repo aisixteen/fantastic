@@ -102,8 +102,7 @@ def main() -> int:
         """Poll (bounded) until no chat of the twin has a task in flight (`ps`)."""
         end = time.monotonic() + bound
         while time.monotonic() < end:
-            tasks = hk.send("kernel", {"type": "ps"}).get("tasks") or []
-            if not any(t.get("agent") in (AI, SUB_AI) for t in tasks):
+            if hk.quiet(AI, SUB_AI):
                 return True
             time.sleep(0.05)
         return False

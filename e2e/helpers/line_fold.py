@@ -163,8 +163,7 @@ class Rig:
     def idle(self, bound: float = 60) -> bool:
         end = time.monotonic() + bound
         while time.monotonic() < end:
-            tasks = self.hk.send("kernel", {"type": "ps"}).get("tasks") or []
-            if not any(t.get("agent") == AI for t in tasks):
+            if self.hk.quiet(AI):
                 return True
             time.sleep(0.05)
         return False

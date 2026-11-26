@@ -91,21 +91,32 @@ pub(crate) async fn deliver(
     let late = crate::state::incarnation(&target_agent) != born.0;
     if dest == self_id.as_str() {
         if late || born.1 != crate::life::stops(self_id) {
-            if let Err(e) = crate::verbs::save_late(self_id, kernel, text).await {
-                eprintln!("  [ai] {self_id}: a late reply could not be kept: {e}");
-            }
+            let me = self_id.clone();
+            // owed while its row is out
+            crate::life::owe(self_id, 1);
+            crate::verbs::save_late(self_id, kernel, text, (), move |(), r| async move {
+                if let Err(e) = r {
+                    eprintln!("  [ai] {me}: a late reply could not be kept: {e}");
+                }
+                crate::life::owe(&me, -1);
+            })
+            .await;
             return;
         }
         let m = crate::life::Incoming {
-            text,
-            client_id,
-            origin: self_id.as_str(),
+            text: text.to_string(),
+            client_id: client_id.to_string(),
+            origin: self_id.as_str().to_string(),
             notice,
             attached: None,
         };
-        if let Err(e) = crate::life::arrive(kernel, self_id, &m, wakes).await {
-            eprintln!("  [ai] {self_id}: a reply could not be stored: {}", e.0);
-        }
+        let me = self_id.clone();
+        crate::life::arrive(kernel, self_id, m, wakes, (), move |(), r| async move {
+            if let Err(e) = r {
+                eprintln!("  [ai] {me}: a reply could not be stored: {}", e.0);
+            }
+        })
+        .await;
         return;
     }
     let mut payload = Map::new();
@@ -405,146 +416,6 @@ pub(crate) fn inquiry_askers(receiver: &str) -> Vec<String> {
     askers
 }
 
-/// The jobs an agent has started and not yet heard end, by owner.
-type RunningJobs = HashMap<String, Vec<(Value, String)>>;
-
-/// Exec jobs an agent started and has not yet heard end, by owner: `(raw job_id, exec
-/// agent)`. An owner with any is awaiting its own work (#306); each one ends in ONE
-/// `job_done` wake, after which it is dropped from here.
-pub(crate) fn running_jobs() -> &'static Mutex<RunningJobs> {
-    static JOBS: OnceLock<Mutex<RunningJobs>> = OnceLock::new();
-    JOBS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Drops one job from [`running_jobs`] when it goes out of scope, so a watcher that is
-/// cancelled (its agent stopped or deleted) stops counting the job as pending.
-struct RunningJob {
-    owner: String,
-    job: Value,
-    exec: String,
-}
-
-impl Drop for RunningJob {
-    fn drop(&mut self) {
-        if let Ok(mut jobs) = running_jobs().lock() {
-            let empty = match jobs.get_mut(&self.owner) {
-                Some(list) => {
-                    list.retain(|(j, e)| !(j == &self.job && e == &self.exec));
-                    list.is_empty()
-                }
-                None => false,
-            };
-            if empty {
-                jobs.remove(&self.owner);
-            }
-        }
-    }
-}
-
-/// A field of the job a `status` or `tail` reply is about: the first of `jobs`, or the
-/// reply itself when the exec agent answers flat.
-fn job_field<'a>(result: &'a Value, key: &str) -> Option<&'a Value> {
-    result
-        .get("jobs")
-        .and_then(Value::as_array)
-        .and_then(|a| a.first())
-        .and_then(|j| j.get(key))
-        .or_else(|| result.get(key))
-}
-
-/// Record a job an agent's `exec start` left running, and spawn ONE watcher task for it
-/// on the owner. The watcher waits on the exec agent's `status` until the job is no
-/// longer live (`running` or `stopping`), forgets the job, then wakes the owner once with
-/// `job_done {job_id, exit_code, lines, tail}`: `tail` is the job's last 20 lines and
-/// `lines` the count of every line it printed (the exec bridge's `printed`), so a tail
-/// shorter than `lines` says the output was cut. The exit key is `exit_code`, as the
-/// exec bridge names it, not `exit`.
-pub(crate) fn watch_job(
-    kernel: &Arc<Kernel>,
-    owner: &str,
-    exec: &str,
-    job_id: &Value,
-    client_id: &str,
-) {
-    running_jobs()
-        .lock()
-        .expect("jobs poisoned")
-        .entry(owner.to_string())
-        .or_default()
-        .push((job_id.clone(), exec.to_string()));
-    let work = Arc::clone(kernel);
-    let born = Born::of(owner);
-    let (owner_s, exec_s, job, cid) = (
-        owner.to_string(),
-        exec.to_string(),
-        job_id.clone(),
-        client_id.to_string(),
-    );
-    let owing = crate::life::Owing::new(&AgentId::from(owner));
-    kernel.spawn_task(&AgentId::from(owner), "job_watch", async move {
-        let _owing = owing;
-        let entry = RunningJob {
-            owner: owner_s.clone(),
-            job: job.clone(),
-            exec: exec_s.clone(),
-        };
-        let execution_id = AgentId::from(exec_s.as_str());
-        let mut last;
-        loop {
-            let out = work
-                .send(vec![Item::new(
-                    execution_id.clone(),
-                    json!({"type": "status", "job_id": job.clone(), "wait_s": 100}),
-                )])
-                .await;
-            last = out.first().map_or(Value::Null, |o| o.result.clone());
-            let state = job_field(&last, "status")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            // An error or unknown-job reply has no status, so it ends the wait too.
-            if state != "running" && state != "stopping" {
-                break;
-            }
-        }
-        let t = work
-            .send(vec![Item::new(
-                execution_id,
-                json!({"type": "tail", "job_id": job.clone(), "lines": 20}),
-            )])
-            .await;
-        // every line the job printed, of which `tail` shows the last 20
-        let lines = t
-            .first()
-            .and_then(|o| o.result.get("printed"))
-            .cloned()
-            .unwrap_or(Value::Null);
-        let tail = t
-            .first()
-            .and_then(|o| o.result.get("lines"))
-            .and_then(Value::as_array)
-            .map(|ls| {
-                let skip = ls.len().saturating_sub(20);
-                ls[skip..]
-                    .iter()
-                    .filter_map(|l| l.get("line").and_then(Value::as_str))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            .unwrap_or_default();
-        let exit = job_field(&last, "exit_code")
-            .cloned()
-            .unwrap_or(Value::Null);
-        // Forget the job BEFORE the wake, so the woken pass no longer counts it.
-        drop(entry);
-        let text = format!(
-            "job_done {}",
-            json!({"job_id": job, "exit_code": exit, "lines": lines, "tail": tail})
-        );
-        let owner = AgentId::from(owner_s.as_str());
-        deliver(&work, &owner, &owner_s, &text, &cid, born, false, true).await;
-    });
-}
-
 /// Close the inquiry this chain `(self_id, client_id)` is answering: hand `body`
 /// (`{answer}` or `{error}`) to its asker as `[reply to <pid> · <self_id> inquiry]`.
 /// The answer is THIS agent's own send to the asker, gated like
@@ -709,13 +580,8 @@ async fn keep_note(
         .err()
 }
 
-/// Drop a deleted agent's jobs and open inquiries
-/// ([`crate::verbs::on_delete`]).
+/// Drop a deleted agent's open inquiries ([`crate::verbs::on_delete`]).
 pub(crate) fn forget(self_id: &str) {
-    running_jobs()
-        .lock()
-        .expect("jobs poisoned")
-        .remove(self_id);
     open_inquiries()
         .lock()
         .expect("open inquiries poisoned")
@@ -1280,19 +1146,11 @@ struct Reply {
 }
 
 impl Reply {
-    /// THE CALL SETTLED: an exec job it started is watched (#306), and the reply is
-    /// rendered and delivered to its `reply_to` as one message. An ack of a message to an
+    /// THE CALL SETTLED: the reply is rendered and delivered to its `reply_to` as one
+    /// message — an exec `start`'s when its job exited (#795). An ack of a message to an
     /// AI is stored without a wake (Q2). The call is no longer owed.
     async fn take(&self, kernel: &Arc<Kernel>, out: fantastic_kernel::Outcome) {
         let me = &self.batch.self_id;
-        let (exec, sent) = &self.sent;
-        let started = sent.get("type").and_then(Value::as_str) == Some("start")
-            && out.result.get("status").and_then(Value::as_str) == Some("running");
-        if let Some(job) = out.result.get("job_id").filter(|v| !v.is_null()) {
-            if started {
-                watch_job(kernel, me.as_str(), exec, job, &self.batch.client_id);
-            }
-        }
         if let Some(o) = &self.owed {
             let body = self.render(kernel, &out, o);
             let pid = out.pid.map_or_else(|| "-".to_string(), |t| t.0.to_string());

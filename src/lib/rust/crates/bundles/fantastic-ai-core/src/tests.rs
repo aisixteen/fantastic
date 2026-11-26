@@ -4716,8 +4716,8 @@ async fn recall_long_head(
             json!({"type": "update_agent", "id": backend.as_str(), "system_prompt": "sys"}),
         )])
         .await;
-    let r = fantastic_kernel::test_support::as_agent(
-        backend.clone(),
+    let r = fantastic_kernel::test_support::as_agent(backend.clone(), async {
+        let me = crate::assembly::self_reflect(backend, kernel).await;
         crate::retrieval::context_recall(
             backend,
             payload["dry"] == json!(true),
@@ -4728,8 +4728,10 @@ async fn recall_long_head(
             crate::constants::DEFAULT_CONTEXT_WINDOW,
             client_id,
             &[],
-        ),
-    )
+            &me,
+        )
+        .await
+    })
     .await
     .expect("store read");
     (r, sc)
@@ -5448,13 +5450,13 @@ async fn a_message_stored_as_a_pass_ends_wakes_the_next() {
     };
     fantastic_kernel::test_support::as_agent(backend.clone(), async {
         let m = crate::life::Incoming {
-            text: "late in the pass",
-            client_id: "h",
-            origin: "h",
+            text: "late in the pass".into(),
+            client_id: "h".into(),
+            origin: "h".into(),
             notice: false,
             attached: None,
         };
-        crate::life::arrive(&kernel, &backend, &m, true).await.expect("stored");
+        crate::life::arrived(&kernel, &backend, m, true).await.expect("stored");
         assert_eq!(s.passes_served(), 0, "no pass beside the running one");
         crate::life::end(&kernel, &backend, epoch);
     })

@@ -67,6 +67,9 @@ impl From<MemoryStoreError> for fantastic_kernel::bundle::BundleError {
 /// Shorthand for the memory layer's results.
 pub type MemResult<T> = Result<T, MemoryStoreError>;
 
+/// A store's reply and the reply body beside it (the byte verbs' bytes).
+pub(crate) type StoreReply = (Map<String, Value>, Option<Vec<u8>>);
+
 /// This bundle's RAM for ONE kernel — the head caches, the bodies held this run,
 /// the row watchers — kept ON the kernel's context, so two
 /// kernels in one process never share them. Python `_mem(kernel)`.
@@ -119,7 +122,20 @@ pub(crate) async fn store_item(
     kernel: &Arc<Kernel>,
     payload: Value,
     body: Option<Vec<u8>>,
-) -> MemResult<(Map<String, Value>, Option<Vec<u8>>)> {
+) -> MemResult<StoreReply> {
+    let (item, sid, verb) = store_request(self_id, kernel, payload, body)?;
+    let out = kernel.send(vec![item]).await.remove(0);
+    checked(self_id, &sid, &verb, out)
+}
+
+/// The call to this agent's memory store: the item, the store and the verb it names.
+/// No store named is the `Err`.
+pub(crate) fn store_request(
+    self_id: &AgentId,
+    kernel: &Kernel,
+    payload: Value,
+    body: Option<Vec<u8>>,
+) -> MemResult<(Item, AgentId, String)> {
     let sid = store_of(self_id, kernel)?;
     let verb = payload
         .get("type")
@@ -128,7 +144,18 @@ pub(crate) async fn store_item(
     if let Some(b) = body {
         item = item.with_binary_key("data", b);
     }
-    let out = kernel.send(vec![item]).await.remove(0);
+    Ok((item, sid, verb))
+}
+
+/// A store reply CHECKED, the one rule for every store call: a refusal or a failed
+/// dispatch is a [`MemoryStoreError`] naming the store and the verb; else the reply and
+/// its body.
+pub(crate) fn checked(
+    self_id: &AgentId,
+    sid: &AgentId,
+    verb: &str,
+    out: fantastic_kernel::Outcome,
+) -> MemResult<StoreReply> {
     let reply_body = out.body.and_then(|b| b.into_at("data"));
     let res = out.result;
     let refused = res.get("error").is_some_and(|e| !e.is_null());
@@ -156,7 +183,9 @@ pub(crate) async fn store_item(
     ))
 }
 
-/// Keep an image's `bytes` in this agent's memory store under `image_ref`.
+/// TESTS: keep an image's `bytes` in this agent's memory store under `image_ref` (a
+/// send's images are kept by its attach steps, [`crate::images::attach`]).
+#[cfg(test)]
 pub(crate) async fn put_bytes(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
@@ -240,27 +269,90 @@ fn is_trace(r: &Value) -> bool {
 /// The head cache — loaded from the store on first use (lazy boot). Python
 /// `_head`.
 pub async fn head(self_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<Vec<Value>> {
-    let m = mem(kernel);
-    if let Some(h) = m.heads.lock().expect("heads poisoned").get(&self_id.0) {
+    if let Some(h) = mem(kernel).heads.lock().expect("heads poisoned").get(&self_id.0) {
         return Ok(h.clone());
     }
-    let res = store_call(
-        self_id,
-        kernel,
-        json!({"type": "read", "from_last_kind": "clear"}),
-    )
-    .await?;
-    // TRACE ROWS ARE NO PART OF THE HEAD (#766): the head does not grow by the cap
-    let h: Vec<Value> = rows_of(&res, self_id)
-        .into_iter()
-        .filter(|r| !is_trace(r))
-        .collect();
-    m.heads
-        .lock()
-        .expect("heads poisoned")
-        .entry(self_id.0.clone())
-        .or_insert_with(|| h.clone());
-    Ok(h)
+    let read = HeadRead::Whole;
+    let res = store_call(self_id, kernel, read.payload()).await?;
+    Ok(read.merge(self_id, kernel, &res))
+}
+
+/// The read that brings the head cache up to the store: the WHOLE head (from the last
+/// `clear`) when none is cached, else the rows AFTER its newest id
+/// ([`refresh_head`]).
+pub(crate) enum HeadRead {
+    /// No head cached: it is read from the last `clear` on.
+    Whole,
+    /// The rows after `newest`, merged by id into the cached head (`ids`).
+    After { newest: i64, ids: Vec<i64> },
+}
+
+/// What [`refresh_head`] reads now for this agent.
+pub(crate) fn head_read(self_id: &AgentId, kernel: &Kernel) -> HeadRead {
+    let m = mem(kernel);
+    let mut heads = m.heads.lock().expect("heads poisoned");
+    let ids: Vec<i64> = heads
+        .get(&self_id.0)
+        .map(|h| h.iter().filter_map(|r| r.get("id").and_then(Value::as_i64)).collect())
+        .unwrap_or_default();
+    match ids.iter().copied().max() {
+        Some(newest) => HeadRead::After { newest, ids },
+        None => {
+            heads.remove(&self_id.0);
+            HeadRead::Whole
+        }
+    }
+}
+
+impl HeadRead {
+    /// The store call that reads it.
+    pub(crate) fn payload(&self) -> Value {
+        match self {
+            Self::Whole => json!({"type": "read", "from_last_kind": "clear"}),
+            Self::After { newest, .. } => json!({"type": "read", "after": newest}),
+        }
+    }
+
+    /// The store's answer `res` taken into the head cache: the head as it is now.
+    pub(crate) fn merge(&self, self_id: &AgentId, kernel: &Kernel, res: &Map<String, Value>) -> Vec<Value> {
+        let m = mem(kernel);
+        match self {
+            Self::Whole => {
+                // TRACE ROWS ARE NO PART OF THE HEAD (#766): the head does not grow by the cap
+                let h: Vec<Value> = rows_of(res, self_id).into_iter().filter(|r| !is_trace(r)).collect();
+                m.heads
+                    .lock()
+                    .expect("heads poisoned")
+                    .entry(self_id.0.clone())
+                    .or_insert_with(|| h.clone());
+                h
+            }
+            Self::After { ids, .. } => {
+                let fresh = rows_of(res, self_id);
+                let mut heads = m.heads.lock().expect("heads poisoned");
+                let h = heads.entry(self_id.0.clone()).or_default();
+                // THE HEAD AS IT IS NOW, not as it was before the read: a row appended while
+                // the read was out (a message arriving during a pass, #795) is in both, and
+                // is kept once
+                let mut seen: std::collections::HashSet<i64> = ids.iter().copied().collect();
+                seen.extend(h.iter().filter_map(|r| r.get("id").and_then(Value::as_i64)));
+                for r in fresh {
+                    let rid = r.get("id").and_then(Value::as_i64);
+                    if rid.is_some_and(|i| seen.contains(&i)) || is_trace(&r) {
+                        continue;
+                    }
+                    if kind_of(&r) == Some("clear") {
+                        h.clear();
+                    }
+                    if let Some(i) = rid {
+                        seen.insert(i);
+                    }
+                    h.push(r);
+                }
+                h.clone()
+            }
+        }
+    }
 }
 
 /// Is the head cache warm for this agent?
@@ -280,47 +372,9 @@ pub fn head_loaded(self_id: &AgentId, kernel: &Kernel) -> bool {
 /// by id (a row the agent wrote meanwhile is already there). A `clear` among them
 /// restarts the head. One small read per turn; the store stays passive (no push).
 pub async fn refresh_head(self_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<Vec<Value>> {
-    let m = mem(kernel);
-    let cached = m
-        .heads
-        .lock()
-        .expect("heads poisoned")
-        .get(&self_id.0)
-        .cloned();
-    let ids: Vec<i64> = cached
-        .as_ref()
-        .map(|h| {
-            h.iter()
-                .filter_map(|r| r.get("id").and_then(Value::as_i64))
-                .collect()
-        })
-        .unwrap_or_default();
-    let Some(newest) = ids.iter().copied().max() else {
-        m.heads.lock().expect("heads poisoned").remove(&self_id.0);
-        return head(self_id, kernel).await;
-    };
-    let res = store_call(self_id, kernel, json!({"type": "read", "after": newest})).await?;
-    let fresh = rows_of(&res, self_id);
-    let mut heads = m.heads.lock().expect("heads poisoned");
-    let h = heads.entry(self_id.0.clone()).or_default();
-    // THE HEAD AS IT IS NOW, not as it was before the read: a row appended while the read
-    // was out (a message arriving during a pass, #795) is in both, and is kept once
-    let mut seen: std::collections::HashSet<i64> = ids.into_iter().collect();
-    seen.extend(h.iter().filter_map(|r| r.get("id").and_then(Value::as_i64)));
-    for r in fresh {
-        let rid = r.get("id").and_then(Value::as_i64);
-        if rid.is_some_and(|i| seen.contains(&i)) || is_trace(&r) {
-            continue;
-        }
-        if kind_of(&r) == Some("clear") {
-            h.clear();
-        }
-        if let Some(i) = rid {
-            seen.insert(i);
-        }
-        h.push(r);
-    }
-    Ok(h.clone())
+    let read = head_read(self_id, kernel);
+    let res = store_call(self_id, kernel, read.payload()).await?;
+    Ok(read.merge(self_id, kernel, &res))
 }
 
 /// The agent's conversation, in order. AGENT ID IS CONVERSATION ID: a second
@@ -340,6 +394,12 @@ pub async fn load_history(
     } else {
         refresh_head(self_id, kernel).await?
     };
+    Ok(turns(rows))
+}
+
+/// The conversation among stored `rows`: its turns, in order, each reply block carrying
+/// what the model kept of it ([`load_history`]).
+pub(crate) fn turns(rows: Vec<Value>) -> Vec<Value> {
     // THE CONVERSATION IS ITS TURNS — rows with a chat `role`. The agent may also
     // `append` a row of its own straight to its store (a note to itself); that row
     // is memory, not a turn: it stays in the store, `grep` finds it, the view never
@@ -362,7 +422,7 @@ pub async fn load_history(
         })
         .collect();
     crate::history_view::attach_kept(&mut rows, &kept);
-    Ok(rows)
+    rows
 }
 
 /// The model's `keep` (#641): `summary` kept for the reply block `of` (its pid), a `keep`
@@ -403,6 +463,22 @@ pub async fn save_history(
     kernel: &Arc<Kernel>,
     new_turns: &[Value],
 ) -> MemResult<Vec<i64>> {
+    let rows = rows_to_append(self_id, kernel, new_turns)?;
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    store_call(self_id, kernel, append_payload(&rows)).await?;
+    Ok(appended(self_id, kernel, rows))
+}
+
+/// The rows of an append as the store takes them: an id minted where none is given,
+/// and WHEN it was written and BY WHOM in each row's `attributes`. A row over the cap is
+/// the `Err`.
+pub(crate) fn rows_to_append(
+    self_id: &AgentId,
+    kernel: &Kernel,
+    new_turns: &[Value],
+) -> MemResult<Vec<Map<String, Value>>> {
     let mut rows: Vec<Map<String, Value>> = Vec::with_capacity(new_turns.len());
     for t in new_turns {
         let mut r: Map<String, Value> = match t {
@@ -449,19 +525,21 @@ pub async fn save_history(
         crate::row_attrs::check_cap(self_id, &r).map_err(MemoryStoreError)?;
         rows.push(r);
     }
-    if rows.is_empty() {
-        return Ok(Vec::new());
-    }
+    Ok(rows)
+}
+
+/// The store's `append` of `rows`.
+pub(crate) fn append_payload(rows: &[Map<String, Value>]) -> Value {
+    json!({"type": "append", "rows": rows.iter().cloned().map(Value::Object).collect::<Vec<_>>()})
+}
+
+/// The store TOOK `rows`: each enters the head cache (once) and is announced to the
+/// agent's watchers. Their ids.
+pub(crate) fn appended(self_id: &AgentId, kernel: &Arc<Kernel>, rows: Vec<Map<String, Value>>) -> Vec<i64> {
     let ids: Vec<i64> = rows
         .iter()
         .filter_map(|r| r.get("id").and_then(Value::as_i64))
         .collect();
-    store_call(
-        self_id,
-        kernel,
-        json!({"type": "append", "rows": rows.iter().cloned().map(Value::Object).collect::<Vec<_>>()}),
-    )
-    .await?;
     let m = mem(kernel);
     for r in rows {
         let mut stored = r;
@@ -486,7 +564,7 @@ pub async fn save_history(
             announce_row(self_id, kernel, &stored);
         }
     }
-    Ok(ids)
+    ids
 }
 
 /// Purge a deleted agent's rows from its memory store ([`crate::verbs::on_delete`]),

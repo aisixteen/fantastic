@@ -700,14 +700,16 @@ async fn folds_at_a_small_window_and_every_turn_answers() {
     // sends it, plus `S8_BODY_ROOM` for the body. The fold and the recall it makes due
     // depend on the room the body has, not on the block's wording, so an edit to a
     // how-to moves the window with the block.
-    let block = as_agent(
-        backend.clone(),
+    let block = as_agent(backend.clone(), async {
+        let me = crate::assembly::self_reflect(&backend, &kernel).await;
         crate::assembly::system_content(
             &backend,
             &kernel,
             crate::model_format::of(crate::model_format::DEFAULT),
-        ),
-    )
+            &me,
+        )
+        .await
+    })
     .await
     .expect("the block");
     let sys = crate::context::estimate_one(&json!({"role": "system", "content": block}));

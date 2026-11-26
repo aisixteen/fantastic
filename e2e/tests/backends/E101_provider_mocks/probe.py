@@ -222,8 +222,7 @@ def main() -> int:
             def idle(who: str, bound: float = 60) -> bool:
                 end = time.monotonic() + bound
                 while time.monotonic() < end:
-                    tasks = hk.send("kernel", {"type": "ps"}).get("tasks") or []
-                    if not any(t.get("agent") == who for t in tasks):
+                    if hk.quiet(who):
                         return True
                     time.sleep(0.05)
                 return False

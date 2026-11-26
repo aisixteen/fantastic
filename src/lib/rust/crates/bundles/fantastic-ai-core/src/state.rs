@@ -282,13 +282,13 @@ pub fn bump_incarnation(agent_id: &AgentId) {
     *m.entry(agent_id.clone()).or_insert(0) += 1;
 }
 
-/// `true` iff a pass is in flight right now. Read off `current_meta`.
+/// `true` iff a pass is in flight right now, from its first step (#795): its life says
+/// `running`.
 pub fn is_generating(agent_id: &AgentId) -> bool {
     BACKENDS
         .lock()
         .get(agent_id)
-        .map(|s| s.current_meta.lock().expect("current poisoned").is_some())
-        .unwrap_or(false)
+        .is_some_and(|s| s.life.lock().expect("life poisoned").running)
 }
 
 /// WAIT UNTIL `agent_id` IS QUIET ([`BackendState::is_quiet`]) or `within` passes:
@@ -456,7 +456,8 @@ pub fn status_snapshot(agent_id: &AgentId, client_id: Option<&str>) -> Value {
     json!({
         "source": agent_id.as_str(),
         "client_id": echoed_client,
-        "generating": cur.is_some(),
+        // A PASS IN FLIGHT, from its first step (#795): its reads, its request, its row
+        "generating": state.life.lock().expect("life poisoned").running,
         "current": current,
         "mine_pending": mine_pending,
         "others_pending": others_pending,

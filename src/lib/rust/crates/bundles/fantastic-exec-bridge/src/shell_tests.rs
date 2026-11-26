@@ -76,6 +76,12 @@ async fn call(kernel: &Arc<Kernel>, id: &str, p: Value) -> Value {
         .result
 }
 
+/// `start` acks and settles when its job exits (#795): the job it started, as
+/// [`crate::tests::started`] reads it.
+async fn start_call(kernel: &Arc<Kernel>, id: &str, p: Value) -> Value {
+    crate::tests::started(kernel, &AgentId::from(id), p).await
+}
+
 /// SIGKILL every job an agent owns, so a shell a test started never outlives it.
 fn teardown(id: &str) {
     let mut g = jobs::jobs();
@@ -121,23 +127,19 @@ async fn a_pty_start_without_command_runs_the_childs_shell() {
     )
     .await;
     let mut rx = k.ensure_inbox(&AgentId::from("sh_run"));
-    let r = call(&k, "sh_run", json!({"type": "start", "pty": pty()})).await;
+    let r = start_call(&k, "sh_run", json!({"type": "start", "pty": pty()})).await;
     assert_eq!(
         (&r["status"], &r["pty"]),
         (&json!("running"), &json!(true)),
         "{r}"
     );
     let jid = r["job_id"].as_i64().unwrap();
-    let (_, events) = events_until(&mut rx, |t| t.contains("SHELL_UP")).await;
+    events_until(&mut rx, |t| t.contains("SHELL_UP")).await;
     // The announcement names the RESOLVED shell, so a client that let the kernel
     // pick it can show it and re-issue it.
-    let started = events
-        .iter()
-        .find(|e| e["type"] == "job_started")
-        .expect("job_started");
     assert_eq!(
-        started,
-        &json!({"type": "job_started", "job_id": jid, "command": sh, "args": []})
+        r["announced"],
+        json!({"type": "job_started", "job_id": jid, "command": sh, "args": []})
     );
     let snap = &call(&k, "sh_run", json!({"type": "status", "job_id": jid})).await["jobs"][0];
     assert_eq!(
@@ -164,7 +166,7 @@ async fn the_shell_comes_from_the_childs_env_not_the_kernels() {
     let tmp = TempDir::new().unwrap();
     let k = kernel(&tmp);
     mk(&k, &tmp, "sh_env", json!({"shell": true})).await;
-    let r = call(&k, "sh_env", json!({"type": "start", "pty": pty()})).await;
+    let r = start_call(&k, "sh_env", json!({"type": "start", "pty": pty()})).await;
     assert_eq!(
         (&r["reason"], &r["arg"]),
         (&json!("missing_arg"), &json!(SHELL_VAR)),
@@ -190,7 +192,7 @@ async fn the_shell_comes_from_the_childs_env_not_the_kernels() {
     )
     .await;
     assert!(u.get("error").is_none(), "{u}");
-    let r = call(&k, "sh_env", json!({"type": "start", "pty": pty()})).await;
+    let r = start_call(&k, "sh_env", json!({"type": "start", "pty": pty()})).await;
     assert_eq!(r["status"], "running", "{r}");
     let snap = &call(
         &k,
@@ -213,7 +215,7 @@ async fn an_empty_shell_in_the_child_env_is_refused_too() {
         json!({"env": {SHELL_VAR: ""}, "shell": true}),
     )
     .await;
-    let r = call(&k, "sh_empty", json!({"type": "start", "pty": pty()})).await;
+    let r = start_call(&k, "sh_empty", json!({"type": "start", "pty": pty()})).await;
     assert_eq!(
         (&r["reason"], &r["arg"]),
         (&json!("missing_arg"), &json!(SHELL_VAR)),
@@ -234,18 +236,14 @@ async fn a_pipe_job_always_names_its_command() {
         json!({"env": {SHELL_VAR: sh}, "shell": true}),
     )
     .await;
-    let r = call(&k, "sh_pipe", json!({"type": "start"})).await;
+    let r = start_call(&k, "sh_pipe", json!({"type": "start"})).await;
     assert_eq!(
         (&r["reason"], &r["arg"]),
         (&json!("missing_arg"), &json!("command | pty")),
         "{r}"
     );
     // …and an explicit empty command on a PTY is a typo, not "use the shell".
-    let r = call(
-        &k,
-        "sh_pipe",
-        json!({"type": "start", "command": "", "pty": pty()}),
-    )
+    let r = start_call(&k, "sh_pipe", json!({"type": "start", "command": "", "pty": pty()}))
     .await;
     assert_eq!(
         (&r["reason"], &r["arg"]),
@@ -267,11 +265,7 @@ async fn shell_true_permits_only_the_bare_shell_line() {
     )
     .await;
     // extra args are a different line — `shell` does not cover it
-    let r = call(
-        &k,
-        "sh_bare",
-        json!({"type": "start", "args": ["-c", "id"], "pty": pty()}),
-    )
+    let r = start_call(&k, "sh_bare", json!({"type": "start", "args": ["-c", "id"], "pty": pty()}))
     .await;
     assert_eq!(r["reason"], "unauthorized", "{r}");
     let err = r["error"].as_str().unwrap_or("");
@@ -282,14 +276,10 @@ async fn shell_true_permits_only_the_bare_shell_line() {
         "{r}"
     );
     // the same shell on a PIPE is not the permitted line either
-    let r = call(&k, "sh_bare", json!({"type": "start", "command": sh})).await;
+    let r = start_call(&k, "sh_bare", json!({"type": "start", "command": sh})).await;
     assert_eq!(r["reason"], "unauthorized", "{r}");
     // naming the shell explicitly on a PTY is the same line, so it is permitted
-    let r = call(
-        &k,
-        "sh_bare",
-        json!({"type": "start", "command": sh, "pty": pty()}),
-    )
+    let r = start_call(&k, "sh_bare", json!({"type": "start", "command": sh, "pty": pty()}))
     .await;
     assert_eq!(r["status"], "running", "{r}");
     teardown("sh_bare");
@@ -313,11 +303,7 @@ async fn shell_login_permits_exactly_the_login_line() {
     let login = crate::sys::LOGIN_ARGS;
     if !login.is_empty() {
         // the bare shell, NAMED, is not the login line
-        let r = call(
-            &k,
-            "sh_login",
-            json!({"type": "start", "command": sh, "pty": pty()}),
-        )
+        let r = start_call(&k, "sh_login", json!({"type": "start", "command": sh, "pty": pty()}))
         .await;
         assert_eq!(r["reason"], "unauthorized", "{r}");
         let err = r["error"].as_str().unwrap_or("");
@@ -327,11 +313,7 @@ async fn shell_login_permits_exactly_the_login_line() {
         );
     }
     // another tail is not it either
-    let r = call(
-        &k,
-        "sh_login",
-        json!({"type": "start", "args": ["-x"], "pty": pty()}),
-    )
+    let r = start_call(&k, "sh_login", json!({"type": "start", "args": ["-x"], "pty": pty()}))
     .await;
     assert_eq!(r["reason"], "unauthorized", "{r}");
     assert!(
@@ -342,7 +324,7 @@ async fn shell_login_permits_exactly_the_login_line() {
         "{r}"
     );
     // no command and no args: the record's whole line — the login line
-    let r = call(&k, "sh_login", json!({"type": "start", "pty": pty()})).await;
+    let r = start_call(&k, "sh_login", json!({"type": "start", "pty": pty()})).await;
     assert_eq!(r["status"], "running", "{r}");
     let up = std::iter::once("SHELL_UP")
         .chain(login.iter().copied())
@@ -351,11 +333,7 @@ async fn shell_login_permits_exactly_the_login_line() {
     events_until(&mut rx, |t| t.contains(&up)).await;
     call(&k, "sh_login", json!({"type": "stop"})).await;
     // …and the line spelled out is the same line
-    let r = call(
-        &k,
-        "sh_login",
-        json!({"type": "start", "args": login, "pty": pty()}),
-    )
+    let r = start_call(&k, "sh_login", json!({"type": "start", "args": login, "pty": pty()}))
     .await;
     assert_eq!(r["status"], "running", "{r}");
     teardown("sh_login");
@@ -369,7 +347,7 @@ async fn without_shell_the_resolved_line_still_needs_allowed() {
     let sh = fake_shell(&tmp);
     let k = kernel(&tmp);
     mk(&k, &tmp, "sh_allow", json!({"env": {SHELL_VAR: sh}})).await;
-    let r = call(&k, "sh_allow", json!({"type": "start", "pty": pty()})).await;
+    let r = start_call(&k, "sh_allow", json!({"type": "start", "pty": pty()})).await;
     assert_eq!(r["reason"], "unauthorized", "{r}");
     // No `shell` ⇒ no shell suffix on the refusal.
     assert!(
@@ -389,7 +367,7 @@ async fn without_shell_the_resolved_line_still_needs_allowed() {
     )
     .await;
     assert!(u.get("error").is_none(), "{u}");
-    let r = call(&k, "sh_allow", json!({"type": "start", "pty": pty()})).await;
+    let r = start_call(&k, "sh_allow", json!({"type": "start", "pty": pty()})).await;
     assert_eq!(r["status"], "running", "{r}");
     teardown("sh_allow");
 }
@@ -413,13 +391,10 @@ async fn shell_does_not_disable_the_allowlist() {
         json!({"env": {SHELL_VAR: sh}, "shell": true, "allowed": [allowed]}),
     )
     .await;
-    let r = call(
-        &k,
-        "sh_list",
-        json!({"type": "start", "command": echo, "args": ["x"]}),
-    )
+    let r = start_call(&k, "sh_list", json!({"type": "start", "command": echo, "args": ["x"]}))
     .await;
-    assert_eq!(r["status"], "running", "{r}");
+    // the allowlisted line ran (it may have ended already)
+    assert!(r["job_id"].is_i64() && r.get("reason").is_none(), "{r}");
     teardown("sh_list");
 }
 

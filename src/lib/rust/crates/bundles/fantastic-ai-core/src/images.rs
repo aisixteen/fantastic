@@ -124,22 +124,34 @@ pub(crate) fn parts_of(row: &Value) -> Option<&Vec<Value>> {
 
 // ── the capability map ───────────────────────────────────────────────────────
 
-/// Keep the chat's `provider_capabilities` right for its provider and model: the provider
-/// is asked (`capabilities`) at the first turn of an incarnation and whenever `provider_id` or
-/// `model` changed since; the record is written only when the map is not what it holds.
-/// A provider that does not answer leaves what is there (a provider that was swapped for
-/// one that does not answer leaves an empty map).
-pub(crate) async fn refresh(agent_id: &AgentId, kernel: &Arc<Kernel>, state: &BackendState) {
+/// Keep the chat's `provider_capabilities` right for its provider and model, as a STEP
+/// (#795): the provider is asked (`capabilities`) at the first turn of an incarnation and
+/// whenever `provider_id` or `model` changed since, and its answer is the next step; the
+/// record is written only when the map is not what it holds. A provider that does not
+/// answer leaves what is there (a provider that was swapped for one that does not answer
+/// leaves an empty map). `next` runs once the map is right, at once when nothing is asked.
+pub(crate) async fn refresh<R, F, Fut>(
+    agent_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    state: Arc<BackendState>,
+    rec: R,
+    next: F,
+) where
+    R: Send + 'static,
+    F: FnOnce(R) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
     let meta = crate::helpers::agent_meta(agent_id, kernel);
     let Some(provider) = meta
         .get(crate::remote_provider::PROVIDER_FIELD)
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
+        .map(str::to_string)
     else {
-        return;
+        return next(rec).await;
     };
-    let model = meta.get("model").and_then(Value::as_str).unwrap_or("");
-    let key = (provider.to_string(), model.to_string());
+    let model = meta.get("model").and_then(Value::as_str).unwrap_or("").to_string();
+    let key = (provider.clone(), model.clone());
     if state
         .caps_checked
         .lock()
@@ -147,20 +159,31 @@ pub(crate) async fn refresh(agent_id: &AgentId, kernel: &Arc<Kernel>, state: &Ba
         .as_ref()
         == Some(&key)
     {
-        return;
+        return next(rec).await;
     }
-    let out = kernel
-        .send(vec![Item::new(
-            AgentId::from(provider),
-            json!({"type": "capabilities"}),
-        )])
-        .await
-        .into_iter()
-        .next();
-    *state.caps_checked.lock().expect("caps_checked poisoned") = Some(key);
+    let item = Item::new(AgentId::from(provider.as_str()), json!({"type": "capabilities"}));
+    let (k, me) = (Arc::clone(kernel), agent_id.clone());
+    crate::steps::call(kernel, item, rec, move |rec, out| async move {
+        *state.caps_checked.lock().expect("caps_checked poisoned") = Some(key);
+        took_capabilities(&me, &k, &state, &meta, &provider, &model, &out).await;
+        next(rec).await;
+    })
+    .await;
+}
+
+/// The provider's `capabilities` answer `out`, taken: the model it names noted, and the
+/// chat's `provider_capabilities` written when it changed.
+async fn took_capabilities(
+    agent_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    state: &BackendState,
+    meta: &Map<String, Value>,
+    provider: &str,
+    model: &str,
+    out: &fantastic_kernel::Outcome,
+) {
     let held = meta.get(FIELD);
-    let answered = out
-        .as_ref()
+    let answered = Some(out)
         .filter(|o| {
             o.status == fantastic_kernel::Status::Completed && o.result.get("error").is_none()
         })
@@ -328,80 +351,182 @@ fn tokens(w: u32, h: u32) -> u64 {
     u64::from(w) * u64::from(h) / 750
 }
 
-/// Attach the images of a `send`: `specs` is its `images` list. Each is read or fetched,
-/// brought inside the limits of the chat's model, and kept in the chat's store under a ref;
-/// the result is what the user's row says of them. `Ok(None)`: no images. `Err` is the
-/// refusal text, naming the item.
-pub(crate) async fn attach(
+/// What the next step of an attach gets: what the row says of the images, `None` for
+/// none, or the refusal text naming the item.
+pub(crate) type AttachResult = Result<Option<Attached>, String>;
+
+/// Attach the images of a `send`, as STEPS (#795): `specs` is its `images` list. Each is
+/// read (the chat's file bridge) or fetched (its store), brought inside the limits of the
+/// chat's model, and kept in the chat's store under a ref, one call per step; the next
+/// step gets what the user's row says of them (`Ok(None)`: no images), or the refusal
+/// text naming the item.
+pub(crate) async fn attach<R, F, Fut>(
     agent_id: &AgentId,
     kernel: &Arc<Kernel>,
-    specs: Option<&[crate::declared::Image]>,
-) -> Result<Option<Attached>, String> {
+    specs: Option<Vec<crate::declared::Image>>,
+    rec: R,
+    next: F,
+) where
+    R: Send + 'static,
+    F: FnOnce(R, AttachResult) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
     let list = match specs {
-        None | Some([]) => return Ok(None),
-        Some(a) => a,
+        Some(a) if !a.is_empty() => a,
+        _ => return next(rec, Ok(None)).await,
     };
     let meta = crate::helpers::agent_meta(agent_id, kernel);
     let limits = limits(&meta);
     if can(&meta, NEEDS) && limits.max_images.is_some_and(|n| list.len() as i64 > n) {
-        return Err(format!(
+        let why = format!(
             "send: {} images, and this model takes {} per request",
             list.len(),
             limits.max_images.unwrap_or_default()
-        ));
+        );
+        return next(rec, Err(why)).await;
     }
-    let mut parts = Vec::new();
-    let mut info = Vec::new();
-    for (i, spec) in list.iter().enumerate() {
-        let at = format!("send: images[{i}]");
-        let path = spec.path.as_deref().filter(|s| !s.is_empty());
-        let named = spec.image_ref.as_deref().filter(|s| !s.is_empty());
-        let (raw, name, from_ref) = match (path, named) {
-            (Some(p), None) => {
-                let bridge = meta
-                    .get("file_bridge_id")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| format!("{at}: a `path` is read through the chat's file_bridge_id, and the record names none"))?;
-                let raw = crate::prompt_file::read_bytes(kernel, bridge, p)
-                    .await
-                    .map_err(|e| format!("{at}: {e}"))?;
-                (raw, p.rsplit('/').next().unwrap_or(p).to_string(), None)
+    let a = Attaching {
+        agent: agent_id.clone(),
+        kernel: Arc::clone(kernel),
+        meta,
+        limits,
+        list,
+        i: 0,
+        parts: Vec::new(),
+        info: Vec::new(),
+        next: Box::new(move |r| Box::pin(next(rec, r))),
+    };
+    a.step().await;
+}
+
+/// An attach in flight: the images, the one being taken, what is attached so far, and
+/// the step that gets the result.
+struct Attaching {
+    agent: AgentId,
+    kernel: Arc<Kernel>,
+    meta: Map<String, Value>,
+    limits: Limits,
+    list: Vec<crate::declared::Image>,
+    i: usize,
+    parts: Vec<Value>,
+    info: Vec<Value>,
+    next: Box<dyn FnOnce(AttachResult) -> futures_util::future::BoxFuture<'static, ()> + Send>,
+}
+
+impl Attaching {
+    fn at(&self) -> String {
+        format!("send: images[{}]", self.i)
+    }
+
+    /// The attach ends: the next step gets `r`.
+    async fn end(self, r: AttachResult) {
+        (self.next)(r).await;
+    }
+
+    /// TAKE IMAGE `i`: its bytes read (a step), or the attach ends with every image.
+    fn step(self) -> futures_util::future::BoxFuture<'static, ()> {
+        Box::pin(async move {
+            let Some(spec) = self.list.get(self.i).cloned() else {
+                let r = Ok(Some(Attached { parts: self.parts.clone(), info: self.info.clone() }));
+                return self.end(r).await;
+            };
+            let at = self.at();
+            let path = spec.path.as_deref().filter(|s| !s.is_empty()).map(str::to_string);
+            let named = spec.image_ref.as_deref().filter(|s| !s.is_empty()).map(str::to_string);
+            match (path, named) {
+                (Some(p), None) => {
+                    let Some(bridge) = self
+                        .meta
+                        .get("file_bridge_id")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                    else {
+                        let why = format!("{at}: a `path` is read through the chat's file_bridge_id, and the record names none");
+                        return self.end(Err(why)).await;
+                    };
+                    let name = p.rsplit('/').next().unwrap_or(&p).to_string();
+                    let kernel = Arc::clone(&self.kernel);
+                    crate::prompt_file::read_bytes(&kernel, bridge, p, self, move |a, r| async move {
+                        match r {
+                            Ok(raw) => a.prepared(raw, name, None).await,
+                            Err(e) => {
+                                let why = format!("{}: {e}", a.at());
+                                a.end(Err(why)).await;
+                            }
+                        }
+                    })
+                    .await;
+                }
+                (None, Some(r)) => {
+                    let (agent, kernel) = (self.agent.clone(), Arc::clone(&self.kernel));
+                    let payload = json!({"type": "get_bytes", "ref": r});
+                    crate::steps::store(&agent, &kernel, payload, None, self, move |a, got| async move {
+                        let raw = got.and_then(|(_, body)| {
+                            body.ok_or_else(|| {
+                                crate::memory::MemoryStoreError(format!(
+                                    "{}: memory store returned no bytes for image `{r}`",
+                                    a.agent
+                                ))
+                            })
+                        });
+                        match raw {
+                            Ok(raw) => a.prepared(raw, r.clone(), Some(r)).await,
+                            Err(e) => {
+                                let why = format!("{}: {}", a.at(), e.0);
+                                a.end(Err(why)).await;
+                            }
+                        }
+                    })
+                    .await;
+                }
+                _ => {
+                    let why = format!("{at}: name exactly one of `path` and `ref`");
+                    self.end(Err(why)).await;
+                }
             }
-            (None, Some(r)) => {
-                let (_, raw) = crate::memory::get_bytes(agent_id, kernel, r)
-                    .await
-                    .map_err(|e| format!("{at}: {}", e.0))?;
-                (raw, r.to_string(), Some(r))
-            }
-            _ => return Err(format!("{at}: name exactly one of `path` and `ref`")),
-        };
+        })
+    }
+
+    /// Image `i`'s bytes `raw`, brought inside the limits (the agent's own work); kept in
+    /// the store under a new ref (a step) unless they are unchanged bytes of a ref.
+    async fn prepared(self, raw: Vec<u8>, name: String, from_ref: Option<String>) {
+        let at = self.at();
+        let limits = self.limits;
         let prepared = {
             let raw = raw.clone();
-            tokio::task::spawn_blocking(move || prepare(&raw, limits))
-                .await
-                .map_err(|e| format!("{at}: {e}"))?
-                .map_err(|e| format!("{at} ({name}) {e}"))?
-        };
-        // bytes already in the store that need no change keep their ref
-        let image_ref = match from_ref {
-            Some(r) if prepared.bytes == raw => r.to_string(),
-            _ => {
-                let r = format!("img-{}", kernel.mint_id());
-                crate::memory::put_bytes(
-                    agent_id,
-                    kernel,
-                    &r,
-                    prepared.media_type,
-                    prepared.bytes.clone(),
-                )
-                .await
-                .map_err(|e| format!("{at}: {}", e.0))?;
-                r
+            match tokio::task::spawn_blocking(move || prepare(&raw, limits)).await {
+                Ok(Ok(p)) => p,
+                Ok(Err(e)) => return self.end(Err(format!("{at} ({name}) {e}"))).await,
+                Err(e) => return self.end(Err(format!("{at}: {e}"))).await,
             }
         };
+        // bytes already in the store that need no change keep their ref
+        match from_ref {
+            Some(r) if prepared.bytes == raw => self.kept(prepared, name, r).await,
+            _ => {
+                let r = format!("img-{}", self.kernel.mint_id());
+                let head = json!({"type": "put_bytes", "ref": r, "media_type": prepared.media_type});
+                let (agent, kernel) = (self.agent.clone(), Arc::clone(&self.kernel));
+                let body = prepared.bytes.clone();
+                crate::steps::store(&agent, &kernel, head, Some(body), (self, prepared), move |(a, prepared), put| async move {
+                    match put {
+                        Ok(_) => a.kept(prepared, name, r).await,
+                        Err(e) => {
+                            let why = format!("{}: {}", a.at(), e.0);
+                            a.end(Err(why)).await;
+                        }
+                    }
+                })
+                .await;
+            }
+        }
+    }
+
+    /// Image `i` is kept under `image_ref`: what the row says of it, then the next image.
+    async fn kept(mut self, prepared: Prepared, name: String, image_ref: String) {
         let (w, h) = (prepared.width, prepared.height);
-        parts.push(json!({
+        self.parts.push(json!({
             "type": "image",
             "needs": NEEDS,
             "ref": image_ref,
@@ -412,15 +537,16 @@ pub(crate) async fn attach(
             "hash": crate::row_attrs::short_hash_bytes(&prepared.bytes),
         }));
         let (ow, oh, ob) = prepared.original;
-        info.push(json!({
+        self.info.push(json!({
             "ref": image_ref,
             "name": name,
             "original": {"width": ow, "height": oh, "bytes": ob},
             "stored": {"width": w, "height": h, "bytes": prepared.bytes.len()},
             "tokens": tokens(w, h),
         }));
+        self.i += 1;
+        self.step().await;
     }
-    Ok(Some(Attached { parts, info }))
 }
 
 // ── the forms an image row takes in a request ────────────────────────────────

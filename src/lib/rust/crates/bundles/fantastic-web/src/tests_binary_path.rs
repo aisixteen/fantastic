@@ -191,27 +191,24 @@ async fn paste_image_reads_its_body_at_data_over_ws_and_rest() {
     } else {
         "/bin/cat".to_string()
     };
-    let start_as = |leg: String| {
+    // `start` settles when its job EXITS (#795): the job is the one it announced
+    let start = || {
         let k = Arc::clone(&kernel);
         let waiter = waiter.clone();
         async move {
-            let started = fantastic_kernel::test_support::as_agent(
-                AgentId::from(leg.as_str()),
-                k.operator_send(vec![Item::new(
-                    AgentId::from("term"),
-                    json!({"type": "start", "command": waiter,
-                           "pty": {"cols": 80, "rows": 24}}),
-                )]),
+            let started = fantastic_exec_bridge::test_support::started(
+                &k,
+                &AgentId::from("term"),
+                json!({"type": "start", "command": waiter,
+                       "pty": {"cols": 80, "rows": 24}}),
             )
-            .await
-            .remove(0)
-            .result;
+            .await;
             assert_eq!(started["pty"], json!(true), "{started}");
             started["job_id"].clone()
         }
     };
-    let job = start_as(format!("{web}_ws")).await;
-    let rest_job = start_as(format!("{web}_rest")).await;
+    let job = start().await;
+    let rest_job = start().await;
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/{web}/ws"))
         .await
         .expect("ws connect");

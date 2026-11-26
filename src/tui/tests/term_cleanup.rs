@@ -112,7 +112,13 @@ async fn shell_with_children(tag: &str) -> (std::sync::Arc<Kernel>, std::path::P
         kernel.operator_send(vec![Item::new(id.clone(), json!({"type":"boot"}))]).await;
     }
     let sh = std::env::var("SHELL").expect("SHELL is set");
-    let started = act(&kernel, "exec", json!({"type":"start","command":sh,"pty":{"cols":80,"rows":24}})).await;
+    // `start` settles when its job EXITS (#795): the shell's job is the one it announced
+    let started = fantastic_exec_bridge::test_support::started(
+        &kernel,
+        &AgentId::from("exec"),
+        json!({"type":"start","command":sh,"pty":{"cols":80,"rows":24}}),
+    )
+    .await;
     let job = started["job_id"].as_i64().unwrap_or_else(|| panic!("{started}"));
     // Distinct per test and per run, so a leftover of another run never counts.
     let n = std::process::id() % 1000;

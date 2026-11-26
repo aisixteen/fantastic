@@ -19,16 +19,23 @@ expect:
     # ── EXS-1 · no command on a PTY → the child's $SHELL, reported resolved ──
     # Sent AS the loader, which reaches its own child by position: the caller
     # names no shell and needs to know none.
+    # A `start` settles when its job EXITS (#795): it is fired, its job is seen
+    # running, stopped, and the start's settle (the job's end) is collected.
     - name: a PTY start without a command runs the shell the record passes down
-      reach: {from: static_loader, to: shell_term, send: {type: start, pty: {cols: 80, rows: 24}}}
-      expect: {allow: true, contains: {status: running, pty: true}}
+      start: {name: shell, from: static_loader, to: shell_term, reach: true, send: {type: start, pty: {cols: 80, rows: 24}}}
       because: EXS-1
-    - name: the job reports the RESOLVED command, so a client can show and re-issue it
+    - name: the shell's job runs
+      await_task: {name: shell_job, agent: shell_term, spawned: true, verb: start}
+    - name: the job runs on a terminal and reports the RESOLVED command, so a client can show and re-issue it
       operator: {to: shell_term, send: {type: status}}
-      expect: {contains: {jobs.*.command: /bin/sh}}
+      expect: {contains: {jobs.*.command: /bin/sh, jobs.*.status: running, jobs.*.pty: true}}
       because: EXS-1
     - name: (cleanup) the shell stops
       operator: {to: shell_term, send: {type: stop}}
+    - name: the loader's start went through, and settles with the job's end
+      collect: {name: shell}
+      expect: {allow: true, contains: {job_id: $shell_job.id}}
+      because: EXS-1
 
     # ── EXS-2 · no SHELL in the child's env → refused, naming it ──────────
     - name: a child environment without SHELL is refused — no fallback shell
@@ -52,17 +59,35 @@ expect:
       expect: {reason: unauthorized}
       because: EXS-4
     - name: "no `command` and no `args` under `shell: login` is its whole line, `$SHELL -l`"
-      operator: {to: login_term, send: {type: start, pty: {cols: 80, rows: 24}}}
-      expect: {contains: {status: running}}
+      start: {name: login, from: static_loader, to: login_term, send: {type: start, pty: {cols: 80, rows: 24}}}
+      because: EXS-1
+    - name: the login shell's job runs
+      await_task: {name: login_job, agent: login_term, spawned: true, verb: start}
+    - name: the login shell runs
+      operator: {to: login_term, send: {type: status}}
+      expect: {contains: {jobs.*.status: running}}
       because: EXS-1
     - name: (cleanup) that login shell stops
       operator: {to: login_term, send: {type: stop}}
+    - name: its start settles with the job's end
+      collect: {name: login}
+      expect: {contains: {job_id: $login_job.id}}
+      because: EXS-1
     - name: "`shell: login` covers exactly `$SHELL -l`"
-      operator: {to: login_term, send: {type: start, args: ['-l'], pty: {cols: 80, rows: 24}}}
-      expect: {contains: {status: running}}
+      start: {name: login_l, from: static_loader, to: login_term, send: {type: start, args: ['-l'], pty: {cols: 80, rows: 24}}}
+      because: EXS-4
+    - name: the `-l` shell's job runs
+      await_task: {name: login_l_job, agent: login_term, spawned: true, verb: start}
+    - name: the `-l` shell runs
+      operator: {to: login_term, send: {type: status, job_id: $login_l_job.id}}
+      expect: {contains: {jobs.*.status: running}}
       because: EXS-4
     - name: (cleanup) the login shell stops
       operator: {to: login_term, send: {type: stop}}
+    - name: the `-l` start settles with the job's end
+      collect: {name: login_l}
+      expect: {contains: {job_id: $login_l_job.id}}
+      because: EXS-4
     - name: with no `shell` on the record, the resolved line must match `allowed`
       operator: {to: allow_term, send: {type: start, pty: {cols: 80, rows: 24}}}
       expect: {reason: unauthorized}
