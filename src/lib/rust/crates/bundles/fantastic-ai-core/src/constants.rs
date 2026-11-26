@@ -53,6 +53,15 @@ pub const SEND_TIMEOUT_SECS: f64 = 600.0;
 /// long before [`SEND_TIMEOUT_SECS`] instead of asking for the model's maximum.
 pub const DEFAULT_TURN_TOKENS: i64 = 260_000;
 
+/// THE DEFAULT THINKING CAP PER PASS (#782): the `thinking_token_budget` a chat sends
+/// when its record names none (`null` on the record is no cap). One answer on a
+/// hermes-type model thought 16-18k tokens (227 s) under the old 16000 default, one
+/// repeating a paragraph for 71k characters, and stalled its whole team; a medium-effort
+/// agent turn thinks ~900 tokens, so 8192 only stops a runaway. Fitted below a chat's own
+/// `max_tokens` ([`crate::record::knobs_of`]); a server that cannot enforce it is cut by
+/// the harness ([`crate::remote_provider::complete`]).
+pub const DEFAULT_THINKING_BUDGET: i64 = 8192;
+
 /// The default `max_tokens` for a record that names none: [`DEFAULT_TURN_TOKENS`],
 /// plus the record's thinking budget when it sets one (thinking is spent out of
 /// the same budget), never above `model_max` — the model's own maximum.

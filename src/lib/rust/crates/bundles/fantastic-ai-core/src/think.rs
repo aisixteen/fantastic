@@ -218,6 +218,73 @@ impl ThinkWrap {
     }
 }
 
+/// The `stop_reason` of a pass whose thinking the harness cut at the chat's cap (#782).
+pub const THINKING_CUT: &str = "thinking_budget";
+
+/// THE HARNESS THINKING CAP (#782), for a server that cannot enforce one: it reads a
+/// pass's token stream and counts the characters inside its `<think>…</think>` spans
+/// (a marker split across tokens included), against the budget in tokens at
+/// [`crate::constants::CHARS_PER_TOKEN`] — the same estimate the rest of ai-core counts
+/// thinking by.
+#[derive(Debug)]
+pub struct ThinkMeter {
+    cap_chars: usize,
+    spent: usize,
+    open: bool,
+    /// The end of the text seen so far that may be the start of a marker.
+    tail: String,
+}
+
+impl ThinkMeter {
+    /// A meter for a cap of `budget` thinking tokens.
+    #[must_use]
+    pub fn new(budget: i64) -> Self {
+        Self {
+            cap_chars: usize::try_from(budget.max(0))
+                .unwrap_or(usize::MAX)
+                .saturating_mul(crate::constants::CHARS_PER_TOKEN),
+            spent: 0,
+            open: false,
+            tail: String::new(),
+        }
+    }
+
+    /// Read one token; `true` once the thinking has passed the cap.
+    pub fn feed(&mut self, token: &str) -> bool {
+        let mut s = std::mem::take(&mut self.tail);
+        s.push_str(token);
+        let mut i = 0usize;
+        loop {
+            let marker = if self.open { THINK_CLOSE } else { THINK_OPEN };
+            if let Some(r) = s[i..].find(marker) {
+                if self.open {
+                    self.spent += s[i..i + r].chars().count();
+                }
+                self.open = !self.open;
+                i += r + marker.len();
+                continue;
+            }
+            // what may be the start of a marker split across tokens waits for the next one
+            let mut keep = s.len().saturating_sub(marker.len() - 1).max(i);
+            while !s.is_char_boundary(keep) {
+                keep += 1;
+            }
+            if self.open {
+                self.spent += s[i..keep].chars().count();
+            }
+            self.tail = s[keep..].to_string();
+            break;
+        }
+        self.spent > self.cap_chars
+    }
+
+    /// Whether a thinking span is open.
+    #[must_use]
+    pub const fn is_open(&self) -> bool {
+        self.open
+    }
+}
+
 /// Decode ONE OpenAI-style streaming `delta` into text pieces, reading BOTH
 /// channels. `wrap` carries the per-TURN reasoning span across deltas. A
 /// property of the `/v1/chat/completions` streaming WIRE, not of a vendor.

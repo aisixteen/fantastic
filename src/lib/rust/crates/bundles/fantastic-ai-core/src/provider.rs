@@ -389,6 +389,14 @@ pub trait Provider: Send + Sync {
     /// Forget the last stop reason before a bounded side call. Python
     /// `provider.last_stop_reason = None`.
     fn clear_stop_reason(&self) {}
+
+    /// Whether this provider's SERVER enforces a pass's `thinking_token_budget` (#782):
+    /// it ends the thinking itself and the model goes on into its answer. Default: it
+    /// cannot, and the harness cuts the pass's thinking on the stream
+    /// ([`crate::remote_provider::complete`]).
+    fn enforces_thinking_budget(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

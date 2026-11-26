@@ -1048,6 +1048,12 @@ impl Provider for AnthropicProvider {
         self.report.lock().expect("report poisoned").stop_reason = None;
     }
 
+    /// Budgeted thinking (`budget_tokens`, capped at the chat's) is ended by the API; the
+    /// ADAPTIVE mode (`thinking_display`) takes no budget, so the harness cuts it (#782).
+    fn enforces_thinking_budget(&self) -> bool {
+        self.thinking_display.is_none()
+    }
+
     async fn chat(
         &self,
         messages: &[Value],
@@ -1528,6 +1534,14 @@ fn int_of(v: Option<&Value>) -> Option<i64> {
     v.and_then(Value::as_i64)
 }
 
+/// The `budget_tokens` a pass asks for: the record's `thinking_budget` (the mode that
+/// turns budgeted thinking on), never above the calling chat's thinking cap
+/// (`thinking_token_budget`, #782) — the API then ends the thinking at it.
+fn budget_tokens_of(meta: &Map<String, Value>) -> Option<i64> {
+    let own = int_of(meta.get("thinking_budget"))?;
+    Some(int_of(meta.get("thinking_token_budget")).map_or(own, |cap| own.min(cap)))
+}
+
 /// The pass's output budget: the calling chat's `max_tokens`, else the one read from the API.
 fn pass_max_tokens(meta: &Map<String, Value>) -> Result<i64, ProviderError> {
     int_of(meta.get("max_tokens")).ok_or_else(|| {
@@ -1562,7 +1576,7 @@ fn build_provider_with(
             key: Arc::new(key_reader(agent_id, kernel, NAME, false)),
             max_tokens: pass_max_tokens(&meta)?,
             temperature: meta.get("temperature").and_then(Value::as_f64),
-            thinking_budget: int_of(meta.get("thinking_budget")),
+            thinking_budget: budget_tokens_of(&meta),
             effort: meta.get("effort").and_then(Value::as_str).map(String::from),
             thinking_display: meta
                 .get("thinking_display")

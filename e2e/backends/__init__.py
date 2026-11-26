@@ -213,11 +213,10 @@ def _vllm() -> Backend:
     # (verbatim-repeat rate 48x -> 0). They are request knobs: the chat's record
     # carries them and sends them with each request (#632).
     #
-    # `thinking_token_budget` is left to the backend's own default ON PURPOSE:
-    # on the chat it is EXPLICIT, and an explicit budget refuses any call it
-    # could not fire on — every fold summary is bounded at its budget + 1024
-    # tokens, below 8000, so all folds would be refused. The default adapts per
-    # call instead (min(16000, max_tokens // 2)).
+    # `thinking_token_budget` is left to the chat's default ON PURPOSE (#782):
+    # a chat that names none carries 8192 on every pass (half its max_tokens
+    # when that is lower), and vllm_backend halves it on a bounded side call (a
+    # fold summary gets min(budget, max_tokens // 2)).
     runner = _runner_params()
     for knob in ("no_repeat_ngram_size", "repetition_penalty"):
         if knob in runner:

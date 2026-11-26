@@ -247,4 +247,5 @@ What does need attention is the **budget**. A reasoning model can spend an entir
 turn thinking and come back cut at `max_tokens` — thought present, answer empty.
 That is a budget problem wearing a model failure's clothes. `max_tokens` is ONE
 constant for every test (`backends.THINK_BUDGET`); `MAX_TOKENS=…` overrides it for
-one deliberate run, and vllm_backend keeps its `thinking_token_budget` below it.
+one deliberate run. Every pass also carries the chat's thinking cap,
+`thinking_token_budget` (8192 by default, below `max_tokens`; #782).
