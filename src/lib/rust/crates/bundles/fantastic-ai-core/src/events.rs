@@ -30,13 +30,57 @@ pub async fn to_caller(kernel: &Arc<Kernel>, self_id: &AgentId, client_id: &str,
     // id has no Agent and no watcher set: a watcher subscribes to the AGENT.
     if client_id == fantastic_kernel::inquiry::default_client_id() {
         // the terminal keeps its own feed through the `cli` agent as well
-        let _ = kernel
-            .send(vec![Item::new(AgentId::from("cli"), ev.clone())])
-            .await
-            .remove(0)
-            .result;
+        feed_cli(kernel, ev.clone()).await;
     }
     kernel.emit(self_id, ev).await;
+}
+
+/// The events on their way to the `cli` agent, in order, and whether one is out.
+#[derive(Default)]
+struct CliFeed {
+    queue: std::sync::Mutex<(bool, std::collections::VecDeque<Value>)>,
+}
+
+/// THE TERMINAL'S FEED, IN ORDER (#795): each event for the `cli` caller is a call to the
+/// `cli` agent, sent once the one before it settled (its continuation sends the next),
+/// so the terminal prints them in the order they happened and nothing waits.
+async fn feed_cli(kernel: &Arc<Kernel>, ev: Value) {
+    let feed = kernel.extension::<CliFeed>("ai_core.cli_feed");
+    {
+        let mut q = feed.queue.lock().expect("cli feed poisoned");
+        q.1.push_back(ev);
+        if q.0 {
+            return;
+        }
+        q.0 = true;
+    }
+    send_next(Arc::clone(kernel), feed).await;
+}
+
+/// Send the oldest queued event to the `cli` agent; its settle sends the next.
+fn send_next(kernel: Arc<Kernel>, feed: Arc<CliFeed>) -> futures_util::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        loop {
+            let ev = {
+                let mut q = feed.queue.lock().expect("cli feed poisoned");
+                match q.1.pop_front() {
+                    Some(ev) => ev,
+                    None => {
+                        q.0 = false;
+                        return;
+                    }
+                }
+            };
+            let (k, f) = (Arc::clone(&kernel), Arc::clone(&feed));
+            let ack = kernel
+                .call(Item::new(AgentId::from("cli"), ev), move |_| send_next(k, f))
+                .await;
+            if ack.status == fantastic_kernel::Status::Accepted {
+                return;
+            }
+            // refused at launch (no `cli` agent here): the next one goes now
+        }
+    })
 }
 
 /// Broadcast a structured `status` event AND update the current entry's

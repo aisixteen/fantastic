@@ -8,10 +8,9 @@
 //! ([`crate::model_format::map`]). The date is said once, in the system block's
 //! environment section, from the first row of the thread ([`day_of`]).
 
-use fantastic_kernel::{AgentId, Kernel};
+use fantastic_kernel::AgentId;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
 
 /// Every this many requests the parts are a full list again (a checkpoint), so a
 /// reader never replays more than this many deltas.
@@ -390,34 +389,24 @@ pub(crate) fn build(
     (parts, totals, next)
 }
 
-/// The `attributes` of the newest assistant row the chat holds, if it has one.
-async fn newest_attributes(self_id: &AgentId, kernel: &Arc<Kernel>) -> Option<Value> {
-    crate::memory::load_history(self_id, kernel, false)
-        .await
-        .ok()?
-        .iter()
+/// The `attributes` of the newest assistant row among `rows` (the history a pass read),
+/// if it has one.
+fn newest_attributes(rows: &[Value]) -> Option<&Value> {
+    rows.iter()
         .rev()
         .find(|r| r.get("role").and_then(Value::as_str) == Some("assistant"))?
         .get("attributes")
-        .cloned()
 }
 
-/// The totals of the newest assistant row the chat holds, if it has one.
-pub(crate) async fn seed_totals(self_id: &AgentId, kernel: &Arc<Kernel>) -> Option<Value> {
-    newest_attributes(self_id, kernel)
-        .await?
-        .get("totals")
-        .cloned()
+/// The totals of the newest assistant row among `rows`, if it has one.
+pub(crate) fn seed_totals(rows: &[Value]) -> Option<Value> {
+    newest_attributes(rows)?.get("totals").cloned()
 }
 
-/// The token counts since the chat's first pass, as the newest assistant row keeps them
-/// (`used.running`, #766 1.7), if it has them: a restart keeps counting.
-pub(crate) async fn seed_used(
-    self_id: &AgentId,
-    kernel: &Arc<Kernel>,
-) -> Option<crate::used::Used> {
-    let attrs = newest_attributes(self_id, kernel).await?;
-    crate::used::Used::from_value(attrs.get("used")?.get("running")?)
+/// The token counts since the chat's first pass, as the newest assistant row among `rows`
+/// keeps them (`used.running`, #766 1.7), if it has them: a restart keeps counting.
+pub(crate) fn seed_used(rows: &[Value]) -> Option<crate::used::Used> {
+    crate::used::Used::from_value(newest_attributes(rows)?.get("used")?.get("running")?)
 }
 
 /// `model`'s entry in a provider record's `prices`: its own, else the entry of the id

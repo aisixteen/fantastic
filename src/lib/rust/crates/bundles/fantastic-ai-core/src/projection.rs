@@ -10,7 +10,7 @@ use crate::constants::{BUDGET_FLOOR, NOTICE_ENVELOPE_RESERVE};
 use crate::context::{budget as agent_budget, recent_n as cfg_recent_n, resolve_context_window};
 use crate::events::to_caller;
 use crate::helpers::{agent_meta, now_secs};
-use crate::memory::{load_history, save_view, MemoryStoreError};
+use crate::memory::{save_view, MemoryStoreError};
 use crate::model_format::pass::Pass;
 use crate::state::BackendState;
 use crate::strategies::{
@@ -362,13 +362,19 @@ pub(crate) async fn project_context(
 /// Read-model over the durable transcript: AFTER the last compaction notice
 /// (its cursor), did the model react? Scans the same client's thread for
 /// `send` tool-calls — a `recall` to its OWN id, or a memory write
-/// (`write`/`patch`/`append`). The reaction IS the 'ack'; this derives it.
-/// `None` if no compaction has fired.
-pub async fn derive_reaction(
+/// (`write`/`patch`/`append`). The reaction IS the 'ack'; this derives it, and the
+/// next step gets it. `None` if no compaction has fired.
+pub async fn derive_reaction<R, F, Fut>(
     self_id: &AgentId,
     state: &Arc<BackendState>,
     kernel: &Arc<Kernel>,
-) -> Result<Option<Value>, MemoryStoreError> {
+    rec: R,
+    next: F,
+) where
+    R: Send + 'static,
+    F: FnOnce(R, Result<Option<Value>, MemoryStoreError>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
     let fired = state
         .projection
         .lock()
@@ -379,13 +385,15 @@ pub async fn derive_reaction(
     let mark = state.compaction_mark.lock().expect("mark poisoned").clone();
     let (idx, _client_id) = match (fired, mark) {
         (true, Some(m)) => m,
-        _ => return Ok(None),
+        _ => return next(rec, Ok(None)).await,
     };
-    let store = load_history(self_id, kernel, false).await?;
-    Ok(Some(reaction_from(
-        self_id.as_str(),
-        store.get(idx..).unwrap_or_default(),
-    )))
+    // the durable turns, read by a step (#795)
+    let me = self_id.as_str().to_string();
+    crate::steps::history(self_id, kernel, rec, move |rec, store| async move {
+        let r = store.map(|store| Some(reaction_from(&me, store.get(idx..).unwrap_or_default())));
+        next(rec, r).await;
+    })
+    .await;
 }
 
 /// The reaction read itself, over the durable turns AFTER the notice cursor: did

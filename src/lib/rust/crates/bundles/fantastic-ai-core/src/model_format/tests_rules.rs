@@ -43,12 +43,12 @@ fn state(tag: &str) -> Arc<crate::state::BackendState> {
 fn asker(
     count: &Arc<AtomicUsize>,
     answer: Option<&str>,
-) -> impl FnOnce(String) -> std::future::Ready<Option<Option<String>>> {
+) -> impl FnOnce(String) -> Option<Option<String>> {
     let count = Arc::clone(count);
     let answer = answer.map(str::to_string);
     move |_provider| {
         count.fetch_add(1, Ordering::SeqCst);
-        std::future::ready(Some(answer))
+        Some(answer)
     }
 }
 
@@ -56,11 +56,11 @@ fn asker(
 /// failed).
 fn unanswered(
     count: &Arc<AtomicUsize>,
-) -> impl FnOnce(String) -> std::future::Ready<Option<Option<String>>> {
+) -> impl FnOnce(String) -> Option<Option<String>> {
     let count = Arc::clone(count);
     move |_provider| {
         count.fetch_add(1, Ordering::SeqCst);
-        std::future::ready(None)
+        None
     }
 }
 
@@ -68,12 +68,12 @@ fn unanswered(
 fn newest(
     count: &Arc<AtomicUsize>,
     answer: Option<&str>,
-) -> impl FnOnce() -> std::future::Ready<Option<String>> {
+) -> impl FnOnce() -> Option<String> {
     let count = Arc::clone(count);
     let answer = answer.map(str::to_string);
     move || {
         count.fetch_add(1, Ordering::SeqCst);
-        std::future::ready(answer)
+        answer
     }
 }
 
@@ -312,8 +312,7 @@ async fn model_of_order() {
         &st,
         asker(&asks, Some("default-model")),
         newest(&rows, Some("row-model")),
-    )
-    .await;
+    );
     assert_eq!(got.as_deref(), Some("record-model"));
     assert_eq!(
         (asks.load(Ordering::SeqCst), rows.load(Ordering::SeqCst)),
@@ -323,15 +322,14 @@ async fn model_of_order() {
     // no record model: what the provider named beats the `models` default
     let st = state("order_seen");
     let m = meta(&[("provider_id", "p")]);
-    let _ = model_of_with(&m, &st, asker(&asks, None), newest(&rows, None)).await;
+    let _ = model_of_with(&m, &st, asker(&asks, None), newest(&rows, None));
     note_seen(&st, "seen-model");
     let got = model_of_with(
         &m,
         &st,
         asker(&asks, Some("default-model")),
         newest(&rows, Some("row-model")),
-    )
-    .await;
+    );
     assert_eq!(got.as_deref(), Some("seen-model"));
 
     // nothing seen: the `models` default beats the newest row
@@ -342,8 +340,7 @@ async fn model_of_order() {
         &st,
         asker(&asks, Some("default-model")),
         newest(&rows, Some("row-model")),
-    )
-    .await;
+    );
     assert_eq!(got.as_deref(), Some("default-model"));
     assert_eq!(
         (asks.load(Ordering::SeqCst), rows.load(Ordering::SeqCst)),
@@ -357,8 +354,7 @@ async fn model_of_order() {
         &st,
         asker(&asks, None),
         newest(&rows, Some("row-model")),
-    )
-    .await;
+    );
     assert_eq!(got.as_deref(), Some("row-model"));
     assert_eq!(rows.load(Ordering::SeqCst), 1);
 
@@ -369,20 +365,19 @@ async fn model_of_order() {
         &st,
         asker(&asks, Some("x")),
         newest(&rows, None),
-    )
-    .await;
+    );
     assert_eq!(got, None);
     assert_eq!(type_of(shipped(), got.as_deref().unwrap_or("")), DEFAULT);
 
     // a changed pair forgets what the provider named before
     let st = state("order_pair");
     let a = meta(&[("provider_id", "p1")]);
-    let _ = model_of_with(&a, &st, asker(&asks, None), newest(&rows, None)).await;
+    let _ = model_of_with(&a, &st, asker(&asks, None), newest(&rows, None));
     note_seen(&st, "qwen3-8b");
-    let got = model_of_with(&a, &st, asker(&asks, None), newest(&rows, None)).await;
+    let got = model_of_with(&a, &st, asker(&asks, None), newest(&rows, None));
     assert_eq!(got.as_deref(), Some("qwen3-8b"));
     let b = meta(&[("provider_id", "p2")]);
-    let got = model_of_with(&b, &st, asker(&asks, None), newest(&rows, None)).await;
+    let got = model_of_with(&b, &st, asker(&asks, None), newest(&rows, None));
     assert_eq!(got, None, "model_seen was for the other provider");
     assert!(st.model_seen.lock().unwrap().is_none());
 }
@@ -455,12 +450,11 @@ async fn models_default_before_first_pass() {
         &st,
         asker(&asks, Some("Qwen/Qwen3-8B")),
         newest(&rows, None),
-    )
-    .await;
+    );
     assert_eq!(got.as_deref(), Some("Qwen/Qwen3-8B"));
     assert_eq!(type_of(shipped(), got.as_deref().unwrap()), "hermes");
     // asked once per pair: the next pass keeps the answer
-    let got = model_of_with(&m, &st, asker(&asks, Some("other")), newest(&rows, None)).await;
+    let got = model_of_with(&m, &st, asker(&asks, Some("other")), newest(&rows, None));
     assert_eq!(got.as_deref(), Some("Qwen/Qwen3-8B"));
     assert_eq!(asks.load(Ordering::SeqCst), 1);
     // another pair is asked again
@@ -470,8 +464,7 @@ async fn models_default_before_first_pass() {
         &st,
         asker(&asks, Some("llama-3.1-8b")),
         newest(&rows, None),
-    )
-    .await;
+    );
     assert_eq!(got.as_deref(), Some("llama-3.1-8b"));
     assert_eq!(asks.load(Ordering::SeqCst), 2);
     assert_eq!(rows.load(Ordering::SeqCst), 0);
@@ -482,8 +475,7 @@ async fn models_default_before_first_pass() {
         &st,
         asker(&asks, Some("x")),
         newest(&rows, None),
-    )
-    .await;
+    );
     assert_eq!(got, None);
     assert_eq!(asks.load(Ordering::SeqCst), 2);
 }
@@ -510,7 +502,7 @@ async fn models_unanswered_is_default() {
     let (asks, rows) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
     let m = meta(&[("provider_id", "p")]);
     for _ in 0..3 {
-        let got = model_of_with(&m, &st, asker(&asks, None), newest(&rows, None)).await;
+        let got = model_of_with(&m, &st, asker(&asks, None), newest(&rows, None));
         assert_eq!(got, None);
         assert_eq!(type_of(shipped(), got.as_deref().unwrap_or("")), DEFAULT);
     }
@@ -520,11 +512,11 @@ async fn models_unanswered_is_default() {
     // follows the answer
     let st = state("models_no_answer_then_answer");
     let asks = Arc::new(AtomicUsize::new(0));
-    let got = model_of_with(&m, &st, unanswered(&asks), newest(&rows, None)).await;
+    let got = model_of_with(&m, &st, unanswered(&asks), newest(&rows, None));
     assert_eq!(got, None);
     assert_eq!(type_of(shipped(), got.as_deref().unwrap_or("")), DEFAULT);
     assert_eq!(asks.load(Ordering::SeqCst), 1);
-    let got = model_of_with(&m, &st, unanswered(&asks), newest(&rows, None)).await;
+    let got = model_of_with(&m, &st, unanswered(&asks), newest(&rows, None));
     assert_eq!(got, None);
     assert_eq!(asks.load(Ordering::SeqCst), 2);
     let got = model_of_with(
@@ -532,13 +524,12 @@ async fn models_unanswered_is_default() {
         &st,
         asker(&asks, Some("Qwen/Qwen3-8B")),
         newest(&rows, None),
-    )
-    .await;
+    );
     assert_eq!(got.as_deref(), Some("Qwen/Qwen3-8B"));
     assert_eq!(type_of(shipped(), got.as_deref().unwrap()), "hermes");
     assert_eq!(asks.load(Ordering::SeqCst), 3);
     // the answer is now kept
-    let got = model_of_with(&m, &st, unanswered(&asks), newest(&rows, None)).await;
+    let got = model_of_with(&m, &st, unanswered(&asks), newest(&rows, None));
     assert_eq!(got.as_deref(), Some("Qwen/Qwen3-8B"));
     assert_eq!(asks.load(Ordering::SeqCst), 3);
 }

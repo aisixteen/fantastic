@@ -702,13 +702,15 @@ async fn folds_at_a_small_window_and_every_turn_answers() {
     // how-to moves the window with the block.
     let block = as_agent(backend.clone(), async {
         let me = crate::assembly::self_reflect(&backend, &kernel).await;
+        let rows = crate::memory::load_history(&backend, &kernel, false).await.unwrap_or_default();
+        crate::assembly::refreshed(&backend, &kernel).await;
         crate::assembly::system_content(
             &backend,
             &kernel,
             crate::model_format::of(crate::model_format::DEFAULT),
             &me,
+            &rows,
         )
-        .await
     })
     .await
     .expect("the block");

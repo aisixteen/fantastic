@@ -92,26 +92,60 @@ fn normpath(p: &str) -> String {
     }
 }
 
-/// The file's text for this turn; `None` when `system_prompt_file` is not set
-/// (nothing is looked up — the default block). Set and unusable — no
-/// `file_bridge_id`, a refused or failed read, an empty file — is a
-/// [`PromptFileError`]: the turn fails loud, it never falls to another block. Runs
-/// in the agent's own turn, so every send here is the agent's.
-pub async fn text(
-    self_id: &AgentId,
-    kernel: &Arc<Kernel>,
-) -> Result<Option<String>, PromptFileError> {
+/// Where the next step goes once the file is current ([`refresh`]).
+type Next<R> = Box<dyn FnOnce(R) -> futures_util::future::BoxFuture<'static, ()> + Send>;
+
+/// BRING THE FILE CURRENT for this pass, as STEPS (#795): the view watched and its
+/// change relay armed the first time a pass needs it (or when the record names another
+/// view or path), the file read again when the view reported it changed — each call a
+/// step, whose settle is the next one; then `next`. Nothing is looked up when
+/// `system_prompt_file` is not set (the default block), and a file held before is
+/// dropped; nor when the record's own `system_prompt` is in force. What the pass then
+/// reads is [`current`].
+pub(crate) async fn refresh<R, F, Fut>(self_id: &AgentId, kernel: &Arc<Kernel>, rec: R, next: F)
+where
+    R: Send + 'static,
+    F: FnOnce(R) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
     let meta = crate::helpers::agent_meta(self_id, kernel);
-    let wanted = ref_of(&meta);
+    // the record's own `system_prompt` beats the file: nothing is looked up then
+    if crate::record::record_system_prompt(&meta).is_some() {
+        return next(rec).await;
+    }
     let held = files()
         .lock()
         .expect("prompt files")
         .get(self_id.as_str())
         .map(|s| (s.file.clone(), s.task.is_some()));
-    let Some(file) = wanted else {
+    let Some(file) = ref_of(&meta) else {
         if held.is_some() {
             drop_file(self_id, kernel).await;
         }
+        return next(rec).await;
+    };
+    let next: Next<R> = Box::new(move |rec| Box::pin(next(rec)));
+    match held {
+        Some((f, _)) if f != file => {
+            drop_file(self_id, kernel).await;
+            arm(self_id, kernel, file, rec, next).await;
+        }
+        // arming failed on an earlier pass — the same one path, again
+        Some((_, false)) | None => arm(self_id, kernel, file, rec, next).await,
+        Some(_) => reread(self_id, kernel, file, rec, next).await,
+    }
+}
+
+/// The file's text for this pass, as [`refresh`] left it; `None` when
+/// `system_prompt_file` is not set (the default block). Set and unusable — no
+/// `file_bridge_id`, a refused or failed read, an empty file — is a
+/// [`PromptFileError`]: the pass fails loud, it never falls to another block.
+///
+/// # Errors
+/// The file is set and unusable, or no refresh has read it yet.
+pub(crate) fn current(self_id: &AgentId, kernel: &Kernel) -> Result<Option<String>, PromptFileError> {
+    let meta = crate::helpers::agent_meta(self_id, kernel);
+    if ref_of(&meta).is_none() {
         if let Some(path) = named(&meta, "system_prompt_file") {
             return Err(PromptFileError(format!(
                 "{self_id}: system_prompt_file {} is set but the record has no file_bridge_id \
@@ -120,52 +154,17 @@ pub async fn text(
             )));
         }
         return Ok(None);
-    };
-    match held {
-        Some((f, _)) if f != file => {
-            drop_file(self_id, kernel).await;
-            arm(self_id, kernel, file.clone()).await;
-        }
-        // arming failed on an earlier turn — the same one path, again
-        Some((_, false)) | None => arm(self_id, kernel, file.clone()).await,
-        Some(_) => {}
-    }
-    let (stale, armed) = {
-        let all = files().lock().expect("prompt files");
-        let st = all.get(self_id.as_str()).expect("armed above");
-        (Arc::clone(&st.stale), st.task.is_some())
-    };
-    if armed && stale.swap(false, Ordering::SeqCst) {
-        let (mut txt, mut err) = read(kernel, &file.0, &file.1).await;
-        if err.is_none() && txt.as_deref().is_some_and(|t| py_strip(t).is_empty()) {
-            txt = None;
-            err = Some(format!("{} {}: the file is empty", file.0, file.1));
-        }
-        if let Some(st) = files()
-            .lock()
-            .expect("prompt files")
-            .get_mut(self_id.as_str())
-        {
-            st.text = txt;
-            st.error = err;
-        }
     }
     let all = files().lock().expect("prompt files");
-    let st = all.get(self_id.as_str()).expect("armed above");
-    match &st.error {
-        Some(e) => Err(PromptFileError(format!(
+    match all.get(self_id.as_str()) {
+        Some(FileState { error: Some(e), .. }) => Err(PromptFileError(format!(
             "{self_id}: system_prompt_file: {e}"
         ))),
-        None => Ok(st.text.clone()),
+        Some(st) => Ok(st.text.clone()),
+        None => Err(PromptFileError(format!(
+            "{self_id}: system_prompt_file: not read yet"
+        ))),
     }
-}
-
-async fn send(kernel: &Arc<Kernel>, target: &str, payload: Value) -> (Status, Value) {
-    let out = kernel
-        .send(vec![Item::new(AgentId::from(target), payload)])
-        .await
-        .remove(0);
-    (out.status, out.result)
 }
 
 fn why(status: Status, res: &Value) -> String {
@@ -178,16 +177,28 @@ fn failed(status: Status, res: &Value) -> bool {
         || res.get("error").is_some_and(|e| !e.is_null())
 }
 
+/// Set why the file is unusable.
+fn set_error(self_id: &AgentId, e: String) {
+    if let Some(st) = files()
+        .lock()
+        .expect("prompt files")
+        .get_mut(self_id.as_str())
+    {
+        st.error = Some(e);
+    }
+}
+
 /// Watch the view (its events reach a private inbox), then arm its change relay
-/// (`watch`) — the watch first, so no change between the two is missed.
-async fn arm(self_id: &AgentId, kernel: &Arc<Kernel>, file: (String, String)) {
+/// (`watch`, a step) — the watch first, so no change between the two is missed; then
+/// the first read.
+async fn arm<R: Send + 'static>(self_id: &AgentId, kernel: &Arc<Kernel>, file: (String, String), rec: R, next: Next<R>) {
     let (view, path) = file.clone();
     let inbox = AgentId::from(format!("{}/prompt_file", self_id.as_str()));
     let stale = Arc::new(AtomicBool::new(true));
     files().lock().expect("prompt files").insert(
         self_id.as_str().to_string(),
         FileState {
-            file,
+            file: file.clone(),
             text: None,
             stale: Arc::clone(&stale),
             error: None,
@@ -195,54 +206,141 @@ async fn arm(self_id: &AgentId, kernel: &Arc<Kernel>, file: (String, String)) {
             task: None,
         },
     );
-    let set_error = |e: String| {
-        if let Some(st) = files()
-            .lock()
-            .expect("prompt files")
-            .get_mut(self_id.as_str())
-        {
-            st.error = Some(e);
-        }
-    };
     let view_id = AgentId::from(view.as_str());
     let mut rx = kernel.ensure_inbox(&inbox);
     if let Some(denial) = kernel.watch(&view_id, inbox.clone()).await {
         kernel.remove_inbox(&inbox);
-        set_error(format!(
-            "{view} watch: {}",
-            fantastic_kernel::refusal::error_text(&denial).unwrap_or_default()
-        ));
-        return;
+        set_error(
+            self_id,
+            format!(
+                "{view} watch: {}",
+                fantastic_kernel::refusal::error_text(&denial).unwrap_or_default()
+            ),
+        );
+        return next(rec).await;
     }
-    let (status, res) = send(kernel, &view, json!({"type": "watch"})).await;
-    if failed(status, &res) {
-        kernel.unwatch(&view_id, &inbox).await;
-        kernel.remove_inbox(&inbox);
-        set_error(format!("{view} watch {path}: {}", why(status, &res)));
-        return;
-    }
-    let norm = normpath(&path);
-    let tid = kernel.spawn_task(self_id, "prompt_file", async move {
-        while let Some(item) = rx.recv().await {
-            let p = &item.payload;
-            if p.get("type").and_then(Value::as_str) == Some("changed")
-                && p.get("path")
-                    .and_then(Value::as_str)
-                    .map(normpath)
-                    .as_deref()
-                    == Some(&norm)
-            {
-                stale.store(true, Ordering::SeqCst);
-            }
+    let item = Item::new(view_id.clone(), json!({"type": "watch"}));
+    let (k, me) = (Arc::clone(kernel), self_id.clone());
+    crate::steps::call(kernel, item, rec, move |rec, out| async move {
+        if failed(out.status, &out.result) {
+            k.unwatch(&view_id, &inbox).await;
+            k.remove_inbox(&inbox);
+            set_error(&me, format!("{view} watch {path}: {}", why(out.status, &out.result)));
+            return next(rec).await;
         }
-    });
-    if let Some(st) = files()
+        let norm = normpath(&path);
+        let tid = k.spawn_task(&me, "prompt_file", async move {
+            while let Some(item) = rx.recv().await {
+                let p = &item.payload;
+                if p.get("type").and_then(Value::as_str) == Some("changed")
+                    && p.get("path")
+                        .and_then(Value::as_str)
+                        .map(normpath)
+                        .as_deref()
+                        == Some(&norm)
+                {
+                    stale.store(true, Ordering::SeqCst);
+                }
+            }
+        });
+        if let Some(st) = files()
+            .lock()
+            .expect("prompt files")
+            .get_mut(me.as_str())
+        {
+            st.task = Some(tid);
+        }
+        reread(&me, &k, file, rec, next).await;
+    })
+    .await;
+}
+
+/// Read the file again when the view said it changed (or it was never read): its text
+/// or why not is kept; then `next`.
+async fn reread<R: Send + 'static>(self_id: &AgentId, kernel: &Arc<Kernel>, file: (String, String), rec: R, next: Next<R>) {
+    let held = files()
         .lock()
         .expect("prompt files")
-        .get_mut(self_id.as_str())
-    {
-        st.task = Some(tid);
+        .get(self_id.as_str())
+        .map(|st| (Arc::clone(&st.stale), st.task.is_some()));
+    let Some((stale, armed)) = held else {
+        return next(rec).await;
+    };
+    if !(armed && stale.swap(false, Ordering::SeqCst)) {
+        return next(rec).await;
     }
+    let me = self_id.clone();
+    let lines: ReadLines<(R, Next<R>, (String, String))> = Box::new(move |(rec, next, file), r| {
+        Box::pin(async move {
+            let (mut txt, mut err) = match r {
+                Ok(t) => (Some(t), None),
+                Err(e) => (None, Some(e)),
+            };
+            if err.is_none() && txt.as_deref().is_some_and(|t| py_strip(t).is_empty()) {
+                txt = None;
+                err = Some(format!("{} {}: the file is empty", file.0, file.1));
+            }
+            if let Some(st) = files()
+                .lock()
+                .expect("prompt files")
+                .get_mut(me.as_str())
+            {
+                st.text = txt;
+                st.error = err;
+            }
+            next(rec).await;
+        })
+    });
+    let (view, path) = file.clone();
+    read_lines(Arc::clone(kernel), view, path, Vec::new(), (rec, next, file), lines).await;
+}
+
+/// The step that gets a whole file's text, or why not.
+type ReadLines<R> =
+    Box<dyn FnOnce(R, Result<String, String>) -> futures_util::future::BoxFuture<'static, ()> + Send>;
+
+/// The whole file through the view's `read`, page by page, as STEPS: its lines joined
+/// again, with the trailing newline it had. The view refuses a binary or non-utf-8
+/// file itself.
+fn read_lines<R: Send + 'static>(
+    kernel: Arc<Kernel>,
+    view: String,
+    path: String,
+    mut lines: Vec<String>,
+    rec: R,
+    next: ReadLines<R>,
+) -> futures_util::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        let offset = lines.len();
+        let item = Item::new(
+            AgentId::from(view.as_str()),
+            json!({"type": "read", "path": path, "offset": offset}),
+        );
+        let k = Arc::clone(&kernel);
+        crate::steps::call(&kernel, item, rec, move |rec, out| async move {
+            let res = out.result;
+            if failed(out.status, &res) {
+                let why = format!("{view} read {path}: {}", why(out.status, &res));
+                return next(rec, Err(why)).await;
+            }
+            let page = res.get("lines").and_then(Value::as_array);
+            lines.extend(
+                page.into_iter()
+                    .flatten()
+                    .filter_map(|l| l.get("text").and_then(Value::as_str))
+                    .map(str::to_string),
+            );
+            if res.get("eof").and_then(Value::as_bool) == Some(true) || lines.len() == offset {
+                let mut text = lines.join("\n");
+                if res.get("newline").and_then(Value::as_bool) == Some(true) {
+                    text.push('\n');
+                }
+                return next(rec, Ok(text)).await;
+            }
+            read_lines(k, view, path, lines, rec, next).await;
+        })
+        .await;
+    })
 }
 
 /// The whole file through `read_stream`, as STEPS (#795): one page per call, each
@@ -293,43 +391,6 @@ fn read_page<R: Send + 'static>(
         })
         .await;
     })
-}
-
-/// The whole file through the view's `read`, page by page: its lines joined again,
-/// with the trailing newline it had → (text, None) or (None, why). The view refuses
-/// a binary or non-utf-8 file itself.
-async fn read(kernel: &Arc<Kernel>, view: &str, path: &str) -> (Option<String>, Option<String>) {
-    let mut lines: Vec<String> = Vec::new();
-    let newline = loop {
-        let offset = lines.len();
-        let (status, res) = send(
-            kernel,
-            view,
-            json!({"type": "read", "path": path, "offset": offset}),
-        )
-        .await;
-        if failed(status, &res) {
-            return (
-                None,
-                Some(format!("{view} read {path}: {}", why(status, &res))),
-            );
-        }
-        let page = res.get("lines").and_then(Value::as_array);
-        lines.extend(
-            page.into_iter()
-                .flatten()
-                .filter_map(|l| l.get("text").and_then(Value::as_str))
-                .map(str::to_string),
-        );
-        if res.get("eof").and_then(Value::as_bool) == Some(true) || lines.len() == offset {
-            break res.get("newline").and_then(Value::as_bool) == Some(true);
-        }
-    };
-    let mut text = lines.join("\n");
-    if newline {
-        text.push('\n');
-    }
-    (Some(text), None)
 }
 
 /// Stop watching: the drain task, the watch on the view, the inbox. The view's own

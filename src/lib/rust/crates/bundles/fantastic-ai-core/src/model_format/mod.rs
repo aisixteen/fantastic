@@ -300,19 +300,6 @@ pub(crate) fn of(kind: &str) -> &'static Decl<'static> {
     declared(kind).unwrap_or_else(|| panic!("model type `{kind}` is not registered"))
 }
 
-/// The type of the chat's next pass: [`rules::type_of`] over [`rules::model_of`], on the
-/// chat's own state, for a reader that has no pass (a `dry` `context_recall` sizing the
-/// block): the `models` ask is made once per `(provider_id, model)` pair.
-pub(crate) async fn type_now(
-    self_id: &fantastic_kernel::AgentId,
-    kernel: &std::sync::Arc<fantastic_kernel::Kernel>,
-    meta: &serde_json::Map<String, serde_json::Value>,
-) -> &'static str {
-    let state = crate::state::state_for(self_id);
-    let id = rules::model_of(self_id, kernel, meta, &state).await;
-    rules::type_of(rules::shipped(), id.as_deref().unwrap_or_default())
-}
-
 /// A resource text with each `{key}` replaced by its value, in one pass: a value is never
 /// scanned again, and a `{…}` that names no key stays as written. No other markup.
 pub(crate) fn fill(template: &str, values: &[(&str, &str)]) -> String {

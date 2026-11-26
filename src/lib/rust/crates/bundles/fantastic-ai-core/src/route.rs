@@ -575,9 +575,24 @@ async fn keep_note(
                 .to_string(),
         );
     };
-    crate::memory::save_keep(self_id, kernel, of, summary)
-        .await
-        .err()
+    if let Err(why) = crate::memory::keep_check(self_id, kernel, of) {
+        return Some(why);
+    }
+    // THE `keep` ROW (the stores only append), written by a step (#795); a store that
+    // refuses it is told to the agent as a notice
+    let row = json!({"kind": "keep", "of": of, "summary": summary});
+    let (k, me) = (Arc::clone(kernel), self_id.clone());
+    crate::life::owe(self_id, 1);
+    crate::steps::append(self_id, kernel, &[row], (), move |(), r| async move {
+        if let Err(e) = r {
+            let text = format!("[reply to - \u{b7} - -]\nkeep: {}", e.0);
+            let cid = fantastic_kernel::inquiry::default_client_id();
+            deliver(&k, &me, me.as_str(), &text, &cid, Born::of(me.as_str()), true, true).await;
+        }
+        crate::life::owe(&me, -1);
+    })
+    .await;
+    None
 }
 
 /// Drop a deleted agent's open inquiries ([`crate::verbs::on_delete`]).

@@ -56,6 +56,7 @@ crate::stand_in_verbs!(rcv_verbs {
     DeferV "defer" {  },
     AskV "ask" { to: Option<String>, reply_to: Option<String> },
     CallThenV "call_then" { to: Option<String> },
+    AskForV "ask_for" { to: Option<String> },
 });
 
 #[async_trait]
@@ -138,6 +139,18 @@ impl Handler for Rcv {
                 let seen = Arc::clone(&self.seen);
                 let ack = kernel
                     .call(Item::new(to, json!({"type": "work"})), move |o| async move {
+                        let me = crate::send::current_sender().map(|s| s.0);
+                        seen.thens.lock().unwrap().push((me, o));
+                    })
+                    .await;
+                ack.to_value()
+            }
+            "ask_for" => {
+                let to = AgentId::from(p["to"].as_str().unwrap_or(""));
+                let seen = Arc::clone(&self.seen);
+                let asker = crate::Asker::current().expect("a dispatch has an asker");
+                let ack = kernel
+                    .call_for(&asker, Item::new(to, json!({"type": "work"})), move |o| async move {
                         let me = crate::send::current_sender().map(|s| s.0);
                         seen.thens.lock().unwrap().push((me, o));
                     })
@@ -529,4 +542,43 @@ async fn a_delivery_leaves_the_settle_row_byte_for_byte() {
     assert_eq!(during.len(), 1);
     let after = serde_json::to_string(&settles(&k, pid)[0]).unwrap();
     assert_eq!(during[0], after, "the settle row is never touched");
+}
+
+/// A CALL FOR THE ASKER: the item goes out as the agent that asked for the running verb,
+/// gated as it — `a` holds no line on `b`, its asker `x` does — and its continuation
+/// runs as the agent that made the call; an asker without the line is refused at launch.
+#[tokio::test]
+async fn a_call_for_the_asker_is_gated_as_it_and_continues_as_the_caller() {
+    let seen = Arc::new(Seen::default());
+    let k = mk(&seen);
+    agent(&k, "a", Value::Null).await;
+    agent(&k, "b", Value::Null).await;
+    agent(&k, "x", json!({"a": {"call": ["*"]}, "b": {"call": ["*"]}})).await;
+    agent(&k, "y", json!({"a": {"call": ["*"]}})).await;
+    let ack = as_agent(
+        AgentId::from("x"),
+        k.send(vec![Item::new(AgentId::from("a"), json!({"type": "ask_for", "to": "b"}))]),
+    )
+    .await
+    .remove(0)
+    .result;
+    assert_eq!(ack["status"], json!("accepted"), "{ack}");
+    assert!(until(|| !seen.thens().is_empty()).await);
+    let thens = seen.thens();
+    assert_eq!(thens[0].0.as_deref(), Some("a"), "the continuation is a's");
+    assert_eq!(thens[0].1.status, Status::Completed, "{:?}", thens[0].1);
+    assert_eq!(thens[0].1.result, json!({"done": true}));
+    // y may call a, not b: the call for y is refused at launch
+    let refused = as_agent(
+        AgentId::from("y"),
+        k.send(vec![Item::new(AgentId::from("a"), json!({"type": "ask_for", "to": "b"}))]),
+    )
+    .await
+    .remove(0)
+    .result;
+    assert_ne!(refused["status"], json!("accepted"), "{refused}");
+    assert!(refused["pid"].is_null(), "{refused}");
+    assert!(refused["result"]["error"].is_string(), "{refused}");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(seen.thens().len(), 1, "a refused call has no settle");
 }

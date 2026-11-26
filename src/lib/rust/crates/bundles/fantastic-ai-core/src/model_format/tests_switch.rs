@@ -458,10 +458,9 @@ async fn unknown_model_is_default() {
     let got = model_of_with(
         &meta,
         &state,
-        |_| async { None::<Option<String>> },
-        || async { None::<String> },
-    )
-    .await;
+        |_| None::<Option<String>>,
+        || None::<String>,
+    );
     assert_eq!(got, None);
     // the endpoint names no model either
     let p = Scripted::new("", vec![]);
@@ -521,32 +520,29 @@ async fn provider_change_forgets_model() {
         m.insert(crate::remote_provider::PROVIDER_FIELD.to_string(), json!(p));
         m
     };
-    let none = || async { None::<String> };
+    let none = || None::<String>;
     let _ = model_of_with(
         &meta("p1"),
         &state,
-        |_| async { None::<Option<String>> },
+        |_| None::<Option<String>>,
         none,
-    )
-    .await;
+    );
     note_seen(&state, QWEN);
     let got = model_of_with(
         &meta("p1"),
         &state,
-        |_| async { None::<Option<String>> },
+        |_| None::<Option<String>>,
         none,
-    )
-    .await;
+    );
     assert_eq!(got.as_deref(), Some(QWEN));
     assert_eq!(type_of(shipped(), got.as_deref().unwrap()), hermes::NAME);
     // the record names another provider
     let got = model_of_with(
         &meta("p2"),
         &state,
-        |_| async { None::<Option<String>> },
+        |_| None::<Option<String>>,
         none,
-    )
-    .await;
+    );
     assert_eq!(got, None, "model_seen was the old provider's");
     assert!(state.model_seen.lock().unwrap().is_none());
     assert_eq!(type_of(shipped(), got.as_deref().unwrap_or("")), DEFAULT);
@@ -555,10 +551,9 @@ async fn provider_change_forgets_model() {
     let got = model_of_with(
         &meta("p2"),
         &state,
-        |_| async { None::<Option<String>> },
+        |_| None::<Option<String>>,
         none,
-    )
-    .await;
+    );
     assert_eq!(got.as_deref(), Some("llama-3.1-8b-instruct"));
     assert_eq!(type_of(shipped(), got.as_deref().unwrap()), DEFAULT);
     crate::state::drop_state(&fantastic_kernel::AgentId::from("sw_m17"));

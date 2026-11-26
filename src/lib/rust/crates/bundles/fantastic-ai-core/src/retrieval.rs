@@ -21,7 +21,7 @@ use crate::folds::member_anchor;
 use crate::folds::{expand_ids, quoted_title, render as fold_render, row_content, row_id};
 use crate::helpers::{agent_meta, now_secs};
 use crate::history_view::{parse_reply_tag, reply_blocks};
-use crate::memory::{head, load_history, save_history, save_view, store_call, MemResult};
+use crate::memory::{load_history, save_history, save_view};
 use crate::model_format::pass::Pass;
 use crate::strategies::fold::{fold_down, fold_row, summarize_span, summary_title};
 use crate::strategies::strip::{pid_of, LOW};
@@ -54,50 +54,88 @@ pub fn as_id(x: &Value) -> Option<i64> {
 /// `model_window` is the backend's own window
 /// ([`crate::agent_loop::BackendConfig::model_window`]) — the inline cap a page
 /// is measured against.
-pub async fn grep(
+pub(crate) async fn grep(
     agent_id: &AgentId,
-    args: &crate::declared::Grep,
+    args: crate::declared::Grep,
     kernel: &Arc<Kernel>,
     model_window: i64,
-) -> MemResult<Value> {
+    settle: crate::steps::Settle,
+) {
+    // A fold id is a DESCENT: the whole conversation is read first (a step, #795)
+    if args.ids.is_some() {
+        let (me, k) = (agent_id.clone(), Arc::clone(kernel));
+        crate::steps::whole(agent_id, kernel, (args, settle), move |(args, settle), r| async move {
+            match r {
+                Ok(rows) => search(&me, &k, args, model_window, Some(&rows), settle).await,
+                Err(e) => settle.with(Err::<Value, _>(e)),
+            }
+        })
+        .await;
+    } else {
+        search(agent_id, kernel, args, model_window, None, settle).await;
+    }
+}
+
+/// What a grep has found so far: each line once, its address the first occurrence's.
+struct Found {
+    matches: Vec<Value>,
+    total: usize,
+    seen: HashSet<String>,
+    limit: usize,
+    width: usize,
+}
+
+impl Found {
+    /// IDENTICAL LINES ONCE. A task the human repeats per delivery can match dozens of
+    /// times in one run and push the one body hit past the inline cap. The first
+    /// occurrence keeps its address.
+    fn take(&mut self, rid: Value, n: Value, line: &str) {
+        let key = py_split_whitespace(line).join(" ");
+        if !self.seen.insert(key) {
+            return;
+        }
+        self.total += 1;
+        if self.matches.len() < self.limit {
+            let cut: String = py_strip(line).chars().take(self.width).collect();
+            self.matches.push(json!({"id": rid, "line": n, "text": cut}));
+        }
+    }
+}
+
+/// The grep over the bodies held this run, then the store's own `search` (a step);
+/// `rows`, the whole conversation when `ids` scope it.
+async fn search(
+    agent_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    args: crate::declared::Grep,
+    model_window: i64,
+    rows: Option<&[Value]>,
+    settle: crate::steps::Settle,
+) {
     let q = args.query.to_lowercase();
     let limit = args.limit as usize;
     let width = args.width as usize;
     let ids: Option<Vec<i64>> = args.ids.clone();
-
-    let mut matches: Vec<Value> = Vec::new();
-    let mut total = 0usize;
-    let mut seen_lines: HashSet<String> = HashSet::new();
-    // IDENTICAL LINES ONCE. A task the human repeats per delivery can match dozens
-    // of times in one run and push the one body hit past the inline cap. The first
-    // occurrence keeps its address.
-    let mut take =
-        |rid: Value, n: Value, line: &str, matches: &mut Vec<Value>, total: &mut usize| {
-            let key = py_split_whitespace(line).join(" ");
-            if !seen_lines.insert(key) {
-                return;
-            }
-            *total += 1;
-            if matches.len() < limit {
-                let cut: String = py_strip(line).chars().take(width).collect();
-                matches.push(json!({"id": rid, "line": n, "text": cut}));
-            }
-        };
-
+    let mut found = Found {
+        matches: Vec::new(),
+        total: 0,
+        seen: HashSet::new(),
+        limit,
+        width,
+    };
     // BODIES FIRST: what a grep is for is the line inside a body never read
     // whole — rows that merely mention the query come after, so the content hit is
     // never the one the inline cap cuts. Bodies live in RAM for this run only.
     let bodies = crate::memory::bodies(agent_id, kernel);
     let mut in_reach: Option<HashSet<i64>> = None;
-    if let Some(ids) = &ids {
+    if let (Some(ids), Some(rows)) = (&ids, rows) {
         // A fold id is a DESCENT: its members are reply rows, and their bodies
         // hang off the pids on their tags (a descent that ignores them finds
         // nothing). An id that is itself a pid counts.
-        let rows = load_history(agent_id, kernel, true).await?;
-        let scope: HashSet<i64> = expand_ids(&rows, ids).into_iter().collect();
+        let scope: HashSet<i64> = expand_ids(rows, ids).into_iter().collect();
         let mut reach: HashSet<i64> = ids.iter().copied().collect();
         reach.extend(scope.iter().copied());
-        for m in &rows {
+        for m in rows {
             if !row_id(m).is_some_and(|i| scope.contains(&i)) {
                 continue;
             }
@@ -119,11 +157,11 @@ pub async fn grep(
         }
         for (n, line) in py_splitlines(text).into_iter().enumerate() {
             if line.to_lowercase().contains(&q) {
-                take(json!(pid), json!(n + 1), line, &mut matches, &mut total);
+                found.take(json!(pid), json!(n + 1), line);
             }
         }
     }
-    // YOUR ROWS — the WHOLE conversation, searched by the store itself.
+    // YOUR ROWS — the WHOLE conversation, searched by the store itself (a step).
     let mut req = Map::new();
     req.insert("type".to_string(), json!("search"));
     req.insert("query".to_string(), json!(q));
@@ -132,46 +170,51 @@ pub async fn grep(
     if let Some(ids) = &ids {
         req.insert("ids".to_string(), json!(ids));
     }
-    let res = store_call(agent_id, kernel, Value::Object(req)).await?;
-    for m in res
-        .get("matches")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-    {
-        let text = m
-            .get("text")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        take(
-            m.get("id").cloned().unwrap_or(Value::Null),
-            m.get("line").cloned().unwrap_or(json!(0)),
-            &text,
-            &mut matches,
-            &mut total,
-        );
-    }
-    let (kept, cut) = fit_reply(
-        &matches,
-        inline_cap(&agent_meta(agent_id, kernel), model_window),
-        Some(limit as i64),
-    );
-    let more = cut || total > kept.len();
-    // PYTHON'S KEY ORDER: matches, total, truncated, next.
-    let mut out = Map::new();
-    out.insert("matches".to_string(), json!(kept));
-    out.insert("total".to_string(), json!(total));
-    out.insert("truncated".to_string(), json!(more));
-    if more {
-        if let Some(last) = kept.last() {
-            out.insert(
-                "next".to_string(),
-                json!({"id": last.get("id"), "line": last.get("line")}),
+    let (me, k) = (agent_id.clone(), Arc::clone(kernel));
+    crate::steps::store(agent_id, kernel, Value::Object(req), None, (found, settle), move |(mut found, settle), r| async move {
+        let res = match r {
+            Ok((res, _)) => res,
+            Err(e) => return settle.with(Err::<Value, _>(e)),
+        };
+        for m in res
+            .get("matches")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+        {
+            let text = m
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            found.take(
+                m.get("id").cloned().unwrap_or(Value::Null),
+                m.get("line").cloned().unwrap_or(json!(0)),
+                &text,
             );
         }
-    }
-    Ok(Value::Object(out))
+        let (kept, cut) = fit_reply(
+            &found.matches,
+            inline_cap(&agent_meta(&me, &k), model_window),
+            Some(found.limit as i64),
+        );
+        let more = cut || found.total > kept.len();
+        // PYTHON'S KEY ORDER: matches, total, truncated, next.
+        let mut out = Map::new();
+        out.insert("matches".to_string(), json!(kept));
+        out.insert("total".to_string(), json!(found.total));
+        out.insert("truncated".to_string(), json!(more));
+        if more {
+            if let Some(last) = kept.last() {
+                out.insert(
+                    "next".to_string(),
+                    json!({"id": last.get("id"), "line": last.get("line")}),
+                );
+            }
+        }
+        settle.with(Ok::<_, crate::memory::MemoryStoreError>(Value::Object(out)));
+    })
+    .await;
 }
 
 const RECALL_PROMPT: &str = "You are rebuilding your own working context. Below is the HEAD of your
@@ -232,33 +275,35 @@ async fn compose(pass: &Pass, prompt: &str) -> String {
 ///
 /// args: `why?` (a sentence, whitespace-collapsed and capped at 200). Returns
 /// `{cleared, rows}`. Mirrors python `_context_clear`.
-pub async fn context_clear(
+pub(crate) async fn context_clear(
     agent_id: &AgentId,
-    why: Option<&str>,
+    why: Option<String>,
     kernel: &Arc<Kernel>,
     model_window: i64,
-) -> MemResult<Value> {
-    let meta = agent_meta(agent_id, kernel);
-    let members: Vec<i64> = head(agent_id, kernel)
-        .await?
-        .iter()
-        .filter(|r| {
-            !r.get("kind")
-                .and_then(Value::as_str)
-                .is_some_and(|k| crate::memory::BOOKKEEPING.contains(&k))
-        })
-        .filter_map(|r| r.get("id").and_then(Value::as_i64))
-        .collect();
-    let why: String = py_split_whitespace(why.unwrap_or(""))
-        .join(" ")
-        .chars()
-        .take(200)
-        .collect();
-    let rid = kernel.mint_id();
-    save_history(
-        agent_id,
-        kernel,
-        &[json!({
+    settle: crate::steps::Settle,
+) {
+    // the head (a step), the clear row and the emptied view (one append each, steps)
+    let (me, k) = (agent_id.clone(), Arc::clone(kernel));
+    crate::steps::head(agent_id, kernel, (why, settle), move |(why, settle), head| async move {
+        let members: Vec<i64> = match head {
+            Ok(h) => h
+                .iter()
+                .filter(|r| {
+                    !r.get("kind")
+                        .and_then(Value::as_str)
+                        .is_some_and(|k| crate::memory::BOOKKEEPING.contains(&k))
+                })
+                .filter_map(|r| r.get("id").and_then(Value::as_i64))
+                .collect(),
+            Err(e) => return settle.with(Err::<Value, _>(e)),
+        };
+        let why: String = py_split_whitespace(why.as_deref().unwrap_or(""))
+            .join(" ")
+            .chars()
+            .take(200)
+            .collect();
+        let rid = k.mint_id();
+        let row = json!({
             "role": "user",
             "id": rid,
             "parent": Value::Null,
@@ -271,31 +316,39 @@ pub async fn context_clear(
                 members.len(),
                 if why.is_empty() { String::new() } else { format!(" {why}") }
             ),
-        })],
-    )
-    .await?;
-    // The persisted view names rows behind the clear — empty it, so the view is the
-    // store from the clear on. RAM is scratch; the store is never cleared.
-    save_view(
-        agent_id,
-        kernel,
-        &[],
-        &[],
-        agent_budget(&meta, model_window),
-        "cleared",
-    )
-    .await?;
-    let st = crate::state::state_for(agent_id);
-    *st.projection.lock().expect("projection poisoned") = None;
-    *st.compaction_mark.lock().expect("mark poisoned") = None;
-    crate::strategies::strip::forget(agent_id.as_str());
-    *st.folds_since.lock().expect("folds_since poisoned") = 0;
-    *st.recall_due.lock().expect("recall_due poisoned") = false;
-    // A NEW THREAD: the messages not read yet belong to the old one, and wake nothing.
-    st.life.lock().expect("life poisoned").unread.clear();
-    st.changed();
-    *st.view_source.lock().expect("view_source poisoned") = None;
-    Ok(json!({"cleared": rid, "rows": members.len()}))
+        });
+        let (me2, k2) = (me.clone(), Arc::clone(&k));
+        crate::steps::append(&me, &k, &[row], settle, move |settle, r| async move {
+            if let Err(e) = r {
+                return settle.with(Err::<Value, _>(e));
+            }
+            // The persisted view names rows behind the clear — empty it, so the view is the
+            // store from the clear on. RAM is scratch; the store is never cleared.
+            let budget = agent_budget(&agent_meta(&me2, &k2), model_window);
+            let me3 = me2.clone();
+            crate::steps::save_view(&me2, &k2, &[], &[], budget, "cleared", settle, move |settle, r| async move {
+                if let Err(e) = r {
+                    return settle.with(Err::<Value, _>(e));
+                }
+                let st = crate::state::state_for(&me3);
+                *st.projection.lock().expect("projection poisoned") = None;
+                *st.compaction_mark.lock().expect("mark poisoned") = None;
+                crate::strategies::strip::forget(me3.as_str());
+                *st.folds_since.lock().expect("folds_since poisoned") = 0;
+                *st.recall_due.lock().expect("recall_due poisoned") = false;
+                // A NEW THREAD: the messages not read yet belong to the old one, and wake nothing.
+                st.life.lock().expect("life poisoned").unread.clear();
+                st.changed();
+                *st.view_source.lock().expect("view_source poisoned") = None;
+                settle.with(Ok::<_, crate::memory::MemoryStoreError>(
+                    json!({"cleared": rid, "rows": members.len()}),
+                ));
+            })
+            .await;
+        })
+        .await;
+    })
+    .await;
 }
 
 /// The persisted view entry for a row the view keeps: its id and resolution, and
@@ -488,27 +541,83 @@ pub(crate) async fn context_fold(
 ///
 /// # Errors
 /// The memory store refused a read, the append or the prune.
-pub async fn context_forget(
+pub(crate) async fn context_forget(
     agent_id: &AgentId,
     include_cleared: bool,
     kernel: &Arc<Kernel>,
-) -> MemResult<Value> {
-    use crate::folds::{chains, is_fold, is_open, own_anchor, refs_of};
-    use crate::memory::{refresh_head, rows_of, BOOKKEEPING, TURN_ROLES};
+    settle: crate::steps::Settle,
+) {
     // A pass in flight reads the store: it must not move under it.
     if crate::state::state_for(agent_id).life.lock().expect("life poisoned").running {
-        return Ok(fantastic_kernel::refusal::refusal_hint(
-            fantastic_kernel::refusal::LOCKED,
-            format!("context_forget: a turn is running for {agent_id}"),
-            "compact once the running turn has answered",
+        return settle.with(Ok::<_, crate::memory::MemoryStoreError>(
+            fantastic_kernel::refusal::refusal_hint(
+                fantastic_kernel::refusal::LOCKED,
+                format!("context_forget: a turn is running for {agent_id}"),
+                "compact once the running turn has answered",
+            ),
         ));
     }
+    // the head and the whole store (steps, #795), then ONE prune (a step) and the head
+    // read again (a step)
+    let (me, k) = (agent_id.clone(), Arc::clone(kernel));
+    crate::steps::refreshed(agent_id, kernel, settle, move |settle, head_rows| async move {
+        let head_rows = match head_rows {
+            Ok(h) => h,
+            Err(e) => return settle.with(Err::<Value, _>(e)),
+        };
+        let (me2, k2) = (me.clone(), Arc::clone(&k));
+        crate::steps::rows(&me, &k, json!({"type": "read"}), settle, move |settle, everything| async move {
+            let everything = match everything {
+                Ok(e) => e,
+                Err(e) => return settle.with(Err::<Value, _>(e)),
+            };
+            let doomed = forgettable(&head_rows, &everything, include_cleared);
+            let (me3, k3) = (me2.clone(), Arc::clone(&k2));
+            let reread = move |settle: crate::steps::Settle, pruned: i64| async move {
+                // THE STORE IS THE TRUTH: the prune cascaded each pruned member out of
+                // every fold's refs, so the head cache is read again, not patched.
+                crate::memory::forget_head(&me3, &k3);
+                crate::steps::head(&me3, &k3, settle, move |settle, fresh| async move {
+                    settle.with(fresh.map(|fresh| {
+                        use crate::folds::{is_fold, own_anchor};
+                        let left: Vec<&Value> = fresh.iter().filter(|r| is_fold(r)).collect();
+                        let lost = left.iter().filter(|f| own_anchor(f).is_none()).count();
+                        json!({"pruned": pruned, "kept_folds": left.len(), "unanchored": lost})
+                    }));
+                })
+                .await;
+            };
+            if doomed.is_empty() {
+                return reread(settle, 0).await;
+            }
+            let prune = json!({"type": "prune", "ids": doomed.iter().collect::<Vec<_>>()});
+            crate::steps::store(&me2, &k2, prune, None, settle, move |settle, r| async move {
+                match r {
+                    Ok((res, _)) => {
+                        let pruned = res.get("pruned").and_then(Value::as_i64).unwrap_or(0);
+                        reread(settle, pruned).await;
+                    }
+                    Err(e) => settle.with(Err::<Value, _>(e)),
+                }
+            })
+            .await;
+        })
+        .await;
+    })
+    .await;
+}
+
+/// The rows a `context_forget` prunes, from the head and the whole store: the rows folds
+/// already summarise, every view row but the one in force, and (on request) the rows
+/// behind the last clear.
+fn forgettable(
+    head_rows: &[Value],
+    everything: &[Value],
+    include_cleared: bool,
+) -> std::collections::BTreeSet<i64> {
+    use crate::folds::{chains, is_fold, is_open, own_anchor, refs_of};
+    use crate::memory::{BOOKKEEPING, TURN_ROLES};
     let kind = |r: &Value| r.get("kind").and_then(Value::as_str).map(str::to_string);
-    let head_rows = refresh_head(agent_id, kernel).await?;
-    let everything = rows_of(
-        &store_call(agent_id, kernel, json!({"type": "read"})).await?,
-        agent_id,
-    );
     let by_id: std::collections::HashMap<i64, &Value> = head_rows
         .iter()
         .filter_map(|r| row_id(r).map(|id| (id, r)))
@@ -583,23 +692,7 @@ pub async fn context_forget(
             );
         }
     }
-    let mut pruned = 0i64;
-    if !doomed.is_empty() {
-        let res = store_call(
-            agent_id,
-            kernel,
-            json!({"type": "prune", "ids": doomed.iter().collect::<Vec<_>>()}),
-        )
-        .await?;
-        pruned = res.get("pruned").and_then(Value::as_i64).unwrap_or(0);
-    }
-    // THE STORE IS THE TRUTH: the prune cascaded each pruned member out of every
-    // fold's refs, so the head cache is read again, not patched.
-    crate::memory::forget_head(agent_id, kernel);
-    let fresh = head(agent_id, kernel).await?;
-    let left: Vec<&Value> = fresh.iter().filter(|r| is_fold(r)).collect();
-    let lost = left.iter().filter(|f| own_anchor(f).is_none()).count();
-    Ok(json!({"pruned": pruned, "kept_folds": left.len(), "unanchored": lost}))
+    doomed
 }
 
 /// The share of the recall's target that the standing rows may take before the
@@ -673,6 +766,7 @@ pub(crate) async fn context_recall(
     dry: bool,
     kernel: &Arc<Kernel>,
     pass: Option<&Pass>,
+    decl: &'static crate::model_format::Decl<'static>,
     model_window: i64,
     client_id: Option<&str>,
     unread: &[i64],
@@ -680,6 +774,8 @@ pub(crate) async fn context_recall(
 ) -> Result<Value, crate::assembly::BlockFail> {
     let meta = agent_meta(agent_id, kernel);
     let mut rows = load_history(agent_id, kernel, false).await?;
+    // the thread as it is: its first row dates the environment section
+    let thread = rows.clone();
     // the history BEFORE the pass's messages: they, and whatever landed after them
     // (another message meanwhile), follow the view
     if let Some(first) = unread.iter().copied().min() {
@@ -690,19 +786,13 @@ pub(crate) async fn context_recall(
             json!({"kept": 0, "expanded": 0, "dropped": 0, "folded": 0, "why": "empty store", "degraded": false}),
         );
     }
-    // THE TYPE THE NEXT TURN IS SENT IN: the pass's, else the one the chat's model
-    // resolves to; the sizes below are of the bytes it is sent
-    let decl = match pass {
-        Some(p) => p.decl,
-        None => {
-            crate::model_format::of(crate::model_format::type_now(agent_id, kernel, &meta).await)
-        }
-    };
-    // The block the turn will actually use (`system_content`), not the default one:
-    // a record or per-call `system_prompt` changes how much room the body gets.
+    // THE TYPE THE NEXT PASS IS SENT IN (`decl`: the pass's, else the one the chat's
+    // model resolves to); the sizes below are of the bytes it is sent. The block the pass
+    // will actually use (`system_content`), not the default one: a record or per-call
+    // `system_prompt` changes how much room the body gets.
     let sys_tokens = estimate_one(&json!({
         "role": "system",
-        "content": system_content(agent_id, kernel, decl, me).await?,
+        "content": system_content(agent_id, kernel, decl, me, &thread)?,
     }));
     let body_budget = (agent_budget(&meta, model_window) - sys_tokens - NOTICE_ENVELOPE_RESERVE)
         .max(BUDGET_FLOOR);

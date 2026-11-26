@@ -269,12 +269,17 @@ fn is_trace(r: &Value) -> bool {
 /// The head cache — loaded from the store on first use (lazy boot). Python
 /// `_head`.
 pub async fn head(self_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<Vec<Value>> {
-    if let Some(h) = mem(kernel).heads.lock().expect("heads poisoned").get(&self_id.0) {
-        return Ok(h.clone());
+    if let Some(h) = cached_head(self_id, kernel) {
+        return Ok(h);
     }
     let read = HeadRead::Whole;
     let res = store_call(self_id, kernel, read.payload()).await?;
     Ok(read.merge(self_id, kernel, &res))
+}
+
+/// The head cache as it is, when it is loaded (no store read).
+pub(crate) fn cached_head(self_id: &AgentId, kernel: &Kernel) -> Option<Vec<Value>> {
+    mem(kernel).heads.lock().expect("heads poisoned").get(&self_id.0).cloned()
 }
 
 /// The read that brings the head cache up to the store: the WHOLE head (from the last
@@ -425,34 +430,21 @@ pub(crate) fn turns(rows: Vec<Value>) -> Vec<Value> {
     rows
 }
 
-/// The model's `keep` (#641): `summary` kept for the reply block `of` (its pid), a `keep`
-/// row in the store (the stores only append). `Err` names why not: no such reply block.
-pub async fn save_keep(
-    self_id: &AgentId,
-    kernel: &Arc<Kernel>,
-    of: i64,
-    summary: &str,
-) -> Result<(), String> {
-    let rows = load_history(self_id, kernel, false)
-        .await
-        .map_err(|e| e.0)?;
+/// The model's `keep` (#641) checked: the reply block `of` (its pid) is in the conversation
+/// the pass read (the head cache its history step loaded). `Err` names why not.
+pub(crate) fn keep_check(self_id: &AgentId, kernel: &Kernel, of: i64) -> Result<(), String> {
+    let rows = turns(cached_head(self_id, kernel).unwrap_or_default());
     let is_reply = rows.iter().any(|r| {
         r.get("role").and_then(Value::as_str) == Some("user")
             && crate::history_view::reply_blocks(r.get("content").and_then(Value::as_str).unwrap_or(""))
                 .into_iter()
                 .any(|b| crate::history_view::reply_pid(b) == Some(of))
     });
-    if !is_reply {
-        return Err(format!("keep: there is no reply with id {of} in your conversation"));
+    if is_reply {
+        Ok(())
+    } else {
+        Err(format!("keep: there is no reply with id {of} in your conversation"))
     }
-    save_history(
-        self_id,
-        kernel,
-        &[json!({"kind": "keep", "of": of, "summary": summary})],
-    )
-    .await
-    .map(|_| ())
-    .map_err(|e| e.0)
 }
 
 /// APPEND rows to the memory store, then to the head cache (write-through). A row
@@ -657,6 +649,20 @@ pub async fn save_view(
     budget: i64,
     why: &str,
 ) -> MemResult<std::collections::BTreeMap<i64, i64>> {
+    let (rows, map) = view_rows(kernel, folds, ids, budget, why);
+    save_history(self_id, kernel, &rows).await?;
+    Ok(map)
+}
+
+/// The rows of a [`save_view`] append — the folds, then the view row — with their ids
+/// minted, and the map (provisional -> minted).
+pub(crate) fn view_rows(
+    kernel: &Kernel,
+    folds: &[Value],
+    ids: &[Value],
+    budget: i64,
+    why: &str,
+) -> (Vec<Value>, std::collections::BTreeMap<i64, i64>) {
     let map: std::collections::BTreeMap<i64, i64> = folds
         .iter()
         .filter_map(crate::folds::row_id)
@@ -674,8 +680,7 @@ pub async fn save_view(
     for r in &mut rows {
         crate::folds::remap_ids(r, &map);
     }
-    save_history(self_id, kernel, &rows).await?;
-    Ok(map)
+    (rows, map)
 }
 
 /// The current view doc, when one has been written and carries an `ids` list.
@@ -684,15 +689,24 @@ pub async fn load_view(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
 ) -> MemResult<Option<Map<String, Value>>> {
-    for r in head(self_id, kernel).await?.iter().rev() {
-        if kind_of(r) == Some("view") {
-            return Ok(r
-                .as_object()
-                .filter(|m| m.get("ids").is_some_and(Value::is_array))
-                .cloned());
-        }
-    }
-    Ok(None)
+    Ok(view_in(&head(self_id, kernel).await?))
+}
+
+/// The current view doc among the head's `rows` ([`load_view`]): the newest `view` row,
+/// when it carries an `ids` list.
+pub(crate) fn view_in(rows: &[Value]) -> Option<Map<String, Value>> {
+    rows.iter()
+        .rev()
+        .find(|r| kind_of(r) == Some("view"))?
+        .as_object()
+        .filter(|m| m.get("ids").is_some_and(Value::is_array))
+        .cloned()
+}
+
+/// The current view doc in the head cache, read by a pass after its history step
+/// loaded the head ([`view_in`]); `None` when no head is cached.
+pub(crate) fn cached_view(self_id: &AgentId, kernel: &Kernel) -> Option<Map<String, Value>> {
+    view_in(&cached_head(self_id, kernel)?)
 }
 
 // ROW EVENT WATCHERS — the kernel holds no rows, so this agent announces its own:
