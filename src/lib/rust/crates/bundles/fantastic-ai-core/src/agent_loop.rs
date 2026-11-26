@@ -795,7 +795,7 @@ async fn attempts(
         let mut bad: Option<String> = None;
         let mut open = false;
         let mut first = true;
-        let mut repaired: Vec<String> = Vec::new();
+        let mut repaired: Vec<(String, String)> = Vec::new();
         while let Some(ev) = stream.next().await {
             let ProviderEvent::Token(t) = match ev {
                 Ok(ev) => ev,
@@ -832,10 +832,15 @@ async fn attempts(
             )
             .await;
         }
-        for added in repaired {
+        for (added, removed) in repaired {
             let mut fields = Map::new();
             fields.insert("attempt".into(), json!(attempt));
-            fields.insert("added".into(), json!(added));
+            if !added.is_empty() {
+                fields.insert("added".into(), json!(added));
+            }
+            if !removed.is_empty() {
+                fields.insert("removed".into(), json!(removed));
+            }
             pass.events()
                 .push(Mode::Turn.name(), pass.kind, "repaired", fields);
         }
@@ -925,7 +930,7 @@ async fn take(
     bad: &mut Option<String>,
     open: &mut bool,
     first: &mut bool,
-    repaired: &mut Vec<String>,
+    repaired: &mut Vec<(String, String)>,
     caller: &Caller<'_>,
 ) {
     for out in outs {
@@ -939,7 +944,7 @@ async fn take(
             }
             Out::Bad { report } => *bad = Some(report),
             Out::Open { .. } => *open = true,
-            Out::Repaired { added } => repaired.push(added),
+            Out::Repaired { added, removed } => repaired.push((added, removed)),
         }
     }
 }

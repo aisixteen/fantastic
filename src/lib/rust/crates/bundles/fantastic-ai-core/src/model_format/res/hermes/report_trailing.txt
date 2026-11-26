@@ -1,0 +1,1 @@
+[malformed call — nothing ran] the call's JSON ended, then this text follows it: `{after}`. A <tool_call> holds one JSON object, closed once, then for a send one <bytes>BODY</bytes> block, nothing else.

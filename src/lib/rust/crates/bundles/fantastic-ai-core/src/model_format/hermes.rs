@@ -104,6 +104,9 @@ pub(crate) const REPORT_PAYLOAD: &str = include_str!("res/hermes/report_payload.
 pub(crate) const REPORT_NO_TARGET: &str = include_str!("res/hermes/report_no_target.txt");
 /// Anything between the JSON and the closer that is not one block of a send (S24).
 pub(crate) const REPORT_BLOCK: &str = include_str!("res/hermes/report_block.txt");
+/// Text after a whole call's JSON that is neither surplus closers nor a `<bytes>` block:
+/// the report quotes its start.
+pub(crate) const REPORT_TRAILING: &str = include_str!("res/hermes/report_trailing.txt");
 /// Several calls inside one `<tool_call>`: `{calls}` the model's own calls, each in its
 /// own block; `{careful}` empty, or a newline and the `careful:` line of each call whose
 /// destructive command the form leaves out (#255).
@@ -584,10 +587,13 @@ impl Stream {
                     let read =
                         prose_fault(&self.prose).map_or_else(|| read_call(&raw, self.tools), Err);
                     match read {
-                        Ok(Read { text, added }) => {
+                        Ok(Read { text, added, removed }) => {
                             self.prose.push('\n');
-                            if let Some(added) = added {
-                                out.push(Out::Repaired { added });
+                            if added.is_some() || removed.is_some() {
+                                out.push(Out::Repaired {
+                                    added: added.unwrap_or_default(),
+                                    removed: removed.unwrap_or_default(),
+                                });
                             }
                             out.push(Out::Call { text });
                         }
@@ -663,6 +669,8 @@ fn json_call_re() -> &'static regex::Regex {
 struct Read {
     text: String,
     added: Option<String>,
+    /// The surplus closers [`surplus`] cut, if any.
+    removed: Option<String>,
 }
 
 /// One held call, opener and closer included, as internal call text; `Err` is the
@@ -673,6 +681,16 @@ fn read_call(raw: &str, tools: &[&str]) -> Result<Read, String> {
     let lead = inner.trim_start_matches(|c: char| c.is_ascii() && is_json_ws(c as u8));
     if lead.starts_with(BYTES_OPEN) {
         return Err(REPORT_BLOCK.to_string());
+    }
+    // ONE CALL WITH SURPLUS CLOSERS: the JSON is complete and only closing brackets and
+    // braces follow it (then, for a send, its `<bytes>` block): the surplus is cut and
+    // the call read, as a missing closer is added ([`closed`]). Nothing else is changed.
+    if let Some((cut, removed)) = surplus(lead) {
+        return read_lead(&cut, tools).map(|text| Read {
+            text,
+            added: None,
+            removed: Some(removed),
+        });
     }
     let reads = matches!(
         serde_json::Deserializer::from_str(lead)
@@ -690,10 +708,43 @@ fn read_call(raw: &str, tools: &[&str]) -> Result<Read, String> {
             return read_lead(&whole, tools).map(|text| Read {
                 text,
                 added: Some(added),
+                removed: None,
             });
         }
     }
-    read_lead(lead, tools).map(|text| Read { text, added: None })
+    read_lead(lead, tools).map(|text| Read {
+        text,
+        added: None,
+        removed: None,
+    })
+}
+
+/// `lead` with the surplus closers after its first JSON value cut: `(cut text, the
+/// closers cut)`, when that value reads whole and what follows it is one or more `}`/`]`
+/// (whitespace between them dropped), then nothing or a `<bytes>` block. `None`
+/// otherwise: no other text after a call is ever dropped.
+fn surplus(lead: &str) -> Option<(String, String)> {
+    let ws = |c: char| c.is_ascii() && is_json_ws(c as u8);
+    let mut it = serde_json::Deserializer::from_str(lead).into_iter::<serde::de::IgnoredAny>();
+    let Some(Ok(_)) = it.next() else {
+        return None;
+    };
+    let end = it.byte_offset();
+    let rest = &lead[end..];
+    let after = rest.trim_start_matches(|c: char| c == '}' || c == ']' || ws(c));
+    let removed: String = rest[..rest.len() - after.len()]
+        .chars()
+        .filter(|c| *c == '}' || *c == ']')
+        .collect();
+    if removed.is_empty() || !(after.is_empty() || after.starts_with(BYTES_OPEN)) {
+        return None;
+    }
+    let cut = if after.is_empty() {
+        lead[..end].to_string()
+    } else {
+        format!("{}\n{after}", &lead[..end])
+    };
+    Some((cut, removed))
 }
 
 /// The JSON of `lead`: the text before its first `<bytes>` outside a JSON string, or
@@ -952,7 +1003,9 @@ fn block_of(rest: &str) -> Result<Option<String>, String> {
     // decoded it (`send_args`). A body in both places is refused. Render writes only
     // the raw block. To be measured against the inline form.
     let Some(after) = rest.strip_prefix(BYTES_OPEN) else {
-        return Err(REPORT_BLOCK.to_string());
+        // the start of what follows, quoted, so the model sees what to take out
+        let shown: String = rest.chars().take(40).collect();
+        return Err(fill(REPORT_TRAILING, &[("after", shown.as_str())]));
     };
     let Some(end) = after.find(BYTES_CLOSE) else {
         return Err(REPORT_BLOCK.to_string());
