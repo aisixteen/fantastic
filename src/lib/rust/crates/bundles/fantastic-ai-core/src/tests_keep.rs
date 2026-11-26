@@ -8,7 +8,8 @@ use crate::constants::{AUTOFOLD_AT, KEEP_SUMMARY_MAX};
 const DONE: &str = "<call name=\"done\"></call>";
 
 async fn say(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) {
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = kernel
+        .operator_send(vec![Item::new(
             agent.clone(),
             json!({"type": "send", "text": text, "client_id": "probe"}),
         )])
@@ -16,7 +17,8 @@ async fn say(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) {
 }
 
 async fn widen(kernel: &Arc<Kernel>, agent: &AgentId) {
-    let r = kernel.operator_send(vec![Item::new(
+    let r = kernel
+        .operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": agent.as_str(), "context_window": 1_000_000}),
         )])
@@ -146,16 +148,20 @@ async fn after_the_answer_the_summary_replaces_the_body_and_recall_returns_it_wh
     assert!(until_passes(&s, 2).await);
     let id = row_id_of(&kernel, &agent).await;
     let seen = s.request(1);
+    let marker = format!(
+        "[reply to 9 · notes read]\n<folded id=\"{id}\" verb=\"read\" from=\"notes\" \
+         tokens=\"16004\"/> {}\nWHAT-IS-NEEDED",
+        default_unfold(agent.as_str(), id)
+    );
     assert!(
-        seen.contains(&format!(
-            "[folded · read reply from notes · ~16004 tokens · get: {id}]\\nWHAT-IS-NEEDED"
-        )),
+        seen.contains(&json_text(&marker)),
         "{}",
         &seen[seen.len().saturating_sub(900)..]
     );
     assert!(!seen.contains("head line"));
     assert!(!seen.contains(&"x".repeat(1000)));
-    let r = kernel.operator_send(vec![Item::new(
+    let r = kernel
+        .operator_send(vec![Item::new(
             agent.clone(),
             json!({"type": "recall", "id": id}),
         )])
@@ -183,14 +189,17 @@ async fn an_over_cap_summary_folds_to_the_plain_anchor() {
     assert!(until_passes(&s, 2).await);
     let id = row_id_of(&kernel, &agent).await;
     let seen = s.request(1);
+    let marker = format!(
+        "[reply to 9 · notes read]\n<folded id=\"{id}\" verb=\"read\" from=\"notes\" \
+         tokens=\"16004\" head=\"head line\"/> {}",
+        default_unfold(agent.as_str(), id)
+    );
     assert!(
-        seen.contains(&format!(
-            "[folded · read reply from notes · ~16004 tokens · head: \\\"head line\\\" · get: {id}]"
-        )),
+        seen.contains(&json_text(&marker)),
         "{}",
         &seen[seen.len().saturating_sub(900)..]
     );
-    assert!(!seen.contains(&format!("get: {id}]\\ny")));
+    assert!(!seen.contains(&json_text(&format!("{marker}\ny"))));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

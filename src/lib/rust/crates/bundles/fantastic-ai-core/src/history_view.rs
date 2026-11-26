@@ -22,11 +22,13 @@
 //!       agent are different files; the tag carries no args, so deduping them
 //!       would silently delete content. NEVER dropped.
 //!
-//! AUTOFOLD ([`autofold`], #556) then shows a thought, a cut answer and a large or
-//! recalled reply as a short anchor, at assembly time and never stored.
+//! AUTOFOLD ([`autofold`], #556) then shows a thought and a large or recalled reply as a
+//! marker piece ([`crate::model_format::map::Piece`]), at assembly time and never stored;
+//! the type's words for it are written by the map.
 
 use crate::constants::{AUTOFOLD_AT, CHARS_PER_TOKEN, KEEP_SUMMARY_MAX};
-use serde_json::{json, Value};
+use crate::model_format::map::{pieces_of, with_pieces, FoldKind, Piece};
+use serde_json::Value;
 
 /// The verbs whose reply is WHOLE STATE, so a later reply strictly supersedes an
 /// earlier one. Python `_WHOLE_STATE_READS`.
@@ -138,26 +140,13 @@ pub fn point_to_docs(target: &str, verb: &str, result: &Value) -> Option<Value> 
     {
         format!("the verbs {target} answers: send {target} {{type: reflect, tier: oneliners}}")
     } else if reason == Some("missing_arg") && o.get("arg").is_some_and(Value::is_string) {
-        format!(
-            "how to call it: send {target} {{type: reflect, verb: '{verb}', tier: detailed}}"
-        )
+        format!("how to call it: send {target} {{type: reflect, verb: '{verb}', tier: detailed}}")
     } else {
         return None;
     };
     let mut m = o.clone();
     m.insert("hint".to_string(), Value::String(hint));
     Some(Value::Object(m))
-}
-
-/// The row with a NEW `content` and every other key intact — python's
-/// `{**turn, "content": …}`.
-pub fn with_content(turn: &Value, content: String) -> Value {
-    let mut row = match turn {
-        Value::Object(m) => m.clone(),
-        _ => serde_json::Map::new(),
-    };
-    row.insert("content".to_string(), json!(content));
-    Value::Object(row)
 }
 
 /// The tokens of `n` characters of text: `ceil(n / CHARS_PER_TOKEN)`.
@@ -189,8 +178,7 @@ fn thinking_tokens(row: &Value) -> Option<usize> {
     Some((t.chars().count() + cut).div_ceil(CHARS_PER_TOKEN))
 }
 
-/// What a recall reply recalled, as the anchor says it (` · id N`, or
-/// ` · query "q"`): read off the model's own recall call that the block answers —
+/// What a recall reply recalled, as the marker says it (`id N`, or `query "q"`): read off the model's own recall call that the block answers —
 /// the block's `↑N` names the row, and the `nth` recall call to `agent` in it is the
 /// one. Empty when any step fails.
 fn recalled_what(store: &[Value], tag_line: &str, agent: &str, nth: usize) -> String {
@@ -219,10 +207,10 @@ fn recalled_what(store: &[Value], tag_line: &str, agent: &str, nth: usize) -> St
             .get("id")
             .and_then(|v| crate::tool_parse::typed::integer("id", v).ok())
         {
-            return Some(format!(" · id {id}"));
+            return Some(format!("id {id}"));
         }
         let q = payload.get("query").and_then(Value::as_str)?;
-        (!q.is_empty()).then(|| format!(" · query \"{q}\""))
+        (!q.is_empty()).then(|| format!("query \"{q}\""))
     };
     find().unwrap_or_default()
 }
@@ -249,24 +237,51 @@ pub fn reply_pid(block: &str) -> Option<i64> {
     pid.parse().ok()
 }
 
-/// KEEP (#641): `content`, the turn that just arrived, with the `keep` call template
-/// — the block's pid filled in — closing each reply block that will fold. The call's
-/// presence is the cue; the model's view of the turn only, never stored.
+/// `pieces` with every stored text of a reply turn split into its reply blocks, one
+/// piece each: the unit a marker stands for. The map joins a run of texts again with
+/// the blank line it was split at, so the bytes do not change.
 #[must_use]
-pub fn mark_keep(content: &str) -> String {
-    if parse_reply_tag(content).is_none() {
-        return content.to_string();
-    }
-    reply_blocks(content)
-        .into_iter()
-        .map(|b| match reply_pid(b).filter(|_| block_folds(b)) {
-            Some(pid) => {
-                format!("{b}\n<call name=\"keep\"><of>{pid}</of><summary>\u{2026}</summary></call>")
+pub(crate) fn blocks(pieces: Vec<Piece>) -> Vec<Piece> {
+    let mut out = Vec::with_capacity(pieces.len());
+    for p in pieces {
+        match p {
+            Piece::Text { text } if parse_reply_tag(&text).is_some() => {
+                out.extend(reply_blocks(&text).into_iter().map(Piece::text));
             }
-            None => b.to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// KEEP (#641): `message`, the turn that just arrived, with the `keep` cue — the block's
+/// pid in it — after each reply block that will fold. The cue's presence is what asks;
+/// the model's view of the turn only, never stored. The cue is written in the type's call
+/// form by the map ([`Piece::KeepCue`]).
+#[must_use]
+pub(crate) fn mark_keep(message: Value) -> Value {
+    let content = content_of(&message);
+    if parse_reply_tag(content).is_none() {
+        return message;
+    }
+    let mut out = Vec::new();
+    let mut cued = false;
+    for p in blocks(pieces_of(&message)) {
+        let cue = match &p {
+            Piece::Text { text } => reply_pid(text).filter(|_| block_folds(text)),
+            _ => None,
+        };
+        out.push(p);
+        if let Some(pid) = cue {
+            out.push(Piece::KeepCue { pid });
+            cued = true;
+        }
+    }
+    if cued {
+        with_pieces(message, &out)
+    } else {
+        message
+    }
 }
 
 /// The summary the model kept for the block `pid` of a row (`attributes.keep`), when it
@@ -303,109 +318,118 @@ pub fn attach_kept(rows: &mut [Value], kept: &std::collections::HashMap<i64, Val
     }
 }
 
-/// `anchor`, followed by the model's kept summary when there is one.
-fn with_kept(anchor: String, summary: Option<&str>) -> String {
-    match summary {
-        Some(s) => format!("{anchor}\n{s}"),
-        None => anchor,
-    }
+/// What [`autofold`] made of a row: the message as the view shows it, the form it took,
+/// and the thought marker the next user-side message carries (rule: an assistant
+/// message holds only the model's own text).
+#[derive(Debug)]
+pub(crate) struct Autofolded {
+    /// The message: its pieces when a block of it folded.
+    pub(crate) msg: Value,
+    /// `whole`, `recalled` (a recall reply folded) or `anchor` (a large body folded).
+    pub(crate) form: &'static str,
+    /// The thought of an assistant row with thinking, for the next user-side message.
+    pub(crate) thought: Option<Piece>,
 }
 
 /// AUTOFOLD (#556): the row `store[idx]`, whose current message is `msg`, as the
-/// model sees it — an anchor in place of a thought, an answered large body or any
-/// answered recall reply. Pure and never stored: the store keeps every row whole,
+/// model sees it. An assistant row is its own text; its thinking, when it has any, is a
+/// [`Piece::Thought`] for the next user-side message. An answered reply turn shows each
+/// large body or recall reply as a [`Piece::Folded`] (its tag line, its size, the row's id,
+/// the summary the model kept). Pure and never stored: the store keeps every row whole,
 /// and `recall` with the row's id reads it back. A row with no int `id` comes back
-/// unchanged. Also which form the row took: `whole`, `thought_anchor` (the anchor
-/// stands for the whole answer), `thought` (the anchor sits on the answer),
-/// `recalled` (a recall reply) or `anchor` (a large body).
+/// unchanged.
 #[must_use]
-pub fn autofold(store: &[Value], idx: usize, msg: &Value) -> (Value, &'static str) {
+pub(crate) fn autofold(store: &[Value], idx: usize, msg: &Value) -> Autofolded {
+    let unchanged = || Autofolded {
+        msg: msg.clone(),
+        form: "whole",
+        thought: None,
+    };
     let (Some(row), Some(content)) = (store.get(idx), msg.get("content").and_then(Value::as_str))
     else {
-        return (msg.clone(), "whole");
+        return unchanged();
     };
     let Some(id) = row.get("id").and_then(Value::as_i64) else {
-        return (msg.clone(), "whole");
+        return unchanged();
     };
     match row.get("role").and_then(Value::as_str) {
-        Some("assistant") => match thinking_tokens(row) {
-            Some(x) => {
-                let anchor = format!("[thought ~{x} tokens · id {id}]");
-                let (shown, form) = if content.is_empty() {
-                    (anchor, "thought_anchor")
-                } else {
-                    (format!("{anchor}\n{content}"), "thought")
-                };
-                (with_content(msg, shown), form)
-            }
-            None => (msg.clone(), "whole"),
+        Some("assistant") => Autofolded {
+            thought: thinking_tokens(row).map(|tokens| Piece::Thought { tokens, id }),
+            ..unchanged()
         },
         Some("user") => {
             let answered = store[idx + 1..]
                 .iter()
                 .any(|t| t.get("role").and_then(Value::as_str) == Some("assistant"));
             if !answered || parse_reply_tag(content).is_none() {
-                return (msg.clone(), "whole");
+                return unchanged();
             }
             let mut changed = false;
             let mut recalled = false;
             let mut recalls = 0usize;
-            let shown: Vec<String> = reply_blocks(content)
+            let shown: Vec<Piece> = blocks(pieces_of(msg))
                 .into_iter()
-                .map(|b| {
+                .map(|p| {
+                    let Piece::Text { text: b } = &p else {
+                        return p;
+                    };
                     let body = body_of(b);
-                    let x = body_tokens(body);
+                    let tokens = body_tokens(body);
                     let (agent, verb) = parse_reply_tag(b).unwrap_or(("", ""));
+                    let tag_line = b.split('\n').next().unwrap_or(b).to_string();
+                    let kept = kept_summary(row, reply_pid(b)).map(str::to_string);
                     if verb == "recall" {
-                        let tag_line = b.split('\n').next().unwrap_or(b);
-                        let what = recalled_what(store, tag_line, agent, recalls);
+                        let what = recalled_what(store, &tag_line, agent, recalls);
                         recalls += 1;
                         changed = true;
                         recalled = true;
-                        with_kept(
-                            format!(
-                                "[folded · recall reply from {agent}{what} · ~{x} tokens · get: {id}]"
-                            ),
-                            kept_summary(row, reply_pid(b)),
-                        )
-                    } else if verb != "reflect" && x > AUTOFOLD_AT {
+                        Piece::Folded {
+                            kind: FoldKind::Recall,
+                            agent: agent.to_string(),
+                            verb: verb.to_string(),
+                            tokens,
+                            id,
+                            tag_line,
+                            head: String::new(),
+                            kept,
+                            what,
+                        }
+                    } else if verb != "reflect" && tokens > AUTOFOLD_AT {
                         changed = true;
-                        let head = cap120(body.split('\n').next().unwrap_or("").trim());
-                        let summary = kept_summary(row, reply_pid(b));
-                        if summary.is_some() {
-                            // the summary stands where the head line would
-                            with_kept(
-                                format!(
-                                    "[folded · {verb} reply from {agent} · ~{x} tokens · get: {id}]"
-                                ),
-                                summary,
-                            )
-                        } else {
-                            format!(
-                                "[folded · {verb} reply from {agent} · ~{x} tokens · head: \"{head}\" · get: {id}]"
-                            )
+                        Piece::Folded {
+                            kind: FoldKind::Reply,
+                            agent: agent.to_string(),
+                            verb: verb.to_string(),
+                            tokens,
+                            id,
+                            tag_line,
+                            head: cap120(body.split('\n').next().unwrap_or("").trim()),
+                            kept,
+                            what: String::new(),
                         }
                     } else {
-                        b.to_string()
+                        p
                     }
                 })
                 .collect();
             if changed {
-                (
-                    with_content(msg, shown.join("\n\n")),
-                    if recalled { "recalled" } else { "anchor" },
-                )
+                Autofolded {
+                    msg: with_pieces(msg.clone(), &shown),
+                    form: if recalled { "recalled" } else { "anchor" },
+                    thought: None,
+                }
             } else {
-                (msg.clone(), "whole")
+                unchanged()
             }
         }
-        _ => (msg.clone(), "whole"),
+        _ => unchanged(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     /// The verb group must exclude `]`: with `\S+`, on a reply whose BODY carries
     /// a bracket the run keeps `reflect]` and the regex closes on the body's
@@ -443,10 +467,14 @@ mod tests {
         json!({"role": role, "id": id, "content": content})
     }
 
-    /// The view message of `store[idx]` after autofold.
-    fn folded(store: &[Value], idx: usize) -> String {
-        let (out, _) = autofold(store, idx, &store[idx]);
-        out["content"].as_str().unwrap().to_string()
+    /// The pieces the view shows of `store[idx]` after autofold.
+    fn folded(store: &[Value], idx: usize) -> Vec<Piece> {
+        pieces_of(&autofold(store, idx, &store[idx]).msg)
+    }
+
+    /// The thought marker an assistant row hands the next user-side message.
+    fn thought(store: &[Value], idx: usize) -> Option<Piece> {
+        autofold(store, idx, &store[idx]).thought
     }
 
     /// A send to `ai`, as the model writes it.
@@ -461,66 +489,109 @@ mod tests {
         format!("first line\n{}", "x".repeat(chars - 11))
     }
 
+    /// A folded reply block's piece.
+    #[allow(clippy::too_many_arguments)]
+    fn fold_piece(
+        kind: FoldKind,
+        agent: &str,
+        verb: &str,
+        tokens: usize,
+        id: i64,
+        tag_line: &str,
+        head: &str,
+        kept: Option<&str>,
+        what: &str,
+    ) -> Piece {
+        Piece::Folded {
+            kind,
+            agent: agent.into(),
+            verb: verb.into(),
+            tokens,
+            id,
+            tag_line: tag_line.into(),
+            head: head.into(),
+            kept: kept.map(str::to_string),
+            what: what.into(),
+        }
+    }
+
     #[test]
-    fn a_row_with_thinking_shows_its_thought_anchor() {
+    fn a_row_with_thinking_hands_on_its_thought_marker_and_keeps_its_text() {
         let thinking = "t".repeat(400);
         let mut a = row(5, "assistant", "answer");
         a["thinking"] = json!(thinking);
         let store = [a];
-        let shown = folded(&store, 0);
-        assert_eq!(shown, "[thought ~100 tokens · id 5]\nanswer");
-        assert!(!shown.contains("tttt"));
-        // no thinking, no anchor
+        assert_eq!(folded(&store, 0), vec![Piece::text("answer")]);
+        assert_eq!(
+            thought(&store, 0),
+            Some(Piece::Thought { tokens: 100, id: 5 })
+        );
+        assert_eq!(autofold(&store, 0, &store[0]).form, "whole");
+        // no thinking, no marker
         let plain = [row(6, "assistant", "answer")];
-        assert_eq!(folded(&plain, 0), "answer");
-        // an anchor alone when the answer is empty
+        assert_eq!(thought(&plain, 0), None);
+        // an empty answer stays empty: the marker is not in the assistant message
         let mut e = row(7, "assistant", "");
         e["thinking"] = json!("t".repeat(8));
-        assert_eq!(folded(&[e], 0), "[thought ~2 tokens · id 7]");
+        let e = [e];
+        assert_eq!(folded(&e, 0), Vec::<Piece>::new());
+        assert_eq!(thought(&e, 0), Some(Piece::Thought { tokens: 2, id: 7 }));
     }
 
     #[test]
-    fn the_thought_anchor_counts_the_cut_thinking_too() {
+    fn the_thought_marker_counts_the_cut_thinking_too() {
         let mut a = row(5, "assistant", "answer");
         a["thinking"] = json!("t".repeat(400));
         a["thinking_cut"] = json!(400);
-        assert_eq!(folded(&[a], 0), "[thought ~200 tokens · id 5]\nanswer");
+        assert_eq!(
+            thought(&[a], 0),
+            Some(Piece::Thought { tokens: 200, id: 5 })
+        );
     }
 
     #[test]
     fn a_reply_body_over_autofold_at_folds_once_answered() {
-        let tag = "[reply to 3 · notes read]\n";
-        let over = format!("{tag}{}", big_body(AUTOFOLD_AT * 4 + 4));
+        let tag = "[reply to 3 · notes read]";
+        let over = format!("{tag}\n{}", big_body(AUTOFOLD_AT * 4 + 4));
         let store = [row(8, "user", &over), row(9, "assistant", "ok")];
         assert_eq!(
             folded(&store, 0),
-            "[folded · read reply from notes · ~16001 tokens · head: \"first line\" · get: 8]"
+            vec![fold_piece(
+                FoldKind::Reply,
+                "notes",
+                "read",
+                16001,
+                8,
+                tag,
+                "first line",
+                None,
+                ""
+            )]
         );
-        let at = format!("{tag}{}", big_body(AUTOFOLD_AT * 4));
+        assert_eq!(autofold(&store, 0, &store[0]).form, "anchor");
+        let at = format!("{tag}\n{}", big_body(AUTOFOLD_AT * 4));
         let store = [row(8, "user", &at), row(9, "assistant", "ok")];
-        assert_eq!(folded(&store, 0), at);
+        assert_eq!(folded(&store, 0), vec![Piece::text(at.as_str())]);
         // unanswered: whole
         let store = [row(8, "user", &over)];
-        assert_eq!(folded(&store, 0), over);
+        assert_eq!(folded(&store, 0), vec![Piece::text(over.as_str())]);
     }
 
     #[test]
     fn a_batch_folds_only_its_large_block() {
         let small = "[reply to 3 · notes list · 1 of 2 in batch b]\nsmall body";
-        let large = format!(
-            "[reply to 3 · notes read · 2 of 2 in batch b]\n{}",
-            big_body(AUTOFOLD_AT * 4 + 8)
-        );
+        let tag = "[reply to 3 · notes read · 2 of 2 in batch b]";
+        let large = format!("{tag}\n{}", big_body(AUTOFOLD_AT * 4 + 8));
         let content = format!("{small}\n\n{large}");
         let store = [row(8, "user", &content), row(9, "assistant", "ok")];
         let shown = folded(&store, 0);
-        let (first, second) = shown.split_once("\n\n").expect("two blocks");
-        assert_eq!(first, small);
+        assert_eq!(shown.len(), 2, "{shown:?}");
+        assert_eq!(shown[0], Piece::text(small));
         assert!(
-            second.starts_with("[folded · read reply from notes · ~"),
-            "{shown}"
+            matches!(&shown[1], Piece::Folded { kind: FoldKind::Reply, id: 8, tag_line, verb, .. }
+                if tag_line == tag && verb == "read"),
+            "{shown:?}"
         );
-        assert!(second.ends_with(" · get: 8]"), "{shown}");
     }
 
     #[test]
@@ -537,28 +608,42 @@ mod tests {
             row(26, "user", "[reply to 7 · ai recall]\ntiny"),
             row(27, "assistant", "ok"),
         ];
+        let recall = |id: i64, tag: &str, what: &str| {
+            vec![fold_piece(
+                FoldKind::Recall,
+                "ai",
+                "recall",
+                1,
+                id,
+                tag,
+                "",
+                None,
+                what,
+            )]
+        };
         assert_eq!(
             folded(&store, 1),
-            "[folded · recall reply from ai · id 12 · ~1 tokens · get: 21]"
+            recall(21, "[reply to 7 · ai recall · ↑20]", "id 12")
         );
         assert_eq!(
             folded(&store, 4),
-            "[folded · recall reply from ai · query \"codename\" · ~1 tokens · get: 24]"
+            recall(24, "[reply to 7 · ai recall · ↑23]", "query \"codename\"")
         );
         assert_eq!(
             folded(&store, 6),
-            "[folded · recall reply from ai · ~1 tokens · get: 26]"
+            recall(26, "[reply to 7 · ai recall]", "")
         );
+        assert_eq!(autofold(&store, 1, &store[1]).form, "recalled");
         // unanswered: whole
         assert_eq!(
             folded(&store[..2], 1),
-            "[reply to 7 · ai recall · ↑20]\ntiny"
+            vec![Piece::text("[reply to 7 · ai recall · ↑20]\ntiny")]
         );
     }
 
     /// H12: an old conversation with a stored correction block. The block shows
     /// whole as the reply block it is, and the row before it shows whole: its
-    /// thought anchor only, no cut anchor.
+    /// thought marker only, no cut marker.
     #[test]
     fn old_correction_is_a_plain_block() {
         let before = "Sending.\n<function=send>";
@@ -574,25 +659,31 @@ mod tests {
         let not_run = "[reply to - · - -]\ncall NOT dispatched: a send names its target";
         for next in [malformed, unsupported, ordinary, not_run, "plain user text"] {
             let store = [a.clone(), row(31, "user", next)];
-            let (out, form) = autofold(&store, 0, &store[0]);
-            assert_eq!(form, "thought", "{next}");
+            let out = autofold(&store, 0, &store[0]);
+            assert_eq!(out.form, "whole", "{next}");
+            assert_eq!(out.msg, store[0], "{next}");
             assert_eq!(
-                out["content"],
-                json!(format!("[thought ~7 tokens · id 30]\n{before}")),
+                out.thought,
+                Some(Piece::Thought { tokens: 7, id: 30 }),
                 "{next}"
             );
             // the block itself, unanswered and answered, is the stored text whole
-            assert_eq!(autofold(&store, 1, &store[1]), (store[1].clone(), "whole"));
-            let answered = [a.clone(), row(31, "user", next), row(32, "assistant", "ok")];
+            let one = autofold(&store, 1, &store[1]);
             assert_eq!(
-                autofold(&answered, 1, &answered[1]),
+                (one.msg, one.form, one.thought),
+                (store[1].clone(), "whole", None)
+            );
+            let answered = [a.clone(), row(31, "user", next), row(32, "assistant", "ok")];
+            let two = autofold(&answered, 1, &answered[1]);
+            assert_eq!(
+                (two.msg, two.form),
                 (answered[1].clone(), "whole"),
                 "{next}"
             );
         }
-        // the last row of the store, with no row after it, shows whole too
+        // the last row of the store, with no row after it, hands on its thought too
         let store = [a.clone()];
-        assert_eq!(autofold(&store, 0, &store[0]).1, "thought");
+        assert!(autofold(&store, 0, &store[0]).thought.is_some());
     }
 
     #[test]
@@ -603,7 +694,7 @@ mod tests {
         );
         assert!(!will_fold(&big));
         let kept = [row(7, "user", &big), row(8, "assistant", "ok")];
-        assert_eq!(autofold(&kept, 0, &kept[0]).1, "whole");
+        assert_eq!(autofold(&kept, 0, &kept[0]).form, "whole");
     }
 
     #[test]
@@ -629,6 +720,10 @@ mod tests {
         vec![user, json!({"role": "assistant", "id": 6, "content": "ok"})]
     }
 
+    fn arriving(content: &str) -> Value {
+        json!({"role": "user", "content": content})
+    }
+
     #[test]
     fn keep_marks_the_blocks_that_will_fold_only() {
         let big = format!(
@@ -636,14 +731,28 @@ mod tests {
             "x".repeat(AUTOFOLD_AT * 4 + 4)
         );
         let small = "[reply to 4 · ai read]\nsmall";
-        let marked = mark_keep(&format!("{small}\n\n{big}"));
-        assert_eq!(marked.matches("<call name=\"keep\">").count(), 1);
-        assert!(marked.starts_with(small), "{marked}");
-        assert!(
-            marked.ends_with("<call name=\"keep\"><of>3</of><summary>\u{2026}</summary></call>")
+        let marked = mark_keep(arriving(&format!("{small}\n\n{big}")));
+        assert_eq!(
+            pieces_of(&marked),
+            vec![
+                Piece::text(small),
+                Piece::text(big.as_str()),
+                Piece::KeepCue { pid: 3 }
+            ]
         );
-        assert_eq!(mark_keep(small), small);
-        assert_eq!(mark_keep("plain text"), "plain text");
+        // the stored text is what it was: the cue is a piece, not text
+        assert_eq!(marked["content"], json!(format!("{small}\n\n{big}")));
+        assert_eq!(mark_keep(arriving(small)), arriving(small));
+        assert_eq!(mark_keep(arriving("plain text")), arriving("plain text"));
+        // under the default type the cue is the call template after its block
+        let decl = crate::model_format::of(crate::model_format::DEFAULT);
+        let text = crate::model_format::map::row(decl, "ai", &pieces_of(&marked));
+        assert!(
+            text.ends_with(&format!(
+                "{big}\n<call name=\"keep\"><of>3</of><summary>\u{2026}</summary></call>"
+            )),
+            "{text}"
+        );
     }
 
     #[test]
@@ -653,21 +762,41 @@ mod tests {
             "x".repeat(AUTOFOLD_AT * 4 + 4)
         );
         let store = kept_row(&big, Some("the part I need"));
-        let (out, form) = autofold(&store, 0, &store[0]);
-        assert_eq!(form, "anchor");
+        let out = autofold(&store, 0, &store[0]);
+        assert_eq!(out.form, "anchor");
         assert_eq!(
-            out["content"],
-            json!("[folded · read reply from ai · ~16003 tokens · get: 5]\nthe part I need")
+            pieces_of(&out.msg),
+            vec![fold_piece(
+                FoldKind::Reply,
+                "ai",
+                "read",
+                16003,
+                5,
+                "[reply to 3 · ai read]",
+                "head",
+                Some("the part I need"),
+                ""
+            )]
         );
     }
 
     #[test]
-    fn no_summary_an_over_cap_one_or_the_placeholder_fold_to_the_plain_anchor() {
+    fn no_summary_an_over_cap_one_or_the_placeholder_fold_to_the_plain_marker() {
         let big = format!(
             "[reply to 3 · ai read]\nhead\n{}",
             "x".repeat(AUTOFOLD_AT * 4 + 4)
         );
-        let plain = "[folded · read reply from ai · ~16003 tokens · head: \"head\" · get: 5]";
+        let plain = vec![fold_piece(
+            FoldKind::Reply,
+            "ai",
+            "read",
+            16003,
+            5,
+            "[reply to 3 · ai read]",
+            "head",
+            None,
+            "",
+        )];
         let long = "y".repeat(KEEP_SUMMARY_MAX * 4 + 4);
         for keep in [
             None,
@@ -677,12 +806,10 @@ mod tests {
             Some(""),
         ] {
             let store = kept_row(&big, keep);
-            let (out, _) = autofold(&store, 0, &store[0]);
-            assert_eq!(out["content"], json!(plain), "{keep:?}");
+            assert_eq!(folded(&store, 0), plain, "{keep:?}");
         }
         let at = "y".repeat(KEEP_SUMMARY_MAX * 4);
         let store = kept_row(&big, Some(&at));
-        let (out, _) = autofold(&store, 0, &store[0]);
-        assert!(out["content"].as_str().unwrap().ends_with(&at));
+        assert!(matches!(&folded(&store, 0)[0], Piece::Folded { kept: Some(k), .. } if *k == at));
     }
 }

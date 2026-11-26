@@ -1,0 +1,3 @@
+<tool_response>
+{"image": {name_q}, "width": {width}, "height": {height}, "shown": false, "why": "not shown to this model"}
+</tool_response>

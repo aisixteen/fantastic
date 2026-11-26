@@ -1,0 +1,1 @@
+An earlier span was omitted in place.

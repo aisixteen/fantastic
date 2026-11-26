@@ -11,9 +11,10 @@ under the inline cap of about 127,000) is delivered inline.
      the creds store): vllm strips the cache mark from its wire (#669), anthropic shows it as
      `cache_control` on a block.
      T1  the model thinks, reads, thinks, answers; T2 the model recalls its FIRST thought by
-         id: request 1 shows the thought as `[thought ~N tokens · id P]` with none of its text,
+         id: request 1 shows the thought as the marker `<thought id="P" tokens="N"/> unfold: …`
+         on a user-side message (never an assistant one), with none of its text,
          request 2 carries the recall reply with the thought WHOLE; T3 the recall reply is
-         `[folded · recall reply from … · id P · ~N tokens · get: R]` and the thought text is
+         `<folded id="R" verb="recall" … recalled="id P" …/>` and the thought text is
          nowhere in the request; the store still holds it (a `recall` by the person).
      T4  across all those requests: the messages up to the LAST cache mark of a request are
          byte-equal in the next request, and a request never has fewer messages than the one
@@ -22,7 +23,7 @@ under the inline cap of about 127,000) is delivered inline.
   V  `provider_cache` (the default), other verbs: the reply of an `exec_bridge` `run` (500 lines,
      the verb's own cap) and of a `file_bridge` `list` (350 entries) each go through the same
      cycle as the `read` reply of E141: whole in its own turn, its
-     `[folded · {verb} reply from {agent} · ~N tokens · head: "…" · get: ID]` anchor in the
+     `<folded id="ID" verb="{verb}" from="{agent}" tokens="N" head="…"/>` marker in the
      next with the body gone, the store row whole, `recall` by id gives it whole and the
      recall reply refolds.
      `history` is NOT covered here: its reply is a digest paged to what fits inline (the
@@ -104,6 +105,27 @@ def last_user(turn: dict) -> str:
 
 def blob(turn: dict) -> str:
     return json.dumps(msgs(turn), ensure_ascii=False)
+
+
+#: a quote of the default type's marker notation, as the JSON of a request writes it
+Q = r'\\?"'
+
+
+def fold_re(verb: str, agent: str, row) -> str:
+    """The default type's marker of a folded `verb` reply of `agent`, row `row` (map-once)."""
+    return (rf'<folded id={Q}{row}{Q} verb={Q}{verb}{Q} from={Q}{agent}{Q} '
+            rf'tokens={Q}\d+{Q} head={Q}')
+
+
+def recall_fold_re(agent: str, of) -> str:
+    """The default type's marker of a folded recall reply that recalled row `of`."""
+    return rf'verb={Q}recall{Q} from={Q}{agent}{Q} recalled={Q}id {of}{Q} tokens={Q}\d+{Q}/>'
+
+
+def roles_with(turn: dict, pattern: str) -> set:
+    """The roles of the messages of `turn` whose text matches `pattern`."""
+    return {m.get("role") for m in msgs(turn)
+            if re.search(pattern, content_text(m.get("content")))}
 
 
 def unmarked(ms: list[dict]) -> list[dict]:
@@ -279,11 +301,10 @@ def main() -> int:
         allt += turns
         seen = blob(turns[0]) if turns else ""
         bt = new_big(AI_T, set(), "T2")
-        need(re.search(rf'\[folded · read reply from {FILES} · ~\d+ tokens · '
-                       rf'head: \\?"[^"]*\\?" · get: {bt}\]', seen) is not None
-             and "L100 " not in seen, "T2: request 1 shows the read reply as its anchor, body gone")
-        need(re.search(rf"\[thought ~\d+ tokens · id {p}\]", seen) is not None,
-             "T2: request 1 shows the thought as its anchor")
+        need(re.search(fold_re("read", FILES, bt), seen) is not None
+             and "L100 " not in seen, "T2: request 1 shows the read reply as its marker, body gone")
+        need(bool(turns) and roles_with(turns[0], rf'<thought id="{p}" tokens="\d+"/>') == {"user"},
+             "T2: request 1 shows the thought as its marker, on a user-side message only")
         need(f"PLAN-{TOKEN}" not in seen and f"SEEN-{TOKEN}" not in seen,
              "T2: request 1 holds no thought text")
         last = last_user(turns[1]) if len(turns) > 1 else ""
@@ -294,9 +315,8 @@ def main() -> int:
         turns = run(AI_T, "T3", "again", 1, DONE)
         allt += turns
         seen = blob(turns[0]) if turns else ""
-        need(re.search(rf"\[folded · recall reply from {AI_T} · id {p} · ~\d+ tokens · "
-                       rf"get: \d+\]", seen) is not None,
-             "T3: request 1 shows the recall reply as its anchor")
+        need(re.search(recall_fold_re(AI_T, p), seen) is not None,
+             "T3: request 1 shows the recall reply as its marker")
         need(f"PLAN-{TOKEN}" not in seen, "T3: the thought text is nowhere in the request")
         got = hk.send(AI_T, {"type": "recall", "id": p})
         rows = got.get("messages") or []
@@ -332,18 +352,16 @@ def main() -> int:
             turns = run(AI_V, f"{label}b", "next", 2,
                         call(AI_V, f"<type>recall</type><id>{b}</id>"), f"Noted.\n{DONE}")
             seen = blob(turns[0]) if turns else ""
-            need(re.search(rf'\[folded · {verb} reply from {agent} · ~\d+ tokens · '
-                           rf'head: \\?"[^"]*\\?" · get: {b}\]', seen) is not None,
-                 f"{label}b: request 1 shows the {verb} reply as its anchor")
+            need(re.search(fold_re(verb, agent, b), seen) is not None,
+                 f"{label}b: request 1 shows the {verb} reply as its marker")
             need(whole not in seen, f"{label}b: request 1 holds no {verb} body")
             last = last_user(turns[1]) if len(turns) > 1 else ""
             need(f" {AI_V} recall" in last and whole in last,
                  f"{label}b: request 2 carries the recalled row whole")
             turns = run(AI_V, f"{label}c", "again", 1, DONE)
             seen = blob(turns[0]) if turns else ""
-            need(re.search(rf"\[folded · recall reply from {AI_V} · id {b} · ~\d+ tokens · "
-                           rf"get: \d+\]", seen) is not None,
-                 f"{label}c: request 1 shows the recall reply as its anchor")
+            need(re.search(recall_fold_re(AI_V, b), seen) is not None,
+                 f"{label}c: request 1 shows the recall reply as its marker")
             need(whole not in seen, f"{label}c: the {verb} body is nowhere in the request")
             need(any(r.get("id") == b and int(r.get("bytes") or 0) > 64000
                      for r in history(AI_V)), f"{label}c: the store row is still whole")
@@ -372,16 +390,18 @@ def main() -> int:
                     call(AI_N, f"<type>recall</type><id>{b}</id>"), f"Noted.\n{DONE}")
         allnone += turns
         seen = blob(turns[0]) if turns else ""
-        need("L100 " in seen and "[folded ·" not in seen,
-             "N2: request 1 holds the read reply whole, no fold anchor")
-        need("[thought ~" not in seen, "N2: request 1 shows no thought anchor")
+        need("L100 " in seen and "<folded id=" not in seen,
+             "N2: request 1 holds the read reply whole, no fold marker")
+        need("<thought id=" not in seen and "unfold: <call" not in seen,
+             "N2: request 1 shows no thought marker and no unfold call")
         last = last_user(turns[1]) if len(turns) > 1 else ""
         need(f" {AI_N} recall" in last and "L100 " in last,
              "N2: request 2 carries the recalled row whole")
         turns = run(AI_N, "N3", "again", 1, DONE)
         allnone += turns
         seen = blob(turns[0]) if turns else ""
-        need(seen.count("L100 ") >= 2 and "[folded ·" not in seen and "[thought ~" not in seen,
+        need(seen.count("L100 ") >= 2 and "<folded id=" not in seen and "<thought id=" not in seen
+             and "unfold: <call" not in seen,
              f"N3: the read reply and the recall reply are both whole: "
              f"{seen.count('L100 ')} bodies, no anchor")
         need(not any(marked(m) for t in allnone for m in msgs(t)),
@@ -420,9 +440,8 @@ def main() -> int:
         b = new_big(AI_U, set(), "U-read")
         turns = run(AI_U, "U-next", "next", 1, DONE)
         seen = blob(turns[0]) if turns else ""
-        need(re.search(rf'\[folded · read reply from {FILES} · ~\d+ tokens · '
-                       rf'head: \\?"[^"]*\\?" · get: {b}\]', seen) is not None
-             and "L100 " not in seen, "U: request 1 shows the read reply as its anchor")
+        need(re.search(fold_re("read", FILES, b), seen) is not None
+             and "L100 " not in seen, "U: request 1 shows the read reply as its marker")
         need(f"[fold {fold} · 2 refs · L1]" in seen and "task step 1" not in seen,
              "U: the fold line still stands in place of its rows")
         got = hk.send(AI_U, {"type": "recall", "id": first})

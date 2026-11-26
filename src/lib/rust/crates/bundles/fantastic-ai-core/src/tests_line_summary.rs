@@ -5,7 +5,22 @@
 
 use super::*;
 use crate::constants::MAX_TITLE;
-use crate::line_summary::{clean, last_in, of_span, EVENT, FIELD, HOWTO};
+use crate::line_summary::{clean, last_in, of_span, EVENT, FIELD};
+use crate::model_format::LINE_SUMMARY;
+
+/// The default block as the default type maps it.
+async fn default_block(agent: &AgentId, kernel: &Arc<Kernel>) -> String {
+    fantastic_kernel::test_support::as_agent(
+        agent.clone(),
+        crate::assembly::default_system_content(
+            agent,
+            kernel,
+            crate::model_format::of(crate::model_format::DEFAULT),
+        ),
+    )
+    .await
+    .expect("the block")
+}
 use fantastic_kernel::test_support::as_agent;
 
 const DONE: &str = "<call name=\"done\"></call>";
@@ -20,7 +35,8 @@ fn read_call() -> String {
 }
 
 async fn say(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) {
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = kernel
+        .operator_send(vec![Item::new(
             agent.clone(),
             json!({"type": "send", "text": text, "client_id": "probe"}),
         )])
@@ -28,7 +44,8 @@ async fn say(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) {
 }
 
 async fn verb(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    let out = kernel.operator_send(vec![Item::new(agent.clone(), payload)])
+    let out = kernel
+        .operator_send(vec![Item::new(agent.clone(), payload)])
         .await
         .remove(0);
     assert_eq!(out.status.as_str(), "completed", "{:?}", out.result);
@@ -163,8 +180,11 @@ async fn a_turn_of_a_line_alone_is_a_turn_with_no_call() {
 async fn not_offered_the_call_is_refused_reflect_has_no_line_and_the_prompt_no_line() {
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_kernel(&tmp, "ls_off").await;
-    let block = crate::assembly::default_system_content(&agent, &kernel).await;
-    assert!(!block.contains(HOWTO), "off: the prompt line is absent");
+    let block = default_block(&agent, &kernel).await;
+    assert!(
+        !block.contains(LINE_SUMMARY),
+        "off: the prompt line is absent"
+    );
     let s = script(
         &agent,
         vec![pass(line("reading")), pass(DONE)],
@@ -185,8 +205,8 @@ async fn not_offered_the_call_is_refused_reflect_has_no_line_and_the_prompt_no_l
     assert!(r.get("line_summary").is_none(), "{r}");
     // offered: the one line is in the block
     offer(&kernel, &agent).await;
-    let block = crate::assembly::default_system_content(&agent, &kernel).await;
-    assert_eq!(block.matches(HOWTO).count(), 1, "on: the one line");
+    let block = default_block(&agent, &kernel).await;
+    assert_eq!(block.matches(LINE_SUMMARY).count(), 1, "on: the one line");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -323,6 +343,7 @@ async fn project(kernel: &Arc<Kernel>, agent: &AgentId) -> Arc<MockScript> {
             kernel,
             "cli",
             crate::caching::Caching::ProviderCache,
+            &crate::row_attrs::Stamp::now(),
         ),
     )
     .await

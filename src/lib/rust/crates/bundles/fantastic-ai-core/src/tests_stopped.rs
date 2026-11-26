@@ -272,7 +272,7 @@ async fn stopped_row_is_a_stop_call() {
         .iter()
         .filter(|m| m["role"] == json!("assistant"))
         .filter_map(|m| m["content"].as_str())
-        .map(|c| crate::row_attrs::without_head(c).to_string())
+        .map(|c| c.to_string())
         .collect::<Vec<_>>();
     assert!(shown.contains(&stop_call(&reason)), "{shown:?}");
 
@@ -290,7 +290,7 @@ async fn stopped_row_is_a_stop_call() {
         .iter()
         .filter(|m| m["role"] == json!("assistant"))
         .filter_map(|m| m["content"].as_str())
-        .map(|c| crate::row_attrs::without_head(c).to_string())
+        .map(|c| c.to_string())
         .collect::<Vec<_>>();
     assert!(
         shown.contains(&Hermes.render(&stop_call(&reason))),

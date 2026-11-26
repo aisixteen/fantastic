@@ -29,7 +29,7 @@ use tempfile::TempDir;
 use super::pass::Pass;
 use super::tests_cache::{cache, conv, open, refs, rows_n, run, Count, Opts};
 use super::trace;
-use crate::agent_loop::{render_for_model, run_generation, BackendConfig, GenFailure, Generation};
+use crate::agent_loop::{run_generation, BackendConfig, GenFailure, Generation};
 use crate::provider::{Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream};
 use crate::tests::{base_kernel, mk_kernel};
 
@@ -493,6 +493,7 @@ pub(super) async fn assembled(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Valu
             kernel,
             "c",
             crate::caching::Caching::ProviderCache,
+            &crate::row_attrs::Stamp::now(),
         ),
     )
     .await
@@ -556,7 +557,9 @@ async fn each_event_has_ids() {
         Ok(Generation::Dead { .. })
     ));
     let dead = traces_of(&kernel, &a, "e1_dead").await;
-    assert_eq!(names(&dead), ["render_warm"], "{dead:?}");
+    // its pass mapped the two rows the first turn stored, none of them cached yet
+    assert_eq!(names(&dead), ["render_cold"], "{dead:?}");
+    assert_eq!(dead[0]["rows"], json!(2), "{dead:?}");
     assert!(dead[0].get("row").is_none(), "{}", dead[0]);
     assert_eq!(dead[0]["mode"], json!("turn"));
 }
@@ -599,7 +602,7 @@ async fn traces_never_in_view() {
             super::hermes::NAME,
             Some(QWEN),
         );
-        let view = pass.view(msgs, &render_for_model(msgs), &[], &meta);
+        let view = pass.view(msgs, &meta);
         (view.messages.clone(), view.kept)
     };
     let with = assembled(&kernel, &a).await;
@@ -1204,20 +1207,23 @@ async fn render_rows_match_cache() {
         ["render_cold", "render_cold", "render_warm", "render_warm"]
     );
 
-    // default: an identity type renders and caches nothing
+    // default: the same, its rows mapped and cached like any type's
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp, "tr_e14_d").await;
     let p = Scripted::new(PLAIN, vec![]);
+    let state = crate::state::state_for(&a);
     let mut events = Vec::new();
     for i in 0..3 {
+        let before = state.render_cache.stats().entries;
         let client = format!("e14d_{i}");
         answered(&kernel, &a, &p, &client).await;
+        let after = state.render_cache.stats().entries;
         let rows = traces_of(&kernel, &a, &client).await;
-        assert_eq!(rows[0]["rows"], json!(0), "{rows:?}");
+        assert_eq!(rows[0]["rows"], json!(after - before), "{rows:?}");
         events.push(rows[0]["event"].as_str().unwrap_or_default().to_string());
     }
-    assert_eq!(crate::state::state_for(&a).render_cache.stats().entries, 0);
-    assert_eq!(events, ["render_cold", "render_warm", "render_warm"]);
+    assert!(state.render_cache.stats().entries > 0);
+    assert_eq!(events, ["render_cold", "render_cold", "render_warm"]);
 }
 
 // E15

@@ -1,13 +1,11 @@
-# recorded by model_format::tests_determinism::record_prefix (#766): res/test/history.json, each row's model text through the adapter
+# recorded by model_format::tests_determinism::record_prefix (#766): res/test/history.json, each row's stored text through the adapter
 # adapter: hermes
 # rev: 1
 # rules_sha256: ff754de3206273513f5c638ae70696695c015c3647483889873a23286f4e41b4
-# commit: 4fd5bb4d949ab2eccaa8cdf1d9b5296f6a5ea245
+# commit: none: the map-once working tree on b8eaa0af, uncommitted
 == row 1 user ==
-[2026-10-24 03:00 +03:00]
 Привіт! Склади, будь ласка, план для нотаток.
 == row 2 assistant ==
-[2026-10-24 03:01 +03:00]
 Почну зі сховища.
 <tool_call>
 {"name": "send", "arguments": {"routing": {"target_id": "notes", "title": "Огляд сховища"}, "payload": {"type": "write", "path": "plan.md"}}}
@@ -22,16 +20,16 @@
 {"name": "send", "arguments": {"routing": {"target_id": "kernel"}, "payload": {"type": "reflect", "tier": "oneliners"}}}
 </tool_call>
 == row 3 user ==
-[2026-10-24 03:02 +03:00]
 [reply to 11 · notes write · "Огляд сховища" · ↑2 · 1 of 2 in batch 2]
+<tool_response>
 {"ok": true, "bytes": 96}
+</tool_response>
 
 [reply to 12 · kernel reflect · ↑2 · 2 of 2 in batch 2]
 <tool_response>
 call NOT dispatched: kernel refused reflect — no line to kernel in your can. Nothing ran.
 </tool_response>
 == row 4 assistant ==
-[2026-10-24 03:03 +03:00]
 <tool_call>
 {"name": "keep", "arguments": {"of": "11", "summary": "План записано в plan.md."}}
 </tool_call>
@@ -39,7 +37,6 @@ call NOT dispatched: kernel refused reflect — no line to kernel in your can. N
 {"name": "await", "arguments": {}}
 </tool_call>
 == row 5 user ==
-[2026-10-24 03:04 +03:00]
 [no call was dispatched] Your answer emitted no <call> element, so NOTHING ran — a call written in your thinking does not run: write it in your answer, after the thinking. If the task is unfinished, emit that call now. If it is finished, end the chain explicitly: <tool_call>
 {"name": "done", "arguments": {}}
 </tool_call>
@@ -49,7 +46,6 @@ Your next answer must START with <tool_call> — the very first characters of th
 </tool_call>.
 Then continue with your current step.
 == row 6 assistant ==
-[2026-10-24 03:05 +03:00]
 <tool_call>
 {"name": "line_summary", "arguments": {"text": "Пишу план нотаток"}}
 </tool_call>
@@ -57,22 +53,22 @@ Then continue with your current step.
 {"name": "send", "arguments": {"routing": {"target_id": "notes", "reply_to": "self"}, "payload": {"type": "read", "path": "plan.md", "lines": ["1", "3"]}}}
 </tool_call>
 == row 7 user ==
-[2026-10-25 05:46 +02:00]
 [reply to 13 · notes read · ↑6]
+<tool_response>
 План:
 1. Зібрати нотатки.
 2. Розкласти по темах.
 <tool_call>
 {"name": "keep", "arguments": {"of": "13", "summary": "…"}}
 </tool_call>
+</tool_response>
 == row 8 assistant ==
-[2026-10-25 05:47 +02:00]
 <tool_call>
 {"name": "send", "arguments": {"routing": {"target_id": "notes"}}}
 </tool_call>
 == row 9 user ==
-[2026-10-25 05:48 +02:00]
 [reply to - · - -]
+<tool_response>
 [malformed call — nothing ran] line 1, col 1:
   <tool_call>
   ^~~~~~~~~~~ not a call tag
@@ -81,8 +77,8 @@ write it as:
 {"name": "send", "arguments": {"routing": {"target_id": "notes"}, "payload": {"type": "reflect"}}}
 </tool_call>
 A call is <tool_call>, then one JSON object {"name": "TOOL", "arguments": {…}} on its own line, then a body as <bytes>…</bytes> when the call has one, then </tool_call>.
+</tool_response>
 == row 10 assistant ==
-[2026-10-25 05:49 +02:00]
 Готово.
 <tool_call>
 {"name": "inquiry_answer", "arguments": {"answer": "Так, план готовий: два пункти."}}
@@ -91,11 +87,9 @@ A call is <tool_call>, then one JSON object {"name": "TOOL", "arguments": {…}}
 {"name": "done", "arguments": {}}
 </tool_call>
 == row 11 user ==
-[2026-10-26 00:33 -07:00]
 Дякую 👩‍💻
 А тепер зупинись. Кінець.
 == row 12 assistant ==
-[2026-10-26 07:34 +00:00]
 <tool_call>
 {"name": "stop", "arguments": {"reason": "Немає доступу до kernel: потрібна лінія в can."}}
 </tool_call>

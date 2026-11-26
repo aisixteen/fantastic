@@ -3,10 +3,10 @@
 //! the chat's previous request (a full list on a checkpoint), the running `totals`, and
 //! the `cost` of the pass.
 //!
-//! WHAT THE MODEL SEES of them is declared once, in [`VISIBLE`] (#652): only `ts`, at
-//! the head of its message (#653). Every other attribute is stored and returned to
-//! people and tools, never rendered into a request
-//! ([`crate::agent_loop::render_for_model`] carries the head and the content).
+//! THE MODEL SEES NONE OF THEM on a row: every attribute is stored and returned to
+//! people and tools, and a request carries a row's content only
+//! ([`crate::model_format::map`]). The date is said once, in the system block's
+//! environment section, from the first row of the thread ([`day_of`]).
 
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Map, Value};
@@ -17,82 +17,10 @@ use std::sync::Arc;
 /// reader never replays more than this many deltas.
 pub(crate) const CHECKPOINT_EVERY: u64 = 50;
 
-/// An attribute the model sees: its key in `attributes`, and how it is written at the
-/// head of the message from the row's attributes (`None`: it cannot be said, and the
-/// head leaves it out).
-pub(crate) struct Visible {
-    /// The key in the row's `attributes`.
-    pub(crate) key: &'static str,
-    /// The attribute as the head writes it, read from the row's `attributes` (the value
-    /// under `key` and what it is written with, such as the `ts` head's [`UTC_OFFSET`]).
-    pub(crate) render: fn(&Map<String, Value>) -> Option<String>,
-}
-
 /// The key of a row's UTC offset (#766, 1.13): whole seconds east of UTC, in force when
-/// the row was written. Set once, where the row's `ts` is set ([`offset_at`]); the `ts`
-/// head is written with it, never with the process's time zone.
+/// the row was written. Set once, where the row's `ts` is set ([`offset_at`]); the
+/// environment section's date is read with it, never with the process's time zone.
 pub(crate) const UTC_OFFSET: &str = "utc_offset";
-
-/// THE ATTRIBUTES THE MODEL SEES, declared once (#652): `ts`, when the row was written
-/// (its stored [`UTC_OFFSET`] is part of the `ts` head). Every key not declared here is
-/// stored and shown to people and tools, never rendered into the model's context.
-pub(crate) const VISIBLE: &[Visible] = &[Visible {
-    key: "ts",
-    render: ts_head,
-}];
-
-/// The head of `message`: each of its [`VISIBLE`] attributes as written, on one line,
-/// ended by a newline; empty when it carries none of them.
-pub(crate) fn head(message: &Value) -> String {
-    let Some(attrs) = message.get("attributes").and_then(Value::as_object) else {
-        return String::new();
-    };
-    let shown: Vec<String> = VISIBLE
-        .iter()
-        .filter(|v| attrs.contains_key(v.key))
-        .filter_map(|v| (v.render)(attrs))
-        .collect();
-    if shown.is_empty() {
-        return String::new();
-    }
-    format!("{}\n", shown.join(" "))
-}
-
-/// The text the model reads for `message`: its [`head`], then its content.
-pub(crate) fn model_text(message: &Value) -> String {
-    let content = message.get("content").and_then(Value::as_str).unwrap_or("");
-    format!("{}{content}", head(message))
-}
-
-/// `text` past the head it opens with (`[YYYY-MM-DD HH:MM ±HH:MM]` and a newline); all
-/// of it when it opens with none.
-#[cfg(test)]
-pub(crate) fn without_head(text: &str) -> &str {
-    let shape = b"[0000-00-00 00:00 +00:00]\n";
-    let b = text.as_bytes();
-    let headed = b.len() >= shape.len()
-        && shape.iter().zip(b).all(|(s, c)| match s {
-            b'0' => c.is_ascii_digit(),
-            b'+' => *c == b'+' || *c == b'-',
-            _ => s == c,
-        });
-    if headed {
-        &text[shape.len()..]
-    } else {
-        text
-    }
-}
-
-/// The row's `ts` (epoch seconds) read with the row's stored [`UTC_OFFSET`], to the
-/// minute (#653, #766 1.13): `[2026-11-19 21:40 +02:00]`. The offset was stored when the
-/// row was written, so a stored row's head never changes, under any time zone. A row
-/// with no offset, or one that is not an integer, is written in UTC (`+00:00`); the
-/// process's time zone is never read here.
-fn ts_head(attrs: &Map<String, Value>) -> Option<String> {
-    let t = attrs.get("ts")?.as_f64()?.floor() as i64;
-    let offset = attrs.get(UTC_OFFSET).and_then(Value::as_i64).unwrap_or(0);
-    Some(stamp(t, offset))
-}
 
 /// The UTC offset to store beside a row's `ts` (#766, 1.13): the process's offset at
 /// that instant ([`local_offset`]). `None` when `ts` is not a number or the C library
@@ -102,19 +30,54 @@ pub(crate) fn offset_at(ts: &Value) -> Option<Value> {
     local_offset(t).map(Value::from)
 }
 
-/// `t` (epoch seconds) read on a clock `offset` seconds ahead of UTC, to the minute.
-pub(crate) fn stamp(t: i64, offset: i64) -> String {
+/// WHEN AN ARRIVING MESSAGE IS WRITTEN: its `ts` and the UTC offset in force then, taken
+/// once, before the assembly reads it ([`crate::assembly::assemble_messages`]), so the
+/// request and the row it becomes keep the same ones.
+#[derive(Clone, Debug)]
+pub(crate) struct Stamp {
+    /// Epoch seconds.
+    pub(crate) ts: Value,
+    /// Seconds east of UTC ([`offset_at`]); none when it cannot be placed.
+    pub(crate) offset: Option<Value>,
+}
+
+impl Stamp {
+    /// The stamp of now.
+    #[must_use]
+    pub(crate) fn now() -> Self {
+        let ts = json!(crate::helpers::now_secs());
+        let offset = offset_at(&ts);
+        Self { ts, offset }
+    }
+
+    /// `row` with this `ts` and offset in its `attributes`.
+    pub(crate) fn apply(&self, row: &mut Value) {
+        row["attributes"]["ts"] = self.ts.clone();
+        if let Some(off) = &self.offset {
+            row["attributes"][UTC_OFFSET] = off.clone();
+        }
+    }
+
+    /// The stamp as the environment section reads a thread's first row.
+    #[must_use]
+    pub(crate) fn env(&self) -> Option<crate::model_format::map::Env> {
+        let mut row = json!({});
+        self.apply(&mut row);
+        crate::model_format::map::Env::of(&row)
+    }
+}
+
+/// `t` (epoch seconds) read on a clock `offset` seconds ahead of UTC: its date
+/// (`2026-11-19`) and the offset (`+02:00`). The process's time zone is never read here.
+#[must_use]
+pub(crate) fn day_of(t: i64, offset: i64) -> (String, String) {
     let local = t + offset;
     let (y, m, d) = civil_from_days(local.div_euclid(86_400));
-    let tod = local.rem_euclid(86_400);
     let sign = if offset < 0 { '-' } else { '+' };
     let off = offset.abs() / 60;
-    format!(
-        "[{y:04}-{m:02}-{d:02} {:02}:{:02} {sign}{:02}:{:02}]",
-        tod / 3600,
-        tod % 3600 / 60,
-        off / 60,
-        off % 60
+    (
+        format!("{y:04}-{m:02}-{d:02}"),
+        format!("{sign}{:02}:{:02}", off / 60, off % 60),
     )
 }
 
@@ -166,7 +129,15 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let mp = (5 * doy + 2) / 153;
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (if m <= 2 { yoe + era * 400 + 1 } else { yoe + era * 400 }, m, d)
+    (
+        if m <= 2 {
+            yoe + era * 400 + 1
+        } else {
+            yoe + era * 400
+        },
+        m,
+        d,
+    )
 }
 
 /// The size cap of a row's `attributes` at write, parts excluded (they are bounded by
@@ -453,19 +424,17 @@ pub(crate) async fn seed_used(
 /// it is a dated form of (the longest).
 fn price_entry<'a>(meta: &'a Map<String, Value>, model: &str) -> Option<&'a Value> {
     let prices = meta.get("prices")?.as_object()?;
-    prices
-        .get(model)
-        .or_else(|| {
-            prices
-                .iter()
-                .filter(|(id, _)| {
-                    model
-                        .strip_prefix(id.as_str())
-                        .is_some_and(|rest| rest.starts_with('-'))
-                })
-                .max_by_key(|(id, _)| id.len())
-                .map(|(_, v)| v)
-        })
+    prices.get(model).or_else(|| {
+        prices
+            .iter()
+            .filter(|(id, _)| {
+                model
+                    .strip_prefix(id.as_str())
+                    .is_some_and(|rest| rest.starts_with('-'))
+            })
+            .max_by_key(|(id, _)| id.len())
+            .map(|(_, v)| v)
+    })
 }
 
 /// The cost of one row's pass, priced from its counts (`used.pass.total`, #766 1.7):
@@ -545,50 +514,26 @@ mod tests {
     /// 2026-11-19 19:40:00 UTC.
     const T: i64 = 1_795_117_200;
 
-    /// `row` with a stored UTC offset of `secs`, as an append writes it.
-    fn with_offset(mut row: Value, secs: i64) -> Value {
-        row["attributes"][UTC_OFFSET] = json!(secs);
-        row
-    }
-
     #[test]
-    fn only_ts_is_declared_visible() {
-        let keys: Vec<&str> = VISIBLE.iter().map(|v| v.key).collect();
-        assert_eq!(keys, ["ts"]);
-    }
-
-    #[test]
-    fn every_other_attribute_stays_out_of_the_text_the_model_reads() {
-        let row = json!({"role": "assistant", "content": "done", "attributes": {
-            "ts": T, "usage": {"input": 10, "output": 2}, "cost": {"usd": 0.1},
-            "model": "m-one", "provider": "prov_a", "parts": {"full": true, "list": []},
-            "totals": {"requests": 1}, "budget": 900, "source": "lead",
-            "keep": {"3": "k"}, "any_future_key": "x"}});
-        let row = with_offset(row, 7200);
-        assert_eq!(model_text(&row), "[2026-11-19 21:40 +02:00]\ndone");
-        // without a ts the row has no head; the content is all
-        let bare = json!({"role": "user", "content": "hi", "attributes": {"source": "lead"}});
-        assert_eq!(head(&bare), "");
-        assert_eq!(model_text(&bare), "hi");
-        assert_eq!(model_text(&json!({"role": "user", "content": "hi"})), "hi");
-    }
-
-    #[test]
-    fn the_head_is_the_local_time_with_its_offset_to_the_minute() {
-        assert_eq!(stamp(T, 7200), "[2026-11-19 21:40 +02:00]");
-        assert_eq!(stamp(T, 0), "[2026-11-19 19:40 +00:00]");
-        assert_eq!(stamp(T, -5 * 3600 - 1800), "[2026-11-19 14:10 -05:30]");
-        assert_eq!(stamp(T, 5 * 3600 + 2700), "[2026-11-20 01:25 +05:45]");
-        // the seconds are dropped, never rounded up
-        assert_eq!(stamp(951_782_400 + 59, 0), "[2000-02-29 00:00 +00:00]");
-        assert_eq!(stamp(-60, 0), "[1969-12-31 23:59 +00:00]");
-        assert_eq!(stamp(1_772_323_200 - 1, 0), "[2026-02-28 23:59 +00:00]");
-        // a fractional ts is the minute it falls in
-        let row = with_offset(
-            json!({"content": "x", "attributes": {"ts": T as f64 + 59.9}}),
-            -18_000,
+    fn the_day_is_the_local_date_with_its_offset() {
+        assert_eq!(day_of(T, 7200), ("2026-11-19".into(), "+02:00".into()));
+        assert_eq!(day_of(T, 0), ("2026-11-19".into(), "+00:00".into()));
+        assert_eq!(
+            day_of(T, -5 * 3600 - 1800),
+            ("2026-11-19".into(), "-05:30".into())
         );
-        assert_eq!(head(&row), format!("{}\n", stamp(T, -18_000)));
+        // past local midnight: the next day
+        assert_eq!(
+            day_of(T, 5 * 3600 + 2700),
+            ("2026-11-20".into(), "+05:45".into())
+        );
+        // the last second of a day is that day, never rounded into the next
+        assert_eq!(day_of(951_782_400 - 1, 0).0, "2000-02-28");
+        assert_eq!(day_of(951_782_400 + 59, 0).0, "2000-02-29");
+        assert_eq!(day_of(-60, 0).0, "1969-12-31");
+        assert_eq!(day_of(1_772_323_200 - 1, 0).0, "2026-02-28");
+        // west of UTC, a UTC morning is the evening before
+        assert_eq!(day_of(1_772_323_200 + 3600, -7200).0, "2026-02-28");
     }
 
     #[test]
@@ -616,6 +561,10 @@ mod tests {
         let sign = if z.starts_with('-') { -1 } else { 1 };
         let h: i64 = z[1..3].parse().unwrap();
         let m: i64 = z[3..5].parse().unwrap();
-        assert_eq!(local_offset(now), Some(sign * (h * 3600 + m * 60)), "date +%z = {z}");
+        assert_eq!(
+            local_offset(now),
+            Some(sign * (h * 3600 + m * 60)),
+            "date +%z = {z}"
+        );
     }
 }

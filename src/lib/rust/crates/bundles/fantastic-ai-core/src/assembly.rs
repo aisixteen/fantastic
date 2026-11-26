@@ -16,6 +16,8 @@
 
 use crate::caching::Caching;
 use crate::memory::{load_history, MemoryStoreError};
+use crate::model_format::map::{Env, Howto, Piece, SysBody, SysPiece};
+use crate::model_format::{Decl, Section};
 use crate::prompt_file::PromptFileError;
 use crate::state::BackendState;
 use fantastic_bundle::{py_split_whitespace, py_strip};
@@ -70,77 +72,8 @@ pub fn render_reflect(v: &Value) -> String {
     py_strip(&format!("{sentence}  {fields}")).to_string()
 }
 
-/// What an agent IS — `reflect`, rendered from its one declaration (every argument).
-fn reflect_howto() -> String {
-    let rows = fantastic_kernel::verbs::rows(&[fantastic_kernel::declared::common::VERBS], &[]);
-    format!(
-        "## What an agent IS — `reflect`\nSend it to any agent you are granted; to `kernel` for the tree, and with `bundles` the bundles' records (the fields `create_agent` takes); name only the ones you need, e.g. `<payload><type>reflect</type><bundles>all</bundles><bundle_names><item>BUNDLE</item></bundle_names></payload>` — each argument closes with its own tag.\n{}",
-        rows.first().map(fantastic_kernel::verbs::detail).unwrap_or_default()
-    )
-}
-
-/// The titles how-to, appended when the record sets `context_titles`. A title
-/// rides on the reply's tag and is what REMAINS once the body is stripped.
-pub const TITLES_HOWTO: &str = r#"## Titling your calls
-Every call carries a one-sentence `<title>` in its `<routing>`:
-<call name="send">
-<routing><target_id>AGENT</target_id><title>WHAT THIS CALL IS FOR</title></routing>
-<payload><type>VERB</type><path>PATH</path></payload>
-</call>
-The title rides on the reply's tag and is what remains once the reply BODY is stripped
-from your view (bodies stay fetchable by pid). Title the INTENT (what you read and what you look for in it);
-what a reply told you goes in your task state — the body will go; the title and your state stay.
-"#;
-
-/// The FULL-ASYNC how-to, gated on the record's `context_async` — taught only
-/// when replies really do arrive as rows. Python `_ASYNC_HOWTO`, verbatim.
-pub const ASYNC_HOWTO: &str = r#"## Replies are rows, not turns
-A reply is DATA, not a message to answer. A LARGE reply arrives as a one-line digest —
-tag, your title, size, and its ORIGIN (how to get it again):
-[reply to <pid> · <agent> <verb> · "<title>"]
-(settled, <N> bytes — NOT inlined, held in memory only until this agent restarts. origin: <agent> <path> lines <a-b> <version> — read {path, range}. To find a line in it: send yourself `<type>grep</type> <query>substring</query> <ids><item>pid</item></ids>`)
-GREP FIRST: `<type>grep</type> <query>substring</query>` on yourself finds the line —
-in a body held this run, a folded stretch, an old turn, a row shared with you — with
-its id and line. BODIES ARE NOT KEPT: after a restart only the origin line remains, so
-re-read or re-run what you still need; never answer from a body you cannot see.
-FOLDS: when your window fills, finished stretches collapse into `[fold <id> · N refs]
-"<title>"` plus a short summary. Nothing is deleted — `<type>history</type>
-<fold>id</fold>` lists a fold's members, grep with the fold's id searches inside it.
-After a fold, and on your first turn after a boot, `context_recall` asks you what to keep
-in full; a `[recall …]` line is your own earlier decision and names the LIVE task.
-`<type>context_clear</type>` on yourself starts a NEW THREAD at a `[cleared …]` line; every
-earlier row stays reachable through grep, recall and `history fold`.
-"#;
-
-/// The memory how-to — python `_MEMORY_HOWTO`, verbatim, `{store}` filled in with
-/// the record's `memory_store_id` (or `(none)`).
-pub const MEMORY_HOWTO: &str = r#"Your conversation lives in your MEMORY STORE `{store}` — every row under YOUR key.
-"#;
-
-/// The working rules, placed LAST in the default system block: the model follows the
-/// most recent instructions most closely, and these must survive a long task brief.
-pub const WORKING_HOWTO: &str = include_str!("model_format/res/default/howto_working.txt");
-
-/// The context-window how-to, appended to the DEFAULT system block. Context is
-/// the backend's (it owns the conversation), so it teaches the recall /
-/// context_status affordances alongside the `send` how-to's addressing (the pass
-/// type's `res/<type>/howto_send.txt`).
-pub const CONTEXT_HOWTO: &str = r#"## Context window
-Your view is finite: when it overflows, older turns are compacted and a
-`[context-notice]` says so; the transcript stays whole. Send your OWN id
-`<type>recall</type>` (`<query>`, `<limit>`) to page dropped turns back, `<type>context_status</type>`
-for your budget.
-A [folded …], [thought …] or [cut …] anchor stands for a body you already saw in full; `recall` with its id to read it again — it folds back after your next answer. A folded `docs` reply has no id: use what you restated; call it again only when the state may have changed. A `reflect` reply stays whole.
-A reply that will fold after your answer ends with a `keep` call holding its id: write what you will still need of it in `summary`, short, and the folded block shows that in place of the body; leave it out and the block folds to its anchor.
-Your thinking lasts one turn: after you answer it folds to a [thought …] anchor and is not kept. Use it to choose the next step, not to gather again what you already know. Do not repeat a call whose result you still have or noted; fetch again only what was folded and you need.
-"#;
-
 /// The fields of an agent's own reflect its system block shows — python `_SELF_KEYS`.
-const SELF_KEYS: [&str; 3] = [
-    "id",
-    "description",
-    "memory_store_id",
-];
+const SELF_KEYS: [&str; 3] = ["id", "description", "memory_store_id"];
 
 /// THE PLACEHOLDERS a system prompt may hold, filled per agent and per turn —
 /// so a prompt that REPLACES the default block keeps its
@@ -160,22 +93,12 @@ fn named(text: &str) -> Vec<&'static str> {
         .collect()
 }
 
-/// One piece of the system block, in the order the block concatenates them:
-/// `part` names what it is (`system_text`, `prompt_file`, `self_reflect`,
-/// `verb_docs`), or is empty for the blank line between two pieces.
-/// The block IS the pieces' texts end to end, so the request carries the same bytes
-/// however they are told apart.
-pub(crate) struct SystemPiece {
-    pub(crate) part: &'static str,
-    pub(crate) text: String,
-}
-
 const SEPARATOR: &str = "\n\n";
 
-fn piece(part: &'static str, text: impl Into<String>) -> SystemPiece {
-    SystemPiece {
-        part,
-        text: text.into(),
+fn piece(part: &str, text: impl Into<String>) -> SysPiece {
+    SysPiece {
+        part: part.to_string(),
+        body: SysBody::Text(text.into()),
     }
 }
 
@@ -185,10 +108,10 @@ fn piece(part: &'static str, text: impl Into<String>) -> SystemPiece {
 /// names (`{store}` is the id, plain text).
 fn fill(
     text: &str,
-    parts: &HashMap<&'static str, String>,
+    parts: &HashMap<&'static str, SysBody>,
     literal: &'static str,
-) -> Vec<SystemPiece> {
-    let mut out: Vec<SystemPiece> = Vec::new();
+) -> Vec<SysPiece> {
+    let mut out: Vec<SysPiece> = Vec::new();
     let mut run = String::new();
     let mut rest = text;
     'scan: while let Some(i) = rest.find('{') {
@@ -203,12 +126,16 @@ fn fill(
                         "howto" => Some("verb_docs"),
                         _ => None,
                     };
-                    match named {
-                        Some(name) => {
+                    match (named, v) {
+                        (Some(name), body) => {
                             out.push(piece(literal, std::mem::take(&mut run)));
-                            out.push(piece(name, v.as_str()));
+                            out.push(SysPiece {
+                                part: name.to_string(),
+                                body: body.clone(),
+                            });
                         }
-                        None => run.push_str(v),
+                        (None, SysBody::Text(t)) => run.push_str(t),
+                        (None, SysBody::Howto(_)) => {}
                     }
                     rest = &tail[token.len()..];
                     continue 'scan;
@@ -224,15 +151,17 @@ fn fill(
 }
 
 /// The live parts of the system block, built only where `need` names them —
-/// python `_parts`.
+/// python `_parts`. `{howto}` is the how-to as sections: the pass's type writes them
+/// ([`crate::model_format::map::system`]), so a type switch maps the same block again.
 async fn parts(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
     need: &[&str],
-) -> HashMap<&'static str, String> {
-    let mut out: HashMap<&'static str, String> = HashMap::new();
+    env: Option<Env>,
+) -> HashMap<&'static str, SysBody> {
+    let mut out: HashMap<&'static str, SysBody> = HashMap::new();
     if need.contains(&"self") {
-        out.insert("self", self_part(self_id, kernel).await);
+        out.insert("self", SysBody::Text(self_part(self_id, kernel).await));
     }
     let meta = crate::helpers::agent_meta(self_id, kernel);
     let store = meta
@@ -240,7 +169,7 @@ async fn parts(
         .and_then(Value::as_str)
         .map_or_else(|| "(none)".to_string(), str::to_string);
     if need.contains(&"store") {
-        out.insert("store", store.clone());
+        out.insert("store", SysBody::Text(store.clone()));
     }
     if need.contains(&"howto") {
         // OPTIONAL SECTIONS, gated on the record: a title only earns its line
@@ -250,29 +179,33 @@ async fn parts(
         // Teaching any unconditionally spends window on an affordance the agent
         // does not have.
         let flag = |k: &str| meta.get(k).and_then(Value::as_bool) == Some(true);
-        // THE `send` HOW-TO IS THE PASS TYPE'S (Q16): `res/<type>/howto_send.txt`, so a
-        // model is taught the call form it is read in. Only a switch to another type
-        // changes it.
-        let kind = crate::model_format::type_now(self_id, kernel, &meta).await;
-        let mut blocks = vec![
-            crate::model_format::of(kind).howto_send.to_string(),
-            reflect_howto(),
-            CONTEXT_HOWTO.to_string(),
-            MEMORY_HOWTO.replace("{store}", &store),
+        // FIRST the environment (the date the thread began), then how to reach agents
+        let mut sections = vec![
+            Section::Env,
+            Section::Send,
+            Section::Reflect,
+            Section::Context,
+            Section::Memory,
         ];
         if flag("context_titles") {
-            blocks.push(TITLES_HOWTO.to_string());
+            sections.push(Section::Titles);
         }
         if flag("context_async") {
-            blocks.push(ASYNC_HOWTO.to_string());
+            sections.push(Section::Async);
         }
         if flag(crate::line_summary::FIELD) {
-            blocks.push(crate::line_summary::HOWTO.to_string());
+            sections.push(Section::LineSummary);
         }
-        // LAST: the working rules are what the model reads right before the task — the
-        // pass type's (`res/<type>/howto_working.txt`), so they name the call form it is read in.
-        blocks.push(crate::model_format::of(kind).howto_working.to_string());
-        out.insert("howto", blocks.join("\n\n"));
+        // LAST: the working rules are what the model reads right before the task.
+        sections.push(Section::Working);
+        out.insert(
+            "howto",
+            SysBody::Howto(Howto {
+                sections,
+                store,
+                env,
+            }),
+        );
     }
     out
 }
@@ -284,35 +217,54 @@ async fn render_prompt(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
     literal: &'static str,
-) -> Vec<SystemPiece> {
+    env: Option<Env>,
+) -> Vec<SysPiece> {
     let need = named(text);
     if need.is_empty() {
         return vec![piece(literal, text)];
     }
-    fill(text, &parts(self_id, kernel, &need).await, literal)
+    fill(text, &parts(self_id, kernel, &need, env).await, literal)
 }
 
-/// The DEFAULT system block: `{self}\n\n{howto}` — this agent's own reflect and
-/// the how-to sections its record earns. Nothing in it changes when the tree does,
-/// so the cached prefix holds for the whole conversation. Extracted
-/// so `context_recall` can MEASURE the same block the next turn will carry —
-/// python's `_default_system_content`.
-pub async fn default_system_content(self_id: &AgentId, kernel: &Arc<Kernel>) -> String {
-    default_pieces(self_id, kernel)
-        .await
-        .into_iter()
-        .map(|p| p.text)
-        .collect()
+/// The DEFAULT system block as `decl` writes it: `{self}\n\n{howto}` — this agent's own
+/// reflect and the how-to sections its record earns. Nothing in it changes when the tree
+/// does, nor with the clock (its date is the thread's first row's), so the cached prefix
+/// holds for the whole conversation. Extracted so `context_recall` can MEASURE the same
+/// block the next turn will carry — python's `_default_system_content`.
+///
+/// # Errors
+/// The memory store refused the read of the thread's first row.
+#[cfg(test)]
+pub(crate) async fn default_system_content(
+    self_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    decl: &Decl<'_>,
+) -> Result<String, MemoryStoreError> {
+    let env = thread_env(self_id, kernel).await?;
+    Ok(crate::model_format::map::system(
+        decl,
+        &default_pieces(self_id, kernel, env).await,
+    ))
 }
 
 /// The default block as its pieces: this agent's own reflect and the how-to
 /// sections, a blank line between.
-async fn default_pieces(self_id: &AgentId, kernel: &Arc<Kernel>) -> Vec<SystemPiece> {
-    let mut p = parts(self_id, kernel, &["self", "howto"]).await;
+async fn default_pieces(
+    self_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    env: Option<Env>,
+) -> Vec<SysPiece> {
+    let mut p = parts(self_id, kernel, &["self", "howto"], env).await;
     vec![
-        piece("self_reflect", p.remove("self").unwrap_or_default()),
+        SysPiece {
+            part: "self_reflect".into(),
+            body: p.remove("self").unwrap_or(SysBody::Text(String::new())),
+        },
         piece("", SEPARATOR),
-        piece("verb_docs", p.remove("howto").unwrap_or_default()),
+        SysPiece {
+            part: "verb_docs".into(),
+            body: p.remove("howto").unwrap_or(SysBody::Text(String::new())),
+        },
     ]
 }
 
@@ -342,41 +294,64 @@ async fn self_part(self_id: &AgentId, kernel: &Arc<Kernel>) -> String {
     format!("You are `{}`. {}", self_id, render_reflect(&me))
 }
 
-/// THE system block a turn uses — the one choice `assemble_messages` builds the
-/// turn on and `context_recall` sizes the body budget against, so the two never
-/// drift (python `_system_content`). PRECEDENCE:
+/// The first row of the current thread as the environment section reads it: the head's
+/// first row (the store's first, or the newest `[cleared …]` row). `None`: an empty
+/// thread (the arriving message is then the first row).
+async fn thread_env(
+    self_id: &AgentId,
+    kernel: &Arc<Kernel>,
+) -> Result<Option<Env>, MemoryStoreError> {
+    Ok(load_history(self_id, kernel, false)
+        .await?
+        .first()
+        .and_then(Env::of))
+}
+
+/// THE system block a turn uses, as `decl` writes it — the one choice
+/// `assemble_messages` builds the turn on and `context_recall` sizes the body budget
+/// against, so the two never drift (python `_system_content`). PRECEDENCE:
 /// the per-call argument (this delivery) > the record's own `system_prompt` (read
 /// LIVE, so an `update_agent` lands on the next turn — a main turn, a
 /// self-delivery, a turn woken by a reply) > the file the record's
 /// `system_prompt_file` names ([`crate::prompt_file`]) > the default block.
 /// Whichever prompt is in force has its placeholders filled; none is ever
 /// appended to another.
-pub async fn system_content(
+///
+/// # Errors
+/// The memory store failed, or a set `system_prompt_file` is unusable.
+pub(crate) async fn system_content(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
-) -> Result<String, PromptFileError> {
-    Ok(system_pieces(self_id, kernel)
-        .await?
-        .into_iter()
-        .map(|p| p.text)
-        .collect())
+    decl: &Decl<'_>,
+) -> Result<String, BlockFail> {
+    let env = thread_env(self_id, kernel).await?;
+    Ok(crate::model_format::map::system(
+        decl,
+        &system_pieces(self_id, kernel, env).await?,
+    ))
 }
 
-/// [`system_content`] told apart piece by piece: the block is their texts end to end.
+/// The system block a turn uses, piece by piece: the block is their mapped texts end to
+/// end. `env`: the first row of the thread.
 pub(crate) async fn system_pieces(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
-) -> Result<Vec<SystemPiece>, PromptFileError> {
+    env: Option<Env>,
+) -> Result<Vec<SysPiece>, PromptFileError> {
     // THE WRAP: the record's `pre_system_prompt` goes BEFORE
     // whichever prompt is in force and `post_system_prompt` AFTER it, each read
     // live and taken verbatim — no placeholders, and neither replaces anything.
     // Absent or null adds nothing (python `_system_content`).
     let meta = crate::helpers::agent_meta(self_id, kernel);
-    let inner = inner_system_pieces(self_id, kernel).await?;
+    let inner = inner_system_pieces(self_id, kernel, env).await?;
     let wrap = |key: &str| {
         crate::record::record_wrap_prompt(&meta, key).map(|s| vec![piece("system_text", s)])
     };
-    let mut out: Vec<SystemPiece> = Vec::new();
+    let blank = |p: &SysPiece| match &p.body {
+        SysBody::Text(t) => py_strip(t).is_empty(),
+        SysBody::Howto(_) => false,
+    };
+    let mut out: Vec<SysPiece> = Vec::new();
     for group in [
         wrap("pre_system_prompt"),
         Some(inner),
@@ -385,7 +360,7 @@ pub(crate) async fn system_pieces(
     .into_iter()
     .flatten()
     {
-        if group.iter().all(|p| py_strip(&p.text).is_empty()) {
+        if group.iter().all(blank) {
             continue;
         }
         if !out.is_empty() {
@@ -400,17 +375,18 @@ pub(crate) async fn system_pieces(
 async fn inner_system_pieces(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
-) -> Result<Vec<SystemPiece>, PromptFileError> {
+    env: Option<Env>,
+) -> Result<Vec<SysPiece>, PromptFileError> {
     if let Some(s) =
         crate::record::record_system_prompt(&crate::helpers::agent_meta(self_id, kernel))
     {
-        return Ok(render_prompt(&s, self_id, kernel, "system_text").await);
+        return Ok(render_prompt(&s, self_id, kernel, "system_text", env).await);
     }
     // Set and unusable is an `Err` — the turn fails, never the default below.
     if let Some(s) = crate::prompt_file::text(self_id, kernel).await? {
-        return Ok(render_prompt(&s, self_id, kernel, "prompt_file").await);
+        return Ok(render_prompt(&s, self_id, kernel, "prompt_file", env).await);
     }
-    Ok(default_pieces(self_id, kernel).await)
+    Ok(default_pieces(self_id, kernel, env).await)
 }
 
 /// Why a turn's block or view could not be built: the memory store failed, or a
@@ -462,43 +438,45 @@ impl From<BlockFail> for fantastic_kernel::bundle::BundleError {
 }
 
 /// Build the per-turn message list: system block + the MODEL VIEW of the
-/// persisted history + the user turn. A caller-supplied `system_prompt` REPLACES
+/// persisted history + the user turn, as pieces: the pass's type writes them
+/// ([`crate::model_format::map`]). A caller-supplied `system_prompt` REPLACES
 /// the default system block (a caller that wants a different role, or a different
 /// convention, owns it whole); absent that, the record's own `system_prompt` does;
-/// the default is self-identity +
-/// the pass type's `send` how-to + [`CONTEXT_HOWTO`] + [`MEMORY_HOWTO`], and NO agent menu.
+/// the default is self-identity + the how-to sections, and NO agent menu.
 ///
 /// The conversation is ALWAYS this agent's own (its memory store): there is no
-/// caller-supplied history.
+/// caller-supplied history. `stamp`: the arriving message's `ts` and offset, which the row
+/// it becomes keeps: on an empty thread they are the date the environment section shows.
 ///
 /// Returns `(messages, store_len)`. `store_len` is how many turns the head held
 /// when this view was built, and it is NOT derivable from the messages: the
 /// history is a deduped/trimmed VIEW (see [`crate::history_view`]), so counting
 /// the view puts the compaction reaction cursor short by exactly the turns the
 /// trimmers dropped.
-pub async fn assemble_messages(
+pub(crate) async fn assemble_messages(
     self_id: &AgentId,
     state: &Arc<BackendState>,
     user_text: &str,
     kernel: &Arc<Kernel>,
     _client_id: &str,
     caching: Caching,
+    stamp: &crate::row_attrs::Stamp,
 ) -> Result<(Vec<Value>, usize), BlockFail> {
-    let pieces = system_pieces(self_id, kernel).await?;
-    let system_content: String = pieces.iter().map(|p| p.text.as_str()).collect();
-    let mut messages = vec![json!({"role": "system", "content": system_content})];
-    // WHAT THE REQUEST CARRIES, piece by piece — kept for the row the turn writes;
-    // never rendered into the request.
-    let mut parts: Vec<Value> = pieces
-        .iter()
-        .filter(|p| !p.part.is_empty() && !p.text.is_empty())
-        .map(|p| part_entry(p.part, None, None, &p.text))
-        .collect();
     // A trimmed VIEW, not a rewrite of the store: stale whole-state reads deduped,
     // identical bodies stubbed, and answered reflects reduced to a stub — the
     // model's own distillation carries the facts forward.
     let store = load_history(self_id, kernel, false).await?;
     let store_len = store.len();
+    // THE DATE THE THREAD BEGAN: its first row's. Only an empty thread takes the
+    // arriving message's, which becomes that first row; a first row with no `ts` (an old
+    // or imported one) shows no date rather than the clock's. A restart shows the same.
+    let env = if store.is_empty() {
+        stamp.env()
+    } else {
+        store.first().and_then(Env::of)
+    };
+    let pieces = system_pieces(self_id, kernel, env).await?;
+    let mut messages = vec![json!({"role": "system", "sys": pieces})];
     // THE VIEW ARRAY IS THE STATE. When a projection (or a recall) has written
     // one, the body is exactly what it chose — each listed row at its recorded
     // resolution — plus only the rows that landed AFTER it, trimmed. Python
@@ -524,22 +502,21 @@ pub async fn assemble_messages(
     *state.view_source.lock().expect("view_source poisoned") = Some(source.to_string());
     let rendered = render_history(&store, listed.as_deref());
     let pics = Pictures::of(self_id, state, kernel, &store, &rendered);
+    // the thought markers waiting for the next user-side message
+    let mut thoughts: Vec<Piece> = Vec::new();
     for r in rendered {
-        let (msg, form) = if caching.folds() && r.res == "full" {
+        let folded = if caching.folds() && r.res == "full" {
             crate::history_view::autofold(&store, r.idx, &r.msg)
         } else {
-            (r.msg, if r.res == "full" { "whole" } else { "anchor" })
+            crate::history_view::Autofolded {
+                msg: r.msg,
+                form: if r.res == "full" { "whole" } else { "anchor" },
+                thought: None,
+            }
         };
-        // a body a trimmer cut down is no longer the row whole
-        let shown = msg.get("content").and_then(Value::as_str).unwrap_or("");
-        let stored = store[r.idx].get("content").and_then(Value::as_str);
-        let form = if form == "whole" && stored != Some(shown) {
-            "anchor"
-        } else {
-            form
-        };
+        let (msg, form) = (folded.msg, folded.form);
         // THE IMAGES OF THE ROW: whole, a line naming them, or alt text (#622)
-        let (msg, form) = match crate::images::parts_of(&msg) {
+        let (mut msg, form) = match crate::images::parts_of(&msg) {
             Some(parts) => {
                 let how = pics.form_of(
                     r.idx,
@@ -556,15 +533,20 @@ pub async fn assemble_messages(
             }
             None => (msg, form),
         };
-        parts.push(part_entry(
-            "row",
-            msg.get("id").and_then(Value::as_i64),
-            Some(form),
-            &crate::row_attrs::model_text(&msg),
-        ));
+        msg["form"] = json!(form);
+        match msg.get("role").and_then(Value::as_str) {
+            Some("assistant") => thoughts.extend(folded.thought),
+            Some("user") if !thoughts.is_empty() => {
+                msg = on_top(msg, std::mem::take(&mut thoughts));
+                // a whole row under a thought marker: shown whole, its bytes the marker's more
+                if form == "whole" {
+                    msg["form"] = json!("thought");
+                }
+            }
+            _ => {}
+        }
         messages.push(msg);
     }
-    *state.request_parts.lock().expect("request_parts poisoned") = parts;
     let mut incoming = json!({"role": "user", "content": user_text});
     // the images this turn attached: shown whole to a model that can see them, else alt text
     if let Some(a) = crate::agent_loop::attached_in_flight(state) {
@@ -572,8 +554,18 @@ pub async fn assemble_messages(
         let how = pics.form_of_new(&a.parts);
         incoming = crate::images::render(incoming, &a.info, None, how);
     }
+    if !thoughts.is_empty() {
+        incoming = on_top(incoming, thoughts);
+    }
     messages.push(incoming);
     Ok((messages, store_len))
+}
+
+/// `message` with `markers` at the top of what it shows.
+fn on_top(message: Value, markers: Vec<Piece>) -> Value {
+    let mut pieces = markers;
+    pieces.extend(crate::model_format::map::pieces_of(&message));
+    crate::model_format::map::with_pieces(message, &pieces)
 }
 
 /// What decides how the image rows of a request show: what the chat's model can take, which
@@ -682,34 +674,39 @@ fn part_entry(part: &str, id: Option<i64>, form: Option<&str>, text: &str) -> Va
     e
 }
 
-/// The parts of the request that is SENT: the assembly's own, with each history
-/// message checked against the final list — the projection can fold, strip or drop
-/// rows after the assembly, and a row it changed is a reduced one (`anchor`). The
-/// last message is the new input.
-pub(crate) fn request_parts(assembled: &[Value], sent: &[Value]) -> Vec<Value> {
-    let mut out: Vec<Value> = assembled
-        .iter()
-        .filter(|p| p["part"] != json!("row"))
-        .cloned()
-        .collect();
+/// THE PARTS OF THE REQUEST THAT IS SENT, measured on its bytes: `messages` in flight
+/// and `sent`, the same messages as the pass's type wrote them (`decl`). The system
+/// block piece by piece, each history message as a `row` with the form it took (`anchor`
+/// when a strategy made it), the last message as the `new_input`.
+pub(crate) fn request_parts(decl: &Decl<'_>, messages: &[Value], sent: &[Value]) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
     let last = sent.len().saturating_sub(1);
-    for (i, m) in sent.iter().enumerate().skip(1) {
-        let text = crate::row_attrs::model_text(m);
-        let id = m.get("id").and_then(Value::as_i64);
+    for (i, (m, s)) in messages.iter().zip(sent).enumerate() {
+        let shown = crate::model_format::map::Shown::of(m);
+        if let crate::model_format::map::Body::System(sys) = &shown.body {
+            for (part, text) in crate::model_format::map::system_parts(decl, sys) {
+                if !part.is_empty() && !text.is_empty() {
+                    out.push(part_entry(&part, None, None, &text));
+                }
+            }
+            continue;
+        }
+        let text = s.get("content").and_then(Value::as_str).unwrap_or("");
         if i == last {
             out.push(part_entry(
                 "new_input",
                 None,
                 m.get("image_form").and_then(Value::as_str),
-                &text,
+                text,
             ));
             continue;
         }
-        let now = part_entry("row", id, Some("anchor"), &text);
-        let same = assembled.iter().find(|p| {
-            p["part"] == json!("row") && p.get("ref") == now.get("ref") && p["hash"] == now["hash"]
-        });
-        out.push(same.cloned().unwrap_or(now));
+        out.push(part_entry(
+            "row",
+            shown.id,
+            Some(shown.form.as_deref().unwrap_or("anchor")),
+            text,
+        ));
     }
     out
 }
@@ -805,14 +802,14 @@ fn rows_from(store: &[Value], from: usize) -> Vec<Rendered> {
 mod tests_worknote {
     #[test]
     fn the_context_howto_teaches_one_turn_thinking_and_anchors() {
-        let h = super::CONTEXT_HOWTO;
+        let h = crate::model_format::default::HOWTO_CONTEXT;
         assert!(h.contains("Your thinking lasts one turn"));
         assert!(h.contains("Do not repeat a call whose result you still have or noted"));
     }
 
     #[test]
     fn the_working_section_asks_to_keep_the_task_state_in_the_reply() {
-        let h = super::WORKING_HOWTO
+        let h = crate::model_format::default::HOWTO_WORKING
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
@@ -845,7 +842,7 @@ mod tests_worknote {
         let h = format!(
             "{} {}",
             crate::model_format::default::HOWTO_SEND,
-            super::WORKING_HOWTO
+            crate::model_format::default::HOWTO_WORKING
         )
         .split_whitespace()
         .collect::<Vec<_>>()

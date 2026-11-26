@@ -214,7 +214,8 @@ async fn closed(kernel: &Arc<Kernel>, agent: &AgentId, tag: &str, big: usize) ->
 }
 
 async fn call(kernel: &Arc<Kernel>, target: &AgentId, payload: Value) -> Value {
-    let out = kernel.operator_send(vec![Item::new(target.clone(), payload)])
+    let out = kernel
+        .operator_send(vec![Item::new(target.clone(), payload)])
         .await
         .remove(0);
     assert_eq!(out.status.as_str(), "completed", "{:?}", out.result);
@@ -226,7 +227,8 @@ async fn set(kernel: &Arc<Kernel>, agent: &AgentId, fields: Value) {
     for (k, v) in fields.as_object().unwrap() {
         p[k] = v.clone();
     }
-    let _ = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), p)])
+    let _ = kernel
+        .operator_send(vec![Item::new(AgentId::from("kernel_state"), p)])
         .await;
 }
 
@@ -253,11 +255,17 @@ async fn prompt(kernel: &Arc<Kernel>, agent: &AgentId) -> String {
             kernel,
             "c",
             crate::caching::Caching::ProviderCache,
+            &crate::row_attrs::Stamp::now(),
         ),
     )
     .await
     .expect("assemble");
-    Value::Array(crate::agent_loop::render_for_model(&msgs)).to_string()
+    Value::Array(crate::model_format::map::messages(
+        crate::model_format::of(crate::model_format::DEFAULT),
+        agent.as_str(),
+        &msgs,
+    ))
+    .to_string()
 }
 
 /// One projection, as a turn runs it: the message list, then the strategy over it;
@@ -283,6 +291,7 @@ async fn project(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
             kernel,
             "cli",
             crate::caching::Caching::ProviderCache,
+            &crate::row_attrs::Stamp::now(),
         ),
     )
     .await
@@ -405,10 +414,11 @@ async fn folds_survive_a_projection_over_the_view_array() {
     );
 }
 
-/// A fold written inside a request shows there with the ts head its stored row keeps
-/// (#653), so the request that folds and every one after it render the fold the same.
+/// A fold written inside a request shows there as its stored row's text, no time on it,
+/// so the request that folds and every one after it map the fold the same; the
+/// summarizer's prompt carries no time either.
 #[tokio::test]
-async fn a_fold_carries_its_rows_ts_head_in_the_request_that_writes_it() {
+async fn a_fold_shows_its_stored_text_and_no_time_in_the_request_that_writes_it() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "fts").await;
     set(
@@ -422,16 +432,33 @@ async fn a_fold_carries_its_rows_ts_head_in_the_request_that_writes_it() {
     }
     let sent = project(&kernel, &backend).await;
     let rows = store(&kernel, &backend).await;
-    let folds: Vec<&Value> = sent.iter().filter(|m| is_fold(m)).collect();
+    let decl = crate::model_format::of(crate::model_format::DEFAULT);
+    let mapped = crate::model_format::map::messages(decl, backend.as_str(), &sent);
+    let folds: Vec<(&Value, &Value)> = sent
+        .iter()
+        .zip(&mapped)
+        .filter(|(m, _)| is_fold(m))
+        .collect();
     assert!(!folds.is_empty(), "the projection folded");
-    for f in folds {
+    for (f, m) in folds {
         let row = rows
             .iter()
             .find(|r| row_id(r) == row_id(f))
             .expect("the fold is stored");
-        let head = crate::row_attrs::head(f);
-        assert!(!head.is_empty(), "no head: {f}");
-        assert_eq!(head, crate::row_attrs::head(row), "{f}");
+        assert_eq!(m["content"], row["content"], "{f}");
+        assert!(!opens_with_a_time(m["content"].as_str().unwrap()), "{m}");
+    }
+    let s = script_for(&backend);
+    for n in 0..s.passes_served() {
+        for m in s.request_messages(n) {
+            for line in m["content"].as_str().unwrap_or("").lines() {
+                let line = line.split_once(": ").map_or(line, |(_, rest)| rest);
+                assert!(
+                    !opens_with_a_time(line),
+                    "a time in a summarizer prompt: {line}"
+                );
+            }
+        }
     }
 }
 
@@ -593,7 +620,8 @@ async fn context_forget_include_cleared() {
     assert!(new.iter().all(|r| left.contains(r)));
     assert_eq!(out["pruned"], old.len(), "{out}");
     assert_eq!(kept["pruned"], 0, "{kept}");
-    let bad = kernel.operator_send(vec![Item::new(
+    let bad = kernel
+        .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "context_forget", "include_cleared": "yes"}),
         )])
@@ -656,6 +684,14 @@ const S8_SUMMARY: &str =
 /// their own shapes — the fold's summary, and the `context_recall` a fold batch
 /// makes due — so neither takes a turn's queued answer. Every turn answers, the
 /// folds land, and the turn after them answers too.
+/// The body's room in S8's window, past its system block: a long turn is about 1 800
+/// tokens (its 300-character ask and 6 840-character answer), so 10 000 tokens hold about
+/// five and eight turns overflow it: the folds land.
+const S8_BODY_ROOM: i64 = 10_000;
+/// The turns S8 runs at most while it waits for a fold batch to make a recall due: each
+/// turn past the fold makes at least one fold, and RECALL_EVERY of them make one due.
+const S8_TURNS_MAX: usize = 8 + 4 * crate::constants::RECALL_EVERY;
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn folds_at_a_small_window_and_every_turn_answers() {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -664,11 +700,29 @@ async fn folds_at_a_small_window_and_every_turn_answers() {
     set(
         &kernel,
         &backend,
-        // 13600, not S8's 12000: the window is a band around the system prompt's size
-        // (the routing-form and reflect how-tos grew it); outside the band no fold batch makes a
-        // recall due inside these eight turns.
-        json!({"context_strategy": "fold", "context_window": 13600, "max_tokens": 12000,
+        json!({"context_strategy": "fold", "max_tokens": 12000,
                "context_async": true, "context_titles": true}),
+    )
+    .await;
+    // THE WINDOW, from the measured system block: the block's tokens as the default type
+    // sends it, plus `S8_BODY_ROOM` for the body. The fold and the recall it makes due
+    // depend on the room the body has, not on the block's wording, so an edit to a
+    // how-to moves the window with the block.
+    let block = as_agent(
+        backend.clone(),
+        crate::assembly::system_content(
+            &backend,
+            &kernel,
+            crate::model_format::of(crate::model_format::DEFAULT),
+        ),
+    )
+    .await
+    .expect("the block");
+    let sys = crate::context::estimate_one(&json!({"role": "system", "content": block}));
+    set(
+        &kernel,
+        &backend,
+        json!({"context_window": sys + S8_BODY_ROOM}),
     )
     .await;
     let s = script(&backend, Vec::new(), Duration::ZERO);
@@ -679,7 +733,6 @@ async fn folds_at_a_small_window_and_every_turn_answers() {
         let last = msgs
             .last()
             .and_then(|m| m["content"].as_str())
-            .map(crate::row_attrs::without_head)
             .unwrap_or("")
             .trim_start()
             .to_string();
@@ -733,14 +786,29 @@ async fn folds_at_a_small_window_and_every_turn_answers() {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
             s.passes.lock().unwrap().push_back(pass(reply));
-            let _ = kernel.operator_send(vec![Item::new(
+            let _ = kernel
+                .operator_send(vec![Item::new(
                     backend,
                     json!({"type": "send", "text": text, "client_id": "cell"}),
                 )])
                 .await;
         }
     };
-    for k in 0..8 {
+    // EIGHT LONG TURNS, then on until a fold batch has made a recall due (the debounce
+    // is RECALL_EVERY folds, and how many folds a turn makes is the window's geometry):
+    // the property is that the due recall runs inside a turn, whatever turn that is
+    // the room's comment, checked: eight turns overflow it, four fit
+    let per_turn = crate::context::estimate_one(
+        &json!({"role": "user", "content": format!("turn 0 {}", &long[..300])}),
+    ) + crate::context::estimate_one(
+        &json!({"role": "assistant", "content": format!("S8-turn-0 {long}")}),
+    );
+    assert!(
+        4 * per_turn < S8_BODY_ROOM && S8_BODY_ROOM < 8 * per_turn,
+        "a turn is {per_turn} tokens: the room must hold four and not eight"
+    );
+    let mut k = 0;
+    while k < 8 || (recalls.load(Ordering::SeqCst) == 0 && k < S8_TURNS_MAX) {
         turn(
             format!("turn {k} {}", &long[..300]),
             format!("S8-turn-{k} {long}"),
@@ -750,11 +818,12 @@ async fn folds_at_a_small_window_and_every_turn_answers() {
             answered(format!("S8-turn-{k}")).await,
             "turn {k} was never answered"
         );
+        k += 1;
     }
     let rows = store(&kernel, &backend).await;
     assert!(
         rows.iter().any(is_fold),
-        "eight long turns at a 13200 window fold"
+        "long turns at a window of the block plus S8_BODY_ROOM fold"
     );
     assert!(
         recalls.load(Ordering::SeqCst) >= 1,

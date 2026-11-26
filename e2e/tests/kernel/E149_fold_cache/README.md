@@ -15,11 +15,11 @@ caching none) runs on a scripted vllm plug.
 - A0: `ai_a`, holding no line on `creds`, reads the key: the reply is the unknown answer
   (`no agent 'creds'`, no side, no hint, no ids) and never the key.
 - B1a: a `read` of the big file is whole in its turn (and stored whole).
-- B1b: the next request holds `[folded · read reply from files · ~N tokens · head: "…" ·
-  get: B]`, not the body; a `reflect bigdoc_1 part=docs tier=detailed` is whole in its turn.
+- B1b: the next request holds the tag line and the default marker `<folded id="B"
+  verb="read" from="files" tokens="N" head="…"/> unfold: …`, not the body; a `reflect bigdoc_1 part=docs tier=detailed` is whole in its turn.
 - B2: the reflect reply stays whole (a reflect never folds: whole state, superseded
   instead); `recall` by its row id D gives the body back whole.
-- B3: the recall reply is `[folded · recall reply from ai_b · id D · ~N tokens · get: …]`
+- B3: the recall reply is `<folded … verb="recall" from="ai_b" recalled="id D" …/>`
   after the answer; the store row D is still whole; `grep` for the word found only inside
   the folded read body returns the hit (`L050 …`), and that body is still folded in view.
 - B4: every anchor is byte-identical in every later request (a folded row is never

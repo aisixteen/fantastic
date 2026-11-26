@@ -1,0 +1,1 @@
+<thought id="{id}" tokens="{tokens}"/> unfold: <call name="send"><routing><target_id>{self}</target_id></routing><payload><type>recall</type><id>{id}</id></payload></call>

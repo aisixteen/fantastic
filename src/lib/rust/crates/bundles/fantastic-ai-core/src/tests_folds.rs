@@ -187,7 +187,13 @@ fn a_span_never_takes_the_goal_turn_or_the_live_tail() {
         rows.push(turn(i, "user", Some(1), &format!("row {i}")));
     }
     let view = view_of(&rows);
-    let span = next_span(&rows, &view, KEEP_TAIL, i64::MAX);
+    let span = next_span(
+        &rows,
+        &view,
+        KEEP_TAIL,
+        i64::MAX,
+        &crate::context::estimate_one,
+    );
     assert!(!span.is_empty(), "a 20-row view has something to fold");
     assert!(
         !span.contains(&0),
@@ -211,7 +217,13 @@ fn a_span_never_ends_between_a_call_and_its_answer() {
         rows.push(reply(id + 1, id, Some(id), "answered"));
     }
     let view = view_of(&rows);
-    let span = next_span(&rows, &view, KEEP_TAIL, i64::MAX);
+    let span = next_span(
+        &rows,
+        &view,
+        KEEP_TAIL,
+        i64::MAX,
+        &crate::context::estimate_one,
+    );
     assert!(!span.is_empty());
     let last = *span.last().unwrap();
     assert_ne!(
@@ -247,7 +259,13 @@ fn folds_at_the_head_are_skipped_until_there_are_fold_run_of_them() {
         rows.push(turn(200 + i, "user", Some(1), &format!("row {i}")));
     }
     let view = view_of(&rows);
-    let span = next_span(&rows, &view, KEEP_TAIL, i64::MAX);
+    let span = next_span(
+        &rows,
+        &view,
+        KEEP_TAIL,
+        i64::MAX,
+        &crate::context::estimate_one,
+    );
     assert!(
         span.iter().all(|&i| !crate::folds::is_fold(&rows[i])),
         "under the threshold the folds at the head are SKIPPED: {span:?}"
@@ -274,7 +292,13 @@ fn folds_at_the_head_are_skipped_until_there_are_fold_run_of_them() {
         rows2.push(turn(200 + i, "user", Some(1), &format!("row {i}")));
     }
     let view2 = view_of(&rows2);
-    let span2 = next_span(&rows2, &view2, KEEP_TAIL, i64::MAX);
+    let span2 = next_span(
+        &rows2,
+        &view2,
+        KEEP_TAIL,
+        i64::MAX,
+        &crate::context::estimate_one,
+    );
     assert_eq!(span2.len(), FOLD_RUN, "{span2:?}");
     assert!(
         span2.iter().all(|&i| crate::folds::is_fold(&rows2[i])),
@@ -288,7 +312,14 @@ fn a_view_with_nothing_foldable_yields_no_span() {
     // only thing that stops it.
     let rows = vec![turn(1, "user", None, "goal"), turn(2, "user", None, "one")];
     let view = view_of(&rows);
-    assert!(next_span(&rows, &view, KEEP_TAIL, i64::MAX).is_empty());
+    assert!(next_span(
+        &rows,
+        &view,
+        KEEP_TAIL,
+        i64::MAX,
+        &crate::context::estimate_one
+    )
+    .is_empty());
 }
 
 // ─── strip: bodies go, titles stay ──────────────────────────────
@@ -298,12 +329,44 @@ fn a_stripped_block_keeps_its_tag_and_names_what_it_cost() {
     // THE TAG IS THE ADDRESS. A stub that lost its `[reply to <pid> …]` line is
     // unrecallable — the bytes are gone AND the model cannot ask for them back.
     let block = "[reply to 42 · notes read · \"survey chunk 2\"]\nabcdefghij";
-    let s = stub(block);
-    assert!(
-        s.starts_with("[reply to 42 · notes read · \"survey chunk 2\"]"),
-        "{s}"
+    let s = stub(block, 7);
+    assert_eq!(
+        s,
+        crate::model_format::map::Piece::Stub {
+            tag_line: "[reply to 42 · notes read · \"survey chunk 2\"]".into(),
+            bytes: 10,
+            id: 7,
+        }
     );
-    assert!(s.contains("(stripped: 10 bytes — recall by pid)"), "{s}");
+    // each type writes the tag line, the size, the row's id and its recall, exactly
+    let tag = "[reply to 42 · notes read · \"survey chunk 2\"]";
+    let want = [
+        (
+            crate::model_format::DEFAULT,
+            format!(
+                "{tag}\n<stripped id=\"7\" bytes=\"10\"/> unfold: <call name=\"send\"><routing>\
+                 <target_id>ai</target_id></routing><payload><type>recall</type><id>7</id>\
+                 </payload></call>"
+            ),
+        ),
+        (
+            crate::model_format::hermes::NAME,
+            format!(
+                "{tag}\n<tool_response>\n{{\"stripped\": true, \"id\": 7, \"bytes\": 10, \
+                 \"unfold\": {{\"name\": \"send\", \"arguments\": {{\"routing\": \
+                 {{\"target_id\": \"ai\"}}, \"payload\": {{\"type\": \"recall\", \"id\": 7}}}}}}}}\
+                 \n</tool_response>"
+            ),
+        ),
+    ];
+    for (kind, text) in want {
+        let decl = crate::model_format::of(kind);
+        assert_eq!(
+            crate::model_format::map::row(decl, "ai", std::slice::from_ref(&s)),
+            text,
+            "{kind}"
+        );
+    }
     assert_eq!(pid_of(block), Some("42"));
 }
 
@@ -347,8 +410,12 @@ fn a_stub_says_how_big_the_body_was_in_code_points() {
     // body as bigger than the model's own `pull` of it.
     let block = "[reply to 7 \u{b7} notes read]\néé";
     assert_eq!(
-        stub(block),
-        "[reply to 7 \u{b7} notes read] (stripped: 2 bytes — recall by pid)"
+        stub(block, 3),
+        crate::model_format::map::Piece::Stub {
+            tag_line: "[reply to 7 \u{b7} notes read]".into(),
+            bytes: 2,
+            id: 3,
+        }
     );
 }
 
@@ -398,9 +465,21 @@ fn a_span_is_sized_by_tokens_not_rows() {
     }
     let view = view_of(&rows);
     let one = crate::context::estimate_tokens(std::slice::from_ref(&rows[1]));
-    let small = next_span(&rows, &view, KEEP_TAIL, one * 3);
+    let small = next_span(
+        &rows,
+        &view,
+        KEEP_TAIL,
+        one * 3,
+        &crate::context::estimate_one,
+    );
     assert_eq!(small.len(), 3, "need of ~3 rows takes 3 rows: {small:?}");
-    let all = next_span(&rows, &view, KEEP_TAIL, i64::MAX);
+    let all = next_span(
+        &rows,
+        &view,
+        KEEP_TAIL,
+        i64::MAX,
+        &crate::context::estimate_one,
+    );
     assert_eq!(
         all.len(),
         40 - KEEP_TAIL - 1,
@@ -425,9 +504,28 @@ fn a_fold_is_made_under_a_provisional_id_the_kernel_never_mints() {
 fn minted_ids_replace_the_provisional_ones_in_id_parent_refs_head_and_view_ids() {
     let map: std::collections::BTreeMap<i64, i64> = [(-1, 40), (-2, 41)].into_iter().collect();
     // a fold of a fold: its refs and parent name the first one; its body quotes `-1`
-    let mut inner = make_fold(&[7, 8], "inner", "says -1 · here", false, -1, 7, 1, Some(-2));
-    let mut outer = make_fold(&[-1, 9], "outer", "[fold -1 · in the body]", false, -2, 7, 2, None);
-    let mut view = json!({"kind": "view", "ids": [{"id": 3, "res": "full"}, {"id": -2, "res": "fold"}]});
+    let mut inner = make_fold(
+        &[7, 8],
+        "inner",
+        "says -1 · here",
+        false,
+        -1,
+        7,
+        1,
+        Some(-2),
+    );
+    let mut outer = make_fold(
+        &[-1, 9],
+        "outer",
+        "[fold -1 · in the body]",
+        false,
+        -2,
+        7,
+        2,
+        None,
+    );
+    let mut view =
+        json!({"kind": "view", "ids": [{"id": 3, "res": "full"}, {"id": -2, "res": "fold"}]});
     crate::folds::remap_ids(&mut inner, &map);
     crate::folds::remap_ids(&mut outer, &map);
     crate::folds::remap_ids(&mut view, &map);
@@ -436,7 +534,10 @@ fn minted_ids_replace_the_provisional_ones_in_id_parent_refs_head_and_view_ids()
     assert_eq!(inner["refs"], json!([7, 8]));
     assert_eq!(
         inner["content"],
-        json!(format!("{}40 · 2 refs · L1] \"inner\"\nsays -1 · here", crate::folds::FOLD_TAG))
+        json!(format!(
+            "{}40 · 2 refs · L1] \"inner\"\nsays -1 · here",
+            crate::folds::FOLD_TAG
+        ))
     );
     assert_eq!(row_id(&outer), Some(41));
     assert_eq!(outer["refs"], json!([40, 9]));
@@ -449,7 +550,10 @@ fn minted_ids_replace_the_provisional_ones_in_id_parent_refs_head_and_view_ids()
             crate::folds::FOLD_TAG
         ))
     );
-    assert_eq!(view["ids"], json!([{"id": 3, "res": "full"}, {"id": 41, "res": "fold"}]));
+    assert_eq!(
+        view["ids"],
+        json!([{"id": 3, "res": "full"}, {"id": 41, "res": "fold"}])
+    );
     // a stored row is left as it is
     let mut kept = turn(5, "user", Some(1), "[fold 5 · not a fold]");
     let before = kept.clone();

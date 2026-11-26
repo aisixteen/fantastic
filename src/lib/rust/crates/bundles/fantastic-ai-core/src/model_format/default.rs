@@ -1,7 +1,8 @@
 //! THE `default` TYPE (#766, 1.4): today's tag grammar, a type like the others.
 //!
-//! - Inbound it is the identity: the internal form is what a `default` model reads, so
-//!   the render cache stores nothing for it.
+//! - Inbound its call renderer copies the text: the internal form is what a `default`
+//!   model reads. Its markers and sections are its own resource texts, so the render
+//!   cache keeps its rows like any type's.
 //! - Outbound every delta is forwarded live as text, as on `4fd5bb4d`. The attempt fails
 //!   ([`Out::Bad`]) at the first foreign call tag, as soon as a delta completes it
 //!   ([`crate::call_check::foreign_cut`]), and at the stream's end for a terminated
@@ -20,7 +21,7 @@
 use regex::Regex;
 use std::sync::OnceLock;
 
-use super::{Out, Outbound, Reader, Renderer, DEFAULT};
+use super::{Markers, Out, Outbound, Reader, Renderer, Section, DEFAULT};
 use crate::think::{THINK_CLOSE, THINK_OPEN};
 use crate::tool_parse::grammar::{envelopes, envelopes_in};
 use crate::tool_parse::{extract_tool_calls, malformed_calls, CLOSE, TOOLS};
@@ -37,6 +38,35 @@ use crate::tool_parse::{extract_tool_calls, malformed_calls, CLOSE, TOOLS};
 /// answer, how to recognise a reply, and when work counts as done. It never names a
 /// loop; stopping is `done` or `await`.
 pub(crate) const HOWTO_SEND: &str = include_str!("res/default/howto_send.txt");
+/// The working rules, placed LAST in the default system block: the model follows the
+/// most recent instructions most closely, and these must survive a long task brief.
+pub(crate) const HOWTO_WORKING: &str = include_str!("res/default/howto_working.txt");
+/// What `reflect` is: `{detail}`, its declaration's detailed text.
+pub(crate) const HOWTO_REFLECT: &str = include_str!("res/default/howto_reflect.txt");
+/// The context window: compaction, the markers and the `recall` that reads them again.
+pub(crate) const HOWTO_CONTEXT: &str = include_str!("res/default/howto_context.txt");
+/// Titling calls, when the record sets `context_titles`: a title is what remains once
+/// a body is stripped.
+pub(crate) const HOWTO_TITLES: &str = include_str!("res/default/howto_titles.txt");
+/// Replies as rows, when the record sets `context_async` (python `_ASYNC_HOWTO`).
+pub(crate) const HOWTO_ASYNC: &str = include_str!("res/default/howto_async.txt");
+/// The markers, in the reply notation: each names its row's id and the `recall` call.
+pub(crate) const MARKERS: Markers = Markers {
+    folded_reply: include_str!("res/default/marker_folded_reply.txt"),
+    folded_reply_kept: include_str!("res/default/marker_folded_reply_kept.txt"),
+    folded_recall: include_str!("res/default/marker_folded_recall.txt"),
+    folded_recall_kept: include_str!("res/default/marker_folded_recall_kept.txt"),
+    thought: include_str!("res/default/marker_thought.txt"),
+    stub: include_str!("res/default/marker_stub.txt"),
+    image_anchor: include_str!("res/default/marker_image_anchor.txt"),
+    image_alt: include_str!("res/default/marker_image_alt.txt"),
+    keep_cue: include_str!("res/default/marker_keep_cue.txt"),
+    notice_head: super::NOTICE_HEAD,
+    notice_summary: super::NOTICE_SUMMARY,
+    notice_omitted: super::NOTICE_OMITTED,
+    notice_stripped: super::NOTICE_STRIPPED,
+    notice_tail: include_str!("res/default/notice_tail.txt"),
+};
 /// The last line of every checker report: the form, in one sentence.
 pub(crate) const FORM: &str = include_str!("res/default/form.txt");
 /// The placeholder form of a call opener, as notices write it. Another type swaps it by
@@ -73,6 +103,38 @@ pub(crate) const STOP_REASON: &str = include_str!("res/default/stop_reason.txt")
 /// The report on a `stop` written with no reason, or an empty one (S25).
 pub(crate) const REPORT_STOP_REASON: &str = include_str!("res/default/report_stop_reason.txt");
 
+/// This type's text of a section.
+pub(crate) fn texts(s: Section) -> &'static str {
+    match s {
+        Section::Send => HOWTO_SEND,
+        Section::Reflect => HOWTO_REFLECT,
+        Section::Context => HOWTO_CONTEXT,
+        Section::Titles => HOWTO_TITLES,
+        Section::Async => HOWTO_ASYNC,
+        Section::Working => HOWTO_WORKING,
+        Section::StopReason => STOP_REASON,
+        shared => super::shared_text(shared).expect("a shared section"),
+    }
+}
+
+/// A value as one quoted attribute of the reply notation: `"…"`, with `&`, `<`, `>` and
+/// `"` written as entities.
+pub(crate) fn quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 // ── the pair ─────────────────────────────────────────────────────────────────
 
 /// The `default` type: both halves, one value.
@@ -86,10 +148,6 @@ impl Renderer for Tags {
 
     fn rev(&self) -> u32 {
         1
-    }
-
-    fn identity(&self) -> bool {
-        true
     }
 
     fn render(&self, text: &str) -> String {

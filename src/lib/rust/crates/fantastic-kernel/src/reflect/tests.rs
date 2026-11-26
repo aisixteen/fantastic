@@ -1725,3 +1725,48 @@ async fn the_root_shows_its_tree_verbs_to_the_holders_of_the_lines_they_act_on()
     shown.sort();
     assert_eq!(shown, ["create_agent", "delete_agent", "update_agent"]);
 }
+
+#[tokio::test]
+async fn a_line_on_the_root_shows_its_fields_but_never_its_runtime_extras() {
+    let kernel = v9_kernel();
+    let mut patch = Map::new();
+    patch.insert("guid".to_string(), json!("0123456789abcdef"));
+    patch.insert("tone".to_string(), json!("dry"));
+    crate::test_support::update(&kernel, &AgentId::from("kernel_state"), patch);
+    // github and its cap `user` call the root
+    for holder in ["github", "user"] {
+        crate::test_support::grant(&kernel, holder, "kernel_state", json!({"call": ["ping"]}));
+    }
+    let r = reflect_as(
+        &kernel,
+        "github",
+        "kernel",
+        json!({"type": "reflect", "tree": "none"}),
+    )
+    .await
+    .result;
+    assert_eq!(r["id"], "kernel_state", "{r}");
+    assert_eq!(
+        r["tone"], "dry",
+        "an ordinary field shows to a line holder: {r}"
+    );
+    for k in ROOT_EXTRAS {
+        assert!(r.get(k).is_none(), "{k} shown to a line holder: {r}");
+    }
+    // the same cut on every path that carries a record: export, replies, events
+    let recs = kernel.records_for(
+        Some(&AgentId::from("github")),
+        &[AgentId::from("kernel_state")],
+    );
+    assert_eq!(recs.len(), 1);
+    assert!(recs[0].meta.get("guid").is_none(), "{:?}", recs[0].meta);
+    assert_eq!(recs[0].meta.get("tone"), Some(&json!("dry")));
+    // the operator sees it
+    let op = reflect_op(
+        &kernel,
+        "kernel_state",
+        json!({"type": "reflect", "tree": "none"}),
+    )
+    .await;
+    assert_eq!(op["guid"], "0123456789abcdef", "{op}");
+}

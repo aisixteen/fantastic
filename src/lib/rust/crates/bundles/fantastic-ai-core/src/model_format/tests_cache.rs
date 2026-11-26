@@ -1,9 +1,9 @@
 //! The render cache (#766, W5, W6): K1-K35, K39-K53 of spec 2.2.
 //!
-//! A pass is driven here as the turn drives it: `messages` (the view with each row's
-//! `id`), `model_view` (`render_for_model` of them), the forms of `request_parts`, and
-//! the chat's bound. The counting renderer wraps a text in its type's name, so a render
-//! is seen and counted.
+//! A pass is driven here as the turn drives it: `messages` in flight (the view with each
+//! row's `id` and the form it took), mapped under a type declared with the renderer
+//! under test, and the chat's bound. The counting renderer wraps a text in its type's
+//! name, so a render is seen and counted.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -12,11 +12,12 @@ use std::sync::Arc;
 use serde_json::{json, Map, Value};
 
 use super::cache::{
-    bound_of, epoch, epoch_of, forms_of, why, Ctx, Hash, Hasher, RenderCache, Sha, View, Why,
+    bound_of, epoch, epoch_of, why, Ctx, Hash, Hasher, RenderCache, Sha, View, Why,
 };
 use super::default::Tags;
 use super::hermes::Hermes;
-use super::{trace, Renderer};
+use super::map::Shown;
+use super::{trace, Decl, Renderer};
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -47,9 +48,6 @@ impl Renderer for Count {
     }
     fn rev(&self) -> u32 {
         self.rev
-    }
-    fn identity(&self) -> bool {
-        false
     }
     fn render(&self, text: &str) -> String {
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -91,7 +89,8 @@ pub(super) fn refs(rows: &[(i64, String)]) -> Vec<(i64, &str)> {
     rows.iter().map(|(i, t)| (*i, t.as_str())).collect()
 }
 
-/// What a pass hands the cache beside its messages, owned.
+/// What a pass hands the cache beside its messages, owned; `forms` are set on the
+/// messages before the pass, as the assembly sets them.
 pub(super) struct Opts {
     pub(super) epoch: Hash,
     pub(super) bound: usize,
@@ -119,7 +118,6 @@ impl Opts {
         Ctx {
             epoch: self.epoch,
             bound: self.bound,
-            forms: &self.forms,
             model: self.model.as_deref(),
             provider_id: self.provider.as_deref(),
             last_send: self.last_send,
@@ -152,6 +150,30 @@ pub(super) struct Done {
     pub(super) events: Vec<Value>,
 }
 
+/// The type `r` renders for: a registered type's declaration with `r` as its calls; for a
+/// test renderer, the default type's markers and sections under `r`'s name.
+pub(super) fn decl_of(r: &dyn Renderer) -> Decl<'_> {
+    Decl {
+        name: r.name(),
+        calls: r,
+        ..*super::declared(r.name()).unwrap_or_else(|| super::of(super::DEFAULT))
+    }
+}
+
+/// `messages` as a pass shows them: each row's form from `o`, as the assembly sets it.
+pub(super) fn shown_of(messages: &[Value], o: &Opts) -> Vec<Shown> {
+    messages
+        .iter()
+        .map(|m| {
+            let mut s = Shown::of(m);
+            if let Some(f) = s.id.and_then(|id| o.forms.get(&id)) {
+                s.form = Some(f.clone());
+            }
+            s
+        })
+        .collect()
+}
+
 /// A pass's view, opened (pins held).
 pub(super) fn open<'c, H: Hasher>(
     cache: &'c RenderCache<H>,
@@ -159,8 +181,7 @@ pub(super) fn open<'c, H: Hasher>(
     messages: &[Value],
     o: &Opts,
 ) -> View<'c, H> {
-    let model_view = crate::agent_loop::render_for_model(messages);
-    cache.view(r, messages, &model_view, &o.ctx())
+    cache.view(&decl_of(r), "ai", &shown_of(messages, o), &o.ctx())
 }
 
 /// A pass, run to its end.
@@ -191,17 +212,9 @@ pub(super) fn finish<H: Hasher>(v: View<'_, H>) -> Done {
     }
 }
 
-/// The view rendered with no cache: every string content through `render`.
+/// The view mapped with no cache.
 pub(super) fn plain(r: &dyn Renderer, messages: &[Value]) -> Vec<Value> {
-    crate::agent_loop::render_for_model(messages)
-        .into_iter()
-        .map(|mut m| {
-            if let Some(t) = m.get("content").and_then(Value::as_str).map(str::to_string) {
-                m["content"] = json!(r.render(&t));
-            }
-            m
-        })
-        .collect()
+    super::map::messages(&decl_of(r), "ai", messages)
 }
 
 pub(super) fn cache() -> RenderCache {
@@ -222,9 +235,11 @@ fn ids_of<H: Hasher>(c: &RenderCache<H>, kind: &str) -> Vec<i64> {
         .collect()
 }
 
+/// The bytes an entry of a row of `text` counts under the counting renderer `name`: its
+/// canonical source and `<name>text</name>`.
 fn entry_size(text: &str, name: &str) -> usize {
-    // source + `<name>source</name>`
-    2 * text.len() + 2 * name.len() + 5
+    let source = super::map::canonical(&Shown::of(&json!({"content": text})));
+    source.len() + text.len() + 2 * name.len() + 5
 }
 
 // ─── K1-K19 ──────────────────────────────────────────────────────────────────
@@ -273,8 +288,12 @@ fn two_types_do_not_share() {
     ];
     let m = conv(&rows, "go");
     let d = run(&c, &Tags, &m, &Opts::default());
-    assert_eq!(c.stats().entries, 0, "default is identity: no entries");
-    assert_eq!(d.messages, crate::agent_loop::render_for_model(&m));
+    assert_eq!(
+        ids_of(&c, "default"),
+        vec![1, 2],
+        "default keeps its entries too"
+    );
+    assert_eq!(d.messages, plain(&Tags, &m));
     let h = run(&c, &Hermes, &m, &Opts::default());
     assert_eq!(ids_of(&c, "hermes"), vec![1, 2]);
     assert_eq!(h.rows, 2);
@@ -341,7 +360,7 @@ fn fold_in_the_middle() {
 fn thought_row_stable() {
     let (c, r) = (cache(), Count::new("t"));
     let m = conv(&[(1, "q"), (2, "[thought] the answer")], "go");
-    let o = || Opts::default().form(2, "thought_anchor");
+    let o = || Opts::default().form(2, "thought");
     let first = run(&c, &r, &m, &o());
     for _ in 0..3 {
         let d = run(&c, &r, &m, &o());
@@ -625,17 +644,26 @@ fn reply_batch_one_entry() {
 }
 
 // K19
+/// The default type keeps its rows like any type: mapped once, then hits; the bytes are
+/// the stored texts (its renderer copies them).
 #[test]
-fn identity_stores_nothing() {
+fn default_type_keeps_entries() {
     let c = cache();
     let m = conv(&refs(&rows_n(1, 6, 10)), "go");
+    let first = run(&c, &Tags, &m, &Opts::default());
+    assert_eq!(first.rows, 6);
     for _ in 0..2 {
         let d = run(&c, &Tags, &m, &Opts::default());
-        assert_eq!(d.messages, crate::agent_loop::render_for_model(&m));
+        assert_eq!(d.messages, plain(&Tags, &m));
+        assert_eq!(d.messages, first.messages);
         assert_eq!(d.rows, 0);
     }
+    for (i, (id, text)) in refs(&rows_n(1, 6, 10)).into_iter().enumerate() {
+        assert_eq!(first.messages[i + 1]["content"], json!(text), "row {id}");
+    }
     let s = c.stats();
-    assert_eq!((s.entries, s.bytes), (0, 0));
+    assert_eq!(s.entries, 6);
+    assert_eq!(s.bytes, s.counted);
 }
 
 // ─── K20-K33 ─────────────────────────────────────────────────────────────────
@@ -802,7 +830,8 @@ fn restart_cold_then_warm() {
 fn epoch_change_resets() {
     let (c, r) = (cache(), Count::new("t"));
     let m = conv(&refs(&rows_n(1, 3, 0)), "go");
-    let base: Vec<&dyn Renderer> = vec![&r];
+    let base_decl = decl_of(&r);
+    let base: Vec<&Decl<'_>> = vec![&base_decl];
     let e1 = epoch_of(b"[rules]", &base);
     let once = |e: Hash| {
         run(
@@ -827,7 +856,7 @@ fn epoch_change_resets() {
         rev: 2,
         ..Count::new("t")
     };
-    let e3 = epoch_of(b"[other rules]", &[&bumped as &dyn Renderer]);
+    let e3 = epoch_of(b"[other rules]", &[&decl_of(&bumped)]);
     assert_ne!(e2, e3);
     let d = once(e3);
     assert_eq!((d.rows, d.kept), (3, 0));
@@ -842,11 +871,8 @@ fn cached_history<H: Hasher>(c: &RenderCache<H>, r: &dyn Renderer) -> String {
         .into_iter()
         .filter(|r| r.get("content").is_some_and(Value::is_string))
         .collect();
-    let model_view: Vec<Value> = rows
-        .iter()
-        .map(|m| json!({"role": m["role"], "content": crate::row_attrs::model_text(m)}))
-        .collect();
-    let v = c.view(r, &rows, &model_view, &Opts::default().ctx());
+    let o = Opts::default();
+    let v = c.view(&decl_of(r), "ai", &shown_of(&rows, &o), &o.ctx());
     let mut out = String::new();
     for (row, m) in rows.iter().zip(&v.messages) {
         let id = row.get("id").map_or_else(String::new, Value::to_string);
@@ -942,9 +968,6 @@ impl Renderer for Empties {
     fn rev(&self) -> u32 {
         1
     }
-    fn identity(&self) -> bool {
-        false
-    }
     fn render(&self, text: &str) -> String {
         if text == "drop me" {
             String::new()
@@ -1019,9 +1042,6 @@ impl Renderer for Gate {
     }
     fn rev(&self) -> u32 {
         1
-    }
-    fn identity(&self) -> bool {
-        false
     }
     fn render(&self, text: &str) -> String {
         self.0.wait();
@@ -1146,7 +1166,7 @@ fn why_table() {
         "reduced -> line"
     );
     assert_eq!(
-        why(Some("anchor"), Some("thought_anchor")),
+        why(Some("anchor"), Some("stub")),
         Why::Fold,
         "reduced -> reduced"
     );
@@ -1160,7 +1180,11 @@ fn why_table() {
         Why::Changed,
         "full -> full, no recall"
     );
-    assert_eq!(why(Some("thought"), Some("whole")), Why::Changed);
+    assert_eq!(
+        why(Some("thought"), Some("whole")),
+        Why::Changed,
+        "a thought host is whole"
+    );
     // equal bytes under two forms: a hit, no drop
     let (c, r) = (cache(), Count::new("t"));
     let m = conv(&[(1, "q"), (2, "same text")], "go");
@@ -1171,7 +1195,7 @@ fn why_table() {
     let steps: [(&str, &str, Option<Why>); 6] = [
         ("whole", "a", None),
         ("anchor", "b", Some(Why::Fold)),
-        ("thought_anchor", "c", Some(Why::Fold)),
+        ("stub", "c", Some(Why::Fold)),
         ("whole", "d", Some(Why::Recall)),
         ("recalled", "e", Some(Why::Recall)),
         ("whole", "f", Some(Why::Changed)),
@@ -1187,16 +1211,6 @@ fn why_table() {
         let got: Vec<Why> = d.dropped.iter().map(|(_, w)| *w).collect();
         assert_eq!(got, want.into_iter().collect::<Vec<_>>(), "{form} {text}");
     }
-    // the parts of a request give the forms
-    let parts = vec![
-        json!({"part": "system", "bytes": 3}),
-        json!({"part": "row", "ref": 2, "form": "anchor", "bytes": 1}),
-        json!({"part": "new_input", "bytes": 2}),
-    ];
-    assert_eq!(
-        forms_of(&parts),
-        BTreeMap::from([(2, "anchor".to_string())])
-    );
 }
 
 // K43
@@ -1649,8 +1663,7 @@ pub(super) fn hermes_pass(
 
 /// One turn's view on `pass`, built as `run_generation` builds it, run to its end.
 pub(super) fn turn_of(pass: &super::pass::Pass, messages: &[Value]) -> Done {
-    let model_view = crate::agent_loop::render_for_model(messages);
-    finish(pass.view(messages, &model_view, &[], &Map::new()))
+    finish(pass.view(messages, &Map::new()))
 }
 
 /// A history with calls in it: what a fold summary of it sends holds them too.
@@ -1729,8 +1742,7 @@ async fn queued_turn_serial() {
         let (pass, state, first) = (Arc::clone(&pass), Arc::clone(&state), first.clone());
         async move {
             let _turn = state.lock.lock().await;
-            let model_view = crate::agent_loop::render_for_model(&first);
-            let view = pass.view(&first, &model_view, &[], &Map::new());
+            let view = pass.view(&first, &Map::new());
             held_tx.send(()).unwrap();
             go_rx.await.unwrap();
             finish(view)

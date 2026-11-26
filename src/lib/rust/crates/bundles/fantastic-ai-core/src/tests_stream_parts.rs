@@ -86,7 +86,10 @@ fn parts_are_the_same_at_every_chunk_size() {
 
 #[test]
 fn an_open_call_when_the_pass_ends_aborts() {
-    let (ev, _) = run("<call name=\"send\"><routing><target_id>x</target_id></routing><payload><type>wr", 3);
+    let (ev, _) = run(
+        "<call name=\"send\"><routing><target_id>x</target_id></routing><payload><type>wr",
+        3,
+    );
     assert!(shape(&ev).contains(&("abort", "call")), "{ev:?}");
 }
 
@@ -264,7 +267,8 @@ async fn make_ai(kernel: &Arc<Kernel>, id: &str) -> AgentId {
 /// [`make_ai`] over the bundle `module` names.
 async fn make_ai_as(kernel: &Arc<Kernel>, id: &str, module: &str) -> AgentId {
     let memory =
-        fantastic_ram_store::test_support::memory_meta(kernel, id, json!({"cli": {"call": ["*"]}})).await;
+        fantastic_ram_store::test_support::memory_meta(kernel, id, json!({"cli": {"call": ["*"]}}))
+            .await;
     let mut create = json!({
         "type": "create_agent",
         "parent_id": "kernel",
@@ -297,7 +301,8 @@ async fn ram_store(kernel: &Arc<Kernel>, id: &str) {
 }
 
 async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    kernel.operator_send(vec![Item::new(AgentId::from(target), payload)])
+    kernel
+        .operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -310,10 +315,11 @@ async fn watcher(
     id: &str,
 ) -> fantastic_kernel::inbox::InboxReceiver {
     let rx = kernel.ensure_inbox(&AgentId::from(id));
-    assert!(fantastic_kernel::send::as_operator(kernel
-        .watch(&AgentId::from(src), AgentId::from(id)))
-        .await
-        .is_none());
+    assert!(fantastic_kernel::send::as_operator(
+        kernel.watch(&AgentId::from(src), AgentId::from(id))
+    )
+    .await
+    .is_none());
     rx
 }
 
@@ -355,7 +361,6 @@ fn last_assistant(s: &Arc<SlowScript>, n: usize) -> String {
         .rev()
         .find(|m| m["role"] == "assistant")
         .and_then(|m| m["content"].as_str())
-        .map(crate::row_attrs::without_head)
         .expect("an assistant message")
         .to_string()
 }
@@ -400,7 +405,8 @@ async fn a_model_that_stops_with_a_block_open_leaves_the_marker_on_top() {
     ram_store(&kernel, "notes").await;
     grant(&kernel, ai.as_str(), "notes", json!({"call": ["*"]}));
     let mut rx = watcher(&kernel, "notes", "w_cut").await;
-    let open_call = "<call name=\"send\"><routing><target_id>notes</target_id></routing><payload><type>refl";
+    let open_call =
+        "<call name=\"send\"><routing><target_id>notes</target_id></routing><payload><type>refl";
     let fp = slow(&ai, &[open_call, DONE], Duration::ZERO);
     call(&kernel, ai.as_str(), json!({"type": "send", "text": "go"})).await;
     until_requests(&fp, 2).await;
@@ -891,7 +897,12 @@ async fn a_message_carries_the_stream_it_was_previewed_as() {
     let kernel = slow_kernel(&tmp).await;
     let prod_id = make_ai(&kernel, &id_for(&tmp, "sp_prod")).await;
     let cons_id = make_ai(&kernel, &id_for(&tmp, "sp_cons")).await;
-    grant(&kernel, prod_id.as_str(), cons_id.as_str(), json!({"call": ["*"]}));
+    grant(
+        &kernel,
+        prod_id.as_str(),
+        cons_id.as_str(),
+        json!({"call": ["*"]}),
+    );
     let mut rx = watcher(&kernel, cons_id.as_str(), "w_cons").await;
     let msg = format!(
         "<call name=\"send\">\n<routing><target_id>{}</target_id></routing><payload><type>send</type>\n\
@@ -926,7 +937,6 @@ async fn a_message_carries_the_stream_it_was_previewed_as() {
         .request(0)
         .last()
         .and_then(|m| m["content"].as_str())
-        .map(crate::row_attrs::without_head)
         .expect("the delivered message")
         .to_string();
     let sid = start["stream_id"].as_str().unwrap();
@@ -1031,7 +1041,8 @@ async fn a_cut_pass_sends_nothing_not_even_its_closed_calls() {
     ram_store(&kernel, "notes").await;
     grant(&kernel, ai.as_str(), "notes", json!({"call": ["*"]}));
     let done_one = "<call name=\"send\"><routing><target_id>notes</target_id></routing><payload><type>reflect</type></payload></call>";
-    let open_two = "<call name=\"send\"><routing><target_id>notes</target_id></routing><payload><type>refl";
+    let open_two =
+        "<call name=\"send\"><routing><target_id>notes</target_id></routing><payload><type>refl";
     let pass = format!("{done_one} then {open_two}");
     let fp = slow(&ai, &[&pass, DONE], Duration::ZERO);
     call(&kernel, ai.as_str(), json!({"type": "send", "text": "go"})).await;

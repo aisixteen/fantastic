@@ -25,10 +25,10 @@
 use super::strip::{strip, LOW};
 use super::{Projection, ProjectionCtx};
 use crate::constants::NOTICE_ENVELOPE_RESERVE;
-use crate::context::{estimate_one, estimate_tokens};
+use crate::context::estimate_one;
 use crate::folds::{
-    chain_text, is_fold, level, make_fold, member_anchor, quoted_title, render, row_id,
-    row_parent, row_role, unanchored, FoldAnchorError,
+    chain_text, is_fold, level, make_fold, member_anchor, quoted_title, render, row_id, row_parent,
+    row_role, unanchored, FoldAnchorError,
 };
 use crate::memory::MemoryStoreError;
 use crate::model_format::pass::Pass;
@@ -154,7 +154,10 @@ fn ident_re() -> &'static regex::Regex {
 /// Python `mechanical_index`.
 #[must_use]
 pub fn mechanical_index(rows: &[Value], chain: &[usize]) -> String {
-    let content = |r: &Value| r.get("content").map_or_else(String::new, crate::helpers::shown);
+    let content = |r: &Value| {
+        r.get("content")
+            .map_or_else(String::new, crate::helpers::shown)
+    };
     let text = chain
         .iter()
         .map(|&i| content(&rows[i]))
@@ -486,7 +489,13 @@ pub fn fold_row(
 /// only when `FOLD_RUN` folds sit adjacent at the head do they become the span
 /// themselves. Depth then grows with the log of the history, not its length.
 #[must_use]
-pub fn next_span(rows: &[Value], view: &[Value], keep_tail: usize, need: i64) -> Vec<usize> {
+pub fn next_span(
+    rows: &[Value],
+    view: &[Value],
+    keep_tail: usize,
+    need: i64,
+    size: &dyn Fn(&Value) -> i64,
+) -> Vec<usize> {
     let by_id: HashMap<i64, usize> = rows
         .iter()
         .enumerate()
@@ -515,7 +524,7 @@ pub fn next_span(rows: &[Value], view: &[Value], keep_tail: usize, need: i64) ->
                 break;
             }
             t.push(r);
-            got += estimate_tokens(std::slice::from_ref(*r));
+            got += size(r);
         }
         while t.last().is_some_and(|r| row_role(r) == "assistant") {
             t.pop();
@@ -550,16 +559,18 @@ pub async fn fold_down(
     budget: i64,
 ) -> Result<(Vec<Value>, Vec<Value>, Vec<Value>, usize), FoldFail> {
     let mut rows: Vec<Value> = rows.to_vec();
+    let size = |m: &Value| ctx.pass.tokens(m);
+    let total = |ms: &[Value]| ctx.pass.tokens_all(ms);
     let mut view = render(&rows);
     let mut folds: Vec<Value> = Vec::new();
-    if estimate_tokens(&view) > (budget as f64 * FOLD_AT) as i64 && rows.len() > 2 {
+    if total(&view) > (budget as f64 * FOLD_AT) as i64 && rows.len() > 2 {
         let target = (budget as f64 * LOW) as i64;
         // ONE FOLD, SIZED BY TOKENS: the oldest rows that bring the view to LOW,
         // plus room for the fold row itself (its summary budget). Repeated only if
         // that still leaves the view over LOW, or nothing foldable is left.
-        while estimate_tokens(&view) > target {
-            let need = estimate_tokens(&view) - target + SUMMARY_BUDGET;
-            let span = next_span(&rows, &view, KEEP_TAIL, need);
+        while total(&view) > target {
+            let need = total(&view) - target + SUMMARY_BUDGET;
+            let span = next_span(&rows, &view, KEEP_TAIL, need, &size);
             if span.is_empty() {
                 break;
             }
@@ -578,7 +589,7 @@ pub async fn fold_down(
     // run shrinks by `FOLD_RUN - 1` every time and `next_span` stops selecting
     // once fewer than `FOLD_RUN` remain.
     loop {
-        let span = next_span(&rows, &view, KEEP_TAIL, 0); // only a FOLD_RUN of folds qualifies here
+        let span = next_span(&rows, &view, KEEP_TAIL, 0, &size); // only a FOLD_RUN of folds qualifies here
         if span.is_empty() || !span.iter().all(|&i| is_fold(&rows[i])) {
             break;
         }
@@ -595,8 +606,7 @@ pub async fn fold_down(
 /// head, then hand what is left to `strip`. The fold rows ride the projection
 /// ([`Projection::folds`]) to the view row they are written with.
 pub async fn fold(body: &[Value], ctx: &ProjectionCtx<'_>) -> Result<Projection, FoldFail> {
-    let (_, view, folds, lost) =
-        fold_down(body, ctx, ctx.budget - NOTICE_ENVELOPE_RESERVE).await?;
+    let (_, view, folds, lost) = fold_down(body, ctx, ctx.budget - NOTICE_ENVELOPE_RESERVE).await?;
     // Stage two and three: strip bodies in what is left, then cut — strip's own
     // logic.
     let out = strip(&view, ctx).await?;
@@ -614,9 +624,7 @@ pub async fn fold(body: &[Value], ctx: &ProjectionCtx<'_>) -> Result<Projection,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{
-        Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream,
-    };
+    use crate::provider::{Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream};
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
 

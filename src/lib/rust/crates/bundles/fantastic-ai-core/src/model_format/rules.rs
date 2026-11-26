@@ -64,7 +64,7 @@ pub(crate) fn load(text: &str) -> Result<Rules, String> {
             .get("type")
             .and_then(Value::as_str)
             .ok_or_else(|| format!("model types: rule {i} has no string `type`"))?;
-        let entry = super::entry(kind)
+        let entry = super::declared(kind)
             .ok_or_else(|| format!("model types: rule {i} names an unknown type `{kind}`"))?;
         rules.push(Rule {
             contains: contains.to_string(),

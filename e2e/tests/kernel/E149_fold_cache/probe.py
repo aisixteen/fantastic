@@ -3,8 +3,11 @@
 PART B, `caching: provider_cache`: the whole cycle. Autofold (`Caching::folds`,
 caching.rs:85-88; Rust history_view.rs:522-603, Python ai_core/autofold.py:146-192):
 
-  [folded · {verb} reply from {agent} · ~{x} tokens · head: "{line}" · get: {row id}]
-  [folded · recall reply from {agent} · id {N} · ~{x} tokens · get: {row id}]
+  {tag line}
+  <folded id="{row id}" verb="{verb}" from="{agent}" tokens="{x}" head="{line}"/> unfold: <call …recall {row id}…>
+  <folded id="{row id}" verb="recall" from="{agent}" recalled="id {N}" tokens="{x}"/> unfold: …
+
+(the default type's markers, `res/default/marker_folded_*.txt`, map-once)
 
 over AUTOFOLD_AT = 16000 tokens (64,000 chars); only an ANSWERED row folds. `recall` by
 id: Rust verbs.rs:741, Python core.py:4651. `grep` (query required, optional ids/limit/
@@ -277,7 +280,7 @@ def main() -> int:
         base = len(allb)
         collect(turns)
         anchor_read = first_seen(
-            "B1b", rf'\[folded · read reply from files · ~\d+ tokens · head: "[^"]*" · get: {b}\]',
+            "B1b", rf'<folded id="{b}" verb="read" from="files" tokens="\d+" head="[^"]*"/>[^\n]*',
             turns, base)
         need(bool(turns) and "L100 " not in full(turns[0]), "B1b: the read reply is folded")
         last = last_user(turns[1]) if len(turns) > 1 else ""
@@ -297,7 +300,7 @@ def main() -> int:
         turns = run(mB, AI_B, "B2", "recall", 2)
         base = len(allb)
         collect(turns)
-        need(bool(turns) and "S090 " in full(turns[0]) and f"get: {d}]" not in full(turns[0]),
+        need(bool(turns) and "S090 " in full(turns[0]) and f'<folded id="{d}"' not in full(turns[0]),
              "B2: the reflect reply stays whole (a reflect never folds)")
         last = last_user(turns[1]) if len(turns) > 1 else ""
         need(f" {AI_B} recall" in last and "S090 " in last,
@@ -310,7 +313,7 @@ def main() -> int:
         turns = run(mB, AI_B, "B3", "grep", 2)
         base = len(allb)
         collect(turns)
-        first_seen("B3", rf"\[folded · recall reply from {AI_B} · id {d} · ~\d+ tokens · get: \d+\]",
+        first_seen("B3", rf'<folded id="\d+" verb="recall" from="{AI_B}" recalled="id {d}" tokens="\d+"/>[^\n]*',
                    turns, base)
         need(bool(turns) and full(turns[0]).count("S090 ") == 1,
              "B3: the recall reply refolds (only the whole reflect reply still carries the body)")

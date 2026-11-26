@@ -7,11 +7,15 @@ next to a `file_bridge` agent (`files`) holding an 80 kB file.
 
   P1. the AI reads the file (thought, then a `read` call); the reply is whole in the
       next request; the AI answers `done`;
-  P2. the next send: the read reply is its `[folded · read reply …]` anchor and both
-      thoughts are `[thought ~N tokens …]` anchors (none of their text); the AI then
-      recalls row B by id and gets the body whole;
-  P3. after the next answer the recall reply is `[folded · recall reply … id B …]`; the
-      store row B is still whole;
+  P2. the next send: the read reply is its tag line and the default type's `<folded …/>`
+      marker, and both thoughts are `<thought …/>` markers on the next user-side
+      messages (none of their text); the AI then recalls row B by id and gets the body
+      whole;
+  P2b. map-once: the read reply's marker in that request is the type's template
+      (`res/default/marker_folded_reply.txt`) filled with the stored row's facts, byte for
+      byte, its unfold call naming row B;
+  P3. after the next answer the recall reply is a `<folded … verb="recall" … recalled="id B"`
+      marker; the store row B is still whole;
   P4. a malformed answer after thinking (a foreign `<invoke>` and 50 closers) is
       re-asked inside its turn (#766): request 2 is request 1's messages, then the
       attempt without its thought, read no further than the delta that held the
@@ -22,6 +26,7 @@ next to a `file_bridge` agent (`files`) holding an 80 kB file.
 from __future__ import annotations
 
 import json
+import math
 import os
 import secrets
 import shutil
@@ -57,6 +62,40 @@ def last_user(req: dict) -> str:
     return ""
 
 
+
+
+#: the default type's marker templates (map-once)
+TEMPLATES = (REPO / "src/lib/rust/crates/bundles/fantastic-ai-core/src/model_format/res/default")
+
+
+def quote(s: str) -> str:
+    """A value as one quoted attribute of the default type's notation."""
+    return '"' + (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                  .replace('"', "&quot;")) + '"'
+
+
+def fill(name: str, own: str, facts: dict[str, str]) -> str:
+    """A marker template filled as the map fills it: `{self}`, every fact as `{k}` and,
+    quoted, as `{k_q}`, one pass; its trailing newline dropped."""
+    text = (TEMPLATES / name).read_text()
+    text = text[:-1] if text.endswith("\n") else text
+    vals = {"self": own, "self_q": quote(own)}
+    for k, v in facts.items():
+        vals[k] = v
+        vals[k + "_q"] = quote(v)
+    out, i = [], 0
+    while (j := text.find("{", i)) >= 0:
+        out.append(text[i:j])
+        end = text.find("}", j)
+        key = text[j + 1:end] if end > j else ""
+        if key in vals:
+            out.append(vals[key])
+            i = end + 1
+        else:
+            out.append("{")
+            i = j + 1
+    out.append(text[i:])
+    return "".join(out)
 
 
 def messages_of(turn: dict) -> list[dict]:
@@ -162,22 +201,44 @@ def main() -> int:
                 f'Noted.\n{DONE}')
         turns = run("P2", "next", 2)
         seen = blob(turns[0]) if turns else ""
-        need("[folded · read reply from files · ~" in seen and f"get: {b}]" in seen,
-             "P2: request 1 shows the read reply as its anchor")
-        need("[thought ~" in seen, "P2: request 1 shows the thoughts as anchors")
+        users = user_texts(turns[0]) if turns else []
+        need(any(f'<folded id="{b}" verb="read" from="{FILES}"' in t for t in users),
+             "P2: request 1 shows the read reply as its marker")
+        need(sum(t.count("<thought id=") for t in users) == 2,
+             "P2: request 1 shows both thoughts as markers on user-side messages")
+        need(all("<thought id=" not in str(x.get("content"))
+                 for x in (messages_of(turns[0]) if turns else [])
+                 if x.get("role") == "assistant"),
+             "P2: no assistant message holds a marker")
         need(f"PLAN-{TOKEN}" not in seen and f"SEEN-{TOKEN}" not in seen and "L100 " not in seen,
              "P2: request 1 holds no thought text and no body")
         last = user_texts(turns[1])[-1] if len(turns) > 1 else ""
         need(" ai recall" in last and "L100 " in last,
              "P2: request 2 carries the recalled row whole")
 
+        # ── P2b · the marker is the type's template (map-once) ────────────────
+        held = hk.send(AI, {"type": "rows", "limit": 500}).get("rows") or []
+        row = next((r for r in held if r.get("id") == b), {})
+        content = str(row.get("content") or "")
+        tag_line, _, rest = content.partition("\n")
+        want = fill("marker_folded_reply.txt", AI, {
+            "tag_line": tag_line, "id": str(b), "agent": FILES, "verb": "read",
+            "tokens": str(math.ceil(len(rest) / 4)),
+            "head": rest.split("\n", 1)[0].strip()[:120], "what": "", "kept": "",
+        })
+        need(bool(content) and any(want in t for t in users),
+             f"P2b: the read reply's marker is the template, byte for byte: {want[:160]!r}")
+        need(f"<id>{b}</id></payload></call>" in want,
+             "P2b: its unfold call is `recall` with row B's id")
+
         # ── P3 · the recall reply folds after the next answer ─────────────────
         m.clear()
         m.reply(DONE)
         turns = run("P3", "again", 1)
         seen = blob(turns[0]) if turns else ""
-        need(f"[folded · recall reply from ai · id {b} · ~" in seen,
-             "P3: the recall reply is its anchor")
+        need(any(f'verb="recall" from="{AI}" recalled="id {b}"' in t
+                 for t in user_texts(turns[0]) if turns),
+             "P3: the recall reply is its marker")
         need("L100 " not in seen, "P3: the body is nowhere in the request")
         need(any(r.get("id") == b and int(r.get("bytes") or 0) > 64000 for r in history()),
              "P3: the store row is still whole")

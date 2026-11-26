@@ -332,8 +332,7 @@ async fn reported_read_is_not_kept() {
         *state.last_send_secs.lock().unwrap() = Some(crate::helpers::now_secs());
         assert_eq!(turn_of(&pass, &views[0]).kept, want[0].0);
 
-        let model_view = crate::agent_loop::render_for_model(&views[1]);
-        let view = pass.view(&views[1], &model_view, &[], &Map::new());
+        let view = pass.view(&views[1], &Map::new());
         let predicted = (view.kept, view.kept_endpoint);
         assert_eq!(predicted, want[1]);
         *provider.report.lock().unwrap() = ProviderReport {

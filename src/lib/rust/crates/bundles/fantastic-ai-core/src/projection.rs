@@ -7,10 +7,7 @@
 //! Python `ai_core/core.py` `_project_context` / `_context_notice`.
 
 use crate::constants::{BUDGET_FLOOR, NOTICE_ENVELOPE_RESERVE};
-use crate::context::{
-    budget as agent_budget, estimate_one, estimate_tokens, recent_n as cfg_recent_n,
-    resolve_context_window,
-};
+use crate::context::{budget as agent_budget, recent_n as cfg_recent_n, resolve_context_window};
 use crate::events::to_caller;
 use crate::helpers::{agent_meta, now_secs};
 use crate::memory::{load_history, save_view, MemoryStoreError};
@@ -77,32 +74,19 @@ pub fn context_notice(
     stripped: usize,
     stripped_bytes: i64,
 ) -> Value {
-    let mut lines = vec![format!(
-        "[context-notice] Your conversation exceeded the window and was compacted \
-         (strategy={strategy}, {dropped_n} earlier turn(s) dropped from THIS view)."
-    )];
-    if let Some(s) = summary {
-        lines.push(format!("Summary of the dropped span:\n{s}"));
-    } else if omitted_marker {
-        lines.push("An earlier span was omitted in place.".to_string());
-    }
-    if stripped > 0 {
-        lines.push(format!(
-            "{stripped} reply bod(ies) were STRIPPED to their tag+title line \
-             ({stripped_bytes} bytes left your view); grep finds a line in a body held \
-             this run — after a restart, re-read it from its origin."
-        ));
-    }
-    // PYTHON'S BYTES. This line teaches the model how to page turns back, in the
-    // shape the harness accepts. Python `_context_notice`.
-    lines.push(
-        "The full transcript is intact in your memory store. To page dropped turns back, \
-         send your OWN id `<type>recall</type>` (optional `<query>`, `<limit>`). If the dropped span holds \
-         durable facts (names, decisions, preferences), persist them to your memory agent \
-         now via the send tool — the earlier turns are leaving your live view."
-            .to_string(),
-    );
-    json!({"role": "user", "content": lines.join("\n")})
+    // its words are the type's (`res/<type>/notice_tail.txt`, `res/shared/notice_*.txt`),
+    // written by the map: the default type's are python's bytes
+    crate::model_format::map::with_pieces(
+        json!({"role": "user"}),
+        &[crate::model_format::map::Piece::Notice {
+            strategy: strategy.to_string(),
+            dropped: dropped_n,
+            summary: summary.map(str::to_string),
+            omitted: omitted_marker,
+            stripped,
+            stripped_bytes,
+        }],
+    )
 }
 
 /// Shape `messages` to fit the budget, prepend the notice, emit the `context`
@@ -129,6 +113,9 @@ pub(crate) async fn project_context(
     store_len: usize,
 ) -> Result<Vec<Value>, ProjectFail> {
     let meta = agent_meta(self_id, kernel);
+    // EVERY SIZE IS OF THE BYTES THIS PASS'S TYPE IS SENT (`Pass::tokens`)
+    let size = |m: &Value| pass.tokens(m);
+    let total = |ms: &[Value]| pass.tokens_all(ms);
     // THE BUDGET IN ESTIMATE UNITS: the record's budget, divided by how much the
     // endpoint's own count exceeded our estimate last turn (`calib`).
     let calib = state.calib.lock().expect("calib poisoned").unwrap_or(1.0);
@@ -137,7 +124,7 @@ pub(crate) async fn project_context(
     } else {
         agent_budget(&meta, model_window)
     };
-    if estimate_tokens(&messages) <= (b as f64 * TRIGGER) as i64 {
+    if total(&messages) <= (b as f64 * TRIGGER) as i64 {
         *state.projection.lock().expect("projection poisoned") = Some(json!({
             "fired": false,
             "trigger": TRIGGER,
@@ -151,9 +138,9 @@ pub(crate) async fn project_context(
         *state.projection.lock().expect("projection poisoned") = Some(json!({"fired": false}));
         return Ok(messages);
     }
-    let sys_tokens = estimate_tokens(&system_block);
+    let sys_tokens = total(&system_block);
     let body_budget = b - sys_tokens;
-    let last_cost = estimate_one(&body[body.len() - 1]);
+    let last_cost = size(&body[body.len() - 1]);
     // The live user turn AND the notice envelope are both non-negotiable — if
     // there's no room for BOTH, fail loud (so the trim below never drops the live turn).
     if body_budget < last_cost + NOTICE_ENVELOPE_RESERVE {
@@ -217,7 +204,7 @@ pub(crate) async fn project_context(
         return Err(ProjectFail::Refusal(json!({
             "error": format!(
                 "{name}: context full: {}k of {}k tokens — clear, fold by hand, or raise context_window",
-                estimate_tokens(&messages) / 1000,
+                total(&messages) / 1000,
                 b / 1000
             ),
         })));
@@ -232,7 +219,7 @@ pub(crate) async fn project_context(
         client_id,
     };
     let proj = match strat_name.as_str() {
-        "truncate" => truncate(&body, body_budget),
+        "truncate" => truncate(&body, body_budget, &size),
         "strip" => strip(&body, &pctx).await?,
         "fold" => fold(&body, &pctx).await?,
         _ => compact(&body, recent, body_budget, pass).await,
@@ -259,7 +246,7 @@ pub(crate) async fn project_context(
         let mut probe = system_block.clone();
         probe.push(notice.clone());
         probe.extend(body.iter().cloned());
-        estimate_tokens(&probe) > b
+        total(&probe) > b
     };
     while out_body.len() > 2 && over(&out_body) {
         let mut next = vec![out_body[0].clone()];
@@ -457,7 +444,9 @@ mod tests {
         // AN UNTERMINATED ENVELOPE IS NOT A CALL: dispatch
         // skips it, and the reaction reader must see the same thing dispatch saw.
         let turns = [
-            turn(r#"<call name="send"><routing><target_id>me</target_id></routing><payload><type>recall</type></payload>"#),
+            turn(
+                r#"<call name="send"><routing><target_id>me</target_id></routing><payload><type>recall</type></payload>"#,
+            ),
             turn(
                 r#"<call name="send"><routing><target_id>notes</target_id></routing><payload><type>write</type><path>facts.md</path><bytes>x</bytes></payload></call>"#,
             ),

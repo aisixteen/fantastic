@@ -145,8 +145,8 @@ fn type_of_is_a_function() {
 
 // ─── the row's stored UTC offset (1.13) ─────────────────────────────────────────
 
-use crate::row_attrs::{head, local_offset, model_text, offset_at, stamp, UTC_OFFSET};
-use crate::tests::{mk_kernel, pass, script, until_true};
+use crate::row_attrs::{day_of, local_offset, offset_at, UTC_OFFSET};
+use crate::tests::{mk_kernel, opens_with_a_time, pass, script, until_true};
 use fantastic_kernel::test_support::as_agent;
 use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Value};
@@ -155,6 +155,28 @@ use std::time::Duration;
 
 /// 2026-11-19 19:40:00 UTC: PST in Los Angeles (-08:00), +14:00 on Kiritimati.
 const T: i64 = 1_795_117_200;
+
+/// The environment section the default type writes when `row` begins the thread: the
+/// one place a row's `ts` and stored offset reach a request (map-once).
+fn env_text(row: &Value) -> String {
+    use super::map::{Env, Howto, SysBody, SysPiece};
+    super::map::system(
+        super::of(super::DEFAULT),
+        &[SysPiece {
+            part: "verb_docs".into(),
+            body: SysBody::Howto(Howto {
+                sections: vec![super::Section::Env],
+                store: String::new(),
+                env: Env::of(row),
+            }),
+        }],
+    )
+}
+
+/// [`env_text`] of a row written at `t` with the offset `off`.
+fn env_at(t: i64, off: i64) -> String {
+    env_text(&json!({"attributes": {"ts": t, UTC_OFFSET: off}}))
+}
 
 /// The variable that tells a child run of this binary which side of a test it is.
 const CHILD_ROLE: &str = "FANTASTIC_D_CHILD_ROLE";
@@ -221,7 +243,7 @@ fn d10_zones() -> Vec<Env> {
 }
 
 /// In a child under a `TZ`, the zone took: the process's own offset at [`T`] is the
-/// zone's, so a head that equals the parent's was not read from the process.
+/// zone's, so a date that equals the parent's was not read from the process.
 fn zone_took(role: &str) {
     match role {
         "tz_kiritimati" => assert_eq!(local_offset(T), Some(50_400), "{role}"),
@@ -287,7 +309,7 @@ fn turn_request(s: &crate::tests::MockScript, said: &str) -> Vec<Value> {
         .find(|req| {
             req.last()
                 .and_then(|m| m["content"].as_str())
-                .is_some_and(|c| crate::row_attrs::without_head(c) == said)
+                .is_some_and(|c| c == said)
         })
         .unwrap_or_else(|| panic!("no turn request for {said:?}"))
 }
@@ -326,25 +348,28 @@ fn old_rows() -> Vec<Value> {
 }
 
 // D13
+/// A row with no offset, or one that is not an integer, dates its thread in UTC, under
+/// every zone; it shows no time of its own.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn old_row_renders_utc() {
-    let want = format!("{}\n", stamp(T, 0));
-    assert_eq!(want, "[2026-11-19 19:40 +00:00]\n");
+async fn old_row_dates_its_thread_in_utc() {
+    let want = env_at(T, 0);
+    assert_eq!(day_of(T, 0), ("2026-11-19".into(), "+00:00".into()));
+    assert!(want.contains("2026-11-19 (UTC+00:00)"), "{want}");
     if let Some(role) = child_role() {
         zone_took(&role);
         for row in old_rows() {
-            assert_eq!(head(&row), want, "{role}: {row}");
+            assert_eq!(env_text(&row), want, "{role}: {row}");
         }
         return;
     }
     for row in old_rows() {
-        assert_eq!(head(&row), want, "{row}");
+        assert_eq!(env_text(&row), want, "{row}");
     }
     // under every zone of D10
     let elsewhere = tempfile::TempDir::new().unwrap();
     for (role, envs, cwd) in d10_zones() {
         run_child(
-            "old_row_renders_utc",
+            "old_row_dates_its_thread_in_utc",
             role,
             &envs,
             cwd.then(|| elsewhere.path()),
@@ -383,15 +408,23 @@ async fn old_row_renders_utc() {
             "row {id} was rewritten"
         );
     }
-    // and each turn's request shows every old row under the UTC head
+    // and each turn's request shows every old row as stored, no time on it, and dates
+    // the thread by the first of them, in UTC
     for said in ["first", "second"] {
         let sent = turn_request(&s, said);
+        let system = sent[0]["content"].as_str().unwrap();
+        assert!(system.contains(&want), "the request of {said:?}: {system}");
         for r in &old {
-            let text = format!("{want}{}", r["content"].as_str().unwrap());
             assert!(
-                sent.iter()
-                    .any(|m| m["content"].as_str().is_some_and(|c| c.contains(&text))),
-                "the request of {said:?} lacks {text:?}: {sent:#?}"
+                sent.iter().any(|m| m["content"] == r["content"]),
+                "the request of {said:?} lacks {}: {sent:#?}",
+                r["content"]
+            );
+        }
+        for m in &sent {
+            assert!(
+                !opens_with_a_time(m["content"].as_str().unwrap_or("")),
+                "{m}"
             );
         }
     }
@@ -401,13 +434,13 @@ async fn old_row_renders_utc() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn offset_set_once_on_append() {
     if let Some(role) = child_role() {
-        // a restart under another zone: the stored rows' heads are the writer's
+        // a restart under another zone: the stored rows date a thread as the writer did
         zone_took(&role);
         let path = std::env::var(CHILD_INPUT).expect("an input file");
         let input: Vec<Value> =
             serde_json::from_str(&std::fs::read_to_string(path).expect("input")).expect("json");
         for e in &input {
-            assert_eq!(json!(head(&e["row"])), e["head"], "{role}: {}", e["row"]);
+            assert_eq!(json!(env_text(&e["row"])), e["env"], "{role}: {}", e["row"]);
         }
         return;
     }
@@ -433,14 +466,11 @@ async fn offset_set_once_on_append() {
         offset_at(&json!(T)),
         "{plain}"
     );
-    assert_eq!(
-        head(&plain),
-        format!("{}\n", stamp(T, local_offset(T).unwrap()))
-    );
+    assert_eq!(env_text(&plain), env_at(T, local_offset(T).unwrap()));
     // A ROW SAVED WITH ONE keeps its own: as written, as a copy, as a row saved again
     let own = by_id(&rows, ids[1]);
     assert_eq!(own["attributes"][UTC_OFFSET], json!(31_500), "{own}");
-    assert_eq!(head(&own), "[2026-11-20 04:25 +08:45]\n");
+    assert!(env_text(&own).contains("2026-11-20 (UTC+08:45)"), "{own}");
     let mut copy = own.clone();
     copy.as_object_mut().unwrap().remove("id");
     copy["content"] = json!("own, copied");
@@ -469,7 +499,7 @@ async fn offset_set_once_on_append() {
         json!(-34_200)
     );
 
-    // THE ARRIVING MESSAGE: the head its request showed is its row's, on the next pass
+    // THE ARRIVING MESSAGE: its row is what its request showed, on the next pass too
     say(&kernel, &agent, "go").await;
     say(&kernel, &agent, "again").await;
     let rows = store(&kernel, &agent).await;
@@ -480,15 +510,23 @@ async fn offset_set_once_on_append() {
         offset_at(&ts),
         "{go}"
     );
-    let shown = model_text(&go);
-    assert_eq!(
-        turn_request(&s, "go").last().unwrap()["content"],
-        json!(shown)
-    );
+    let shown = go["content"].clone();
+    let first_request = turn_request(&s, "go");
+    assert_eq!(first_request.last().unwrap()["content"], shown);
     let next = turn_request(&s, "again");
     assert!(
-        next.iter().any(|m| m["content"] == json!(shown)),
-        "the next pass shows another head: {next:#?}"
+        next.iter().any(|m| m["content"] == shown),
+        "the next pass shows another text: {next:#?}"
+    );
+    // the thread's date is its first row's, the same on both passes
+    assert_eq!(first_request[0]["content"], next[0]["content"]);
+    assert!(
+        next[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains(&env_text(&plain)),
+        "{}",
+        next[0]["content"]
     );
     // its answer, stored through the append, has one too
     let answer = rows
@@ -502,7 +540,8 @@ async fn offset_set_once_on_append() {
         "{answer}"
     );
 
-    // A FOLD ROW: its offset is set where its `ts` is, and the next pass shows its head
+    // A FOLD ROW: its offset is set where its `ts` is, and the next pass shows it with no
+    // time of its own
     let out = verb(
         &kernel,
         &agent,
@@ -520,8 +559,6 @@ async fn offset_set_once_on_append() {
         offset_at(&fold["attributes"]["ts"]),
         "{fold}"
     );
-    let fold_head = head(&fold);
-    assert!(!fold_head.is_empty(), "{fold}");
     let sent = turn_request(&s, "after the fold");
     let shown = sent
         .iter()
@@ -532,8 +569,8 @@ async fn offset_set_once_on_append() {
         })
         .unwrap_or_else(|| panic!("the fold is not in the request: {sent:#?}"));
     assert!(
-        shown["content"].as_str().unwrap().starts_with(&fold_head),
-        "{shown} under {fold_head:?}"
+        !opens_with_a_time(shown["content"].as_str().unwrap()),
+        "{shown}"
     );
 
     // NO LATER WRITE CHANGES IT: a fold, a recall, a view write and a restart over them
@@ -577,11 +614,11 @@ async fn offset_set_once_on_append() {
             "row {id}'s offset changed"
         );
     }
-    // and under another zone the stored rows show the heads the writer showed
+    // and under another zone the stored rows date a thread as the writer did
     let input: Vec<Value> = rows
         .iter()
         .filter(|r| r["attributes"].get("ts").is_some())
-        .map(|r| json!({"row": r, "head": head(r)}))
+        .map(|r| json!({"row": r, "env": env_text(r)}))
         .collect();
     let file = tmp.path().join("d14_rows.json");
     std::fs::write(&file, serde_json::to_string(&input).unwrap()).unwrap();
@@ -597,9 +634,10 @@ async fn offset_set_once_on_append() {
 
 const HISTORY: &str = include_str!("res/test/history.json");
 
-/// `res/test/history.json` rendered for one adapter: each row's model text (its `ts`
-/// head included) through `render`, each under a `== row <id> <role> ==` line. What the
-/// prefix files hold below their header (K29, D2, D10, RS12).
+/// `res/test/history.json` mapped for one adapter: each row's stored text through
+/// `render` (what the map writes of a row of one text), each under a
+/// `== row <id> <role> ==` line. What the prefix files hold below their header (K29, D2,
+/// D10, RS12).
 pub(super) fn rendered_history(renderer: &dyn super::Renderer) -> String {
     let rows: Vec<Value> = serde_json::from_str(HISTORY).expect("history.json");
     let mut out = String::new();
@@ -610,7 +648,7 @@ pub(super) fn rendered_history(renderer: &dyn super::Renderer) -> String {
         let id = row.get("id").map_or_else(String::new, Value::to_string);
         let role = row.get("role").and_then(Value::as_str).unwrap_or("");
         out.push_str(&format!("== row {id} {role} ==\n"));
-        out.push_str(&renderer.render(&model_text(row)));
+        out.push_str(&renderer.render(row["content"].as_str().unwrap_or("")));
         out.push('\n');
     }
     out
@@ -679,11 +717,11 @@ fn record_prefix() {
         let e = super::of(kind);
         let text = format!(
             "# recorded by model_format::tests_determinism::record_prefix (#766): \
-             res/test/history.json, each row's model text through the adapter\n\
+             res/test/history.json, each row's stored text through the adapter\n\
              # adapter: {kind}\n# rev: {}\n# rules_sha256: {}\n# commit: {commit}\n{}",
-            e.renderer.rev(),
+            e.calls.rev(),
             rules_digest(),
-            rendered_history(e.renderer),
+            rendered_history(e.calls),
         );
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src/model_format/res/test")
@@ -692,9 +730,9 @@ fn record_prefix() {
         let (rev, digest, body) = recorded(&text);
         assert_eq!(
             (rev, digest.as_str()),
-            (e.renderer.rev(), rules_digest().as_str())
+            (e.calls.rev(), rules_digest().as_str())
         );
-        assert_eq!(body, rendered_history(e.renderer));
+        assert_eq!(body, rendered_history(e.calls));
     }
 }
 
@@ -717,7 +755,7 @@ const CHILD_OUTPUT: &str = "FANTASTIC_D_CHILD_OUTPUT";
 fn adapters() -> Vec<(&'static dyn Renderer, &'static dyn Reader)> {
     super::REGISTRY
         .iter()
-        .map(|e| (e.renderer, e.reader))
+        .map(|e| (e.calls, e.reader))
         .collect()
 }
 
@@ -798,15 +836,14 @@ fn send_call(args: Value) -> String {
 }
 
 /// The rows of `res/test/history.json` with string content, as a pass's view carries
-/// them: `{id, role, content: model text}`, after a system message and before an
-/// arriving one.
+/// them: `{id, role, content}`, after a system message and before an arriving one.
 fn history_messages() -> Vec<Value> {
     let rows: Vec<Value> = serde_json::from_str(HISTORY).expect("history.json");
     let mut out = vec![json!({"role": "system", "content": "SYS"})];
     out.extend(
         rows.iter()
             .filter(|r| r.get("content").is_some_and(Value::is_string))
-            .map(|r| json!({"id": r["id"], "role": r["role"], "content": model_text(r)})),
+            .map(|r| json!({"id": r["id"], "role": r["role"], "content": r["content"]})),
     );
     out.push(json!({"role": "user", "content": "go"}));
     out
@@ -825,7 +862,7 @@ fn repeated_passes() {
         let h: Box<dyn Renderer> = Box::new(Hermes);
         assert_eq!(rendered_history(&*d), first_d, "D, round {round}");
         assert_eq!(rendered_history(&*h), first_h, "H, round {round}");
-        assert_eq!(rendered_history(super::of("hermes").renderer), first_h);
+        assert_eq!(rendered_history(super::of("hermes").calls), first_h);
     }
 }
 
@@ -889,7 +926,7 @@ fn other_process_same_bytes() {
                         }
                         let role = row.get("role").and_then(Value::as_str).unwrap_or("");
                         text.push_str(&format!("== row {id} {role} ==\n"));
-                        text.push_str(&r.render(&model_text(row)));
+                        text.push_str(&r.render(row["content"].as_str().unwrap_or("")));
                         text.push('\n');
                     }
                     out.push((name, text));
@@ -1023,7 +1060,11 @@ fn whitespace_kept() {
             assert!(rendered.ends_with(tail), "{}: {rendered:?}", r.name());
             assert!(rendered.contains(body), "{}: the body's bytes", r.name());
             let back = round_trip(r, reader, &text);
-            assert!(back.contains(&block), "{}: the body's bytes back {back:?}", r.name());
+            assert!(
+                back.contains(&block),
+                "{}: the body's bytes back {back:?}",
+                r.name()
+            );
             let want = if r.name() == Hermes.name() {
                 format!("{prose}\n{trimmed}{tail}")
             } else {
@@ -1083,11 +1124,12 @@ fn digit_runs(s: &str) -> Vec<&str> {
 }
 
 // D6
-/// Timestamps and ids: a `ts` head, row ids, pids in reply tags, a `client_id` in text are
-/// copied as stored; the output holds no number that is not in its input; the same row
-/// with two `ts` heads is two sources, each stable.
+/// Ids: row ids, pids in reply tags, a `client_id` in text are copied as stored; the
+/// output holds no number that is not in its input; a row's `ts` and offset are not
+/// part of its source: the same row written under two offsets maps to one text, one
+/// entry.
 #[test]
-fn ts_and_ids_copied() {
+fn ids_copied_and_attributes_not_mapped() {
     let content = format!(
         "[reply to 11 · notes read · ↑4 · 1 of 2 in batch 7]\nc_7f3a готово\n\n\
          [reply to 12 · kernel reflect]\n{}",
@@ -1098,17 +1140,29 @@ fn ts_and_ids_copied() {
                "attributes": {"ts": T, UTC_OFFSET: off}})
     };
     let (a, b) = (row(7200), row(-28_800));
-    let (src_a, src_b) = (model_text(&a), model_text(&b));
-    assert_ne!(src_a, src_b, "two heads, two sources");
+    let shown = |m: &Value| super::map::Shown::of(m);
+    assert_eq!(
+        super::map::canonical(&shown(&a)),
+        super::map::canonical(&shown(&b)),
+        "the offset is not part of the source"
+    );
+    for d in super::REGISTRY {
+        let (ma, mb) = (
+            super::map::message(d, "ai", &shown(&a)),
+            super::map::message(d, "ai", &shown(&b)),
+        );
+        assert_eq!(ma, mb, "{}: one text", d.name);
+        assert!(
+            !opens_with_a_time(ma["content"].as_str().unwrap()),
+            "{}",
+            d.name
+        );
+    }
+    let src_a = content.clone();
     for (r, _) in adapters() {
-        for src in [&src_a, &src_b] {
+        for src in [&src_a] {
             let out = r.render(src);
             assert_eq!(r.render(src), out, "{}: stable", r.name());
-            assert!(
-                out.starts_with(&head(if src == &src_a { &a } else { &b })),
-                "{}",
-                r.name()
-            );
             for needle in ["c_7f3a", "[reply to 11 ·", "[reply to 12 ·", "n42.md"] {
                 assert!(out.contains(needle), "{}: {needle} in {out}", r.name());
             }
@@ -1121,22 +1175,20 @@ fn ts_and_ids_copied() {
             }
         }
     }
-    // through a cache: each head is its own source, each stable
+    // through a cache: the row under either offset is one source, one entry
     let c = <RenderCache>::new();
-    let view = |src: &str| {
+    let view = |row: &Value| {
         vec![
             json!({"role": "system", "content": "SYS"}),
-            json!({"id": 41, "role": "user", "content": src}),
+            row.clone(),
             json!({"role": "user", "content": "go"}),
         ]
     };
-    let first = run(&c, &Hermes, &view(&src_a), &Opts::default());
-    let other = run(&c, &Hermes, &view(&src_b), &Opts::default());
-    assert_eq!(other.rows, 1, "the other head is another source");
-    let again = run(&c, &Hermes, &view(&src_b), &Opts::default());
-    assert_eq!(again.rows, 0);
-    assert_eq!(again.messages, other.messages);
-    assert_ne!(first.messages, other.messages);
+    let first = run(&c, &Hermes, &view(&a), &Opts::default());
+    assert_eq!(first.rows, 1);
+    let other = run(&c, &Hermes, &view(&b), &Opts::default());
+    assert_eq!(other.rows, 0, "the other offset is the same source");
+    assert_eq!(first.messages, other.messages);
 }
 
 // ─── the seeded history generator ────────────────────────────────────────────
@@ -1405,7 +1457,7 @@ fn as_view(h: &History) -> Vec<Value> {
 /// reset: every view is byte-equal to the uncached render.
 #[test]
 fn property_cache_equals_plain() {
-    let other = epoch_of(b"[other rules]", &[&Hermes as &dyn Renderer]);
+    let other = epoch_of(b"[other rules]", &[super::of(super::hermes::NAME)]);
     for seed in SEEDS {
         let mut g = Seeded::new(seed);
         let m = as_view(&g.history());
@@ -1440,8 +1492,8 @@ fn property_cache_equals_plain() {
 // D10
 /// `history.json` assembled and rendered by child processes under another locale, time
 /// zone and working directory, and through a cache whose clock stands at 0 and at a far
-/// future time: every output byte-equal to the parent's, `ts` heads included; only
-/// `kept_endpoint` follows the clock.
+/// future time: every output byte-equal to the parent's, the system block's date
+/// included; only `kept_endpoint` follows the clock.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn same_rows_any_environment() {
     let rendered = d10_output().await;
@@ -1512,6 +1564,7 @@ async fn d10_output() -> Value {
             &kernel,
             "c",
             crate::caching::Caching::ProviderCache,
+            &crate::row_attrs::Stamp::now(),
         ),
     )
     .await
@@ -1532,9 +1585,10 @@ async fn d10_output() -> Value {
 // D11
 /// A restart under another time zone, through the assembly: rows appended by a child
 /// under `TZ=Europe/Kyiv`, the store opened by a child under `TZ=America/Los_Angeles`
-/// and by one under `TZ=UTC`. Every head is the head the writer sent, so the sources
-/// equal the pre-stop ones; the first pass is cold only because the cache is new; a row
-/// appended after the restart carries the new zone's offset.
+/// and by one under `TZ=UTC`. Every row maps as the writer's did and the system block
+/// shows the thread's date as it did, so the request equals the pre-stop one; the first
+/// pass is cold only because the cache is new; a row appended after the restart carries
+/// the new zone's offset.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn other_zone_same_heads() {
     if let Some(role) = child_role() {
@@ -1584,7 +1638,7 @@ async fn other_zone_same_heads() {
         .unwrap();
         let now: Vec<Value> = reader["request"].as_array().cloned().unwrap();
         let k = pre.len() - 1;
-        assert_eq!(now[1..k], pre[1..k], "{role}: the heads the writer sent");
+        assert_eq!(now[..k], pre[..k], "{role}: the bytes the writer sent");
         assert!(
             reader["events"]
                 .as_array()
@@ -1668,16 +1722,17 @@ async fn d11_child(role: &str) {
     .expect("written");
 }
 
-/// D12's rows: one minute before the change of 2026-10-25 01:00 UTC, and at it.
+/// D12's rows: one minute before the change of 2026-10-25 01:00 UTC, and at it, with
+/// the date each dates its thread by.
 const DST: [(i64, i64, &str); 2] = [
-    (1_792_889_940, 10_800, "[2026-10-25 03:59 +03:00]\n"),
-    (1_792_890_000, 7_200, "[2026-10-25 03:00 +02:00]\n"),
+    (1_792_889_940, 10_800, "2026-10-25 (UTC+03:00)"),
+    (1_792_890_000, 7_200, "2026-10-25 (UTC+02:00)"),
 ];
 
 // D12
 /// A DST change: under `TZ=Europe/Kyiv`, rows appended one minute before and at the
-/// change keep offsets 10800 and 7200 and the heads of their own instant; both heads are
-/// unchanged when the store is read after the change, and under another zone.
+/// change keep offsets 10800 and 7200 and date a thread by their own instant; both dates
+/// are unchanged when the store is read after the change, and under another zone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dst_rows_keep_own_offset() {
     if let Some(role) = child_role() {
@@ -1698,7 +1753,7 @@ async fn dst_rows_keep_own_offset() {
             let back: Vec<Value> = ids.iter().map(|id| by_id(&stored, *id)).collect();
             for (row, (_, off, h)) in back.iter().zip(DST) {
                 assert_eq!(row["attributes"][UTC_OFFSET], json!(off), "{row}");
-                assert_eq!(head(row), h, "{row}");
+                assert!(env_text(row).contains(h), "{row}");
             }
             std::fs::write(file, serde_json::to_string(&back).unwrap()).expect("written");
         } else {
@@ -1706,7 +1761,7 @@ async fn dst_rows_keep_own_offset() {
             let back: Vec<Value> =
                 serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
             for (row, (.., h)) in back.iter().zip(DST) {
-                assert_eq!(head(row), h, "{role}: {row}");
+                assert!(env_text(row).contains(h), "{role}: {row}");
             }
         }
         return;
@@ -1728,7 +1783,7 @@ async fn dst_rows_keep_own_offset() {
     let back: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
     for (row, (_, off, h)) in back.iter().zip(DST) {
         assert_eq!(row["attributes"][UTC_OFFSET], json!(off));
-        assert_eq!(head(row), h);
+        assert!(env_text(row).contains(h), "{row}");
     }
     // and under another zone
     if zone_known("America/Los_Angeles") {

@@ -12,7 +12,7 @@ use super::cache::{epoch_of, Hash, RenderCache};
 use super::default::{self, Tags};
 use super::hermes::{self, Hermes};
 use super::rules::{load, model_of_with, note_seen, shipped, type_of, RULES_JSON};
-use super::tests_cache::{plain, run, Opts};
+use super::tests_cache::{plain, run, Done, Opts};
 use super::tests_trace::{
     answered, chat_on, names, set_model, traces_of, Scripted, Step, PLAIN, QWEN,
 };
@@ -50,7 +50,10 @@ fn stop(reason: &str) -> String {
 
 /// The harness's reason after `n` attempts, for `kind`.
 fn harness_reason(kind: &str, n: usize) -> String {
-    super::fill(super::of(kind).stop_reason, &[("n", &n.to_string())])
+    super::fill(
+        (super::of(kind).texts)(super::Section::StopReason),
+        &[("n", &n.to_string())],
+    )
 }
 
 /// Stored rows in the internal form: calls, a reply batch with a refusal, the nudge and
@@ -205,7 +208,8 @@ async fn same_type_keeps_all() {
 }
 
 // M7
-/// D -> H: every row rendered once for H; a second H pass renders none.
+/// D -> H: every row mapped once for H (the D entries serve no H key); a second H pass
+/// maps none.
 #[test]
 fn other_type_renders_once() {
     let c = <RenderCache>::new();
@@ -214,13 +218,13 @@ fn other_type_renders_once() {
     let d = run(&c, &Tags, &m, &model(PLAIN));
     assert_eq!(
         (d.rows, c.stats().entries),
-        (0, 0),
-        "default stores nothing"
+        (rows, rows),
+        "D maps and keeps its rows"
     );
     let h1 = run(&c, &Hermes, &m, &model(QWEN));
     assert!(h1.cold);
     assert_eq!(h1.rows, rows);
-    assert_eq!(c.stats().entries, rows);
+    assert_eq!(c.stats().entries, 2 * rows, "keyed by type");
     let h2 = run(&c, &Hermes, &m, &model(QWEN));
     assert_eq!(h2.rows, 0);
     assert_eq!(h2.messages, h1.messages);
@@ -249,6 +253,66 @@ fn back_gives_identical_bytes() {
     assert_eq!(h2.kept, m.len(), "H's chain was kept across the D pass");
 }
 
+// M8
+/// THE SYSTEM BLOCK OF A SWITCH: the same pieces mapped under the other type carry that
+/// type's sections (no string replace); back on the first type the bytes are the first
+/// pass's.
+#[test]
+fn the_system_block_maps_again_under_the_new_type() {
+    use super::map::{Howto, SysBody, SysPiece};
+    use super::Section;
+    let sys = vec![
+        SysPiece {
+            part: "self_reflect".into(),
+            body: SysBody::Text("You are `ai`.".into()),
+        },
+        SysPiece {
+            part: String::new(),
+            body: SysBody::Text("\n\n".into()),
+        },
+        SysPiece {
+            part: "verb_docs".into(),
+            body: SysBody::Howto(Howto {
+                sections: vec![
+                    Section::Env,
+                    Section::Send,
+                    Section::Reflect,
+                    Section::Context,
+                    Section::Memory,
+                    Section::Titles,
+                    Section::Async,
+                    Section::LineSummary,
+                    Section::Working,
+                ],
+                store: "mem".into(),
+                env: Some(super::map::Env {
+                    ts: 1_795_117_200,
+                    offset: 7200,
+                }),
+            }),
+        },
+    ];
+    let mut m = view(&stored(), &arriving());
+    m[0] = json!({"role": "system", "sys": sys});
+    let c = <RenderCache>::new();
+    let text = |d: &Done| d.messages[0]["content"].as_str().unwrap().to_string();
+    let d1 = run(&c, &Tags, &m, &model(PLAIN));
+    let h = run(&c, &Hermes, &m, &model(QWEN));
+    let d2 = run(&c, &Tags, &m, &model(PLAIN));
+    assert!(text(&d1).contains(default::HOWTO_SEND));
+    assert!(!text(&d1).contains(hermes::HOWTO_SEND));
+    assert!(text(&h).contains(hermes::HOWTO_SEND));
+    assert!(!text(&h).contains(default::HOWTO_SEND));
+    assert!(text(&h).contains(hermes::HOWTO_WORKING));
+    assert!(!text(&h).contains(default::HOWTO_WORKING));
+    // the shared sections are the same text under both
+    for t in [text(&d1), text(&h)] {
+        assert!(t.contains("2026-11-19 (UTC+02:00)"), "{t}");
+        assert!(t.contains("`mem`"), "{t}");
+    }
+    assert_eq!(text(&d2), text(&d1), "back: the same bytes");
+}
+
 // M9
 /// Nothing of the old type is left: the H view holds no `<call name=`, the D view no
 /// `<tool_call>`, over calls, replies, a refusal, a nudge, an escalation, a keep template,
@@ -271,7 +335,7 @@ fn no_foreign_form_left() {
     for (i, text) in contents(&d.messages).iter().enumerate() {
         assert!(!text.contains("<tool_call>"), "D message {i}: {text}");
     }
-    assert_eq!(d.messages, crate::agent_loop::render_for_model(&m));
+    assert_eq!(d.messages, plain(&Tags, &m));
 }
 
 // M10
@@ -315,8 +379,8 @@ fn moved_rules() -> String {
 
 /// The epoch of a build with `rules`.
 fn epoch_with(rules: &str) -> Hash {
-    let renderers: Vec<&dyn Renderer> = super::REGISTRY.iter().map(|e| e.renderer).collect();
-    epoch_of(rules.as_bytes(), &renderers)
+    let decls: Vec<&super::Decl<'_>> = super::REGISTRY.iter().collect();
+    epoch_of(rules.as_bytes(), &decls)
 }
 
 // M11, M12
@@ -342,14 +406,16 @@ fn rule_change_resets() {
     assert_eq!(before.rows, 0);
     assert!(c.stats().entries > 0);
     // the new build: the id is `default`
-    let after = run(&c, super::of(type_of(&moved, QWEN)).renderer, &m, &at(e2));
+    let after = run(&c, super::of(type_of(&moved, QWEN)).calls, &m, &at(e2));
     assert!(after.cold);
-    assert_eq!(
-        (after.kept, c.stats().entries),
-        (0, 0),
-        "everything cleared"
+    assert_eq!(after.kept, 0, "every chain cleared");
+    assert!(
+        keys(&c).iter().all(|(t, _)| t == DEFAULT),
+        "every entry of the old build cleared: {:?}",
+        keys(&c)
     );
-    assert_eq!(after.messages, crate::agent_loop::render_for_model(&m));
+    assert_eq!(c.stats().entries, m.len() - 2, "the new build's rows only");
+    assert_eq!(after.messages, plain(&Tags, &m));
     assert_eq!(c.stats().chains, 1, "only the new build's chain");
 }
 
@@ -366,12 +432,7 @@ fn back_after_rule_change() {
     };
     let recorded = run(&c, &Hermes, &m, &at(e1));
     run(&c, &Tags, &m, &at(e2));
-    let back = run(
-        &c,
-        super::of(type_of(shipped(), QWEN)).renderer,
-        &m,
-        &at(e1),
-    );
+    let back = run(&c, super::of(type_of(shipped(), QWEN)).calls, &m, &at(e1));
     assert!(back.cold, "cold again: the epoch changed again");
     assert_eq!((back.rows, back.kept), (m.len() - 2, 0));
     assert_eq!(back.messages, recorded.messages);
@@ -461,19 +522,43 @@ async fn provider_change_forgets_model() {
         m
     };
     let none = || async { None::<String> };
-    let _ = model_of_with(&meta("p1"), &state, |_| async { None::<Option<String>> }, none).await;
+    let _ = model_of_with(
+        &meta("p1"),
+        &state,
+        |_| async { None::<Option<String>> },
+        none,
+    )
+    .await;
     note_seen(&state, QWEN);
-    let got = model_of_with(&meta("p1"), &state, |_| async { None::<Option<String>> }, none).await;
+    let got = model_of_with(
+        &meta("p1"),
+        &state,
+        |_| async { None::<Option<String>> },
+        none,
+    )
+    .await;
     assert_eq!(got.as_deref(), Some(QWEN));
     assert_eq!(type_of(shipped(), got.as_deref().unwrap()), hermes::NAME);
     // the record names another provider
-    let got = model_of_with(&meta("p2"), &state, |_| async { None::<Option<String>> }, none).await;
+    let got = model_of_with(
+        &meta("p2"),
+        &state,
+        |_| async { None::<Option<String>> },
+        none,
+    )
+    .await;
     assert_eq!(got, None, "model_seen was the old provider's");
     assert!(state.model_seen.lock().unwrap().is_none());
     assert_eq!(type_of(shipped(), got.as_deref().unwrap_or("")), DEFAULT);
     // the new provider's first reply names its model
     note_seen(&state, "llama-3.1-8b-instruct");
-    let got = model_of_with(&meta("p2"), &state, |_| async { None::<Option<String>> }, none).await;
+    let got = model_of_with(
+        &meta("p2"),
+        &state,
+        |_| async { None::<Option<String>> },
+        none,
+    )
+    .await;
     assert_eq!(got.as_deref(), Some("llama-3.1-8b-instruct"));
     assert_eq!(type_of(shipped(), got.as_deref().unwrap()), DEFAULT);
     crate::state::drop_state(&fantastic_kernel::AgentId::from("sw_m17"));
@@ -605,8 +690,12 @@ fn after_cut() {
     let m = view(&kept, &arriving());
     let h = run(&c, &Hermes, &m, &model(QWEN));
     assert_eq!(h.rows, kept.len());
-    let ids: Vec<i64> = keys(&c).into_iter().map(|(_, id)| id).collect();
-    assert_eq!(ids, vec![5, 6, 7], "entries only for the rows in view");
+    let ids: Vec<i64> = keys(&c)
+        .into_iter()
+        .filter(|(t, _)| t == hermes::NAME)
+        .map(|(_, id)| id)
+        .collect();
+    assert_eq!(ids, vec![5, 6, 7], "H entries only for the rows in view");
     assert_eq!(h.messages, plain(&Hermes, &m));
 }
 

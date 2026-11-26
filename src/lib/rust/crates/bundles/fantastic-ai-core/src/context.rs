@@ -11,22 +11,10 @@ use serde_json::{json, Map, Value};
 /// Rough token estimate for ONE message — counts the SERIALIZED form, because
 /// role + content + the JSON envelope all consume real context.
 ///
-/// A row's `attributes` are about the row: only the head the model reads of them
-/// ([`crate::row_attrs::VISIBLE`]) counts toward a window, as part of its text.
+/// It counts what it is given: on the turn path that is the message as the pass sends
+/// it ([`crate::model_format::pass::Pass::tokens`]), so no stored attribute and no
+/// internal key is counted.
 pub fn estimate_one(message: &Value) -> i64 {
-    let trimmed;
-    let message = match message.as_object() {
-        Some(m) if m.contains_key("attributes") => {
-            let mut m = m.clone();
-            m.shift_remove("attributes");
-            if let Some(Value::String(c)) = m.get_mut("content") {
-                *c = crate::row_attrs::model_text(message);
-            }
-            trimmed = Value::Object(m);
-            &trimmed
-        }
-        _ => message,
-    };
     // PYTHON'S `json.dumps`, PYTHON'S LENGTH: `, `/`: ` separators, `\uXXXX`
     // escapes (ensure_ascii), and CODE POINTS. `serde_json`'s compact separators
     // and byte length made every estimate smaller than python's — by 2 chars per

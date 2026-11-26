@@ -94,7 +94,10 @@ async fn kernel(engine: &Arc<FakeEngine>, meta: Value) -> Fx {
     let tmp = TempDir::new().unwrap();
     let mut k = Kernel::new();
 
-    k.bundles.register(fantastic_ai_core::chat_bundle::HANDLER_MODULE, fantastic_ai_core::chat_bundle::AiChatBundle);
+    k.bundles.register(
+        fantastic_ai_core::chat_bundle::HANDLER_MODULE,
+        fantastic_ai_core::chat_bundle::AiChatBundle,
+    );
     k.bundles.register(
         HANDLER_MODULE,
         FoundationModelsBackendBundle::new(Arc::clone(engine) as Arc<dyn FmEngine>),
@@ -114,7 +117,9 @@ async fn kernel(engine: &Arc<FakeEngine>, meta: Value) -> Fx {
     );
     fantastic_kernel::test_support::register(&k, Arc::clone(&root));
     k.set_root(root);
-    let memory = fantastic_ram_store::test_support::memory_meta(&k, &id, json!({"cli": {"call": ["*"]}})).await;
+    let memory =
+        fantastic_ram_store::test_support::memory_meta(&k, &id, json!({"cli": {"call": ["*"]}}))
+            .await;
     let mut create = json!({
         "type": "create_agent",
         "parent_id": "kernel_state",
@@ -135,10 +140,16 @@ async fn kernel(engine: &Arc<FakeEngine>, meta: Value) -> Fx {
 
 async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
     // a chat verb goes to an ai_chat completing through this provider
-    let verb = payload.get("type").and_then(Value::as_str).unwrap_or("").to_string();
+    let verb = payload
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     // a verb the provider does not declare is a chat's: it goes to an ai_chat completing here
     let to = if verb != "boot"
-        && fantastic_ai_core::declared::chat::VERBS.iter().any(|v| v.name == verb)
+        && fantastic_ai_core::declared::chat::VERBS
+            .iter()
+            .any(|v| v.name == verb)
     {
         pair_chat(k, &AgentId::from(target)).await
     } else {
@@ -181,7 +192,10 @@ async fn the_catalog_carries_the_schema_with_no_agent_existing() {
     let engine = Arc::new(FakeEngine::new().context_size(4096));
     let mut k = Kernel::new();
 
-    k.bundles.register(fantastic_ai_core::chat_bundle::HANDLER_MODULE, fantastic_ai_core::chat_bundle::AiChatBundle);
+    k.bundles.register(
+        fantastic_ai_core::chat_bundle::HANDLER_MODULE,
+        fantastic_ai_core::chat_bundle::AiChatBundle,
+    );
     k.bundles.register(
         HANDLER_MODULE,
         FoundationModelsBackendBundle::new(Arc::clone(&engine) as Arc<dyn FmEngine>),
@@ -236,7 +250,10 @@ fn the_window_is_refused_outside_its_shape_and_the_knobs_are_the_chats() {
     };
     // the request knobs are the chat's (#632): the provider's record has no such field
     for knob in [json!({"temperature": 0.7}), json!({"max_tokens": 256})] {
-        assert!(check(knob.clone()).is_some_and(|e| e.contains("no record field")), "{knob}");
+        assert!(
+            check(knob.clone()).is_some_and(|e| e.contains("no record field")),
+            "{knob}"
+        );
     }
     let too_big = Some(TOO_BIG_4096.to_string());
     assert_eq!(check(json!({"context_window": 8192})), too_big);
@@ -299,7 +316,10 @@ async fn reflect_shows_availability_the_window_and_the_knobs() {
         .iter()
         .position(|k| *k == "available")
         .expect("available");
-    assert_eq!(keys[i..i + 3], ["available", "unavailable_reason", "context_size"]);
+    assert_eq!(
+        keys[i..i + 3],
+        ["available", "unavailable_reason", "context_size"]
+    );
     assert!(keys.iter().position(|k| *k == "generating").unwrap() < i);
     // the verb list is rendered by the kernel from the declarations, not carried by the bundle
     assert!(!keys.contains(&"concurrency"));
@@ -574,7 +594,8 @@ async fn a_send_streams_the_engines_text_and_replays_the_conversation_next_turn(
     ]));
     let fx = kernel(&engine, json!({})).await;
     assert_eq!(fx.created["id"], json!(fx.id), "{}", fx.created);
-    fx.chat_knobs(json!({"temperature": 0.1, "max_tokens": 300})).await;
+    fx.chat_knobs(json!({"temperature": 0.1, "max_tokens": 300}))
+        .await;
     let one = fx.send("hi", json!({})).await;
     assert!(
         one["response"]
@@ -588,15 +609,8 @@ async fn a_send_streams_the_engines_text_and_replays_the_conversation_next_turn(
         "the system block is the instructions"
     );
     assert!(req0.turns.is_empty());
-    // each message opens with its ts head: `[YYYY-MM-DD HH:MM ±HH:MM]` on its own line
-    let body = |text: &str| -> String {
-        let (head, rest) = text.split_once('\n').unwrap_or_else(|| panic!("no head: {text:?}"));
-        assert!(
-            head.len() == 25 && head.starts_with("[20") && head.ends_with(']'),
-            "{head:?}"
-        );
-        rest.to_string()
-    };
+    // each message is its stored text: no time head (the date is the system block's)
+    let body = |text: &str| -> String { text.to_string() };
     assert_eq!(body(&req0.prompt), "hi");
     assert_eq!((req0.temperature, req0.max_tokens), (Some(0.1), Some(300)));
     let status = fx.call(json!({"type": "context_status"})).await;
@@ -613,8 +627,12 @@ async fn a_send_streams_the_engines_text_and_replays_the_conversation_next_turn(
     assert_eq!(reqs.len(), 2, "{reqs:?}");
     let roles: Vec<&str> = reqs[1].turns.iter().map(|t| t.role.as_str()).collect();
     assert_eq!(roles, ["user", "assistant"]);
-    assert_eq!(reqs[1].turns[0].content, req0.prompt, "the stored row renders as it was sent");
+    assert_eq!(
+        reqs[1].turns[0].content, req0.prompt,
+        "the stored row renders as it was sent"
+    );
     assert!(body(&reqs[1].turns[1].content).starts_with("first "));
+    assert!(!req0.instructions.is_empty() && req0.instructions.contains("This thread began on "));
     assert_eq!(body(&reqs[1].prompt), "again");
 }
 
@@ -626,8 +644,12 @@ async fn a_lean_system_prompt_turn_runs_in_the_real_on_device_window() {
     let fx = kernel(&engine, json!({})).await;
     // the chat's record holds the prompt: a send carries none
     let chat = pair_chat(&fx.k, &AgentId::from(fx.id.as_str())).await;
-    let up = call(&fx.k, "kernel_state",
-        json!({"type": "update_agent", "id": chat.as_str(), "system_prompt": "Be terse."})).await;
+    let up = call(
+        &fx.k,
+        "kernel_state",
+        json!({"type": "update_agent", "id": chat.as_str(), "system_prompt": "Be terse."}),
+    )
+    .await;
     assert!(up.get("error").is_none(), "{up}");
     let r = fx.send("hi", json!({})).await;
     assert!(
@@ -769,7 +791,9 @@ async fn an_unknown_type_names_the_bundle() {
     let r = fx.call(json!({"type": "nope"})).await;
     assert_eq!(r["reason"], json!("unhandled"), "{r}");
     assert!(
-        r["error"].as_str().is_some_and(|e| e.starts_with("unknown verb 'nope'; ")),
+        r["error"]
+            .as_str()
+            .is_some_and(|e| e.starts_with("unknown verb 'nope'; ")),
         "{r}"
     );
 }

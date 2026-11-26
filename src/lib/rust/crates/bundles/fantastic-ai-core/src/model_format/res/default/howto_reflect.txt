@@ -1,0 +1,3 @@
+## What an agent IS — `reflect`
+Send it to any agent you are granted; to `kernel` for the tree, and with `bundles` the bundles' records (the fields `create_agent` takes); name only the ones you need, e.g. `<payload><type>reflect</type><bundles>all</bundles><bundle_names><item>BUNDLE</item></bundle_names></payload>` — each argument closes with its own tag.
+{detail}
