@@ -1,0 +1,3 @@
+<tool_response>
+{"image": true, "id": {id}, "width": {width}, "height": {height}, "media_type": {media_type_q}, "tokens": {tokens}, "unfold": {"name": "send", "arguments": {"routing": {"target_id": {self_q}}, "payload": {"type": "recall", "id": {id}}}}}
+</tool_response>

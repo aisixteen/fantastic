@@ -348,11 +348,15 @@ mod tests {
     }
 
     #[test]
-    fn render_for_model_carries_cache_mark_and_nothing_else() {
-        let out = crate::agent_loop::render_for_model(&[
-            json!({"role": "user", "content": "a", "id": 3, "kind": "fold", "cache_mark": true}),
-            json!({"role": "user", "content": "b", "id": 4}),
-        ]);
+    fn the_mapped_message_carries_cache_mark_and_nothing_else() {
+        let out = crate::model_format::map::messages(
+            crate::model_format::of(crate::model_format::DEFAULT),
+            "ai",
+            &[
+                json!({"role": "user", "content": "a", "id": 3, "kind": "fold", "cache_mark": true, "form": "whole"}),
+                json!({"role": "user", "content": "b", "id": 4, "attributes": {"ts": 1}}),
+            ],
+        );
         assert_eq!(
             out,
             vec![

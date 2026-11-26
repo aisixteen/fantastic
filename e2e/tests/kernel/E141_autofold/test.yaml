@@ -2,7 +2,7 @@
 # plays the model for the kernel's own AI agent, driven over web_rest.
 id: autofold
 group: kernel
-title: "autofold (#556): a thought, a large read reply and a recall reply show as anchors in the next request; recall by id gives the row back whole; the store keeps every body; a malformed answer is re-asked inside its turn and is in no later request or row (#766)"
+title: "autofold (#556): a thought, a large read reply and a recall reply show as the type's markers in the next request (the read reply's is its template, map-once); recall by id gives the row back whole; the store keeps every body; a malformed answer is re-asked inside its turn and is in no later request or row (#766)"
 runner: probe.py
 runtimes: [rust]
 costs: free

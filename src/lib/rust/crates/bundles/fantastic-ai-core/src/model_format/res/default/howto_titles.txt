@@ -1,0 +1,9 @@
+## Titling your calls
+Every call carries a one-sentence `<title>` in its `<routing>`:
+<call name="send">
+<routing><target_id>AGENT</target_id><title>WHAT THIS CALL IS FOR</title></routing>
+<payload><type>VERB</type><path>PATH</path></payload>
+</call>
+The title rides on the reply's tag and is what remains once the reply BODY is stripped
+from your view (bodies stay fetchable by pid). Title the INTENT (what you read and what you look for in it);
+what a reply told you goes in your task state — the body will go; the title and your state stay.

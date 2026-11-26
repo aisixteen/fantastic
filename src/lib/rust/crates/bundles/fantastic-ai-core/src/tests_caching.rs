@@ -11,7 +11,8 @@ use fantastic_kernel::test_support::as_agent;
 
 /// One verb sent to the agent; its result.
 async fn verb(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    kernel.operator_send(vec![Item::new(agent.clone(), payload)])
+    kernel
+        .operator_send(vec![Item::new(agent.clone(), payload)])
         .await
         .remove(0)
         .result
@@ -24,7 +25,8 @@ async fn set(kernel: &Arc<Kernel>, agent: &AgentId, fields: Value) {
         .as_object_mut()
         .expect("object")
         .extend(fields.as_object().expect("object").clone());
-    let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), payload)])
+    let r = kernel
+        .operator_send(vec![Item::new(AgentId::from("kernel_state"), payload)])
         .await
         .remove(0)
         .result;
@@ -54,11 +56,22 @@ async fn view_with(kernel: &Arc<Kernel>, agent: &AgentId, caching: Caching) -> V
             kernel,
             "c",
             caching,
+            &crate::row_attrs::Stamp::now(),
         ),
     )
     .await
     .expect("assemble");
     msgs
+}
+
+/// The next turn's view as the default type maps it: what its model reads.
+async fn seen_with(kernel: &Arc<Kernel>, agent: &AgentId, caching: Caching) -> Vec<Value> {
+    let msgs = view_with(kernel, agent, caching).await;
+    crate::model_format::map::messages(
+        crate::model_format::of(crate::model_format::DEFAULT),
+        agent.as_str(),
+        &msgs,
+    )
 }
 
 /// The history part of a view as `(role, content)`: the system block and the live
@@ -136,12 +149,7 @@ async fn mk_caching_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
     .await;
     let backend_id = id_for(tmp, tag);
     let file_id = format!("ff_{}", backend_id);
-    add_file_bridge(
-        &kernel,
-        &file_id,
-        &tmp.path().join(".fantastic"),
-    )
-    .await;
+    add_file_bridge(&kernel, &file_id, &tmp.path().join(".fantastic")).await;
     let backend = add_backend_on(&kernel, &backend_id, &file_id, CACHING_MODULE).await;
     (kernel, backend)
 }
@@ -157,7 +165,8 @@ async fn turn_messages(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) -> Vec
         Duration::ZERO,
     );
     let _rx = rebind_backend_inbox(kernel, agent);
-    let reply = kernel.operator_send(vec![Item::new(
+    let reply = kernel
+        .operator_send(vec![Item::new(
             agent.clone(),
             json!({"type": "send", "text": text, "client_id": "c"}),
         )])
@@ -174,7 +183,7 @@ async fn turn_messages(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) -> Vec
         .find(|msgs| {
             msgs.last()
                 .and_then(|m| m["content"].as_str())
-                .is_some_and(|c| crate::row_attrs::without_head(c).starts_with(text))
+                .is_some_and(|c| c.starts_with(text))
         })
         .unwrap_or_else(|| panic!("no provider pass carried the turn {text:?}"))
 }
@@ -183,7 +192,7 @@ async fn turn_messages(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) -> Vec
 fn flagged_contents(msgs: &[Value], key: &str) -> Vec<String> {
     msgs.iter()
         .filter(|m| m.get(key) == Some(&json!(true)))
-        .map(|m| crate::row_attrs::without_head(m["content"].as_str().unwrap_or("")).to_string())
+        .map(|m| m["content"].as_str().unwrap_or("").to_string())
         .collect()
 }
 
@@ -492,14 +501,14 @@ async fn autofold_runs_in_provider_cache_and_none_stays_append_only() {
     let none = view_with(&kernel, &agent, Caching::None).await;
     assert_eq!(history(&none), before);
     for mode in [Caching::ProviderCache] {
-        let seen = history(&view_with(&kernel, &agent, mode).await)
+        let seen = history(&seen_with(&kernel, &agent, mode).await)
             .iter()
             .map(|(_, c)| c.clone())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(seen.contains("[thought ~"), "{mode:?}: {seen}");
+        assert!(seen.contains("<thought id="), "{mode:?}: {seen}");
         assert!(
-            seen.contains("[folded · read reply from notes · ~"),
+            seen.contains("[reply to 12 · notes read]\n<folded id="),
             "{mode:?}: {seen}"
         );
         assert!(!seen.contains("xxxxxxxxxx"), "{mode:?}");
@@ -538,8 +547,10 @@ async fn a_provider_cache_turn_marks_before_the_large_body_and_the_next_turn_kee
     let again: Vec<_> = msgs2[..=len1 - 2].iter().map(pair).collect();
     assert_eq!(cached, again, "the cached prefix bytes do not change");
     assert!(
-        crate::row_attrs::without_head(msgs2[len1 - 1]["content"].as_str().unwrap())
-            .starts_with("[folded · read reply from notes"),
+        msgs2[len1 - 1]["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("[reply to 5 · notes read]\n<folded id="),
         "{}",
         msgs2[len1 - 1]
     );
@@ -570,27 +581,37 @@ async fn the_request_parts_name_each_row_by_the_form_it_took() {
         .iter()
         .filter_map(|r| r["id"].as_i64())
         .collect();
-    let state = crate::state::state_for(&agent);
     for (mode, forms) in [
         (Caching::None, ["whole", "whole", "whole", "whole"]),
-        (Caching::ProviderCache, ["whole", "thought", "anchor", "whole"]),
+        (
+            Caching::ProviderCache,
+            ["whole", "whole", "anchor", "whole"],
+        ),
     ] {
         let msgs = view_with(&kernel, &agent, mode).await;
-        let parts = state.request_parts.lock().unwrap().clone();
+        let decl = crate::model_format::of(crate::model_format::DEFAULT);
+        let sent = crate::model_format::map::messages(decl, agent.as_str(), &msgs);
+        let parts = crate::assembly::request_parts(decl, &msgs, &sent);
         let rows: Vec<&Value> = parts.iter().filter(|p| p["part"] == "row").collect();
         assert_eq!(rows.len(), 4, "{mode:?}: {parts:?}");
         for (i, row) in rows.iter().enumerate() {
             assert_eq!(row["ref"], json!(ids[i]), "{mode:?}");
             assert_eq!(row["form"], json!(forms[i]), "{mode:?}: {row}");
-            // the bytes and the hash are of the text the request carries, its head included
-            let text = crate::row_attrs::model_text(&msgs[i + 1]);
+            // the bytes and the hash are of the text the request carries, its markers
+            // included
+            let text = sent[i + 1]["content"].as_str().unwrap();
             assert_eq!(row["bytes"], json!(text.len()), "{mode:?}");
+            assert_eq!(
+                row["hash"],
+                json!(crate::row_attrs::short_hash(text)),
+                "{mode:?}"
+            );
         }
     }
 }
 
 #[tokio::test]
-async fn an_attribute_of_any_key_but_ts_leaves_the_request_bytes_alone() {
+async fn no_attribute_of_any_key_reaches_the_request_bytes() {
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_kernel(&tmp, "cm_any_attr").await;
     let with = |content: &str, role: &str| {
@@ -601,27 +622,29 @@ async fn an_attribute_of_any_key_but_ts_leaves_the_request_bytes_alone() {
     put_row(&kernel, &agent, with("hello", "user")).await;
     put_row(&kernel, &agent, with("answer", "assistant")).await;
     for mode in [Caching::None, Caching::ProviderCache] {
-        let msgs = view_with(&kernel, &agent, mode).await;
-        let sent = crate::agent_loop::render_for_model(&msgs);
+        let sent = seen_with(&kernel, &agent, mode).await;
         let body = Value::Array(sent.clone()).to_string();
         assert!(!body.contains("any_future_key") && !body.contains("a long value"));
-        // the ts is the head the text opens with; nothing else of the map is there
-        let head = crate::row_attrs::head(&with("", "user"));
-        assert!(head.starts_with('[') && head.ends_with("]\n"), "{head:?}");
-        let next = crate::row_attrs::model_text(msgs.last().unwrap());
+        // the content is the stored text: no time, nothing else of the map
         assert_eq!(
             &sent[1..],
             [
-                json!({"role": "user", "content": format!("{head}hello")}),
-                json!({"role": "assistant", "content": format!("{head}answer")}),
-                json!({"role": "user", "content": next}),
+                json!({"role": "user", "content": "hello"}),
+                json!({"role": "assistant", "content": "answer"}),
+                json!({"role": "user", "content": "next"}),
             ],
             "{mode:?}"
         );
-        // and the window estimate counts the head alone
-        let bare = json!({"role": "user", "content": format!("{head}hello")});
+        // and the window estimate counts the mapped message alone
+        let decl = crate::model_format::of(crate::model_format::DEFAULT);
+        let mapped = crate::model_format::map::message(
+            decl,
+            agent.as_str(),
+            &crate::model_format::map::Shown::of(&with("hello", "user")),
+        );
+        let bare = json!({"role": "user", "content": "hello"});
         assert_eq!(
-            crate::context::estimate_one(&with("hello", "user")),
+            crate::context::estimate_one(&mapped),
             crate::context::estimate_one(&bare)
         );
     }

@@ -105,10 +105,6 @@ pub struct BackendState {
     /// `"store"` (no view yet) or `"store (stale array)"`. Python `_view_source`,
     /// reported by `context_status`.
     pub view_source: Mutex<Option<String>>,
-    /// What the last assembled request carried, piece by piece (`{part, ref?,
-    /// form?, bytes, hash}`): kept for the assistant row the turn writes, never
-    /// rendered into a request.
-    pub request_parts: Mutex<Vec<Value>>,
     /// What the previous request of this chat carried, for the next row's `parts`
     /// delta and running totals; `None` on a fresh start and after a compaction.
     pub(crate) prev_request: Mutex<Option<crate::row_attrs::PrevRequest>>,
@@ -263,7 +259,6 @@ impl BackendState {
             folds_since: Mutex::new(0),
             recall_due: Mutex::new(false),
             view_source: Mutex::new(None),
-            request_parts: Mutex::new(Vec::new()),
             prev_request: Mutex::new(None),
             calib: Mutex::new(None),
             reported: Mutex::new(None),
@@ -428,9 +423,7 @@ fn current_out(c: &CurrentEntry, requesting: Option<&str>) -> Value {
 pub fn status_snapshot(agent_id: &AgentId, client_id: Option<&str>) -> Value {
     // A CLIENT THAT NAMES ITSELF gets its own entries in full; an EMPTY or absent one
     // takes the redacted branch and the reply echoes what it sent.
-    let requesting = client_id
-        .filter(|c| !c.is_empty())
-        .map(safe_client);
+    let requesting = client_id.filter(|c| !c.is_empty()).map(safe_client);
     let echoed_client = match (&requesting, client_id) {
         (Some(c), _) => json!(c),
         (None, Some(raw)) => json!(raw),

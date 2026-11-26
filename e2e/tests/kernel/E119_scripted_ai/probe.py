@@ -32,7 +32,7 @@ The script, one model answer per request:
      none: accepted (a call-less answer is not a malformed one); nothing is
      dispatched (no file); request 6 carries the no-call reminder (`[no call was
      dispatched]`), its history holds the answer without the thought (stripped
-     before the turn is stored, shown as its `[thought ~N tokens …]` anchor) and
+     before the turn is stored, shown as its `<thought …/>` marker on the next user-side message) and
      NOTHING of attempts 1 and 2: neither attempt nor report is stored or re-sent;
   6. a plain answer + `done`: the chain ends — no further request reaches the
      server once the agent has nothing in flight.
@@ -217,9 +217,11 @@ def main() -> int:
         need("Thinking it over." in hist and "think.txt" not in hist,
              "the thought is stripped before the turn is stored: request 6 holds the "
              "answer, not the thought")
-        need(any("[thought ~" in m.get("content", "")
-                 for m in turns[5]["body"]["messages"] if m.get("role") == "assistant"),
-             "request 6 shows the thought as its anchor")
+        need(u[5].startswith("<thought id=")
+             and not any("<thought id=" in str(m.get("content", ""))
+                         for m in turns[5]["body"]["messages"] if m.get("role") == "assistant"),
+             "request 6 shows the thought as its marker, at the top of the next user-side "
+             "message and in no assistant message")
         need("[no call was dispatched]" in u[5],
              f"request 6 carries the no-call reminder: {u[5][:160]!r}")
         # across the run

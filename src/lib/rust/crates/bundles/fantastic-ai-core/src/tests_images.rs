@@ -25,7 +25,8 @@ fn png(w: u32, h: u32) -> Vec<u8> {
 }
 
 async fn ask(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    kernel.operator_send(vec![Item::new(agent.clone(), payload)])
+    kernel
+        .operator_send(vec![Item::new(agent.clone(), payload)])
         .await
         .remove(0)
         .result
@@ -108,20 +109,16 @@ fn user_rows(all: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-/// A request message's text past its ts head.
+/// A request message's text.
 fn text_of(m: &Value) -> Value {
-    json!(crate::row_attrs::without_head(m["content"].as_str().unwrap_or("")))
+    json!(m["content"].as_str().unwrap_or(""))
 }
 
 /// The message of a request that carries `text`.
 fn message<'a>(request: &'a [Value], text: &str) -> &'a Value {
     request
         .iter()
-        .find(|m| {
-            m["content"]
-                .as_str()
-                .is_some_and(|c| crate::row_attrs::without_head(c).starts_with(text))
-        })
+        .find(|m| m["content"].as_str().is_some_and(|c| c.starts_with(text)))
         .unwrap_or_else(|| panic!("no message starting {text:?} in {request:?}"))
 }
 
@@ -196,8 +193,12 @@ async fn a_model_that_sees_gets_the_image_once_then_an_anchor_and_recall_brings_
     let second = script.request_messages(1);
     let old = message(&second, "look");
     assert!(old.get("images").is_none(), "{old}");
-    let anchor =
-        format!("[image \u{b7} 64\u{d7}48 \u{b7} image/png \u{b7} ~4 tokens \u{b7} id {id}]");
+    // the default type's marker: its facts, and the `recall` that brings it back
+    let anchor = format!(
+        "<image id=\"{id}\" width=\"64\" height=\"48\" type=\"image/png\" tokens=\"4\"/> \
+         unfold: <call name=\"send\"><routing><target_id>{chat}</target_id></routing>\
+         <payload><type>recall</type><id>{id}</id></payload></call>"
+    );
     assert_eq!(text_of(old), json!(format!("look\n{anchor}")));
     // recall brings it back, once
     let back = ask(&kernel, &chat, json!({"type": "recall", "id": id})).await;
@@ -243,7 +244,7 @@ async fn a_model_that_cannot_see_gets_alt_text_and_never_the_bytes() {
     assert!(m.get("images").is_none(), "{m}");
     assert_eq!(
         text_of(m),
-        json!("look\n[image: pic.png \u{b7} 64\u{d7}48 \u{b7} not shown to this model]")
+        json!("look\n<image name=\"pic.png\" width=\"64\" height=\"48\" shown=\"no\"/> not shown to this model")
     );
     // the row still holds the part, and the store the bytes
     let row = user_rows(&rows(&kernel, &chat).await).remove(0);
@@ -435,10 +436,10 @@ impl Handler for Pics {
                     )),
                 }
             }
-            pics_verbs::Call::Complete(a) => Ok(Some(
-                json!({"rid": a.rid, "model": "m", "prompt_tokens": 1,
-                                               "completion_tokens": 1, "stop_reason": "end_turn"}),
-            )),
+            pics_verbs::Call::Complete(a) => {
+                Ok(Some(json!({"rid": a.rid, "model": "m", "prompt_tokens": 1,
+                                               "completion_tokens": 1, "stop_reason": "end_turn"})))
+            }
         }
     }
     async fn handle_binary(
@@ -450,11 +451,10 @@ impl Handler for Pics {
     ) -> Result<(Reply, Option<fantastic_kernel::outcome::Blob>), BundleError> {
         if let pics_verbs::Call::Complete(a) = &call {
             if let (Some(image), Some(bytes)) = (&a.image, body.and_then(|b| b.into_at("data"))) {
-                seen().lock().unwrap().push((
-                    a.rid.clone(),
-                    image.image_ref.clone(),
-                    bytes,
-                ));
+                seen()
+                    .lock()
+                    .unwrap()
+                    .push((a.rid.clone(), image.image_ref.clone(), bytes));
                 return Ok((Some(json!({"rid": a.rid})), None));
             }
         }
@@ -475,22 +475,28 @@ async fn chat_with_provider(
     let chat = add_backend(&kernel, &id, &file_id).await;
     let root = kernel.root().unwrap();
     let provider = format!("capp_{tag}");
-    fantastic_kernel::test_support::register(&kernel, Agent::new(
-        AgentId::from(provider.as_str()),
-        Some("pics.tools".into()),
-        Some(root.id.clone()),
-        json!({"capabilities_reply": reply})
-            .as_object()
-            .unwrap()
-            .clone(),
-        tmp.path().join("capp"),
-        false,
-    ));
+    fantastic_kernel::test_support::register(
+        &kernel,
+        Agent::new(
+            AgentId::from(provider.as_str()),
+            Some("pics.tools".into()),
+            Some(root.id.clone()),
+            json!({"capabilities_reply": reply})
+                .as_object()
+                .unwrap()
+                .clone(),
+            tmp.path().join("capp"),
+            false,
+        ),
+    );
     let mut can = helpers::agent_meta(&chat, &kernel)["can"]
         .as_object()
         .cloned()
         .unwrap_or_default();
-    can.insert(provider.clone(), json!({"call": ["complete", "watch", "capabilities"]}));
+    can.insert(
+        provider.clone(),
+        json!({"call": ["complete", "watch", "capabilities"]}),
+    );
     update(
         &kernel,
         &chat,
@@ -610,27 +616,34 @@ async fn the_images_of_a_request_reach_the_provider_on_the_binary_path_before_th
     let tmp = TempDir::new().unwrap();
     let k = base_kernel(&tmp, |k| k.bundles.register("pics.tools", Pics)).await;
     let root = k.root().unwrap();
-    let meta =
-        fantastic_ram_store::test_support::memory_meta(&k, "chat", json!({"pics": {"call": ["*"]}})).await;
-    fantastic_kernel::test_support::register(&k, Agent::new(
-        AgentId::from("chat"),
-        None,
-        Some(root.id.clone()),
-        meta,
-        tmp.path().join("chat"),
-        false,
-    ));
-    fantastic_kernel::test_support::register(&k, Agent::new(
-        AgentId::from("pics"),
-        Some("pics.tools".into()),
-        Some(root.id.clone()),
-        json!({})
-            .as_object()
-            .unwrap()
-            .clone(),
-        tmp.path().join("pics"),
-        false,
-    ));
+    let meta = fantastic_ram_store::test_support::memory_meta(
+        &k,
+        "chat",
+        json!({"pics": {"call": ["*"]}}),
+    )
+    .await;
+    fantastic_kernel::test_support::register(
+        &k,
+        Agent::new(
+            AgentId::from("chat"),
+            None,
+            Some(root.id.clone()),
+            meta,
+            tmp.path().join("chat"),
+            false,
+        ),
+    );
+    fantastic_kernel::test_support::register(
+        &k,
+        Agent::new(
+            AgentId::from("pics"),
+            Some("pics.tools".into()),
+            Some(root.id.clone()),
+            json!({}).as_object().unwrap().clone(),
+            tmp.path().join("pics"),
+            false,
+        ),
+    );
     let chat = AgentId::from("chat");
     let raw = png(16, 16);
     let part = json!({"type": "image", "needs": "images", "ref": "img-7", "media_type": "image/png",

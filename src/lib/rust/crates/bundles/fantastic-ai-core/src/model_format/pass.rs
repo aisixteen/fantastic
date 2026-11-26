@@ -3,17 +3,20 @@
 //! A [`Pass`] is built once per turn run (in `run_generation`) and once per verb that
 //! runs a helper outside a turn (`context_recall`, `context_fold`), and is handed down
 //! where the provider went before. It holds the chat's provider and state and the model
-//! TYPE of the pass, fixed for its life: the type's [`Renderer`] (inbound) and
-//! [`Reader`] (outbound).
+//! TYPE of the pass, fixed for its life: the type's declaration ([`Decl`]), which the
+//! map writes every model-visible text from ([`super::map`]).
 //!
 //! Two modes:
-//! - [`Mode::Turn`], the agent's turn: its view rendered for the type through the
+//! - [`Mode::Turn`], the agent's turn: its view mapped for the type through the
 //!   chat's render cache ([`Pass::view`]), one request ([`Pass::request`]), the
 //!   endpoint's report read after the stream ended ([`Pass::report`]).
 //! - [`Mode::Task`], the harness's helpers (the fold summarizer and `compose`): the
-//!   same renderer, uncached ([`render_text`]) on each message, because their prompts
-//!   hold history rows with calls; one request; no parse, no check, no retry; the
-//!   result is plain text with the reasoning stripped ([`Pass::task`]).
+//!   same map, uncached, on each message, because their prompts hold history rows with
+//!   calls; one request; no parse, no check, no retry; the result is plain text with the
+//!   reasoning stripped ([`Pass::task`]).
+//!
+//! The window estimate of a message is counted on the bytes the pass sends of it
+//! ([`Pass::tokens`]), so a projection fits what this type is sent.
 //!
 //! Every request clears the provider's counts first and reads its report after, so a
 //! count is never read from a report an earlier request left. `pass.rs` holds the only
@@ -24,14 +27,18 @@
 //! ([`Pass::rejected`]) or are held as the accepted one ([`Pass::accepted`]) until the
 //! turn's row is stored.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use fantastic_kernel::{AgentId, Kernel};
 use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
 
-use super::cache::{bound_of, epoch, forms_of, Ctx, View};
-use super::{trace, Reader, Renderer};
+use sha2::{Digest as _, Sha256};
+
+use super::cache::{bound_of, epoch, Ctx, View};
+use super::map::Shown;
+use super::{trace, Decl};
 use crate::provider::{Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream};
 use crate::state::BackendState;
 
@@ -55,12 +62,6 @@ impl Mode {
     }
 }
 
-/// `text` rendered for a type, with no cache: a task pass's messages.
-#[must_use]
-pub(crate) fn render_text(renderer: &dyn Renderer, text: &str) -> String {
-    renderer.render(text)
-}
-
 /// What a task pass gives back.
 #[derive(Debug)]
 pub(crate) struct Task {
@@ -78,10 +79,10 @@ pub(crate) struct Pass {
     pub(crate) state: Arc<BackendState>,
     /// The model type of the pass.
     pub(crate) kind: &'static str,
-    /// Inbound: internal text into the type's text.
-    pub(crate) renderer: &'static dyn Renderer,
-    /// Outbound: the type's raw answer into internal call text.
-    pub(crate) reader: &'static dyn Reader,
+    /// The type's declaration: its call renderer and reader, markers and sections.
+    pub(crate) decl: &'static Decl<'static>,
+    /// The chat's own id: the `{self}` of a marker's unfold call.
+    pub(crate) own: String,
     /// The model id the type was chosen by ([`super::rules::model_of`]).
     pub(crate) model: Option<String>,
     /// The chat record's `provider_id`.
@@ -90,6 +91,9 @@ pub(crate) struct Pass {
     /// them at its end; a verb's pass drops them (a task pass outside a turn writes no
     /// trace row).
     events: Mutex<trace::Events>,
+    /// The window estimate of each message mapped so far, by the digest of what it maps
+    /// from: a projection sizes one message many times.
+    sizes: Mutex<BTreeMap<[u8; 32], i64>>,
 }
 
 impl Pass {
@@ -112,27 +116,36 @@ impl Pass {
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        Self::of(provider, Arc::clone(state), kind, model, provider_id)
+        Self::of(
+            provider,
+            Arc::clone(state),
+            kind,
+            model,
+            provider_id,
+            self_id.as_str(),
+        )
     }
 
-    /// A pass of the registered type `kind`.
+    /// A pass of the registered type `kind` for the chat `own`.
     fn of(
         provider: Arc<dyn Provider>,
         state: Arc<BackendState>,
         kind: &str,
         model: Option<String>,
         provider_id: Option<String>,
+        own: &str,
     ) -> Self {
-        let entry = super::of(kind);
+        let decl = super::of(kind);
         Self {
             provider,
             state,
-            kind: entry.name,
-            renderer: entry.renderer,
-            reader: entry.reader,
+            kind: decl.name,
+            decl,
+            own: own.to_string(),
             model,
             provider_id,
             events: Mutex::new(trace::Events::default()),
+            sizes: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -141,8 +154,9 @@ impl Pass {
     pub(crate) fn for_test(provider: Arc<dyn Provider>) -> Self {
         static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let state = crate::state::state_for(&AgentId::from(format!("pass_test_{n}").as_str()));
-        Self::of(provider, state, super::DEFAULT, None, None)
+        let own = format!("pass_test_{n}");
+        let state = crate::state::state_for(&AgentId::from(own.as_str()));
+        Self::of(provider, state, super::DEFAULT, None, None, &own)
     }
 
     /// A pass of type `kind` over `provider` on `state`, for model `model` (tests).
@@ -159,6 +173,7 @@ impl Pass {
             kind,
             model.map(str::to_string),
             Some("p".to_string()),
+            "ai",
         )
     }
 
@@ -192,26 +207,19 @@ impl Pass {
             kind,
             Some(model.to_string()),
             self.provider_id.clone(),
+            &self.own,
         );
         let moved = self.take_events();
         *next.events() = moved;
         Some(next)
     }
 
-    /// THE TURN'S VIEW (step 3): `model_view` (what `render_for_model` gave, the
-    /// estimate's input) with each message's content rendered for the type through the
-    /// chat's render cache; `messages` are the same messages before it, with their row
-    /// `id`; `request_parts` give each row's form; the bound is read from `meta`, the
-    /// chat's record, at every pass. The [`View`] holds the pass's pins until it is
-    /// finished or dropped.
-    pub(crate) fn view(
-        &self,
-        messages: &[Value],
-        model_view: &[Value],
-        request_parts: &[Value],
-        meta: &Map<String, Value>,
-    ) -> View<'_> {
-        let forms = forms_of(request_parts);
+    /// THE TURN'S VIEW (step 3): `messages` in flight (their pieces, their row `id`, the
+    /// form each took) mapped for the type through the chat's render cache; the bound is
+    /// read from `meta`, the chat's record, at every pass. The [`View`] holds the pass's
+    /// pins until it is finished or dropped.
+    pub(crate) fn view(&self, messages: &[Value], meta: &Map<String, Value>) -> View<'_> {
+        let shown: Vec<Shown> = messages.iter().map(Shown::of).collect();
         let last_send = *self
             .state
             .last_send_secs
@@ -220,14 +228,43 @@ impl Pass {
         let ctx = Ctx {
             epoch: epoch(),
             bound: bound_of(meta),
-            forms: &forms,
             model: self.model.as_deref(),
             provider_id: self.provider_id.as_deref(),
             last_send,
         };
         self.state
             .render_cache
-            .view(self.renderer, messages, model_view, &ctx)
+            .view(self.decl, &self.own, &shown, &ctx)
+    }
+
+    /// THE WINDOW ESTIMATE of `message` in flight: [`crate::context::estimate_one`] of
+    /// the bytes this pass sends of it ([`super::map::message`]).
+    #[must_use]
+    pub(crate) fn tokens(&self, message: &Value) -> i64 {
+        let shown = Shown::of(message);
+        let mut h = Sha256::new();
+        h.update(super::map::canonical(&shown));
+        h.update(
+            serde_json::to_vec(&(&shown.role, &shown.images, &shown.cache_mark))
+                .unwrap_or_default(),
+        );
+        let key: [u8; 32] = h.finalize().into();
+        let mut sizes = self
+            .sizes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(n) = sizes.get(&key) {
+            return *n;
+        }
+        let n = crate::context::estimate_one(&super::map::message(self.decl, &self.own, &shown));
+        sizes.insert(key, n);
+        n
+    }
+
+    /// [`Pass::tokens`] summed over `messages`.
+    #[must_use]
+    pub(crate) fn tokens_all(&self, messages: &[Value]) -> i64 {
+        messages.iter().map(|m| self.tokens(m)).sum()
     }
 
     /// THE ONE MODEL REQUEST: the provider's counts and stop reason cleared, then
@@ -283,21 +320,11 @@ impl Pass {
         crate::used::Accepted::hold(&self.state, report)
     }
 
-    /// A TASK PASS (step 7): each message's string content rendered for the type with
-    /// no cache, one request, the answer read whole, reasoning stripped; never parsed,
+    /// A TASK PASS (step 7): each message mapped for the type with no cache (one stored
+    /// text each), one request, the answer read whole, reasoning stripped; never parsed,
     /// so a call form in it is text. `None`: the request failed or its stream did.
     pub(crate) async fn task(&self, messages: &[Value], max_tokens: Option<i64>) -> Option<Task> {
-        let sent: Vec<Value> = messages
-            .iter()
-            .map(|m| {
-                let mut m = m.clone();
-                if let Some(text) = m.get("content").and_then(Value::as_str) {
-                    let rendered = render_text(self.renderer, text);
-                    m["content"] = Value::String(rendered);
-                }
-                m
-            })
-            .collect();
+        let sent = super::map::messages(self.decl, &self.own, messages);
         let mut stream = self.request(&sent, max_tokens).await.ok()?;
         let mut parts: Vec<String> = Vec::new();
         while let Some(ev) = stream.next().await {

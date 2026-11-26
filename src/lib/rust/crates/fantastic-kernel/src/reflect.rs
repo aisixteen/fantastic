@@ -59,6 +59,11 @@ const IDENTITY_KEYS: [&str; 6] = [
     "view",
 ];
 
+/// THE ROOT'S RUNTIME EXTRAS: the instance `guid` its record keeps, and what the root
+/// reflect adds for the operator (`runtime`, `peers`, `env`, `version`, and the root
+/// bundle's `persistence`). On the root, no agent sees them, whatever line it holds.
+const ROOT_EXTRAS: [&str; 6] = ["guid", "peers", "env", "version", "runtime", "persistence"];
+
 /// The keys the tree walk itself writes into a node: never a field.
 const WALK_KEYS: [&str; 2] = ["children", "pruned"];
 
@@ -97,7 +102,13 @@ impl Sight {
     /// setting — a field is SET only with an `update` line, but a caller sees how the
     /// agent is configured, e.g. a bridge's `root`, a runner's `cwd`). A record holds a
     /// key's `{store, ref}`, never its value.
-    fn shows_key(&self, _a: &Agent, held: Held, _key: &str) -> bool {
+    ///
+    /// Except the ROOT'S RUNTIME EXTRAS ([`ROOT_EXTRAS`]): on the root they are the
+    /// operator's alone (owner 2026-11-26), whatever line an agent holds there.
+    fn shows_key(&self, a: &Agent, held: Held, key: &str) -> bool {
+        if self.viewer.is_some() && a.parent_id.is_none() && ROOT_EXTRAS.contains(&key) {
+            return false;
+        }
         held != Held::Nothing
     }
 

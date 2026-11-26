@@ -1,0 +1,1 @@
+When your work changes, write a `line_summary` call: what you are doing now, one short line in `text`.

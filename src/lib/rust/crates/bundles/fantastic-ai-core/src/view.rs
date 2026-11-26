@@ -7,8 +7,9 @@
 //! Mirrors python `ai_core/core.py` `_res_of` / `_apply_res`.
 
 use crate::history_view::reply_blocks;
+use crate::model_format::map::{shows, with_pieces, Piece};
 use crate::strategies::strip::stub;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 /// The resolution a rendered row is at: a fold, a stripped stub, or the row
 /// itself.
@@ -17,14 +18,14 @@ pub fn res_of(row: &Value) -> &'static str {
     if row.get("kind").and_then(Value::as_str) == Some("fold") {
         return "fold";
     }
-    let c = row.get("content").and_then(Value::as_str).unwrap_or("");
-    if c.starts_with("[reply to ") && c.contains("(stripped:") {
+    if shows(row, |p| matches!(p, Piece::Stub { .. })) {
         return "stub";
     }
     "full"
 }
 
-/// Render a stored row at the resolution the view array asks for.
+/// Render a stored row at the resolution the view array asks for: at `stub`, every
+/// reply block of it is its tag line and a [`Piece::Stub`].
 #[must_use]
 pub fn apply_res(row: &Value, res: &str) -> Value {
     if res != "stub" {
@@ -36,14 +37,9 @@ pub fn apply_res(row: &Value, res: &str) -> Value {
     if !c.starts_with("[reply to ") {
         return row.clone();
     }
-    let stubbed = reply_blocks(c)
-        .into_iter()
-        .map(stub)
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let mut out = row.clone();
-    if let Some(o) = out.as_object_mut() {
-        o.insert("content".to_string(), json!(stubbed));
-    }
-    out
+    let Some(id) = row.get("id").and_then(Value::as_i64) else {
+        return row.clone();
+    };
+    let stubbed: Vec<Piece> = reply_blocks(c).into_iter().map(|b| stub(b, id)).collect();
+    with_pieces(row.clone(), &stubbed)
 }

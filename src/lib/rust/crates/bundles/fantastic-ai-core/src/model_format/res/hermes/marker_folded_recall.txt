@@ -1,0 +1,4 @@
+{tag_line}
+<tool_response>
+{"folded": true, "id": {id}, "verb": "recall", "from": {agent_q}, "recalled": {what_q}, "tokens": {tokens}, "unfold": {"name": "send", "arguments": {"routing": {"target_id": {self_q}}, "payload": {"type": "recall", "id": {id}}}}}
+</tool_response>

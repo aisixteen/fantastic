@@ -10,7 +10,7 @@
 use serde_json::{json, Map, Value};
 
 use super::default::{answer_of, Tags, FORM, FORM_OPEN, HOWTO_SEND, REPORT_STOP_REASON};
-use super::{entry, fill, Out, Reader, Renderer, DEFAULT};
+use super::{declared, fill, Out, Reader, Renderer, DEFAULT};
 use crate::think::without_thinking;
 use crate::tool_parse::{extract_tool_calls, malformed_calls, render_call, TOOLS};
 
@@ -324,11 +324,10 @@ fn golden_render_identity_on_history() {
         }
     }
     assert!(n > 0);
-    assert!(Tags.identity());
     assert_eq!(Tags.name(), DEFAULT);
-    let e = entry(DEFAULT).expect("default is registered");
-    assert_eq!(e.renderer.name(), DEFAULT);
-    assert_eq!(e.howto_send, HOWTO_SEND);
+    let e = declared(DEFAULT).expect("default is registered");
+    assert_eq!(e.calls.name(), DEFAULT);
+    assert_eq!((e.texts)(super::Section::Send), HOWTO_SEND);
     assert!(HOWTO_SEND.starts_with("## Reaching other agents\n"));
     assert!(HOWTO_SEND.ends_with("— nothing else counts as your answer.\n"));
     assert_eq!(FORM_OPEN, "<call name=\"…\">");

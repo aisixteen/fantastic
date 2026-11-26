@@ -53,9 +53,6 @@ impl Renderer for Timed<'_> {
     fn rev(&self) -> u32 {
         self.inner.rev()
     }
-    fn identity(&self) -> bool {
-        self.inner.identity()
-    }
     fn render(&self, text: &str) -> String {
         let start = Instant::now();
         let out = self.inner.render(text);
@@ -125,16 +122,16 @@ fn cold_and_warm() {
         source / 4
     );
 
-    // D first: identity, nothing kept
+    // D first: every row mapped once and kept, as for any type
     let m = view(n);
     let start = Instant::now();
-    run(&c, &d, &m, &Opts::default());
+    let first = run(&c, &d, &m, &Opts::default());
     let (renders, _) = d.take();
     println!(
         "X1 D: {:.3} s, {renders} renders of whole messages",
         start.elapsed().as_secs_f64()
     );
-    assert_eq!(c.stats().bytes, 0, "the identity type keeps nothing");
+    assert_eq!(first.rows, n as usize, "the default type keeps its rows");
 
     // the switch to H: cold over every row
     let start = Instant::now();

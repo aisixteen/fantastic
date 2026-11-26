@@ -8,7 +8,7 @@ use super::*;
 use crate::agent_loop::{run_generation, GenFailure, Generation};
 use crate::model_format::default::Tags;
 use crate::model_format::hermes::{Hermes, NAME as HERMES};
-use crate::model_format::pass::{render_text, Pass};
+use crate::model_format::pass::Pass;
 use crate::model_format::{Out, Reader, Renderer};
 use futures_util::StreamExt;
 
@@ -89,8 +89,8 @@ async fn task_pass_not_parsed() {
         let was = was["content"].as_str().expect("text content");
         assert_eq!(
             sent["content"],
-            json!(render_text(&Hermes, was)),
-            "each message rendered for the type"
+            json!(Hermes.render(was)),
+            "each message mapped for the type: one stored text through its renderer"
         );
     }
     let sent = Value::Array(asked[0].clone()).to_string();
@@ -1394,9 +1394,38 @@ async fn default_turn_same_as_before() {
         if let Some(n) = attrs["totals"]["bytes"]["verb_docs"].as_i64() {
             attrs["totals"]["bytes"]["verb_docs"] = json!(n + grown);
         }
+        // MAP-ONCE, pinned as bytes: the how-to opens with the environment section (150
+        // bytes and its blank line: `MAP_ONCE_ENV`) and the context section names the
+        // markers (`MAP_ONCE_CONTEXT` bytes more); the new input carries no time head
+        // (`HEAD` bytes less). An edit to either text fails here.
+        let mapped = MAP_ONCE_ENV + MAP_ONCE_CONTEXT;
+        let head = HEAD;
+        for p in attrs["parts"]["list"].as_array_mut().into_iter().flatten() {
+            if p["part"] == json!("verb_docs") {
+                p["bytes"] = json!(p["bytes"].as_i64().unwrap() + mapped);
+            }
+            if p["part"] == json!("new_input") {
+                p["bytes"] = json!(p["bytes"].as_i64().unwrap() - head);
+            }
+        }
+        for (part, by) in [("verb_docs", mapped), ("new_input", -head)] {
+            if let Some(n) = attrs["totals"]["bytes"][part].as_i64() {
+                attrs["totals"]["bytes"][part] = json!(n + by);
+            }
+        }
         assert_eq!(row, want_row, "{name}");
     }
 }
+
+/// MAP-ONCE's bytes in `verb_docs` for R11: the environment section, `## Environment` and
+/// its one line with a 10-byte date and a 6-byte offset, then the blank line before the
+/// next section.
+const MAP_ONCE_ENV: i64 = 152;
+/// MAP-ONCE's bytes in `verb_docs` for R11: what the context section's marker wording
+/// added to it.
+const MAP_ONCE_CONTEXT: i64 = 113;
+/// The time head a row's text opened with before map-once: `[YYYY-MM-DD HH:MM ±HH:MM]\n`.
+const HEAD: i64 = 26;
 
 /// The Turns section of the how-to on `4fd5bb4d` (`assembly.rs` `SEND_TO_HOWTO`), byte
 /// for byte: R11's measure of what W13 added.
@@ -1808,7 +1837,7 @@ async fn cancel_keeps_pure_entries() {
             .iter()
             .find(|r| r["id"].as_i64() == Some(*id))
             .expect("an entry names a stored row");
-        let fresh = Hermes.render(&crate::row_attrs::model_text(row));
+        let fresh = Hermes.render(row["content"].as_str().unwrap_or(""));
         assert_eq!(cache.rendered(kind, *id), Some(fresh), "row {id}");
     }
 }

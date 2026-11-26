@@ -1,0 +1,3 @@
+<tool_call>
+{"name": "keep", "arguments": {"of": "{pid}", "summary": "…"}}
+</tool_call>

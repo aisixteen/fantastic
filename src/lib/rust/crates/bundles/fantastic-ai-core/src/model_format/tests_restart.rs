@@ -60,7 +60,7 @@ use super::cache::{epoch_of, Hash, RenderCache};
 use super::default::Tags;
 use super::hermes::{self, Hermes};
 use super::rules::{load, shipped, type_of, RULES_JSON};
-use super::tests_cache::{conv, finish, open, plain, refs, rows_n, run, Count, Opts};
+use super::tests_cache::{conv, decl_of, finish, open, plain, refs, rows_n, run, Count, Opts};
 use super::tests_determinism::{recorded, rendered_history, rules_digest};
 use super::tests_trace::{
     answered, assembled, chat_on, generate, names, operator, restart, set_model, store,
@@ -206,7 +206,8 @@ fn last(p: &Scripted) -> Vec<Value> {
 fn same_rows(pre: &[Value], now: &[Value], what: &str) {
     let k = pre.len() - 1;
     assert!(now.len() >= k, "{what}: {} messages, {k} before", now.len());
-    assert_eq!(now[1..k], pre[1..k], "{what}: the pre-stop bytes");
+    // the system block too: its date is the thread's first row's, never the clock's
+    assert_eq!(now[..k], pre[..k], "{what}: the pre-stop bytes");
 }
 
 /// The kept chain of `kind` in the chat's cache.
@@ -411,8 +412,8 @@ async fn clean_restart_cold_then_warm() {
         let n = turn_requests(&p).last().expect("the turn's request").len() - 2;
         let cold = render_row(&s, &format!("{chat}_after")).await;
         assert_eq!(cold["event"], json!("render_cold"), "{kind}: {cold}");
-        let rendered = if kind == hermes::NAME { n } else { 0 };
-        assert_eq!(cold["rows"], json!(rendered), "{kind}: {cold}");
+        // every type maps and keeps its rows
+        assert_eq!(cold["rows"], json!(n), "{kind}: {cold}");
         assert_eq!(cold["kept"], json!(0), "{kind}: {cold}");
         let now = last(&p);
         same_rows(&pre, &now, kind);
@@ -422,8 +423,7 @@ async fn clean_restart_cold_then_warm() {
         answered(&s.kernel, &s.agent, &p, &format!("{chat}_after2")).await;
         let warm = render_row(&s, &format!("{chat}_after2")).await;
         assert_eq!(warm["event"], json!("render_warm"), "{kind}: {warm}");
-        let new_rows = if kind == hermes::NAME { 2 } else { 0 };
-        assert_eq!(warm["rows"], json!(new_rows), "{kind}: only the new rows");
+        assert_eq!(warm["rows"], json!(2), "{kind}: only the new rows");
         s.stop();
     }
 }
@@ -1184,9 +1184,6 @@ impl Renderer for Wrapper {
     fn rev(&self) -> u32 {
         self.rev
     }
-    fn identity(&self) -> bool {
-        false
-    }
     fn render(&self, text: &str) -> String {
         if text.starts_with("[reply to ") {
             format!("<reply-r{0}>{text}</reply-r{0}>", self.rev)
@@ -1213,7 +1210,7 @@ fn adapter_rev_change_is_expected_diff() {
     let m = conv(&rows, "go");
     let (old, new) = (Wrapper { rev: 1 }, Wrapper { rev: 2 });
     let at = |r: &dyn Renderer| Opts {
-        epoch: epoch_of(RULES_JSON.as_bytes(), &[r]),
+        epoch: epoch_of(RULES_JSON.as_bytes(), &[&decl_of(r)]),
         ..Opts::default()
     };
     let (o1, o2) = (at(&old), at(&new));
@@ -1271,20 +1268,20 @@ async fn rule_change_is_expected_diff() {
         let next = with_first(rule);
         let (was, now) = (type_of(shipped(), id), type_of(&next, id));
         assert_ne!(was, now, "{id}");
-        let renderers: Vec<&dyn Renderer> = super::REGISTRY.iter().map(|e| e.renderer).collect();
+        let decls: Vec<&super::Decl<'_>> = super::REGISTRY.iter().collect();
         let o1 = Opts {
-            epoch: epoch_of(RULES_JSON.as_bytes(), &renderers),
+            epoch: epoch_of(RULES_JSON.as_bytes(), &decls),
             ..Opts::default()
         };
         let o2 = Opts {
-            epoch: epoch_of(next.source.as_bytes(), &renderers),
+            epoch: epoch_of(next.source.as_bytes(), &decls),
             ..Opts::default()
         };
         let before = <RenderCache>::new();
-        let pre = run(&before, super::of(was).renderer, &m, &o1);
+        let pre = run(&before, super::of(was).calls, &m, &o1);
         drop(before);
         let after = <RenderCache>::new();
-        let cold = run(&after, super::of(now).renderer, &m, &o2);
+        let cold = run(&after, super::of(now).calls, &m, &o2);
         assert!(cold.cold, "{id}");
         let differ: Vec<usize> = (0..m.len())
             .filter(|&i| cold.messages[i] != pre.messages[i])
@@ -1294,7 +1291,7 @@ async fn rule_change_is_expected_diff() {
             let src = m[i]["content"].as_str().unwrap();
             assert_eq!(
                 cold.messages[i]["content"],
-                json!(super::of(now).renderer.render(src)),
+                json!(super::of(now).calls.render(src)),
                 "{id}: message {i} is the other type's golden"
             );
         }
@@ -1661,7 +1658,10 @@ async fn row_during_summary_keeps_its_place() {
     let fid = out["folded"]
         .as_i64()
         .unwrap_or_else(|| panic!("context_fold refused: {out}"));
-    assert!(fid > mid, "the fold's id {fid} is not above the row's {mid}");
+    assert!(
+        fid > mid,
+        "the fold's id {fid} is not above the row's {mid}"
+    );
     let pre_rows = store(&s.kernel, &s.agent).await;
     let at = |id: i64| pre_rows.iter().position(|r| r["id"] == json!(id)).unwrap();
     assert!(at(mid) < at(fid), "the row is stored before the fold");
@@ -1685,7 +1685,10 @@ async fn row_during_summary_keeps_its_place() {
         pre_rows[at(fid)]
     );
     let order: Vec<i64> = pre_rows.iter().filter_map(|r| r["id"].as_i64()).collect();
-    assert!(order.windows(2).all(|w| w[0] < w[1]), "append order is id order: {order:?}");
+    assert!(
+        order.windows(2).all(|w| w[0] < w[1]),
+        "append order is id order: {order:?}"
+    );
     let pre_view = assembled(&s.kernel, &s.agent).await;
     assert!(view_ids(&pre_view).contains(&fid));
     let ids = s.stop();
@@ -1705,7 +1708,11 @@ async fn row_during_summary_keeps_its_place() {
     let later = out["folded"]
         .as_i64()
         .unwrap_or_else(|| panic!("context_fold refused: {out}"));
-    assert!(later > max_id(&back), "{later} is not above {}", max_id(&back));
+    assert!(
+        later > max_id(&back),
+        "{later} is not above {}",
+        max_id(&back)
+    );
     s.stop();
 
     // the fold strategy: the turn's request shows its folds under their stored ids
@@ -1722,19 +1729,34 @@ async fn row_during_summary_keeps_its_place() {
     let p = Scripted::new(PLAIN, vec![]);
     let _ = generate(&s.kernel, &s.agent, &p, &format!("{tag}_turn")).await;
     let pre_rows = store(&s.kernel, &s.agent).await;
-    let folds: Vec<&Value> = pre_rows.iter().filter(|r| r["kind"] == json!("fold")).collect();
+    let folds: Vec<&Value> = pre_rows
+        .iter()
+        .filter(|r| r["kind"] == json!("fold"))
+        .collect();
     assert!(!folds.is_empty(), "the projection folded nothing");
     let fold_ids: Vec<i64> = folds.iter().filter_map(|r| r["id"].as_i64()).collect();
-    assert!(fold_ids.iter().all(|&id| id > before), "{fold_ids:?} above {before}");
+    assert!(
+        fold_ids.iter().all(|&id| id > before),
+        "{fold_ids:?} above {before}"
+    );
     for f in &folds {
         let head = format!("{}{} · ", crate::folds::FOLD_TAG, f["id"]);
-        assert!(f["content"].as_str().is_some_and(|c| c.starts_with(&head)), "{f}");
+        assert!(
+            f["content"].as_str().is_some_and(|c| c.starts_with(&head)),
+            "{f}"
+        );
         for r in f["refs"].as_array().unwrap() {
-            assert!(r.as_i64().is_some_and(|id| id > 0), "a provisional ref: {f}");
+            assert!(
+                r.as_i64().is_some_and(|id| id > 0),
+                "a provisional ref: {f}"
+            );
         }
     }
     let order: Vec<i64> = pre_rows.iter().filter_map(|r| r["id"].as_i64()).collect();
-    assert!(order.windows(2).all(|w| w[0] < w[1]), "append order is id order: {order:?}");
+    assert!(
+        order.windows(2).all(|w| w[0] < w[1]),
+        "append order is id order: {order:?}"
+    );
     // the request carries no ids: each fold the projection's view row names is shown
     // under its stored id, and no fold head names a provisional one
     let req = turn_requests(&p).last().cloned().expect("a turn request");
@@ -1759,11 +1781,18 @@ async fn row_during_summary_keeps_its_place() {
     assert!(!named.is_empty(), "the view names no fold: {view_row}");
     for id in named {
         let head = format!("{}{id} · ", crate::folds::FOLD_TAG);
-        assert!(text.iter().any(|c| c.contains(&head)), "fold {id} not shown: {req:#?}");
+        assert!(
+            text.iter().any(|c| c.contains(&head)),
+            "fold {id} not shown: {req:#?}"
+        );
     }
     let ids = s.stop();
     let s = site(tmp.path(), tag, fields, ids).await;
-    assert_eq!(store(&s.kernel, &s.agent).await, pre_rows, "the rows read back");
+    assert_eq!(
+        store(&s.kernel, &s.agent).await,
+        pre_rows,
+        "the rows read back"
+    );
     s.stop();
 }
 
@@ -1822,7 +1851,11 @@ async fn one_chat_restarts_other_warm() {
 #[test]
 fn each_chat_evicts_its_own() {
     let r = Count::new("t");
-    let (a, b, c) = (<RenderCache>::new(), <RenderCache>::new(), <RenderCache>::new());
+    let (a, b, c) = (
+        <RenderCache>::new(),
+        <RenderCache>::new(),
+        <RenderCache>::new(),
+    );
     let ma = conv(&refs(&rows_n(1, 6, 50)), "go");
     let mb = conv(&refs(&rows_n(1, 6, 50)), "go");
     let mc = conv(&refs(&rows_n(1, 12, 200)), "go");

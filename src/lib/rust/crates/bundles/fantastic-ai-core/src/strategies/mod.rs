@@ -13,7 +13,6 @@ pub mod fold;
 pub mod strip;
 
 use crate::constants::NOTICE_ENVELOPE_RESERVE;
-use crate::context::estimate_one;
 use crate::model_format::pass::Pass;
 use fantastic_bundle::py_strip;
 use fantastic_kernel::{AgentId, Kernel};
@@ -69,16 +68,17 @@ pub struct ProjectionCtx<'a> {
 }
 
 /// Keep the largest SUFFIX of `turns` that fits `budget`, always including
-/// the last turn (the live request).
-pub fn fit_tail(turns: &[Value], budget: i64) -> Vec<Value> {
+/// the last turn (the live request). `size`: a message's tokens as the pass sends it
+/// ([`Pass::tokens`]).
+pub fn fit_tail(turns: &[Value], budget: i64, size: &dyn Fn(&Value) -> i64) -> Vec<Value> {
     if turns.is_empty() {
         return Vec::new();
     }
     let last = turns.len() - 1;
     let mut kept = vec![turns[last].clone()];
-    let mut used = estimate_one(&turns[last]);
+    let mut used = size(&turns[last]);
     for t in turns[..last].iter().rev() {
-        let c = estimate_one(t);
+        let c = size(t);
         if used + c > budget {
             break;
         }
@@ -121,7 +121,18 @@ pub(crate) async fn summarize(
                 Some(r) => crate::helpers::shown(r),
                 None => "?".to_string(),
             };
-            let content = m.get("content").map_or_else(String::new, crate::helpers::shown);
+            // a message in flight shows its pieces: their internal text (a folded block's
+            // marker with the summary the model kept), which the task pass maps for its type
+            let content = if m.get("pieces").is_some() {
+                crate::model_format::map::row(
+                    crate::model_format::of(crate::model_format::DEFAULT),
+                    &pass.own,
+                    &crate::model_format::map::pieces_of(m),
+                )
+            } else {
+                m.get("content")
+                    .map_or_else(String::new, crate::helpers::shown)
+            };
             format!("{role}: {content}")
         })
         .collect::<Vec<_>>()
@@ -154,16 +165,12 @@ pub(crate) async fn safe_summary(pass: &Pass, overflow: &[Value]) -> String {
 
 /// `compact` (DEFAULT): keep the recent turns verbatim + an LLM summary of
 /// the overflow. The summary rides the artifact; the seam wraps it.
-pub(crate) async fn compact(
-    body: &[Value],
-    recent: usize,
-    budget: i64,
-    pass: &Pass,
-) -> Projection {
+pub(crate) async fn compact(body: &[Value], recent: usize, budget: i64, pass: &Pass) -> Projection {
+    let size = |m: &Value| pass.tokens(m);
     let (overflow, recent_turns) = recent_split(body, recent);
     if overflow.is_empty() {
         return Projection {
-            body: fit_tail(body, budget),
+            body: fit_tail(body, budget, &size),
             summary: None,
             omitted_marker: false,
             stripped: 0,
@@ -175,7 +182,7 @@ pub(crate) async fn compact(
     let summary = safe_summary(pass, &overflow).await;
     // Reserve room for the notice the seam prepends: the wrapper envelope +
     // the summary text itself (the seam embeds this exact summary).
-    let summary_cost = estimate_one(&json!({"role": "user", "content": summary}));
+    let summary_cost = size(&json!({"role": "user", "content": summary}));
     let avail = (budget - NOTICE_ENVELOPE_RESERVE - summary_cost).max(0);
     // PIN THE GOAL. The first turn is the task framing, and it is the OLDEST — so it is
     // the first thing the overflow split takes. A summary is a lossy retelling; the one
@@ -186,7 +193,7 @@ pub(crate) async fn compact(
     // before the tail.
     let Some(first) = body.first() else {
         return Projection {
-            body: fit_tail(&recent_turns, avail),
+            body: fit_tail(&recent_turns, avail, &size),
             summary: Some(summary),
             omitted_marker: false,
             stripped: 0,
@@ -195,8 +202,8 @@ pub(crate) async fn compact(
             unanchored: 0,
         };
     };
-    let head_cost = estimate_one(first);
-    let kept = fit_tail(&recent_turns, (avail - head_cost).max(0));
+    let head_cost = size(first);
+    let kept = fit_tail(&recent_turns, (avail - head_cost).max(0), &size);
     // Only re-add it if the recent window does not already carry it (short bodies).
     let body = if kept.first() == Some(first) {
         kept
@@ -217,11 +224,12 @@ pub(crate) async fn compact(
 }
 
 /// `truncate`: keep the first (task-framing) turn + the recent turns, drop the
-/// middle. NO summarizer. The elision is reported via `omitted_marker`.
-pub fn truncate(body: &[Value], budget: i64) -> Projection {
+/// middle. NO summarizer. The elision is reported via `omitted_marker`. `size`: a
+/// message's tokens as the pass sends it ([`Pass::tokens`]).
+pub fn truncate(body: &[Value], budget: i64, size: &dyn Fn(&Value) -> i64) -> Projection {
     if body.len() <= 1 {
         return Projection {
-            body: fit_tail(body, budget),
+            body: fit_tail(body, budget, size),
             summary: None,
             omitted_marker: false,
             stripped: 0,
@@ -232,8 +240,8 @@ pub fn truncate(body: &[Value], budget: i64) -> Projection {
     }
     let first = body[0].clone();
     // Reserve room for the notice the seam prepends (no summary in truncate).
-    let head_cost = estimate_one(&first) + NOTICE_ENVELOPE_RESERVE;
-    let tail = fit_tail(&body[1..], (budget - head_cost).max(0));
+    let head_cost = size(&first) + NOTICE_ENVELOPE_RESERVE;
+    let tail = fit_tail(&body[1..], (budget - head_cost).max(0), size);
     let mut out = vec![first];
     out.extend(tail);
     Projection {

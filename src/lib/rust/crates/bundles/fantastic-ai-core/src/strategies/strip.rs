@@ -11,8 +11,11 @@
 //!
 //! ```text
 //! L0  full row  [reply to pid · notes read · "survey chunk 2"]\n<6800 bytes>
-//! L1  stub      [reply to pid · notes read · "survey chunk 2"] (stripped: 6800 bytes)
+//! L1  stub      [reply to pid · notes read · "survey chunk 2"] + the type's stub marker
 //! ```
+//!
+//! The stub is a [`Piece::Stub`] (its tag line, its size, its row): the type's words for
+//! it are written by the map ([`crate::model_format::map`]).
 //!
 //! TWO RULES THAT KEEP THE KV CACHE WARM. Under prefix caching (vLLM /metrics):
 //! an append after the cached prefix reuses it in full; any edit inside it reuses
@@ -31,8 +34,8 @@
 
 use super::{fit_tail, Projection, ProjectionCtx};
 use crate::constants::NOTICE_ENVELOPE_RESERVE;
-use crate::context::{estimate_one, estimate_tokens};
-use crate::history_view::reply_blocks;
+use crate::history_view::{blocks, reply_blocks};
+use crate::model_format::map::{pieces_of, with_pieces, Piece};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
@@ -69,17 +72,20 @@ pub fn pid_of(block: &str) -> Option<&str> {
     Some(pid)
 }
 
-/// A reply block reduced to its stub: the tag line, then what it cost.
+/// A reply block reduced to its stub: its tag line, and the size of the body that left
+/// the view (in CODE POINTS: python prints `len(body)`, and a byte count reported a
+/// non-ASCII body as bigger than the model's own `pull` of it). `id`: the row that holds
+/// the body.
 #[must_use]
-pub fn stub(block: &str) -> String {
-    // CODE POINTS: python prints `len(body)`, and a byte count reported a
-    // non-ASCII body as bigger than the model's own `pull` of it.
-    match block.split_once('\n') {
-        Some((head, body)) => format!(
-            "{head} (stripped: {} bytes — recall by pid)",
-            body.chars().count()
-        ),
-        None => format!("{block} (stripped: 0 bytes — recall by pid)"),
+pub(crate) fn stub(block: &str, id: i64) -> Piece {
+    let (head, bytes) = match block.split_once('\n') {
+        Some((head, body)) => (head, body.chars().count()),
+        None => (block, 0),
+    };
+    Piece::Stub {
+        tag_line: head.to_string(),
+        bytes,
+        id,
     }
 }
 
@@ -93,37 +99,48 @@ pub fn is_reply(m: &Value) -> bool {
 }
 
 /// Project `body` with every stripped block reduced to its stub. Deterministic
-/// in (body, stripped) — the same inputs render the same bytes, which is what
-/// keeps the prefix stable between strip events.
-fn render(body: &[Value], done: &HashSet<String>) -> (Vec<Value>, usize, i64) {
+/// in (body, stripped) — the same inputs render the same pieces, which is what
+/// keeps the prefix stable between strip events. Also how many blocks were stubbed and
+/// the characters that left the view with them: each block's less its stub's as the
+/// pass's type writes it (`stub_chars`).
+fn render(
+    body: &[Value],
+    done: &HashSet<String>,
+    stub_chars: &dyn Fn(&Piece) -> i64,
+) -> (Vec<Value>, usize, i64) {
     let mut out = Vec::with_capacity(body.len());
     // `saved` is SIGNED in python (`len(b) - len(stub)`): a tiny block's stub is
     // LONGER than the block, and saturating at 0 reported a strip that cost
     // bytes as one that saved none.
     let (mut n, mut saved) = (0usize, 0i64);
     for m in body {
-        if !is_reply(m) {
+        // a reply row with no id has no row to recall: it is never stubbed
+        let Some(id) = m.get("id").and_then(Value::as_i64).filter(|_| is_reply(m)) else {
             out.push(m.clone());
             continue;
-        }
-        let content = m.get("content").and_then(Value::as_str).unwrap_or("");
-        let mut parts: Vec<String> = Vec::new();
-        for b in reply_blocks(content) {
-            match pid_of(b) {
-                Some(p) if done.contains(p) => {
-                    let s = stub(b);
+        };
+        let mut changed = false;
+        let pieces: Vec<Piece> = blocks(pieces_of(m))
+            .into_iter()
+            .map(|p| match &p {
+                Piece::Text { text } if pid_of(text).is_some_and(|pid| done.contains(pid)) => {
+                    let s = stub(text, id);
+                    saved += text.chars().count() as i64 - stub_chars(&s);
                     n += 1;
-                    saved += b.chars().count() as i64 - s.chars().count() as i64;
-                    parts.push(s);
+                    changed = true;
+                    s
                 }
-                _ => parts.push(b.to_string()),
-            }
+                _ => p,
+            })
+            .collect();
+        if changed {
+            let mut row = with_pieces(m.clone(), &pieces);
+            // a row shown reduced
+            row["form"] = json!("anchor");
+            out.push(row);
+        } else {
+            out.push(m.clone());
         }
-        let mut row = m.clone();
-        if let Some(o) = row.as_object_mut() {
-            o.insert("content".to_string(), json!(parts.join("\n\n")));
-        }
-        out.push(row);
     }
     (out, n, saved)
 }
@@ -175,9 +192,11 @@ pub async fn strip(
     body: &[Value],
     ctx: &ProjectionCtx<'_>,
 ) -> Result<Projection, crate::memory::MemoryStoreError> {
+    let size = |m: &Value| ctx.pass.tokens(m);
+    let total = |ms: &[Value]| ctx.pass.tokens_all(ms);
     if body.len() <= 1 {
         return Ok(Projection {
-            body: fit_tail(body, ctx.budget),
+            body: fit_tail(body, ctx.budget, &size),
             ..Default::default()
         });
     }
@@ -202,12 +221,17 @@ pub async fn strip(
         .unwrap_or_default();
 
     let budget = ctx.budget - NOTICE_ENVELOPE_RESERVE;
-    let (mut rendered, mut n, mut saved) = render(body, &done);
-    if estimate_tokens(&rendered) > budget {
+    let stub_chars = |p: &Piece| {
+        crate::model_format::map::row(ctx.pass.decl, &ctx.pass.own, std::slice::from_ref(p))
+            .chars()
+            .count() as i64
+    };
+    let (mut rendered, mut n, mut saved) = render(body, &done, &stub_chars);
+    if total(&rendered) > budget {
         // OVER THE HIGH WATERMARK: strip oldest-first, in ONE batch, down to LOW.
         let target = (budget as f64 * LOW) as i64;
         for m in &body[1..body.len() - 1] {
-            if estimate_tokens(&rendered) <= target {
+            if total(&rendered) <= target {
                 break;
             }
             if !is_reply(m) {
@@ -219,7 +243,7 @@ pub async fn strip(
                     done.insert(p.to_string());
                 }
             }
-            let r = render(body, &done);
+            let r = render(body, &done, &stub_chars);
             rendered = r.0;
             n = r.1;
             saved = r.2;
@@ -230,12 +254,12 @@ pub async fn strip(
             .insert(key, done);
     }
     let mut cut = false;
-    if estimate_tokens(&rendered) > budget {
+    if total(&rendered) > budget {
         // Everything strippable is stripped and the prose alone still overflows.
         // Stage two: the cut. The goal turn is pinned.
         let first = rendered[0].clone();
-        let head_cost = estimate_one(&first);
-        let tail = fit_tail(&halve(&rendered[1..]), (budget - head_cost).max(0));
+        let head_cost = size(&first);
+        let tail = fit_tail(&halve(&rendered[1..]), (budget - head_cost).max(0), &size);
         let mut out = vec![first];
         out.extend(tail);
         rendered = out;

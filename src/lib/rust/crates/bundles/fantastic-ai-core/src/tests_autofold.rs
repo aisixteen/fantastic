@@ -18,7 +18,8 @@ async fn rows(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
 
 /// One send to the agent.
 async fn say(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) {
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = kernel
+        .operator_send(vec![Item::new(
             agent.clone(),
             json!({"type": "send", "text": text, "client_id": "probe"}),
         )])
@@ -27,7 +28,8 @@ async fn say(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) {
 
 /// One verb on the agent; its result.
 async fn verb(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    kernel.operator_send(vec![Item::new(agent.clone(), payload)])
+    kernel
+        .operator_send(vec![Item::new(agent.clone(), payload)])
         .await
         .remove(0)
         .result
@@ -35,7 +37,8 @@ async fn verb(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
 
 /// A window wide enough that a 16k-token reply is delivered inline.
 async fn widen(kernel: &Arc<Kernel>, agent: &AgentId) {
-    let r = kernel.operator_send(vec![Item::new(
+    let r = kernel
+        .operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": agent.as_str(), "context_window": 1_000_000}),
         )])
@@ -73,7 +76,7 @@ async fn thinking_folds_to_its_anchor_from_the_next_request() {
     say(&kernel, &agent, "again").await;
     assert!(until_passes(&s, 2).await);
     let seen = s.request(1);
-    assert!(seen.contains("[thought ~"), "{seen}");
+    assert!(seen.contains("<thought id="), "{seen}");
     assert!(seen.contains("Answer one."), "{seen}");
     assert!(!seen.contains("SECRET-PLAN"), "{seen}");
     let kept = rows(&kernel, &agent).await;
@@ -107,11 +110,14 @@ async fn a_large_reply_is_whole_the_turn_it_arrives_and_an_anchor_from_the_next(
         .find(|r| r["content"].as_str() == Some(text.as_str()))
         .expect("the store row is whole");
     let seen = s.request(1);
+    let marker = format!(
+        "[reply to 9 · notes read]\n<folded id=\"{id}\" verb=\"read\" from=\"notes\" \
+         tokens=\"16004\" head=\"head line\"/> {}",
+        default_unfold(agent.as_str(), stored["id"].clone()),
+        id = stored["id"]
+    );
     assert!(
-        seen.contains(&format!(
-            "[folded · read reply from notes · ~16004 tokens · head: \\\"head line\\\" · get: {}]",
-            stored["id"]
-        )),
+        seen.contains(&json_text(&marker)),
         "{}",
         &seen[seen.len().saturating_sub(900)..]
     );
@@ -190,10 +196,10 @@ async fn a_recall_reply_refolds_after_the_next_answer() {
     assert!(until_passes(&s, 4).await);
     let seen = s.request(3);
     assert!(
-        seen.contains(&format!(
-            "[folded · recall reply from {} · id {b} · ~",
+        seen.contains(&json_text(&format!(
+            "verb=\"recall\" from=\"{}\" recalled=\"id {b}\"",
             agent.as_str()
-        )),
+        ))),
         "{}",
         &seen[seen.len().saturating_sub(900)..]
     );
@@ -243,12 +249,7 @@ async fn a_reflect_reply_carrying_an_html_view_reaches_the_model_without_the_bod
     .await;
     let backend_id = id_for(&tmp, "af_viewhide");
     let file_id = format!("ff_{backend_id}");
-    add_file_bridge(
-        &kernel,
-        &file_id,
-        &tmp.path().join(".fantastic"),
-    )
-    .await;
+    add_file_bridge(&kernel, &file_id, &tmp.path().join(".fantastic")).await;
     let agent = add_backend(&kernel, &backend_id, &file_id).await;
     let made = verb(
         &kernel,

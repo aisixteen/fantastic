@@ -27,9 +27,7 @@ use crate::strategies::fold::{fold_down, fold_row, summarize_span, summary_title
 use crate::strategies::strip::{pid_of, LOW};
 use crate::strategies::ProjectionCtx;
 use crate::view::{apply_res, res_of};
-use fantastic_bundle::{
-    py_split_whitespace, py_splitlines, py_strip,
-};
+use fantastic_bundle::{py_split_whitespace, py_splitlines, py_strip};
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -680,11 +678,19 @@ pub(crate) async fn context_recall(
             json!({"kept": 0, "expanded": 0, "dropped": 0, "folded": 0, "why": "empty store", "degraded": false}),
         );
     }
+    // THE TYPE THE NEXT TURN IS SENT IN: the pass's, else the one the chat's model
+    // resolves to; the sizes below are of the bytes it is sent
+    let decl = match pass {
+        Some(p) => p.decl,
+        None => {
+            crate::model_format::of(crate::model_format::type_now(agent_id, kernel, &meta).await)
+        }
+    };
     // The block the turn will actually use (`system_content`), not the default one:
     // a record or per-call `system_prompt` changes how much room the body gets.
     let sys_tokens = estimate_one(&json!({
         "role": "system",
-        "content": system_content(agent_id, kernel).await?,
+        "content": system_content(agent_id, kernel, decl).await?,
     }));
     let body_budget = (agent_budget(&meta, model_window) - sys_tokens - NOTICE_ENVELOPE_RESERVE)
         .max(BUDGET_FLOOR);
@@ -731,10 +737,18 @@ pub(crate) async fn context_recall(
         }
     };
     let cost = |r: &Value| -> i64 {
-        estimate_one(&json!({
+        let mut m = json!({
             "role": r.get("role").and_then(Value::as_str).unwrap_or("user"),
             "content": row_content(r),
-        }))
+        });
+        if let Some(p) = r.get("pieces") {
+            m["pieces"] = p.clone();
+        }
+        estimate_one(&crate::model_format::map::message(
+            decl,
+            agent_id.as_str(),
+            &crate::model_format::map::Shown::of(&m),
+        ))
     };
     // 1. MECHANICAL FIT — never fails. The goal turn always in; then the STANDING
     // rows (#218) — the turn that set the task, the live one, the newest fold, the
@@ -789,7 +803,9 @@ pub(crate) async fn context_recall(
                 // the row's kind, else its role
                 let kind = match r.get("kind").filter(|k| !k.is_null()) {
                     Some(k) => crate::helpers::shown(k),
-                    None => r.get("role").map_or_else(String::new, crate::helpers::shown),
+                    None => r
+                        .get("role")
+                        .map_or_else(String::new, crate::helpers::shown),
                 };
                 let parent = match r.get("parent").filter(|p| !p.is_null()) {
                     Some(p) => match p.as_i64() {

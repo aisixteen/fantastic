@@ -132,32 +132,6 @@ impl From<crate::assembly::BlockFail> for GenFailure {
     }
 }
 
-/// Project the message list to what the model actually reads — its role, and its
-/// text under the head of its visible attributes ([`crate::row_attrs::VISIBLE`]);
-/// every other key is stripped.
-pub(crate) fn render_for_model(messages: &[Value]) -> Vec<Value> {
-    messages
-        .iter()
-        .map(|m| {
-            let role = m.get("role").cloned().unwrap_or(Value::Null);
-            let content = match m.get("content") {
-                Some(Value::String(_)) | None => json!(crate::row_attrs::model_text(m)),
-                Some(other) => other.clone(),
-            };
-            let mut out = json!({"role": role, "content": content});
-            // the image parts of a message whose model is to see them (#622)
-            if let Some(images) = crate::images::parts_of(m) {
-                out["images"] = Value::Array(images.clone());
-            }
-            // the agent's cache_mark travels with its message; nothing else does
-            if let Some(v) = m.get(crate::caching::CACHE_MARK) {
-                out[crate::caching::CACHE_MARK] = v.clone();
-            }
-            out
-        })
-        .collect()
-}
-
 /// The incoming user row; `kind: "notice"` when it is this layer's own text to
 /// its own agent (python `_notice_kind`) — the row otherwise keeps its role as its
 /// kind.
@@ -265,43 +239,25 @@ pub async fn run_generation(
         )
         .await?;
     }
+    // THE INCOMING MESSAGE IS STAMPED FIRST: its `ts` and UTC offset (#766 1.13), set
+    // once here, are the ones its row keeps, and on a first request they are the date
+    // the environment section shows (the thread's first row)
+    let stamp = crate::row_attrs::Stamp::now();
     let (mut messages, store_len) = assemble_messages(
-        self_id,
-        state,
-        user_text,
-        kernel,
-        client_id,
-        caching,
+        self_id, state, user_text, kernel, client_id, caching, &stamp,
     )
     .await?;
-    // THE INCOMING MESSAGE IS WRITTEN NOW: the model reads this `ts` at its head, and
-    // its row keeps the same one, so the next request renders it byte for byte the same
-    // (and its UTC offset, #766 1.13, set once here beside the `ts`)
-    let incoming_ts = json!(crate::helpers::now_secs());
-    let incoming_offset = crate::row_attrs::offset_at(&incoming_ts);
-    let stamp_incoming = |m: &mut Value| {
-        m["attributes"]["ts"] = incoming_ts.clone();
-        if let Some(off) = &incoming_offset {
-            m["attributes"][crate::row_attrs::UTC_OFFSET] = off.clone();
-        }
-    };
-    if let Some(last) = messages.last_mut() {
-        stamp_incoming(last);
-    }
-    // the incoming row as stored, whether the pass answers or dies: the `ts` above
+    // the incoming row as stored, whether the pass answers or dies: the stamp above
     let incoming_row = |id: i64, parent: Option<i64>| {
         let mut row = incoming_row_of(state, user_text, id, parent);
-        stamp_incoming(&mut row);
+        stamp.apply(&mut row);
         crate::row_attrs::with_source(row, &incoming_source(state))
     };
     // KEEP (#641): a reply that will fold after the answer carries the call that keeps
     // what the model needs of it
     if caching.folds() {
-        if let Some(last) = messages.last_mut() {
-            let marked = crate::history_view::mark_keep(
-                last.get("content").and_then(Value::as_str).unwrap_or(""),
-            );
-            last["content"] = Value::String(marked);
+        if let Some(last) = messages.pop() {
+            messages.push(crate::history_view::mark_keep(last));
         }
     }
     // Context-overflow projection: shape what the MODEL sees this turn to fit the
@@ -336,11 +292,6 @@ pub async fn run_generation(
         }
     };
 
-    // WHAT THIS REQUEST CARRIES, piece by piece, for the assistant row it earns.
-    let request_parts = crate::assembly::request_parts(
-        &state.request_parts.lock().expect("request_parts poisoned"),
-        &model_messages,
-    );
     let prev_request = state
         .prev_request
         .lock()
@@ -360,9 +311,6 @@ pub async fn run_generation(
     if caching.marks() {
         crate::caching::mark(&mut model_messages, primer);
     }
-    // `model_view` is the INTERNAL view: the estimate and the calibration read it. Each
-    // sequence of attempts sends it rendered for its model type (`attempts`).
-    let model_view = render_for_model(&model_messages);
     let meta = crate::helpers::agent_meta(self_id, kernel);
     // STREAMING PARTS: the same chunks, split into parts as
     // they are written — animation for the addressee, never action
@@ -398,13 +346,12 @@ pub async fn run_generation(
     };
     let view_of = ViewOf {
         model_messages: &model_messages,
-        model_view: &model_view,
-        request_parts: &request_parts,
         meta: &meta,
     };
     // THE ATTEMPTS (#766, 1.5 step 4): one sequence under the pass's type; a failed
     // attempt whose reply named a model of another type restarts it once, under that
-    // type, with a view rendered for it (Q26).
+    // type, with the same view mapped for it (Q26): the system block's sections too, so
+    // no request mixes two types' forms.
     let mut restarted: Option<Pass> = None;
     let seq = match attempts(&pass, true, &view_of, &caller).await? {
         Seq::Restart(next) => {
@@ -418,15 +365,6 @@ pub async fn run_generation(
             );
             next.events()
                 .push(Mode::Turn.name(), next.kind, "model_switched", fields);
-            // the system block's `send` how-to is the type's (Q16): the restarted
-            // request carries the new type's, so no request mixes two types' forms
-            let messages = with_howto(&model_messages, pass.kind, next.kind);
-            let view = render_for_model(&messages);
-            let view_of = ViewOf {
-                model_messages: &messages,
-                model_view: &view,
-                ..view_of
-            };
             attempts(next, false, &view_of, &caller).await?
         }
         other => other,
@@ -437,15 +375,18 @@ pub async fn run_generation(
     // THE ENDPOINT'S OWN COUNT calibrates our chars/4 estimate (python `_calib`), from
     // the window: attempt 1 of the sequence the row comes from, the request the view was
     // built for (#766, 1.7). After a type restart the old type's ratio goes first.
-    let window = match &seq {
-        Seq::Accepted { window, .. } | Seq::Stopped { window, .. } => *window,
-        Seq::Restart(_) => None,
+    let (window, sent, request_parts) = match &seq {
+        Seq::Accepted { window, sent, .. } | Seq::Stopped { window, sent, .. } => {
+            let parts = crate::assembly::request_parts(cur.decl, &model_messages, sent);
+            (*window, sent.clone(), parts)
+        }
+        Seq::Restart(_) => unreachable!("a restarted sequence does not restart again"),
     };
     if cur.kind != pass.kind {
         *state.calib.lock().expect("calib poisoned") = None;
     }
     *state.last_type.lock().expect("last_type poisoned") = Some(cur.kind);
-    calibrate(state, window, &model_view);
+    calibrate(state, window, &sent);
     let (last_text, report, accepted, open) = match seq {
         Seq::Accepted {
             text,
@@ -459,7 +400,7 @@ pub async fn run_generation(
         // row's `used` has nothing accepted: every attempt is in `turn.rejected`.
         Seq::Stopped { errors, .. } => {
             let reason = crate::model_format::fill(
-                crate::model_format::of(cur.kind).stop_reason,
+                (cur.decl.texts)(crate::model_format::Section::StopReason),
                 &[("n", &errors.len().to_string())],
             );
             let mut args = Map::new();
@@ -567,7 +508,7 @@ pub async fn run_generation(
         m.extend(usage_detail(
             window.map(Window::sum),
             Counts::of(&report).map(|c| c.completion),
-            &model_view,
+            &sent,
             &last_text,
             gen_started.elapsed().as_secs_f64(),
             context_window,
@@ -646,8 +587,7 @@ pub async fn run_generation(
 }
 
 /// The assistant row's `attributes`, stored and returned by the retrieval verbs, never
-/// rendered into a request (`render_for_model` renders only the declared visible ones,
-/// [`crate::row_attrs::VISIBLE`]): what served it (the provider agent, the chat itself
+/// shown to the model (a request carries a row's content only, [`crate::model_format::map`]): what served it (the provider agent, the chat itself
 /// when it names none, and the model it ran), its token counts (`used`, #766 1.7), the
 /// `window` of the request its view was built for when the endpoint reported one, the
 /// price of `used.pass.total`, and the request's `parts` and `totals`. What the chat
@@ -780,52 +720,33 @@ impl Caller<'_> {
     }
 }
 
-/// `messages` with the `send` how-to and the working rules of type `from` in each system
-/// message swapped, by exact match, for type `to`'s (the assembly put the pass type's there, Q16).
-fn with_howto(messages: &[Value], from: &str, to: &str) -> Vec<Value> {
-    let (was, now) = (crate::model_format::of(from), crate::model_format::of(to));
-    messages
-        .iter()
-        .map(|m| {
-            let mut m = m.clone();
-            if m["role"] == json!("system") {
-                if let Some(text) = m.get("content").and_then(Value::as_str) {
-                    let swapped = text
-                        .replace(was.howto_send, now.howto_send)
-                        .replace(was.howto_working, now.howto_working);
-                    m["content"] = Value::String(swapped);
-                }
-            }
-            m
-        })
-        .collect()
-}
-
-/// What a sequence of attempts renders its view from.
+/// What a sequence of attempts maps its view from: the messages in flight (pieces) and
+/// the chat's record.
 struct ViewOf<'a> {
     model_messages: &'a [Value],
-    model_view: &'a [Value],
-    request_parts: &'a [Value],
     meta: &'a Map<String, Value>,
 }
 
 /// How a sequence of attempts ended.
 enum Seq {
     /// An attempt with no `Bad`: its internal text (reasoning intact), its report, its
-    /// counts held for the row, whether the stream ended inside a call (`Open`), and the
-    /// sequence's window (attempt 1's).
+    /// counts held for the row, whether the stream ended inside a call (`Open`), the
+    /// sequence's window (attempt 1's), and the view it sent (mapped, no re-ask).
     Accepted {
         text: String,
         report: crate::provider::ProviderReport,
         accepted: Accepted,
         open: bool,
         window: Option<Window>,
+        sent: Vec<Value>,
     },
     /// Every attempt was malformed: each one's report, first line, in order (their
-    /// counts are in `used_pending`), and the sequence's window (attempt 1's).
+    /// counts are in `used_pending`), the sequence's window (attempt 1's), and the view
+    /// it sent.
     Stopped {
         errors: Vec<String>,
         window: Option<Window>,
+        sent: Vec<Value>,
     },
     /// A failed attempt's reply named a model of another type: the pass for it.
     Restart(Box<Pass>),
@@ -851,15 +772,11 @@ async fn attempts(
     view_of: &ViewOf<'_>,
     caller: &Caller<'_>,
 ) -> Result<Seq, GenFailure> {
-    // THE TYPED VIEW (#766): each message's content rendered for the type through the
-    // chat's render cache; role, images and cache marks carried unchanged. It holds the
-    // pass's pins until the sequence is accepted (finished) or ends otherwise (dropped).
-    let typed_view = pass.view(
-        view_of.model_messages,
-        view_of.model_view,
-        view_of.request_parts,
-        view_of.meta,
-    );
+    // THE TYPED VIEW (#766): each message mapped for the type through the chat's render
+    // cache; role, images and cache marks carried unchanged. It holds the pass's pins
+    // until the sequence is accepted (finished) or ends otherwise (dropped).
+    let typed_view = pass.view(view_of.model_messages, view_of.meta);
+    let sent = typed_view.messages.clone();
     let mut reask: Vec<Value> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
     let mut window: Option<Window> = None;
@@ -872,7 +789,7 @@ async fn attempts(
             Ok(stream) => stream,
             Err(e) => return Err(abort_parts(caller.parts, e).await),
         };
-        let mut reader = pass.reader.outbound();
+        let mut reader = pass.decl.reader.outbound();
         let mut raw = String::new();
         let mut text = String::new();
         let mut bad: Option<String> = None;
@@ -937,6 +854,7 @@ async fn attempts(
                 accepted,
                 open,
                 window,
+                sent,
             });
         };
         // a thrown-away attempt: its counts go to the next row's `turn.rejected`
@@ -971,17 +889,21 @@ async fn attempts(
         }
     }
     drop(typed_view);
-    Ok(Seq::Stopped { errors, window })
+    Ok(Seq::Stopped {
+        errors,
+        window,
+        sent,
+    })
 }
 
 /// The calibration (`calib`, `reported`) from a sequence's window: the prompt the
-/// endpoint counted over our estimate of the internal view. No window (no report) leaves
-/// both as they were.
-fn calibrate(state: &BackendState, window: Option<Window>, model_view: &[Value]) {
+/// endpoint counted over our estimate of the view it was sent (`sent`, mapped). No window
+/// (no report) leaves both as they were.
+fn calibrate(state: &BackendState, window: Option<Window>, sent: &[Value]) {
     let Some(reported) = window.map(Window::sum).filter(|n| *n > 0) else {
         return;
     };
-    let est = estimate_tokens(model_view).max(1);
+    let est = estimate_tokens(sent).max(1);
     *state.calib.lock().expect("calib poisoned") = Some(reported as f64 / est as f64);
     *state.reported.lock().expect("reported poisoned") = Some(reported);
 }
@@ -1050,7 +972,7 @@ fn retry_counts(report: &crate::provider::ProviderReport) -> Map<String, Value> 
 pub fn usage_detail(
     prompt: Option<i64>,
     completion: Option<i64>,
-    model_view: &[Value],
+    sent: &[Value],
     text: &str,
     gen_seconds: f64,
     window: i64,
@@ -1061,7 +983,7 @@ pub fn usage_detail(
             m.insert("prompt_tokens".into(), json!(n));
         }
         None => {
-            m.insert("prompt_tokens".into(), json!(estimate_tokens(model_view)));
+            m.insert("prompt_tokens".into(), json!(estimate_tokens(sent)));
             m.insert("prompt_tokens_estimated".into(), json!(true));
         }
     }

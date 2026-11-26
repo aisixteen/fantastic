@@ -1,9 +1,11 @@
 //! THE RENDER CACHE (#766, spec 1.6): each chat's own, in its RAM state only.
 //!
-//! A pass renders each message of its view for the model type ([`super::Renderer`]).
-//! A stored row's rendered text is kept under `(type, row id)` with the source it was
-//! rendered from, so a warm pass renders only its new and changed rows. Nothing of it
-//! is stored or sent; it goes with the chat's state ([`crate::state::drop_state`]).
+//! A pass maps each message of its view for the model type ([`super::map`], from the
+//! type's [`super::Decl`]). A stored row's mapped text is kept under `(type, row id)`
+//! with the source it was mapped from — the canonical bytes of what it shows
+//! ([`super::map::canonical`]) — so a warm pass maps only its new and changed rows.
+//! Nothing of it is stored or sent; it goes with the chat's state
+//! ([`crate::state::drop_state`]).
 //!
 //! What it borrows from vLLM's automatic prefix caching (design, not code): the chained
 //! key (each link covers its parent), a collision-safe hash (SHA-256) checked by a byte
@@ -13,7 +15,7 @@
 //!
 //! - **Entries.** Key `(type, row id)`. A hit needs an equal digest and then equal bytes
 //!   (the byte compare is the truth: an equal digest over other bytes is a collision,
-//!   counted, and a miss). A hit runs no adapter code. An `identity()` type has none.
+//!   counted, and a miss). A hit runs no adapter code. Every type keeps entries.
 //! - **Never cached:** the system message, the arriving message (the last), a message
 //!   with no `id` or with non-string content. They are rendered every time.
 //! - **Drops.** A row whose source changed is rendered again and its drop labelled by
@@ -29,13 +31,14 @@
 //!   releases them when dropped or finished. Over the bound the least recently used
 //!   unpinned entries go; a pinned one never does, so the bound may be exceeded until
 //!   the pass ends.
-//! - **Epoch.** `H(rule file bytes, each adapter's name and rev)`, checked at every pass:
-//!   another epoch clears every entry and chain.
+//! - **Epoch.** `H(rule file bytes, each type's name, rev, renderer rev and every
+//!   resource text it maps with)`, checked at every pass: another epoch clears every
+//!   entry and chain, so an edited text never serves stale bytes.
 //! - **Concurrency.** One mutex, taken per lookup and per insert, never across a
 //!   `render`. Two lookups that miss one key may both render: the second insert replaces
 //!   the first with equal bytes and the byte count stays exact.
 //!
-//! Every render path here is a pure function of (source, type, rev): no clock, no
+//! Every map path here is a pure function of (source, type, rev): no clock, no
 //! environment, no random value, no unordered map. The clock feeds `kept_endpoint` only.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -45,7 +48,8 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use serde_json::{json, Map, Value};
 use sha2::{Digest as _, Sha256};
 
-use super::{trace, Renderer};
+use super::map::{canonical, Shown};
+use super::{trace, Decl, Section};
 use crate::constants::CACHE_LIFETIME_SECS;
 
 /// A SHA-256 sized digest.
@@ -78,26 +82,36 @@ fn sha(parts: &[&[u8]]) -> Hash {
     h.finalize().into()
 }
 
-/// The epoch of a build: the rule file's bytes and each adapter's name and rev.
-pub(crate) fn epoch_of(rules: &[u8], renderers: &[&dyn Renderer]) -> Hash {
+/// The epoch of a build: the rule file's bytes and, for each type, its name, its rev,
+/// its call renderer's rev, and every resource text it maps with (sections, markers).
+pub(crate) fn epoch_of(rules: &[u8], decls: &[&Decl<'_>]) -> Hash {
     let mut h = Sha256::new();
-    h.update((rules.len() as u64).to_le_bytes());
-    h.update(rules);
-    for r in renderers {
-        let name = r.name().as_bytes();
-        h.update((name.len() as u64).to_le_bytes());
-        h.update(name);
-        h.update(r.rev().to_le_bytes());
+    let mut part = |b: &[u8]| {
+        h.update((b.len() as u64).to_le_bytes());
+        h.update(b);
+    };
+    part(rules);
+    for d in decls {
+        part(d.name.as_bytes());
+        part(&d.rev.to_le_bytes());
+        part(d.calls.name().as_bytes());
+        part(&d.calls.rev().to_le_bytes());
+        for s in Section::ALL {
+            part((d.texts)(s).as_bytes());
+        }
+        for (_, t) in d.markers.all() {
+            part(t.as_bytes());
+        }
     }
     h.finalize().into()
 }
 
-/// The epoch of this binary: the shipped rule file and every registered adapter.
+/// The epoch of this binary: the shipped rule file and every registered type.
 pub(crate) fn epoch() -> Hash {
     static EPOCH: OnceLock<Hash> = OnceLock::new();
     *EPOCH.get_or_init(|| {
-        let renderers: Vec<&dyn Renderer> = super::REGISTRY.iter().map(|e| e.renderer).collect();
-        epoch_of(super::rules::RULES_JSON.as_bytes(), &renderers)
+        let decls: Vec<&Decl<'_>> = super::REGISTRY.iter().collect();
+        epoch_of(super::rules::RULES_JSON.as_bytes(), &decls)
     })
 }
 
@@ -157,7 +171,7 @@ enum Rank {
 /// The rank of a row's `form` (`request_parts`). A row with no form is shown whole.
 fn rank(form: Option<&str>) -> Rank {
     match form {
-        Some("anchor" | "thought_anchor" | "stub" | "image_alt") => Rank::Reduced,
+        Some("anchor" | "stub" | "image_alt") => Rank::Reduced,
         Some("image_anchor") => Rank::Line,
         _ => Rank::Full,
     }
@@ -181,29 +195,12 @@ pub(crate) fn why(was: Option<&str>, now: Option<&str>) -> Why {
     }
 }
 
-/// Each row's `form` in the request, by row id: the `row` parts of `request_parts`.
-#[must_use]
-pub(crate) fn forms_of(parts: &[Value]) -> BTreeMap<i64, String> {
-    parts
-        .iter()
-        .filter(|p| p["part"] == json!("row"))
-        .filter_map(|p| {
-            Some((
-                p.get("ref")?.as_i64()?,
-                p.get("form")?.as_str()?.to_string(),
-            ))
-        })
-        .collect()
-}
-
 /// What a pass hands the cache beside its messages.
 pub(crate) struct Ctx<'a> {
     /// The build's epoch ([`epoch`]).
     pub(crate) epoch: Hash,
     /// The chat's bound for this pass ([`bound_of`]).
     pub(crate) bound: usize,
-    /// Each row's form in this request ([`forms_of`]).
-    pub(crate) forms: &'a BTreeMap<i64, String>,
     /// The model id of the pass.
     pub(crate) model: Option<&'a str>,
     /// The chat's `provider_id`.
@@ -214,13 +211,13 @@ pub(crate) struct Ctx<'a> {
 
 type Key = (&'static str, i64);
 
-/// One row's rendered text for one type.
+/// One row's mapped text for one type.
 struct Entry {
-    /// The row's text as sent (`model_text`).
-    source: String,
+    /// What the row shows, canonical ([`canonical`]).
+    source: Vec<u8>,
     /// The source's digest.
     digest: Hash,
-    /// The source rendered for the type.
+    /// The source mapped for the type.
     rendered: String,
     /// The row's form when the entry was last used.
     form: Option<String>,
@@ -399,20 +396,18 @@ impl<H: Hasher> RenderCache<H> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// The view of one pass, for `renderer`'s type: `model_view` (what
-    /// `render_for_model` gave) with each message's content rendered, `messages` (the
-    /// same messages before it, with their `id`) naming the rows. `role`, `images` and
-    /// `cache_mark` are carried unchanged. The returned [`View`] holds the pass's pins
-    /// until it is finished or dropped.
+    /// The view of one pass, for `decl`'s type: each message of `shown` mapped for the
+    /// chat `own` ([`super::map::message`]); `role`, `images` and `cache_mark` are carried
+    /// unchanged. The returned [`View`] holds the pass's pins until it is finished or
+    /// dropped.
     pub(crate) fn view<'c>(
         &'c self,
-        renderer: &dyn Renderer,
-        messages: &[Value],
-        model_view: &[Value],
+        decl: &Decl<'_>,
+        own: &str,
+        shown: &[Shown],
         ctx: &Ctx<'_>,
     ) -> View<'c, H> {
-        let kind = renderer.name();
-        let identity = renderer.identity();
+        let kind = decl.name;
         let (pass, kept_chain, last) = {
             let mut inner = self.lock();
             if inner.epoch != Some(ctx.epoch) {
@@ -429,13 +424,13 @@ impl<H: Hasher> RenderCache<H> {
         let mut view = View {
             cache: self,
             kind,
-            messages: Vec::with_capacity(model_view.len()),
+            messages: Vec::with_capacity(shown.len()),
             rows: 0,
             kept: 0,
             kept_endpoint: 0,
             cold: true,
             dropped: Vec::new(),
-            links: Vec::with_capacity(model_view.len()),
+            links: Vec::with_capacity(shown.len()),
             in_view: BTreeSet::new(),
             pins: Vec::new(),
             bound: ctx.bound,
@@ -443,32 +438,20 @@ impl<H: Hasher> RenderCache<H> {
             provider_id: ctx.provider_id.map(str::to_string),
         };
         let mut hits = 0usize;
-        let arriving = model_view.len().saturating_sub(1);
-        view.in_view = (0..model_view.len())
-            .filter_map(|i| messages.get(i)?.get("id")?.as_i64())
-            .collect();
-        for (i, m) in model_view.iter().enumerate() {
-            let mut out = m.clone();
-            let id = messages
-                .get(i)
-                .and_then(|r| r.get("id"))
-                .and_then(Value::as_i64);
-            let form = id.and_then(|id| ctx.forms.get(&id)).map(String::as_str);
-            let text = m.get("content").and_then(Value::as_str);
-            let cacheable = !identity
-                && i != arriving
-                && m.get("role").and_then(Value::as_str) != Some("system")
-                && text.is_some();
-            match (identity, cacheable, id, text) {
-                (true, ..) => {}
-                (false, true, Some(id), Some(text)) => {
+        let arriving = shown.len().saturating_sub(1);
+        view.in_view = shown.iter().filter_map(|s| s.id).collect();
+        for (i, s) in shown.iter().enumerate() {
+            let form = s.form.as_deref();
+            let cacheable = i != arriving && s.role != "system" && s.is_text();
+            let content = match (cacheable, s.id) {
+                (true, Some(id)) => {
                     let (rendered, hit) =
-                        self.row(renderer, &mut view, (kind, id), text, form, pass, ctx.bound);
+                        self.row(decl, own, &mut view, (kind, id), s, form, pass, ctx.bound);
                     hits += usize::from(hit);
                     view.rows += usize::from(!hit);
-                    out["content"] = Value::String(rendered);
+                    Value::String(rendered)
                 }
-                (false, _, id, text) => {
+                (_, id) => {
                     // an entry for a row that can no longer be cached is dropped
                     if let Some(id) = id {
                         let mut inner = self.lock();
@@ -482,25 +465,19 @@ impl<H: Hasher> RenderCache<H> {
                             view.dropped.push((id, w));
                         }
                     }
-                    if let Some(text) = text {
-                        out["content"] = Value::String(renderer.render(text));
-                    }
+                    super::map::content(decl, own, s)
                 }
-            }
-            view.messages.push(out);
+            };
+            view.messages.push(super::map::message_with(s, content));
         }
-        // THE CHAIN, over the rendered view
+        // THE CHAIN, over the mapped view
         let epoch = ctx.epoch;
         for (i, m) in view.messages.iter().enumerate() {
             let digest = message_digest(m);
             let link = match view.links.last() {
                 None => sha(&[&epoch, kind.as_bytes(), &digest]),
                 Some(prev) => {
-                    let id = messages
-                        .get(i)
-                        .and_then(|r| r.get("id"))
-                        .and_then(Value::as_i64)
-                        .unwrap_or(0);
+                    let id = shown.get(i).and_then(|s| s.id).unwrap_or(0);
                     sha(&[prev, &id.to_le_bytes(), &digest])
                 }
             };
@@ -522,33 +499,31 @@ impl<H: Hasher> RenderCache<H> {
             .last_send
             .is_some_and(|t| (self.clock)() - t <= CACHE_LIFETIME_SECS);
         view.kept_endpoint = if same_endpoint && warm { view.kept } else { 0 };
-        view.cold = if identity {
-            kept_chain.is_none()
-        } else {
-            hits == 0
-        };
+        view.cold = hits == 0;
         view
     }
 
-    /// One cacheable row: its rendered text, and whether it was a hit.
+    /// One cacheable row: its mapped text, and whether it was a hit.
     #[allow(clippy::too_many_arguments)]
     fn row(
         &self,
-        renderer: &dyn Renderer,
+        decl: &Decl<'_>,
+        own: &str,
         view: &mut View<'_, H>,
         key: Key,
-        text: &str,
+        shown: &Shown,
         form: Option<&str>,
         pass: u64,
         bound: usize,
     ) -> (String, bool) {
-        let digest = H::digest(text.as_bytes());
+        let source = canonical(shown);
+        let digest = H::digest(&source);
         {
             let mut inner = self.lock();
             let found = inner
                 .entries
                 .get(&key)
-                .map(|e| (e.digest == digest, e.source == text, e.form.clone()));
+                .map(|e| (e.digest == digest, e.source == source, e.form.clone()));
             match found {
                 Some((true, true, _)) => {
                     let e = inner.entries.get_mut(&key).expect("found");
@@ -569,13 +544,16 @@ impl<H: Hasher> RenderCache<H> {
                 None => {}
             }
         }
-        // rendered with no lock held
-        let rendered = renderer.render(text);
+        // mapped with no lock held
+        let rendered = match super::map::content(decl, own, shown) {
+            Value::String(s) => s,
+            other => other.to_string(),
+        };
         let mut inner = self.lock();
         inner.insert(
             key,
             Entry {
-                source: text.to_string(),
+                source,
                 digest,
                 rendered: rendered.clone(),
                 form: form.map(str::to_string),
@@ -656,7 +634,7 @@ pub(crate) struct Stats {
     pub(crate) passes: u64,
 }
 
-/// The digest of one rendered message: its role and its content.
+/// The digest of one mapped message: its role and its content.
 fn message_digest(m: &Value) -> Hash {
     let role = m.get("role").and_then(Value::as_str).unwrap_or("");
     let content = match m.get("content") {
@@ -673,7 +651,7 @@ fn message_digest(m: &Value) -> Hash {
 pub(crate) struct View<'c, H: Hasher = Sha> {
     cache: &'c RenderCache<H>,
     kind: &'static str,
-    /// The messages to send: rendered content, every other key as given.
+    /// The messages to send: role, mapped content, images and cache mark.
     pub(crate) messages: Vec<Value>,
     /// Rows rendered now (inserts and drops).
     pub(crate) rows: usize,
@@ -681,7 +659,7 @@ pub(crate) struct View<'c, H: Hasher = Sha> {
     pub(crate) kept: usize,
     /// `kept`, or 0 when the endpoint's cache cannot hold it.
     pub(crate) kept_endpoint: usize,
-    /// No entry of this type was hit (an identity type: none of its passes finished).
+    /// No entry of this type was hit.
     pub(crate) cold: bool,
     /// The drops so far, in order: `(row id, why)`.
     pub(crate) dropped: Vec<(i64, Why)>,

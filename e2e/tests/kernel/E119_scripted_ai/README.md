@@ -20,8 +20,8 @@ then an envelope with text outside a tag (the second re-ask adds it and its faul
 call only inside the thought (accepted, not dispatched; the no-call reminder comes back;
 the stored history has no thought) → a plain answer with `done` (no further request). After
 the accepted attempt no request and no stored row holds either failed attempt or a report.
-A thought shows in the next request as its autofold anchor (`[thought ~N tokens · id N]`,
-#556). The checks are listed in `probe.py`'s docstring.
+A thought shows in the next request as its autofold marker (`<thought id="N" tokens="…"/>`,
+#556, map-once) at the top of the next user-side message, never in an assistant message. The checks are listed in `probe.py`'s docstring.
 
 ```sh
 cd src/lib/python

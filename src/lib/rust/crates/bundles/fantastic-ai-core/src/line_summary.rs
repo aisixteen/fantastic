@@ -32,9 +32,6 @@ pub const CALL: &str = "line_summary";
 /// The event a new line publishes on the chat's own inbox.
 pub const EVENT: &str = "line_summary_changed";
 
-/// The one line the system block carries when the call is offered.
-pub const HOWTO: &str = "When your work changes, write a `line_summary` call: what you are doing now, one short line in `text`.";
-
 /// How many rows a boot reads per page while it looks for the last line.
 const PAGE: u64 = 64;
 

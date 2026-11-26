@@ -1,0 +1,3 @@
+<tool_response>
+{"thought": "folded", "id": {id}, "tokens": {tokens}, "unfold": {"name": "send", "arguments": {"routing": {"target_id": {self_q}}, "payload": {"type": "recall", "id": {id}}}}}
+</tool_response>

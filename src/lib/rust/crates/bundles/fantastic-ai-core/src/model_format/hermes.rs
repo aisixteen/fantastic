@@ -38,7 +38,7 @@
 use serde_json::{Map, Value};
 
 use super::stream::{Body, Piece, Scanner};
-use super::{default, fill, Out, Outbound, Reader, Renderer};
+use super::{default, fill, Markers, Out, Outbound, Reader, Renderer, Section};
 use crate::history_view::{parse_reply_tag, reply_blocks};
 use crate::think::without_thinking;
 use crate::tool_parse::grammar::{code_masked, envelopes, envelopes_in, parse_call, ROUTING};
@@ -52,6 +52,32 @@ pub(crate) const NAME: &str = "hermes";
 pub(crate) const HOWTO_SEND: &str = include_str!("res/hermes/howto_send.txt");
 /// The working rules in this type's call form (`<tool_call>` blocks).
 pub(crate) const HOWTO_WORKING: &str = include_str!("res/hermes/howto_working.txt");
+/// What `reflect` is, in this type's form: `{detail}`, its declaration's detailed text.
+pub(crate) const HOWTO_REFLECT: &str = include_str!("res/hermes/howto_reflect.txt");
+/// The context window in this type's form: the default text's facts, no other.
+pub(crate) const HOWTO_CONTEXT: &str = include_str!("res/hermes/howto_context.txt");
+/// Titling calls in this type's form.
+pub(crate) const HOWTO_TITLES: &str = include_str!("res/hermes/howto_titles.txt");
+/// Replies as rows in this type's form.
+pub(crate) const HOWTO_ASYNC: &str = include_str!("res/hermes/howto_async.txt");
+/// The markers: a JSON line inside `<tool_response>` (the keep cue a `<tool_call>`), each
+/// naming its row's id and the `recall` call.
+pub(crate) const MARKERS: Markers = Markers {
+    folded_reply: include_str!("res/hermes/marker_folded_reply.txt"),
+    folded_reply_kept: include_str!("res/hermes/marker_folded_reply_kept.txt"),
+    folded_recall: include_str!("res/hermes/marker_folded_recall.txt"),
+    folded_recall_kept: include_str!("res/hermes/marker_folded_recall_kept.txt"),
+    thought: include_str!("res/hermes/marker_thought.txt"),
+    stub: include_str!("res/hermes/marker_stub.txt"),
+    image_anchor: include_str!("res/hermes/marker_image_anchor.txt"),
+    image_alt: include_str!("res/hermes/marker_image_alt.txt"),
+    keep_cue: include_str!("res/hermes/marker_keep_cue.txt"),
+    notice_head: super::NOTICE_HEAD,
+    notice_summary: super::NOTICE_SUMMARY,
+    notice_omitted: super::NOTICE_OMITTED,
+    notice_stripped: super::NOTICE_STRIPPED,
+    notice_tail: include_str!("res/hermes/notice_tail.txt"),
+};
 /// The call form, in one sentence: swapped for [`default::FORM`].
 pub(crate) const FORM: &str = include_str!("res/hermes/form.txt");
 /// The placeholder form of a call opener: swapped for [`default::FORM_OPEN`] (Q22).
@@ -111,6 +137,27 @@ fn swaps() -> [(&'static str, &'static str); 3] {
     ]
 }
 
+/// This type's text of a section.
+pub(crate) fn texts(s: Section) -> &'static str {
+    match s {
+        Section::Send => HOWTO_SEND,
+        Section::Reflect => HOWTO_REFLECT,
+        Section::Context => HOWTO_CONTEXT,
+        Section::Titles => HOWTO_TITLES,
+        Section::Async => HOWTO_ASYNC,
+        Section::Working => HOWTO_WORKING,
+        Section::StopReason => STOP_REASON,
+        shared => super::shared_text(shared).expect("a shared section"),
+    }
+}
+
+/// A value as one JSON string, as the call form writes it.
+pub(crate) fn quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    write_str(s, &mut out);
+    out
+}
+
 // ── the pair ─────────────────────────────────────────────────────────────────
 
 /// The `hermes` type: both halves, one value.
@@ -124,10 +171,6 @@ impl Renderer for Hermes {
 
     fn rev(&self) -> u32 {
         1
-    }
-
-    fn identity(&self) -> bool {
-        false
     }
 
     fn render(&self, text: &str) -> String {

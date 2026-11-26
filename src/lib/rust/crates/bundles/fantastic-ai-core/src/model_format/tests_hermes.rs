@@ -15,7 +15,7 @@ use super::hermes::{
     REPORT_BLOCK, REPORT_FOREIGN, REPORT_JSON, REPORT_MULTI, REPORT_NOT_A_TOOL, REPORT_NO_OPENER,
     REPORT_NO_TARGET, REPORT_PAYLOAD, REPORT_ROUTING, REPORT_ROUTING_KEY, REPORT_STOP_REASON,
 };
-use super::{entry, fill, Out, Reader, Renderer};
+use super::{declared, fill, Out, Reader, Renderer};
 use crate::tool_parse::grammar::ROUTING;
 use crate::tool_parse::{extract_tool_calls, render_call, TOOLS};
 
@@ -996,9 +996,16 @@ fn key_order_stable() {
 // H6: the `keep` template on the arriving message is a call in the hermes form.
 #[test]
 fn keep_template_rendered() {
-    let marked = crate::history_view::mark_keep("[reply to 7 · ai recall]\nold text");
-    assert!(marked.contains("<call name=\"keep\">"), "{marked}");
-    let h = Hermes.render(&marked);
+    let marked = crate::history_view::mark_keep(
+        serde_json::json!({"role": "user", "content": "[reply to 7 · ai recall]\nold text"}),
+    );
+    let pieces = super::map::pieces_of(&marked);
+    assert_eq!(
+        pieces.last(),
+        Some(&super::map::Piece::KeepCue { pid: 7 }),
+        "{marked}"
+    );
+    let h = super::map::row(super::of(NAME), "ai", &pieces);
     assert!(!h.contains("<call name="), "{h}");
     assert!(
         h.contains("<tool_call>\n{\"name\": \"keep\", \"arguments\": {\"of\": \"7\", \"summary\": \"…\"}}\n</tool_call>"),
@@ -1388,11 +1395,10 @@ fn stream_ends_mid_call() {
 
 #[test]
 fn registered_with_its_howto() {
-    let e = entry(NAME).expect("hermes is registered");
-    assert_eq!(e.renderer.name(), NAME);
-    assert!(!e.renderer.identity());
-    assert_eq!(e.renderer.rev(), 1);
-    assert_eq!(e.howto_send, HOWTO_SEND);
+    let e = declared(NAME).expect("hermes is registered");
+    assert_eq!(e.calls.name(), NAME);
+    assert_eq!(e.calls.rev(), 1);
+    assert_eq!((e.texts)(super::Section::Send), HOWTO_SEND);
     assert!(HOWTO_SEND.starts_with("## Reaching other agents\n"));
     // the `<tools>` block names the seven tools, one signature per line
     let tools: Vec<&str> = HOWTO_SEND
@@ -1435,10 +1441,27 @@ fn registered_with_its_howto() {
 /// first `<tool_call>`). The default type's rules are the internal ones, unchanged.
 #[test]
 fn the_working_rules_name_the_type_s_call_form() {
-    let h = super::of(super::hermes::NAME).howto_working;
-    assert!(!h.contains("<call"), "hermes working rules teach the internal form: {h}");
+    let h = (super::of(super::hermes::NAME).texts)(super::Section::Working);
+    assert!(
+        !h.contains("<call"),
+        "hermes working rules teach the internal form: {h}"
+    );
     assert!(h.contains("<tool_call>"), "{h}");
     assert!(h.contains("before your first `<tool_call>`"), "{h}");
-    assert_eq!(super::of(super::DEFAULT).howto_working, crate::assembly::WORKING_HOWTO);
-    assert_ne!(h, crate::assembly::WORKING_HOWTO);
+    let d = (super::of(super::DEFAULT).texts)(super::Section::Working);
+    assert_eq!(d, super::default::HOWTO_WORKING);
+    assert_ne!(h, d);
+}
+
+/// A message whose first block is a reply block: that block's body is wrapped in
+/// `<tool_response>` like every other block's (with no time head above it, nothing hides
+/// the first block's tag line).
+#[test]
+fn the_first_reply_block_of_a_message_is_wrapped() {
+    let text = "[reply to 5 · notes read]\nbody one\n\n[reply to 6 · notes list]\nbody two";
+    assert_eq!(
+        Hermes.render(text),
+        "[reply to 5 · notes read]\n<tool_response>\nbody one\n</tool_response>\n\n\
+         [reply to 6 · notes list]\n<tool_response>\nbody two\n</tool_response>"
+    );
 }

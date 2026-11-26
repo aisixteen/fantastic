@@ -166,7 +166,10 @@ pub(crate) async fn refresh(agent_id: &AgentId, kernel: &Arc<Kernel>, state: &Ba
         })
         .map(|o| &o.result);
     // the model the provider names is a source of the chat's call format (#766)
-    if let Some(m) = answered.and_then(|r| r.get("model")).and_then(Value::as_str) {
+    if let Some(m) = answered
+        .and_then(|r| r.get("model"))
+        .and_then(Value::as_str)
+    {
         crate::model_format::rules::note_seen(state, m);
     }
     let capabilities = match answered {
@@ -466,45 +469,42 @@ fn name_of(part: &Value, info: &[Value]) -> String {
 }
 
 /// `message` as the request carries it in `form`: `Image` and `Recalled` keep the parts on
-/// the message (the provider remaps them to its wire), `Anchor` and `Alt` leave the text a
-/// line per image after it. The form is noted on the message as `image_form`, for the
-/// request's `attributes.parts` (the render for the model drops it).
+/// the message (the provider remaps them to its wire), `Anchor` and `Alt` leave a
+/// [`Piece::Image`] per image after its text (the type's line for it is written by the
+/// map). The form is noted on the message as `image_form`, for the request's
+/// `attributes.parts`.
 pub(crate) fn render(mut message: Value, info: &[Value], row_id: Option<i64>, form: Form) -> Value {
+    use crate::model_format::map::{pieces_of, with_pieces, ImageForm, Piece};
     let parts = parts_of(&message).cloned().unwrap_or_default();
-    let lines: Vec<String> = parts
-        .iter()
-        .map(|p| {
+    let shown = match form {
+        Form::Anchor => Some(ImageForm::Anchor),
+        Form::Alt => Some(ImageForm::Alt),
+        Form::Image | Form::Recalled => None,
+    };
+    if let Some(how) = shown {
+        let mut pieces = pieces_of(&message);
+        pieces.extend(parts.iter().map(|p| {
             let n = |k: &str| p.get(k).and_then(Value::as_u64).unwrap_or(0);
-            match form {
-                Form::Anchor => format!(
-                    "[image \u{b7} {}\u{d7}{} \u{b7} {} \u{b7} ~{} tokens \u{b7} id {}]",
-                    n("width"),
-                    n("height"),
-                    p.get("media_type").and_then(Value::as_str).unwrap_or(""),
-                    tokens(n("width") as u32, n("height") as u32),
-                    row_id.map_or_else(String::new, |i| i.to_string()),
-                ),
-                _ => format!(
-                    "[image: {} \u{b7} {}\u{d7}{} \u{b7} not shown to this model]",
-                    name_of(p, info),
-                    n("width"),
-                    n("height"),
-                ),
+            Piece::Image {
+                form: how,
+                id: row_id,
+                name: name_of(p, info),
+                width: n("width"),
+                height: n("height"),
+                media_type: p
+                    .get("media_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                tokens: tokens(n("width") as u32, n("height") as u32),
             }
-        })
-        .collect();
-    if let Some(m) = message.as_object_mut() {
-        if matches!(form, Form::Anchor | Form::Alt) {
+        }));
+        if let Some(m) = message.as_object_mut() {
             m.remove("images");
-            let text = m.get("content").and_then(Value::as_str).unwrap_or("");
-            let joined = lines.join("\n");
-            let content = if text.is_empty() {
-                joined
-            } else {
-                format!("{text}\n{joined}")
-            };
-            m.insert("content".into(), json!(content));
         }
+        message = with_pieces(message, &pieces);
+    }
+    if let Some(m) = message.as_object_mut() {
         m.insert("image_form".into(), json!(form.name()));
     }
     message

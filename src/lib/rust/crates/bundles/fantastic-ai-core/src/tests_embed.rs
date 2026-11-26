@@ -5,7 +5,8 @@
 use super::*;
 
 async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    kernel.operator_send(vec![Item::new(AgentId::from(target), payload)])
+    kernel
+        .operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -202,6 +203,7 @@ async fn embed_rows_never_reach_the_prompt() {
                 &kernel,
                 "probe",
                 crate::caching::Caching::ProviderCache,
+                &crate::row_attrs::Stamp::now(),
             ),
         )
         .await

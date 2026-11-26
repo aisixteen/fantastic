@@ -2,7 +2,7 @@
 //! the qwen rules of 2026-11-25).
 
 use super::rules::{default_in, first_set, load, model_of_with, note_seen, shipped, type_of};
-use super::{entry, DEFAULT, REGISTRY};
+use super::{declared, DEFAULT, REGISTRY};
 use fantastic_kernel::AgentId;
 use serde_json::{json, Map, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -152,7 +152,7 @@ fn shipped_rules_load() {
     assert!(!rules.rules.is_empty());
     assert_eq!(rules.source, super::rules::RULES_JSON);
     for r in &rules.rules {
-        assert!(entry(r.kind).is_some(), "{} is not registered", r.kind);
+        assert!(declared(r.kind).is_some(), "{} is not registered", r.kind);
     }
     let names: Vec<&str> = REGISTRY.iter().map(|e| e.name).collect();
     assert_eq!(names, ["default", "hermes"]);
@@ -189,20 +189,52 @@ fn qwen_rules_each_and_order() {
     let rules = shipped();
     for (id, want, why) in [
         // 1 before 5: qwen3-coder holds `qwen3`
-        ("Qwen/Qwen3-Coder-30B-A3B-Instruct", "default", "qwen3-coder before qwen3"),
+        (
+            "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+            "default",
+            "qwen3-coder before qwen3",
+        ),
         // 2 before 5: embedding / reranker ids hold `qwen3`
-        ("Qwen/Qwen3-Embedding-0.6B", "default", "embedding before qwen3"),
-        ("Qwen/Qwen3-Reranker-0.6B", "default", "reranker before qwen3"),
+        (
+            "Qwen/Qwen3-Embedding-0.6B",
+            "default",
+            "embedding before qwen3",
+        ),
+        (
+            "Qwen/Qwen3-Reranker-0.6B",
+            "default",
+            "reranker before qwen3",
+        ),
         // 2 for an id of another family
         ("bge-reranker-v2-m3", "default", "reranker"),
         // 3 before 7: each holds `qwen2.5`
-        ("Qwen/Qwen2.5-VL-7B-Instruct", "default", "qwen2.5-vl before qwen2.5"),
-        ("Qwen/Qwen2.5-Omni-7B", "default", "qwen2.5-omni before qwen2.5"),
-        ("Qwen/Qwen2.5-Math-7B-Instruct", "default", "qwen2.5-math before qwen2.5"),
+        (
+            "Qwen/Qwen2.5-VL-7B-Instruct",
+            "default",
+            "qwen2.5-vl before qwen2.5",
+        ),
+        (
+            "Qwen/Qwen2.5-Omni-7B",
+            "default",
+            "qwen2.5-omni before qwen2.5",
+        ),
+        (
+            "Qwen/Qwen2.5-Math-7B-Instruct",
+            "default",
+            "qwen2.5-math before qwen2.5",
+        ),
         // 4: the id holds `qwen`, which no later rule matches alone
-        ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", "default", "deepseek-r1-distill"),
+        (
+            "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+            "default",
+            "deepseek-r1-distill",
+        ),
         // 4 before 7: a distill of a qwen2.5 base
-        ("deepseek-r1-distill-qwen2.5-7b", "default", "deepseek-r1-distill before qwen2.5"),
+        (
+            "deepseek-r1-distill-qwen2.5-7b",
+            "default",
+            "deepseek-r1-distill before qwen2.5",
+        ),
         // 5
         ("Qwen/Qwen3-8B", "hermes", "qwen3"),
         ("Qwen/Qwen3-30B-A3B-Instruct-2507", "hermes", "qwen3"),
@@ -234,13 +266,24 @@ fn qwen_rules_each_and_order() {
         ("qwen2.5-vl", "qwen2.5", "qwen2.5-vl-7b"),
         ("qwen2.5-omni", "qwen2.5", "qwen2.5-omni-7b"),
         ("qwen2.5-math", "qwen2.5", "qwen2.5-math-7b"),
-        ("deepseek-r1-distill", "qwen2.5", "deepseek-r1-distill-qwen2.5-7b"),
+        (
+            "deepseek-r1-distill",
+            "qwen2.5",
+            "deepseek-r1-distill-qwen2.5-7b",
+        ),
     ] {
         let pos = |c: &str| rules.rules.iter().position(|r| r.contains == c).unwrap();
         assert!(pos(first) < pos(then), "{first} before {then}");
         let hit = |r: &super::rules::Rule| id.contains(r.contains.as_str());
-        assert!(hit(&rules.rules[pos(first)]) && hit(&rules.rules[pos(then)]), "{id}");
-        assert_ne!(rules.rules[pos(first)].kind, rules.rules[pos(then)].kind, "{id}");
+        assert!(
+            hit(&rules.rules[pos(first)]) && hit(&rules.rules[pos(then)]),
+            "{id}"
+        );
+        assert_ne!(
+            rules.rules[pos(first)].kind,
+            rules.rules[pos(then)].kind,
+            "{id}"
+        );
     }
 }
 

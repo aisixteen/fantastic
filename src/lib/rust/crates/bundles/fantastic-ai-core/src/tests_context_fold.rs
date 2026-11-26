@@ -13,7 +13,8 @@ const DONE: &str = "<call name=\"done\"></call>";
 
 /// One verb sent to the agent; its result.
 async fn verb(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    kernel.operator_send(vec![Item::new(agent.clone(), payload)])
+    kernel
+        .operator_send(vec![Item::new(agent.clone(), payload)])
         .await
         .remove(0)
         .result
@@ -55,6 +56,7 @@ async fn messages(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
             kernel,
             "c",
             crate::caching::Caching::ProviderCache,
+            &crate::row_attrs::Stamp::now(),
         ),
     )
     .await

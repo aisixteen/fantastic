@@ -12,7 +12,8 @@ use fantastic_kernel::test_support::as_agent;
 const DONE: &str = "<call name=\"done\"></call>";
 
 async fn verb(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    kernel.operator_send(vec![Item::new(agent.clone(), payload)])
+    kernel
+        .operator_send(vec![Item::new(agent.clone(), payload)])
         .await
         .remove(0)
         .result
@@ -83,6 +84,7 @@ async fn messages(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
             kernel,
             "c",
             crate::caching::Caching::ProviderCache,
+            &crate::row_attrs::Stamp::now(),
         ),
     )
     .await
@@ -321,8 +323,16 @@ async fn the_fork_has_the_parents_card_and_grants() {
         assert!(f.get(key).is_some(), "{key} is on the card");
     }
     let (pa, fa) = (
-        kernel.resolve_target(parent.as_str()).unwrap().handler_module.clone(),
-        kernel.resolve_target(fork.as_str()).unwrap().handler_module.clone(),
+        kernel
+            .resolve_target(parent.as_str())
+            .unwrap()
+            .handler_module
+            .clone(),
+        kernel
+            .resolve_target(fork.as_str())
+            .unwrap()
+            .handler_module
+            .clone(),
     );
     assert_eq!(pa, fa, "the same handler");
     // a name and an id are taken as given
@@ -345,7 +355,12 @@ async fn fork_is_all_or_nothing_on_a_store_refusal() {
     let (kernel, parent) = mk_kernel(&tmp, "fk_refused").await;
     let all = three_turns(&kernel, &parent).await;
     // the store lets the parent read and prune, not append: the fork inherits that
-    fantastic_kernel::test_support::grant(&kernel, parent.as_str(), MEMORY, json!({"call": ["read", "prune"]}));
+    fantastic_kernel::test_support::grant(
+        &kernel,
+        parent.as_str(),
+        MEMORY,
+        json!({"call": ["read", "prune"]}),
+    );
     let out = verb(
         &kernel,
         &parent,
@@ -375,12 +390,7 @@ async fn the_forks_prompt_equals_the_parents_for_the_same_prefix() {
     // the reference: the same record, only the rows up to `at` — the prompt the
     // parent sent for that prefix
     let file = format!("ff_{}", id_for(&tmp, "fk_prompt_ref"));
-    add_file_bridge(
-        &kernel,
-        &file,
-        &tmp.path().join(".fantastic").join("ref"),
-    )
-    .await;
+    add_file_bridge(&kernel, &file, &tmp.path().join(".fantastic").join("ref")).await;
     let reference = add_backend(&kernel, &id_for(&tmp, "fk_prompt_ref"), &file).await;
 
     // turn one, a fold of it, turn two with the view row written before its answer
@@ -435,7 +445,8 @@ async fn the_forks_prompt_equals_the_parents_for_the_same_prefix() {
     };
     // one short record prompt for both: the default block names each agent's own id
     for a in [&fork, &reference] {
-        let _ = kernel.operator_send(vec![Item::new(
+        let _ = kernel
+            .operator_send(vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({"type": "update_agent", "id": a.as_str(), "system_prompt": "sys"}),
             )])
