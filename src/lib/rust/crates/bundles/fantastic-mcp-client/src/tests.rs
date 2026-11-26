@@ -698,7 +698,9 @@ async fn a_line_names_tools_like_verbs() {
     })
     .await;
     assert_eq!(ok.status, Status::Completed, "{}", ok.result);
-    assert_eq!(no.result["reason"], "unknown_agent", "a verb the line does not name: the unknown answer");
+    // the caller sees the connector through its line, so the tool it lacks is named
+    assert_eq!(no.result["reason"], "not_allowed", "a tool the line does not name: {}", no.result);
+    assert_eq!(no.result["arg"], "fail", "{}", no.result);
 }
 
 #[test]

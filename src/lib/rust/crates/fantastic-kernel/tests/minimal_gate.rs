@@ -236,6 +236,16 @@ fn unknown(id: &str) -> Value {
     fantastic_kernel::unknown_agent(id)
 }
 
+/// The refusal of an act on a target the caller sees: `not_allowed` naming
+/// `arg`, with a hint and no side or ids (#783).
+fn names(r: &Value, arg: &str) -> bool {
+    r["reason"] == "not_allowed"
+        && r["arg"] == arg
+        && r["hint"].is_string()
+        && r.get("side").is_none()
+        && r.get("ids").is_none()
+}
+
 /// The call reached the target (its handler answered).
 fn reached(out: &Outcome, id: &str) -> bool {
     out.result.get("ok").and_then(Value::as_str) == Some(id)
@@ -274,10 +284,9 @@ async fn one_line_in_the_callers_can_is_the_whole_edge() {
     let out = as_agent(&k, "a", "b", json!({"type": "ping"})).await;
     assert!(reached(&out, "b"), "{}", out.result);
     assert!(k.resolve_target("b").unwrap().record().meta.get("can").is_none());
-    // a verb the line does not name: the unknown answer, no `side`
+    // a verb the line does not name: a sees b, so the verb is named, no `side`
     let out = as_agent(&k, "a", "b", json!({"type": "send"})).await;
-    assert_eq!(out.result, unknown("b"));
-    assert!(out.result.get("side").is_none());
+    assert!(names(&out.result, "send"), "{}", out.result);
     // the other way: b holds no line on a
     let out = as_agent(&k, "b", "a", json!({"type": "ping"})).await;
     assert_eq!(out.result, unknown("a"));
@@ -405,9 +414,9 @@ async fn a_create_line_on_itself_creates_under_itself() {
     let r = create_as(&k, "a", "a", "kid", MOD).await;
     assert_eq!(r["id"], "kid", "{r}");
     assert_eq!(k.resolve_target("kid").unwrap().parent_id, Some(AgentId::from("a")));
-    // `call *` on the root creates nothing
+    // `call *` on the root creates nothing (b sees the root: the bundle is named)
     let r = create_as(&k, "b", "kernel_state", "nope", MOD).await;
-    assert_eq!(r, unknown("kernel_state"));
+    assert!(names(&r, "handler_module"), "{r}");
     assert!(!k.exists("nope"));
 }
 
@@ -427,19 +436,15 @@ async fn create_star_on_the_root_never_reaches_self_or_ancestors() {
     assert_eq!(r["id"], "x", "{r}");
     let upd = |id: &str, field: &str| json!({"type": "update_agent", "id": id, field: {"x": {"call": ["ping"]}}});
     // never upward: its own `can`, the root, its own delete
-    assert_eq!(
-        as_agent(&k, "a", "kernel", upd("a", "can")).await.result,
-        unknown("a")
-    );
-    assert_eq!(
-        as_agent(&k, "a", "kernel", json!({"type": "update_agent", "id": "kernel_state", "description": "x"}))
-            .await
-            .result,
-        unknown("kernel_state")
-    );
+    let r = as_agent(&k, "a", "kernel", upd("a", "can")).await.result;
+    assert!(names(&r, "can"), "{r}");
+    let r = as_agent(&k, "a", "kernel", json!({"type": "update_agent", "id": "kernel_state", "description": "x"}))
+        .await
+        .result;
+    assert!(names(&r, "description"), "{r}");
     for id in ["a", "kernel_state"] {
         let r = as_agent(&k, "a", "kernel", json!({"type": "delete_agent", "id": id})).await.result;
-        assert_eq!(r["reason"], "unknown_agent", "{id}: {r}");
+        assert!(names(&r, "delete"), "{id}: {r}");
         assert_eq!(r["deleted"], false, "{id}: {r}");
     }
     // a sibling it selects goes
@@ -587,7 +592,7 @@ async fn chat_never_updates_its_own_can() {
     )
     .await
     .result;
-    assert_eq!(r, unknown("chat_a"));
+    assert!(names(&r, "can"), "{r}");
     assert!(k.resolve_target("chat_a").unwrap().record().meta["can"]
         .get("credentials")
         .is_none());
@@ -604,11 +609,11 @@ async fn chat_never_updates_or_deletes_canvas_root() {
     )
     .await
     .result;
-    assert_eq!(r, unknown("canvas_root"));
+    assert!(names(&r, "description"), "{r}");
     let r = as_agent(&k, "chat_a", "kernel", json!({"type": "delete_agent", "id": "canvas_root"}))
         .await
         .result;
-    assert_eq!(r["reason"], "unknown_agent", "{r}");
+    assert!(names(&r, "delete"), "{r}");
     assert_eq!(r["deleted"], false);
     assert!(k.exists("canvas_root"));
 }
@@ -631,17 +636,16 @@ async fn parent_line_gives_send_on_the_parent_and_no_create() {
         &as_agent(&k, "t1_w1", "t1_lead", json!({"type": "send"})).await,
         "t1_lead"
     ));
-    assert_eq!(
-        as_agent(&k, "t1_w1", "t1_lead", json!({"type": "ping"})).await.result,
-        unknown("t1_lead")
-    );
+    let r = as_agent(&k, "t1_w1", "t1_lead", json!({"type": "ping"})).await.result;
+    assert!(names(&r, "ping"), "{r}");
     // nothing on the grandparent
     assert_eq!(
         as_agent(&k, "t1_w1", "team_1", json!({"type": "send"})).await.result,
         unknown("team_1")
     );
     let r = create_as(&k, "t1_w1", "t1_lead", "t1_w9", "worker").await;
-    assert_eq!(r, unknown("t1_lead"));
+    assert!(names(&r, "handler_module"), "{r}");
+    assert!(!k.exists("t1_w9"));
 }
 
 #[tokio::test]
@@ -650,12 +654,12 @@ async fn a_create_line_selects_by_who_and_what() {
     let r = create_as(&k, "t1_lead", "t1_lead", "t1_w3", "worker").await;
     assert_eq!(r["id"], "t1_w3", "{r}");
     // an id outside `who`
-    assert_eq!(create_as(&k, "t1_lead", "t1_lead", "x_w3", "worker").await, unknown("t1_lead"));
+    let r = create_as(&k, "t1_lead", "t1_lead", "x_w3", "worker").await;
+    assert!(names(&r, "id"), "{r}");
     // a bundle outside `what`
-    assert_eq!(
-        create_as(&k, "t1_lead", "t1_lead", "t1_w4", "exec_bridge").await,
-        unknown("t1_lead")
-    );
+    let r = create_as(&k, "t1_lead", "t1_lead", "t1_w4", "exec_bridge").await;
+    assert!(names(&r, "handler_module"), "{r}");
+    assert!(!k.exists("x_w3") && !k.exists("t1_w4"));
     // allowed once the line's `what` names it
     grant(
         &k,
@@ -790,12 +794,24 @@ async fn a_leg_cannot_hand_out_call_all_through_an_empty_update_line() {
 async fn a_create_line_deletes_only_selected_agents() {
     let k = mk_v9();
     let del = |id: &str| json!({"type": "delete_agent", "id": id});
-    // not selected: bundle outside `what`, id outside `who`, the holder, an ancestor
+    // not selected: bundle outside `what`, id outside `who`, the holder, an
+    // ancestor. One it sees is named back (`delete`); one it does not is unknown.
+    let lead = AgentId::from("t1_lead");
+    let mut seen = 0;
     for id in ["t1_tasks", "t1_exec", "t1_lead", "team_1"] {
         let r = as_agent(&k, "t1_lead", "kernel", del(id)).await.result;
         assert_eq!(r["deleted"], false, "{id}: {r}");
-        assert_eq!(r["reason"], "unknown_agent", "{id}: {r}");
+        if k.holds(Some(&lead), fantastic_kernel::Held::Call, &AgentId::from(id)) {
+            seen += 1;
+            assert!(names(&r, "delete"), "{id}: {r}");
+        } else {
+            let mut u = unknown(id);
+            u["deleted"] = json!(false);
+            assert_eq!(r, u, "{id}");
+        }
+        assert!(k.exists(id), "{id}");
     }
+    assert!(seen > 0, "the holder sees itself");
     // a sibling worker holds no create line
     let r = as_agent(&k, "t1_w1", "kernel", del("t1_w2")).await.result;
     assert_eq!(r["deleted"], false, "{r}");
@@ -1061,9 +1077,9 @@ async fn self_writes_are_one_rule_for_code_and_verb() {
             }
         } else {
             assert!(fantastic_kernel::is_refused(&by_verb), "{fields}: {by_verb}");
-            if fields.get("can").is_some() || fields.get("mode").is_some() {
-                assert_eq!(by_verb, unknown("a"), "{fields}");
-            }
+            // its own record: the refused field is named
+            let key = fields.as_object().unwrap().keys().next().unwrap().clone();
+            assert!(names(&by_verb, &key), "{fields}: {by_verb}");
             assert_eq!(by_code, by_verb, "{fields}: one rule both ways");
             assert_eq!(k.resolve_target("a").unwrap().record(), before, "{fields}: nothing written");
         }

@@ -4,23 +4,28 @@ A call passes only when the CALLER's own `can` holds a line covering
 `(target, verb)` — or the target is in the caller's own tree (position, `call`
 only) — AND every ancestor of the caller whose tree does not hold the target
 allows it too (the cap; the root never caps). The target keeps no list: it can
-neither widen nor block a call. Every denial is the UNKNOWN ANSWER, byte for byte
-the answer for a missing id (no side, no hint, no ids). On the PACKAGED rust
+neither widen nor block a call. A denial on a target the caller holds nothing on
+is the UNKNOWN ANSWER, byte for byte the answer for a missing id (no side, no
+hint, no ids); on a target it sees it is `not_allowed` naming the verb, field
+or create part its lines lack. On the PACKAGED rust
 host, driven over `web_rest` — the agents under test are `user_probe` agents
 whose `send` dispatches AS THEMSELVES, so the caller is a real agent, not the
 REST leg:
 
   1. one line on the caller: none → unknown, the same as a missing id; a line →
      passes, the target's record unchanged; one-way;
-  2. LEVELS: `call: [reflect]` admits reflect only; `call: [*]` every verb;
+  2. LEVELS: `call: [reflect]` admits reflect only (another verb is
+     `not_allowed` naming it); `call: [*]` every verb;
      `update` includes `call` on every verb;
   3. POSITION (own tree, no line), `$parent` (the parent needs a written line),
      siblings need a line, a line reaches the target's tree, THE WRITER SUBSET
      (`rest` hands out only what its written lines hold), and THE CAP (an
      ancestor that does not hold the target cuts the call);
-  4. the REST leg is an agent too: a target it holds no covering line on → the
-     unknown answer, a create on the root it holds no `create` line on → unknown;
-  5. NEVER UPWARD: an agent cannot write its own `can`, nor its parent's record;
+  4. the REST leg is an agent too: a verb its line on a target lacks →
+     `not_allowed` naming the verb, a create on the root it holds no `create`
+     line on → `not_allowed` naming `handler_module`;
+  5. NEVER UPWARD: an agent cannot write its own `can` (`not_allowed` naming
+     `can`), nor its parent's record (unknown: it holds nothing there);
   6. a line's shape is checked at the write (`invalid_meta`); a line naming a
      missing id, written by an agent, is the unknown answer for that id;
   7. IDS ARE REUSABLE: a line survives its target's delete, a new line on an
@@ -41,7 +46,7 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
-from helpers.lines import ALL, call, is_unknown
+from helpers.lines import ALL, call, is_not_allowed, is_unknown
 from helpers.verdict import verdict
 
 REPO = E2E.parent
@@ -128,7 +133,8 @@ def main() -> int:
 
         # 2 · levels
         r = via("a", "b", {"type": "inquiries"})
-        need(refused(r, "b"), f"call: [reflect] does not cover inquiries: {str(r)[:200]}")
+        need(is_not_allowed(r, "inquiries"),
+             f"call: [reflect] does not cover inquiries, named back: {str(r)[:200]}")
         setg("a", {"b": ALL})
         r = via("a", "b", {"type": "inquiries"})
         need(allowed(r) and "inquiries" in r, f"call: [*] covers every verb: {str(r)[:120]}")
@@ -167,21 +173,24 @@ def main() -> int:
 
         # 4 · the REST leg is an agent too
         r = hk.send(OUTSIDER, {"type": "list"})
-        need(is_unknown(r, OUTSIDER), f"REST → {OUTSIDER} list (reflect line only) → unknown: {str(r)[:200]}")
+        need(is_not_allowed(r, "list"),
+             f"REST → {OUTSIDER} list (reflect line only) → not_allowed list: {str(r)[:200]}")
         r = hk.send("kernel", {"type": "create_agent", "parent_id": root, "id": "x",
                                "handler_module": USER})
-        need(is_unknown(r, root), f"REST creates on the root with no create line there → unknown: {str(r)[:200]}")
+        need(is_not_allowed(r, "handler_module") and not rec("x"),
+             f"REST creates on the root with no create line there → not_allowed: {str(r)[:200]}")
 
         # 5 · never upward
         before = rec("a").get("can")
         r = via("a", "kernel", {"type": "update_agent", "id": "a", "can": {OUTSIDER: ALL}})
-        need(refused(r, "a"), f"a's update_agent of its own can (via the root) → unknown: {str(r)[:200]}")
+        need(is_not_allowed(r, "can"),
+             f"a's update_agent of its own can (via the root) → not_allowed can: {str(r)[:200]}")
         r2 = via("a", "a", {"type": "update_agent", "id": "a", "can": {OUTSIDER: ALL}})
         need(r2.get("reason") == "not_here" and r2.get("updated") is not True,
              f"a's update_agent sent to itself is refused not_here: {str(r2)[:200]}")
         need(rec("a").get("can") == before, f"a's can is unchanged: {rec('a').get('can')!r}")
         r = via("a", OUTSIDER, {"type": "list"})
-        need(refused(r, OUTSIDER), f"and the line it tried to write stays absent: {str(r)[:160]}")
+        need(is_not_allowed(r, "list"), f"and the line it tried to write stays absent: {str(r)[:160]}")
         r = via("a", "kernel", {"type": "update_agent", "id": "rest", "description": "x"})
         need(refused(r, "rest"), f"a cannot write its parent's record: {str(r)[:200]}")
 

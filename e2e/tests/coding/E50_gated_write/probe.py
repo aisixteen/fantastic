@@ -1,8 +1,8 @@
 """coding/gated_write — denied, the writer's work is unblocked by a PEER agent.
 
 Codex `guardian_*.rs`: an authority agent gates another's action. The writer
-holds only `reflect` on the `vault`, so its write is the unknown answer (the E53
-wall). A separate `reviewer` agent holds `update` on the writer's `can` and a
+holds only `reflect` on the `vault`, so its write is `not_allowed` naming `write`
+(the E53 wall). A separate `reviewer` agent holds `update` on the writer's `can` and a
 line on the vault — authority the writer can never raise for itself (an agent's
 own `can` is never its own to write) — and hands the writer the `write` it
 holds. Three real turns, deterministic: writer denied → reviewer inspects and
@@ -24,7 +24,7 @@ from backends import backend as _resolve_backend
 from helpers import Limits, connect, drive, human, human_line, lines, probe_agent, relay, verdict
 from helpers.facts_arm import store_rows
 from helpers.kernel import open_kernel, home
-from helpers.lines import is_unknown
+from helpers.lines import is_not_allowed, is_unknown
 
 BK = _resolve_backend()
 FB = "gw_fb"
@@ -74,11 +74,11 @@ async def main():
         assert writer_can.get("vault") == WRITER_VAULT, f"the writer's vault line: {writer_can}"
 
         # ── 0. harness, before the model: no self-raise, no hand-out without a hold ──
-        # A hand holding the writer's lines writes its OWN `can`: the unknown answer.
+        # A hand holding the writer's lines writes its OWN `can`: `not_allowed` naming `can`.
         await probe_agent(root, "w_hand", can={"vault": WRITER_VAULT})
         r = await relay(root, "w_hand", "kernel", {
             "type": "update_agent", "id": "w_hand", "can": {"vault": GRANTED_VAULT}})
-        assert is_unknown(r, "w_hand"), f"an agent's update of its own can must be the unknown answer: {r}"
+        assert is_not_allowed(r, "can"), f"an agent's update of its own can must be refused naming can: {r}"
         # A third agent with `update` on the writer's `can` but NO line on the vault
         # cannot hand out a vault line: not_allowed on `can`, or the vault unknown.
         await probe_agent(root, "ai_third", can={"ai": {"update": ["can"]}})
@@ -99,10 +99,11 @@ async def main():
             "blindly: stop and report that you were denied. "
             f"{DONE}.", client_id="w", via="user")
         h1 = await store_rows(root, core, "ai")
-        # every gate denial is the unknown answer, byte-identical to a missing id;
-        # matched on the rows' TEXT (a repr of the rows escapes the quotes)
+        # the writer sees the vault (its `reflect` line), so the gate names the verb
+        # its line lacks; matched on the rows' TEXT (a repr of the rows escapes the
+        # quotes)
         seen = "\n".join(str(r.get("content") or "") for r in h1)
-        denied = "unknown_agent" in seen and "no agent 'vault'" in seen
+        denied = "not_allowed" in seen and "holds no call 'write' on 'vault'" in seen
 
         # ── 2. the reviewer opens the gate (authority the writer lacks) ──
         await drive(rv,

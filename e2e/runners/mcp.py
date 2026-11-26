@@ -38,7 +38,7 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 
 from helpers import oslayer, verdict  # noqa: E402
-from helpers.lines import is_unknown  # noqa: E402
+from helpers.lines import is_not_allowed, is_unknown  # noqa: E402
 
 # The binary's user-home template store (`user_home_store`) reads FANTASTIC_HOME,
 # else ~/.fantastic. A test must never read or write the owner's real
@@ -218,12 +218,11 @@ def check(step: dict, reply: dict, state: dict) -> list[str]:
             missing = [v for v in want if v not in verbs]
             if missing:
                 bad.append(f"verbs lack {missing}")
-        elif key == "body_keys_within":
-            # a reflect cut by level: every key it shows is one of `want`
-            extra = sorted(k for k in body) if isinstance(body, dict) else ["<not an object>"]
-            extra = [k for k in extra if k not in want]
-            if extra:
-                bad.append(f"body shows keys {extra} beyond {want}: {text[:160]}")
+        elif key == "body_lacks_keys":
+            # keys a reflect must never show this caller (the root's runtime extras)
+            shown = sorted(k for k in want if isinstance(body, dict) and k in body)
+            if shown:
+                bad.append(f"body shows {shown}: {text[:160]}")
         elif key == "body_verbs":
             # the verbs a reflect lists, exactly (none listed counts as [])
             verbs = (body or {}).get("verbs", {}) if isinstance(body, dict) else {}
@@ -239,6 +238,12 @@ def check(step: dict, reply: dict, state: dict) -> list[str]:
             res = item.get("result") if isinstance(item, dict) else None
             if not is_unknown(res, want):
                 bad.append(f"item0 is not the unknown answer for {want!r}: {text[:160]}")
+        elif key == "item0_not_allowed":
+            # a call refused on a target the caller sees: `not_allowed` naming the verb
+            item = body[0] if isinstance(body, list) and body else {}
+            res = item.get("result") if isinstance(item, dict) else None
+            if not is_not_allowed(res, want):
+                bad.append(f"item0 is not not_allowed naming {want!r}: {text[:160]}")
         elif key.startswith("item0."):
             item = body[0] if isinstance(body, list) and body else {}
             got = dig(item, key[len("item0."):])

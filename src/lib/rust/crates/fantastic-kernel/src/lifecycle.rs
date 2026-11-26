@@ -391,7 +391,7 @@ impl Kernel {
             new_id: id.clone(),
         };
         if bundle.is_empty() || !self.allowed(&asker, &act, &p) {
-            return Err(crate::refusal::unknown_agent(parent.as_str()));
+            return Err(create_denial(self, &asker, &p, parent.as_str(), &bundle, &id));
         }
         // the running agent's forced values: the line's, never the asker's to name
         let line_forced = match crate::send::current_sender() {
@@ -436,6 +436,40 @@ impl Kernel {
     }
 }
 
+/// The refusal of a create of `bundle` as `id` under `parent` that `caller`'s
+/// lines (capped) do not allow (`shown` is the address used for the parent).
+/// Hidden parent: the unknown answer. Seen: `not_allowed` with `arg`
+/// `handler_module` when no line of the caller creates that bundle there under
+/// any `who`, else `id` (its lines make that bundle under other ids).
+fn create_denial(
+    kernel: &Kernel,
+    caller: &AgentId,
+    parent: &Agent,
+    shown: &str,
+    bundle: &str,
+    id: &str,
+) -> Value {
+    use crate::authz::solver::Act;
+    let repr = fantastic_bundle::py_repr;
+    let bundle_held = !bundle.is_empty()
+        && kernel.candidates_for(caller).whos.iter().any(|w| {
+            let act = Act::Create {
+                bundle: bundle.to_string(),
+                new_id: crate::send::gate::sample_id(w),
+            };
+            kernel.allowed(caller, &act, parent)
+        });
+    if bundle_held {
+        kernel.lacks(caller, &parent.id, shown, "id", || {
+            format!("holds no create of {} as {} under", repr(bundle), repr(id))
+        })
+    } else {
+        kernel.lacks(caller, &parent.id, shown, "handler_module", || {
+            format!("holds no create of {} under", repr(bundle))
+        })
+    }
+}
+
 /// The `create_agent` body, for the kernel verb alone (crate-private): a bundle
 /// that makes a child for its asker (a file bridge's view, `fork`,
 /// `import_subtree`) sends the verb with [`Kernel::send_as_caller`], which reads
@@ -446,8 +480,8 @@ impl Kernel {
 ///
 /// With an agent caller, in order: the parent must exist; the id is minted (from
 /// the caller's matching `who`, else the bundle's name) or taken as supplied;
-/// `allowed(caller, create{bundle, id}, parent)` must hold, or the answer is the
-/// same unknown answer as a missing parent; then the bundle must be installed;
+/// `allowed(caller, create{bundle, id}, parent)` must hold, or the answer is
+/// [`create_denial`] (the unknown answer when the caller sees nothing there); then the bundle must be installed;
 /// then the lines' forced values are written over the bundle's and the
 /// creator's, and every key that ends up set must be named by a matching line
 /// of the caller and of every capping ancestor (rule 8); then every line of the
@@ -483,7 +517,7 @@ pub(crate) async fn create_agent(
     };
 
     // THE CREATE LINE. An agent creates only what a line in its `can` (capped by
-    // every ancestor) allows; anything else answers exactly as a missing parent.
+    // every ancestor) allows; anything else is `create_denial`.
     // A bare agent (no handler) is the operator's alone: the declaration requires a
     // handler, and no line covers bundle "".
     if let Some(c) = caller {
@@ -492,14 +526,14 @@ pub(crate) async fn create_agent(
             new_id: id.clone(),
         };
         if hm.is_empty() || !kernel.allowed(c, &act, parent) {
-            return crate::refusal::unknown_agent(pid);
+            return create_denial(kernel, c, parent, pid, hm, &id);
         }
     }
 
     // THE HANDLER MUST BE INSTALLED (issue #642): an agent of a bundle this kernel
     // does not run would be created, and fail only when called. Checked after the
     // create line, so a bundle the caller may not create and one that is not
-    // installed answer the same. The LOAD path still skips a record whose bundle
+    // installed answer the same `create_denial`. The LOAD path still skips a record whose bundle
     // is another runtime's (weak-load semantics).
     let Some(bundle) = kernel.bundles.get(hm) else {
         let mut r = crate::refusal::refusal_hint(
@@ -715,8 +749,9 @@ pub fn keep_memory(kernel: &Kernel, id: &AgentId) -> bool {
 /// `None` for the operator. An agent deletes an agent only when its lines
 /// (capped) allow `delete` on that agent — a `create` line selecting it; the
 /// agent's whole subtree goes with it. A bare agent is deleted by the operator
-/// only (no line covers bundle ""). Refused, the answer is the unknown answer with
-/// `deleted:false`, the same bytes as a missing id.
+/// only (no line covers bundle ""). Refused, the answer carries `deleted:false`:
+/// `not_allowed` naming `delete` when the caller sees the target, else the unknown
+/// answer, the same bytes as a missing id.
 pub(crate) async fn delete_agent(
     kernel: &Arc<Kernel>,
     caller: Option<&AgentId>,
@@ -736,7 +771,24 @@ pub(crate) async fn delete_agent(
     };
     if let Some(c) = caller {
         if !kernel.allowed(c, &crate::authz::solver::Act::Delete, &target) {
-            return unknown();
+            // seen: `not_allowed` naming the `delete` level; hidden: unknown
+            let mut r = if kernel.in_tree(c, &target.id)
+                && kernel.held(c, &target.id) != crate::send::gate::Held::Nothing
+            {
+                crate::refusal::not_allowed(
+                    "delete",
+                    format!(
+                        "delete_agent: {} is {} or an ancestor of it",
+                        fantastic_bundle::py_repr(id_str),
+                        fantastic_bundle::py_repr(c.as_str())
+                    ),
+                    "nothing deletes itself or an ancestor; ask whoever created it",
+                )
+            } else {
+                kernel.lacks(c, &target.id, id_str, "delete", || "holds no delete of".to_string())
+            };
+            crate::refusal::with(&mut r, "deleted", json!(false));
+            return r;
         }
     }
     // THE ROOT IS NOT DELETABLE. It owns the persistence surface and answers

@@ -44,7 +44,7 @@ sys.path.insert(
 )
 from backends import backend as _resolve_backend  # noqa: E402
 from helpers import Limits, add_lines, connect, creds, lines, memory, probe_agent, relay, verdict  # noqa: E402
-from helpers.lines import is_unknown  # noqa: E402
+from helpers.lines import is_not_allowed  # noqa: E402
 from helpers.ai import CHAT_MODULE, IDLE_END, QuietWatch, chat_pair  # noqa: E402
 from helpers.groups import PRACTICE, GroupLedger, group_of, make_queue, master_prompt, wall_seconds  # noqa: E402
 from helpers.kernel import home, open_kernel  # noqa: E402
@@ -246,12 +246,12 @@ async def main() -> None:
         await add_lines(root, conn.id, master_lines())
         # THE PREFIX IS THE BOUND OF ITS RIGHT (harness, before the model): a hand
         # holding the master's lines creates a `g…` agent under the master, and an
-        # id outside `g*` is the unknown answer.
+        # id outside `g*` is `not_allowed` naming `id`.
         await probe_agent(root, "master_hand", can=(await asyncio.to_thread(root.record, conn.id)).get("can") or {})
         bad = await relay(root, "master_hand", "kernel", {
             "type": "create_agent", "parent_id": conn.id, "id": "x1_editor",
             "handler_module": "file_bridge.tools", "root": queue_dir, "allow": ["."]})
-        assert is_unknown(bad, conn.id), f"a create outside `{PREFIX}*` under the master: {bad}"
+        assert is_not_allowed(bad, "id"), f"a create outside `{PREFIX}*` under the master: {bad}"
         good = await relay(root, "master_hand", "kernel", {
             "type": "create_agent", "parent_id": conn.id, "id": f"{PREFIX}0_editor",
             "handler_module": "file_bridge.tools", "root": queue_dir, "allow": ["."]})

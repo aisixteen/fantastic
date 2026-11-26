@@ -238,13 +238,83 @@ fn forced_field(kernel: &Arc<Kernel>, target: &Agent, key: &str) -> bool {
 /// as well ([`forced_field`]). Every other own field is ordinary.
 const NEVER_OWN: [&str; 5] = ["can", "id", "parent", "parent_id", "handler_module"];
 
+/// The refusal of the first key of `patch` that `caller` may not change on
+/// `target`, or `None`. A caller that holds nothing on the target gets the unknown
+/// answer; one that sees it (its own record included) gets `not_allowed` naming
+/// the key, and what to do: a structure field is never updated, a forced field is
+/// the operator's, its own `can` is written by whoever holds `update can` on it,
+/// any other field by whoever holds a wider line.
+fn refused_key(
+    kernel: &Arc<Kernel>,
+    caller: &AgentId,
+    target: &Agent,
+    patch: &Map<String, Value>,
+) -> Option<Value> {
+    let own = *caller == target.id;
+    let (k, why) = patch.keys().find_map(|k| {
+        let by_line = if own {
+            !NEVER_OWN.contains(&k.as_str())
+        } else {
+            kernel.allowed(caller, &crate::authz::solver::Act::Update(k.clone()), target)
+        };
+        if !by_line {
+            Some((k, Why::Line))
+        } else if forced_field(kernel, target, k) {
+            Some((k, Why::Forced))
+        } else {
+            None
+        }
+    })?;
+    let key = fantastic_bundle::py_repr(k);
+    let t = fantastic_bundle::py_repr(target.id.as_str());
+    let seen = || kernel.held(caller, &target.id) != crate::send::gate::Held::Nothing;
+    Some(if crate::authz::solver::STRUCTURE.contains(&k.as_str()) && seen() {
+        crate::refusal::not_allowed(
+            k,
+            format!("update_agent: {key} can never be updated"),
+            "id, parent and handler_module are set once, by create_agent",
+        )
+    } else if matches!(why, Why::Forced) && seen() {
+        crate::refusal::not_allowed(
+            k,
+            format!("update_agent: {key} on {t} is forced by a create line"),
+            "only the operator changes a forced field",
+        )
+    } else if own && k == "can" {
+        crate::refusal::not_allowed(
+            k,
+            "update_agent: an agent never writes its own can",
+            "ask an agent that holds update can on you",
+        )
+    } else if own {
+        crate::refusal::not_allowed(
+            k,
+            format!("update_agent: an agent never writes its own {key}"),
+            "it is set once, by create_agent",
+        )
+    } else {
+        kernel.lacks(caller, &target.id, target.id.as_str(), k, || {
+            format!("holds no update {key} on")
+        })
+    })
+}
+
+/// Why a key of an `update_agent` patch is refused.
+enum Why {
+    /// No line of the caller (capped) allows it, or it is never the caller's own.
+    Line,
+    /// A create line forces it: the operator's alone.
+    Forced,
+}
+
 /// `update_agent`, answered by the ROOT (`root`): the agent named by `id` is the
 /// operand. The CALLER is `current_origin()`: the operator (`None`) changes any
 /// field; an agent changes field K of agent X only when its lines (capped) allow
 /// `update K` on X. On its OWN record it changes its ordinary fields, every key
 /// but [`NEVER_OWN`], with no line (one rule for its code and its verb calls).
-/// A field a create line forces is the operator's alone. Any refused key
-/// answers the unknown answer for the target, as a missing id does. A `can` an
+/// A field a create line forces is the operator's alone. A refused key answers
+/// `not_allowed` naming it when the caller sees the target, else the unknown
+/// answer, as a missing id does ([`refused_key`]). A `can` an
 /// agent writes holds only lines its own written lines hold (rule 7,
 /// [`crate::authz::glue::check_can_edit`]). The reply carries the record cut to
 /// what the caller holds on it (rule 9, the reflect cut).
@@ -264,21 +334,8 @@ async fn update_agent(
     };
     let origin = crate::send::current_origin();
     if let Some(caller) = &origin {
-        let own = *caller == target.id;
-        let refused = patch.keys().any(|k| {
-            let by_line = if own {
-                !NEVER_OWN.contains(&k.as_str())
-            } else {
-                kernel.allowed(
-                    caller,
-                    &crate::authz::solver::Act::Update(k.clone()),
-                    &target,
-                )
-            };
-            !by_line || forced_field(kernel, &target, k)
-        });
-        if refused {
-            return crate::refusal::unknown_agent(id.as_str());
+        if let Some(refused) = refused_key(kernel, caller, &target, &patch) {
+            return refused;
         }
     }
     // WRITE-TIME VALIDATION: the target's own entry judges the patch before anything

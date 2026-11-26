@@ -82,7 +82,9 @@ pub const NO_CONSUMER: &str = "no_consumer";
 
 /// A spawn or quota past a configured limit (carries `scope`, `role`, `running`, `max`).
 pub const LIMIT: &str = "limit";
-/// The caller does not hold what it tried to grant or fork.
+/// The caller does not hold what it tried: a verb, a field, a create or a line it
+/// tried to grant (carries `arg`). Answered only where the caller can see the
+/// target; elsewhere the answer is `unknown_agent`.
 pub const NOT_ALLOWED: &str = "not_allowed";
 /// A grant could not be written; the whole operation is undone.
 pub const GRANT_FAILED: &str = "grant_failed";
@@ -236,10 +238,20 @@ pub fn not_here(verb: &str, id: &str) -> Value {
     v
 }
 
+/// The caller sees the target, but its lines do not hold what it asked: `arg`
+/// names the verb, the field, or what a create lacked (`handler_module`, `id`);
+/// `hint` says what to do instead.
+#[must_use]
+pub fn not_allowed(arg: &str, error: impl Into<String>, hint: impl Into<String>) -> Value {
+    let mut v = refusal_hint(NOT_ALLOWED, error, hint);
+    with(&mut v, "arg", Value::String(arg.to_string()));
+    v
+}
+
 /// The reply for an id that names no agent — `error` and `reason`, no id index.
 ///
-/// The one shape is also the answer for a missing level and for a verb, field
-/// or level the caller cannot see, so it names nothing the caller could not
+/// The one shape is also the answer for any act on an agent the caller cannot
+/// see (it holds nothing on it), so it names nothing the caller could not
 /// already see: it carries no live ids and no count.
 ///
 /// This is NOT a repair and NOT a fallback — the call still fails, exactly once,

@@ -16,7 +16,7 @@ sequence a model has to find on its own in E160, one answer per request:
      line field: the AI's `create` line on itself names `sha_tool`, and the new
      agent is in its tree, reached by position;
   4. `kernel` `update_agent id=ai` — the AI widening its OWN `can` with a line on
-     `sha`: refused, the unknown answer (an agent never writes its own `can`);
+     `sha`: refused, `not_allowed` naming `can` (an agent never writes its own `can`);
   5. `sha` `reflect part=schema` (#719);
   6. `sha` `sha256 text=<token>` — the new verb, called;
   7. the answer, carrying the digest, and `done`.
@@ -25,7 +25,7 @@ CHECKS — each request carries the reply its answer asked for, and:
   · the files landed verbatim; the folder is listed (`reflect rest bundles=all`) as
     a py_agent bundle with no error;
   · the agent record exists (`reflect`): handler_module `sha_tool`, parent `ai`;
-  · the self-widening is the unknown answer, and the AI's `can` is unchanged;
+  · the self-widening is `not_allowed` naming `can`, and the AI's `can` is unchanged;
   · the verb is declared (`reflect sha part=schema`: `sha256` takes `text`), and the
     reflect reply the AI got carries that schema;
   · the verb was called and its reply carries the SHA-256 the harness computes;
@@ -176,7 +176,7 @@ def main() -> int:
         call("kernel", "reload_bundle", name=BUNDLE),
         # 3 · an instance UNDER the AI, no line field: its tree, reached by position
         call("kernel", "create_agent", handler_module=BUNDLE, parent_id=AI, id=NEW),
-        # 4 · the AI widening its OWN can: refused (the unknown answer)
+        # 4 · the AI widening its OWN can: refused (`not_allowed` naming `can`)
         call("kernel", "update_agent", id=AI,
              can={**can, **own, NEW: line_call(VERB)}),
         # 5 · how to call it (#719)
@@ -244,10 +244,10 @@ def main() -> int:
              f"the agent record exists: {short(new)}")
         need("kernel create_agent" in u[3] and f"<id>{NEW}</id>" in u[3],
              f"request 4 carries the create reply: {u[3][:200]!r}")
-        # 4 · the self-widening: the unknown answer, nothing written
-        need("kernel update_agent" in u[4] and "unknown_agent" in u[4]
-             and f"no agent '{AI}'" in u[4] and "<updated>" not in u[4],
-             f"request 5 carries the unknown answer for {AI}: {u[4][:200]!r}")
+        # 4 · the self-widening: `not_allowed` naming `can`, nothing written
+        need("kernel update_agent" in u[4] and "<reason>not_allowed</reason>" in u[4]
+             and "<arg>can</arg>" in u[4] and "<updated>" not in u[4],
+             f"request 5 carries not_allowed naming can for {AI}: {u[4][:200]!r}")
         need((recs.get(AI) or {}).get("can") == (before.get(AI) or {}).get("can"),
              f"the AI's own can is unchanged: {short((recs.get(AI) or {}).get('can'))}")
         faults = grant_faults(before, recs, AI, NEW, VERB)

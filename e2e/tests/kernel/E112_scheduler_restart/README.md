@@ -11,7 +11,7 @@ and keeps no list of callers:
    `timed_out` error; the same schedule on a 1 s cadence records `timed_out` while
    the 1 s `work` schedule keeps firing beside it;
 3. a schedule of a verb `sch`'s line does not cover (`started`): `tick_now`
-   reports the gate's unknown answer for `tgt` (`no agent 'tgt'`), and history
+   reports the gate's `not_allowed` naming the verb (`'sch' holds no call 'started' on 'tgt'`), and history
    records it;
 4. SIGTERM, boot the same directory: every schedule back with its target,
    payload, interval, fire_timeout and paused flag; run counts never go backwards;

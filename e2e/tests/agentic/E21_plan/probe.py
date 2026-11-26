@@ -297,7 +297,8 @@ async def main():
                         "handler_module": "exec_bridge.tools",
                         "id": "shell",
                         # the COMMAND runner's gate: regexes over the full line, named in
-                        # its description too (a `call` line shows no fields)
+                        # its description too (a `call` line shows the fields but never
+                        # sets one)
                         "allowed": [f"{sys.executable} -c .*"],
                         "description": lines.runs([f"{sys.executable} -c .*"]),
                         # where and with what it runs: the operator's, on the record

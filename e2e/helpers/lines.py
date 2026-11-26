@@ -5,8 +5,10 @@ A grant is a line in the CALLER's own record, in its `can` field: a target id
 `create: {who, what}`. The target keeps no list of callers. Without a line an
 agent reaches only its own tree, by position (`call` only); the parent too
 needs a `$parent` line. Every ancestor whose tree does not hold the target
-caps the call. Every gate denial is the unknown answer, byte-identical to the
-answer for a missing id.
+caps the call. A denial on a target the caller holds nothing on is the unknown
+answer, byte-identical to the answer for a missing id; on a target it sees (any
+line on it, or its own tree) it is `not_allowed` naming the verb, field or
+create part its lines lack.
 """
 
 from __future__ import annotations
@@ -50,13 +52,25 @@ def is_unknown(reply: object, aid: str) -> bool:
     )
 
 
+def is_not_allowed(reply: object, arg: str) -> bool:
+    """The refusal of an act on a target the caller sees: `not_allowed` naming
+    `arg` (the verb, the field, or `handler_module`/`id` of a create), with a
+    hint and no side or ids."""
+    return (
+        isinstance(reply, dict)
+        and reply.get("reason") == "not_allowed"
+        and reply.get("arg") == arg
+        and isinstance(reply.get("hint"), str)
+        and not ({"side", "ids"} & set(reply))
+    )
+
+
 def runs(allowed: list[str], what: str = "") -> str:
     """A command runner's `description` naming its `allowed` patterns.
 
-    A `call` line shows the identity keys and the verbs it holds, never a field:
-    `allowed` is a field, so an AI holding `call` on a runner does not see it.
-    `description` is an identity key, so the runner says there what it may run
-    (and the AI gets no `update` line that would let it widen its own allowlist).
+    A `call` line shows the record's fields but sets none: the AI reads
+    `allowed` but cannot widen it (it gets no `update` line). `description` is an
+    identity key, so the runner says there, in words, what it may run.
     """
     pats = ", ".join(f"`{p}`" for p in allowed)
     return f"{what + ' ' if what else ''}Runs only commands matching (regex over the whole command line): {pats}."

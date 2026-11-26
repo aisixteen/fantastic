@@ -64,9 +64,11 @@ fn refuse(kernel: &Kernel, writer: &AgentId, id: &AgentId, why: impl FnOnce() ->
     if kernel.held(writer, id) == Held::Nothing {
         return crate::refusal::unknown_agent(id.as_str());
     }
-    let mut r = crate::refusal::refusal(crate::refusal::NOT_ALLOWED, why());
-    crate::refusal::with(&mut r, "arg", json!("can"));
-    r
+    crate::refusal::not_allowed(
+        "can",
+        why(),
+        format!("ask whoever holds a wider line on {}", repr(id.as_str())),
+    )
 }
 
 /// May `writer` hand `line` to `recipient`? `Err` is the refusal reply.

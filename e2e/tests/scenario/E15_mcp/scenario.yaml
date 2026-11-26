@@ -14,9 +14,9 @@
 #
 # THE LEG'S LINES (the blueprint's `mcp`): one `create` line on `canvas_root`, the
 # user space, and `user: {call: [import_subtree]}`. That line shows the system
-# agents `files` and `exec` at call level (identity, no field, no verb of theirs),
-# so a read or a run there is the unknown answer, the same as for an id that does
-# not exist.
+# agents `files` and `exec` at call level (identity and every record field, no
+# verb of theirs), so a read, a run, a field write or a delete there is
+# `not_allowed` naming what its line lacks: the leg sees them.
 # Its work goes through a file bridge and a command runner it makes UNDER
 # `canvas_root` itself (`e15_files`, `e15_exec`), which its line reaches.
 
@@ -58,15 +58,22 @@ runs:
           is_error: true
           body_unknown: kernel
       # the leg's one line on `user` (`import_subtree`: the import goes through the
-      # legs) covers user's tree at call level, `files` included: its identity
-      # and the tree, no field, and none of its verbs (the leg holds none there)
+      # legs) covers user's tree at call level, `files` included: its identity,
+      # its record fields and the tree, none of its verbs (the leg holds none
+      # there), and never a root runtime extra (those are the operator's)
       - tool: reflect
         args: {target: files}
         expect:
           is_error: false
-          body_has_keys: [id, handler_module, tree]
-          body_keys_within: [id, display_name, parent_id, handler_module, description, view, verbs, tree]
+          body_has_keys: [id, handler_module, tree, root, allow_count]
+          body_lacks_keys: [guid, peers, env, version, runtime, persistence]
           body_verbs: []
+      # a field it sees is never one it sets: no `update` line, `not_allowed`
+      - tool: send
+        args: {items: [{target: kernel, payload: {type: update_agent, id: files, readonly: false}}]}
+        expect:
+          is_error: true
+          item0_not_allowed: readonly
       # its own bridge over the work folder, and its own runner, UNDER canvas_root
       - tool: send
         args: {items: [{target: kernel, payload: {type: create_agent, parent_id: canvas_root, id: e15_files, handler_module: file_bridge.tools, root: ".", allow: [note.txt]}}]}
@@ -90,12 +97,12 @@ runs:
           is_error: false
           item0.status: completed
           item0_verbs_include: [read_stream, list]
-      # a read through the system `files`: the unknown answer
+      # a read through the system `files`: the leg sees it, its line holds no read
       - tool: send
         args: {items: [{target: files, payload: {type: read_stream, path: note.txt}}]}
         expect:
           is_error: true
-          item0_unknown: files
+          item0_not_allowed: read_stream
       # a real read, through the leg's own bridge
       - tool: send
         args: {items: [{target: e15_files, payload: {type: read_stream, path: note.txt}}]}
@@ -109,12 +116,12 @@ runs:
         expect:
           is_error: false
           item0.status: completed
-      # the leg may not delete a system agent: the unknown answer
+      # the leg may not delete a system agent it sees: `not_allowed` naming `delete`
       - tool: send
         args: {items: [{target: kernel, payload: {type: delete_agent, id: files}}]}
         expect:
           is_error: true
-          item0_unknown: files
+          item0_not_allowed: delete
       # a shape error is the client's, and says how to fix it
       - tool: send
         args: {items: [{target: files, payload: {verb: read_stream}}]}
@@ -216,17 +223,17 @@ runs:
         expect:
           is_error: false
           item0.status: completed
-      # the system `files` and `exec`: the unknown answer
+      # the system `files` and `exec`: seen, and no verb of theirs held
       - tool: send
         args: {items: [{target: files, payload: {type: read_stream, path: w.txt}}]}
         expect:
           is_error: true
-          item0_unknown: files
+          item0_not_allowed: read_stream
       - tool: send
         args: {items: [{target: exec, payload: {type: run, command: "{pwd_cmd}", args: "{pwd_args}", wait_s: 30}}]}
         expect:
           is_error: true
-          item0_unknown: exec
+          item0_not_allowed: run
       - tool: send
         args: {items: [{target: e15_files, payload: {type: read_stream, path: w.txt}}]}
         expect:
