@@ -1582,12 +1582,8 @@ pub async fn send(
         let route_kernel = Arc::clone(kernel);
         let route_self = agent_id.clone();
         let route_client = client_id.clone();
-        // THE ROUTED CALLS REACH THEIR TARGETS BEFORE THIS REPLY GOES BACK
-        // (python's event loop order): released at launch,
-        // not at completion — a self-addressed call fans out before it needs the
-        // lock, so this never waits on this agent.
-        let launched = Arc::new(fantastic_kernel::Signal::default());
-        let route_launched = Arc::clone(&launched);
+        // The route runs as its own task: this reply waits for none of the
+        // routed calls.
         let deadline = crate::route::route_deadline(kernel);
         kernel.spawn_task(agent_id, "route_reply", async move {
             crate::route::route_reply(
@@ -1605,11 +1601,9 @@ pub async fn send(
                 message_id,
                 call_streams,
                 cut,
-                Some(route_launched),
             )
             .await;
         });
-        launched.wait().await;
     }
     Ok(reply)
 }

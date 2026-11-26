@@ -809,7 +809,6 @@ pub async fn route_reply(
     message_id: Option<i64>,
     call_streams: Vec<(String, String)>,
     cut: bool,
-    launched: Option<Arc<fantastic_kernel::Signal>>,
 ) {
     // THE MODEL'S CALLS ARE THE AGENT'S CALLS — gated. The routing task is
     // spawned by the agent's own dispatch through `Kernel::spawn_task`, which
@@ -828,7 +827,6 @@ pub async fn route_reply(
         message_id,
         call_streams,
         cut,
-        launched,
     )
     .await;
     if !goes_on {
@@ -989,17 +987,6 @@ pub(crate) fn resume_cut(
     );
 }
 
-/// Fires the route's launch signal however the route ends.
-struct FireOnDrop(Option<Arc<fantastic_kernel::Signal>>);
-
-impl Drop for FireOnDrop {
-    fn drop(&mut self) {
-        if let Some(s) = &self.0 {
-            s.fire();
-        }
-    }
-}
-
 /// One EMITTED thing, in emission order — python's `units` tuple
 /// `(dest, target, verb, item_index, body)`. `idx` links a dispatched call to its
 /// outcome; `body` is pre-decided for the paths that never dispatch (a parse
@@ -1042,10 +1029,7 @@ async fn route_reply_gated(
     message_id: Option<i64>,
     call_streams: Vec<(String, String)>,
     cut: bool,
-    launched: Option<Arc<fantastic_kernel::Signal>>,
 ) -> bool {
-    // However this route ends, the `send` waiting on its launch is released.
-    let _release = FireOnDrop(launched.clone());
     // ONE CHAIN PER AGENT (#227): true while the chain goes on (see the caller).
     let mut goes_on = false;
     // THE MATCH: a dispatched message carries the `stream_id`
@@ -1443,19 +1427,7 @@ async fn route_reply_gated(
     let outcomes = if items.is_empty() {
         Vec::new()
     } else {
-        // LAUNCHED = every routed call has reached its target; the `send` that
-        // spawned this route returns only then.
-        let out = match &launched {
-            Some(sig) => {
-                let sig = Arc::clone(sig);
-                let hook: Arc<dyn Fn() + Send + Sync> = Arc::new(move || sig.fire());
-                fantastic_kernel::ON_BATCH_LAUNCHED
-                    .scope(Some(hook), kernel.send(items))
-                    .await
-            }
-            None => kernel.send(items).await,
-        };
-        out
+        kernel.send(items).await
     };
 
     // A JOB this agent started (#306): an `exec start` answered `running` is watched, and
