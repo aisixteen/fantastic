@@ -1,6 +1,6 @@
 //! THE PASS PATH (#766, spec 1.5): the one place the chat asks its model.
 //!
-//! A [`Pass`] is built once per turn run (in `run_generation`) and once per verb that
+//! A [`Pass`] is built once per pass (in `agent_loop::prepare`) and once per verb that
 //! runs a helper outside a turn (`context_recall`, `context_fold`), and is handed down
 //! where the provider went before. It holds the chat's provider and state and the model
 //! TYPE of the pass, fixed for its life: the type's declaration ([`Decl`]), which the
@@ -218,7 +218,7 @@ impl Pass {
     /// form each took) mapped for the type through the chat's render cache; the bound is
     /// read from `meta`, the chat's record, at every pass. The [`View`] holds the pass's
     /// pins until it is finished or dropped.
-    pub(crate) fn view(&self, messages: &[Value], meta: &Map<String, Value>) -> View<'_> {
+    pub(crate) fn view(&self, messages: &[Value], meta: &Map<String, Value>) -> View<'static> {
         let shown: Vec<Shown> = messages.iter().map(Shown::of).collect();
         let last_send = *self
             .state
@@ -234,7 +234,7 @@ impl Pass {
         };
         self.state
             .render_cache
-            .view(self.decl, &self.own, &shown, &ctx)
+            .view_shared(self.decl, &self.own, &shown, &ctx)
     }
 
     /// THE WINDOW ESTIMATE of `message` in flight: [`crate::context::estimate_one`] of

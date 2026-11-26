@@ -1,6 +1,7 @@
 //! The split: a chat completes through a provider agent it knows only by id.
 use super::*;
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
+use std::time::Duration;
 
 /// A provider agent: `complete` streams the words of its record's `say`.
 struct Echo;
@@ -373,4 +374,103 @@ fn a_failed_pass_keeps_its_class_across_complete() {
             .class,
         ErrorClass::Turn
     );
+}
+
+/// A live view that takes its time over each token: under it the reader's drop-oldest
+/// inbox overflows.
+struct SlowLive(std::sync::Mutex<String>);
+
+#[async_trait]
+impl crate::provider::Live for SlowLive {
+    async fn token(&self, t: &str) {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        self.0.lock().unwrap().push_str(t);
+    }
+}
+
+/// A provider agent that streams `n` tokens of its record's `say`, then its `tail`.
+struct Many;
+
+#[async_trait]
+impl Handler for Many {
+    type Call = provider_verbs::Call;
+    fn name(&self) -> &str {
+        "many"
+    }
+    fn man(&self) -> &'static str {
+        "A provider stand-in that streams many tokens."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        provider_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, a: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        provider_verbs::dynamic_verbs(a)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &crate::tests_decl::any::RECORD
+    }
+    async fn handle(&self, id: &AgentId, call: Self::Call, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
+        let build = |_m: Map<String, Value>| -> Arc<dyn Provider> {
+            let mut toks: Vec<String> = (0..400).map(|i| format!("w{i} ")).collect();
+            toks.push("<call name=\"done\"></call>".into());
+            Arc::new(Words(toks, crate::provider::ProviderReport::default()))
+        };
+        use provider_verbs::Call;
+        Ok(Some(match call {
+            Call::Complete(a) => crate::remote_provider::complete_verb(id, &a, kernel, build).await,
+            _ => json!({"id": id.as_str()}),
+        }))
+    }
+}
+
+/// THE ROUTE READS THE SETTLED TEXT, NOT THE STREAM (#795): the provider's `complete`
+/// reply carries the whole answer; a live view so slow that its drop-oldest inbox
+/// overflowed shows less, and the answer read from the settle is still whole.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_route_reads_the_settled_text_not_the_stream() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut k = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
+    // a tiny inbox: the live view's watch drops the oldest tokens under a slow reader
+    k.inbox_bound = 4;
+    k.bundles.register("many.tools", Many);
+    let k = Arc::new(k);
+    let root = fantastic_kernel::Agent::new(AgentId::from("kernel_state"), None, None, Map::new(), tmp.path().join(".fantastic"), false);
+    fantastic_kernel::test_support::register(&k, Arc::clone(&root));
+    k.set_root(Arc::clone(&root));
+    let a = fantastic_kernel::Agent::new(AgentId::from("p"), Some("many.tools".into()), Some(root.id.clone()), Map::new(), tmp.path().join("p"), false);
+    fantastic_kernel::test_support::register(&k, a);
+    agent(&k, &root, "chat", json!({"can": {"p": {"call": ["complete", "watch"]}}}), tmp.path());
+    let rp = RemoteProvider::new(&k, &AgentId::from("chat"), "p");
+    let live = Arc::new(SlowLive(std::sync::Mutex::new(String::new())));
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, ProviderError>>();
+    let done: crate::provider::Done = Box::new(move |r| {
+        Box::pin(async move {
+            let _ = tx.send(r);
+        })
+    });
+    fantastic_kernel::test_support::as_agent(AgentId::from("chat"), async {
+        rp.begin(
+            vec![json!({"role": "user", "content": "hi"})],
+            None,
+            (Duration::from_secs(30), 30.0),
+            Arc::clone(&live) as Arc<dyn crate::provider::Live>,
+            done,
+        )
+        .await
+    })
+    .await
+    .expect("the request is out");
+    let whole = tokio::time::timeout(Duration::from_secs(20), rx)
+        .await
+        .expect("the request settled")
+        .expect("done ran")
+        .expect("an answer");
+    let mut want: String = (0..400).map(|i| format!("w{i} ")).collect();
+    want.push_str("<call name=\"done\"></call>");
+    assert_eq!(whole, want, "the settle's text is the whole answer");
+    let shown = live.0.lock().unwrap().clone();
+    assert!(shown.len() < want.len(), "the live view dropped tokens: {} of {}", shown.len(), want.len());
 }

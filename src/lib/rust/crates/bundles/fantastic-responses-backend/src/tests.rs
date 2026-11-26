@@ -543,13 +543,12 @@ async fn send_streams_tokens_raw_on_both_channels() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, id) = mk_kernel(&tmp, &format!("{}/v1/responses", server.uri())).await;
     set_key(&kernel, &tmp, &id, "sk-x").await;
-    let id = pair_chat(&kernel, &id).await; // the chat streams to its caller
-    let mut rx = kernel.ensure_inbox(&id);
+    let chat = pair_chat(&kernel, &id).await; // the chat streams to its caller
+    let mut rx = kernel.ensure_inbox(&chat);
     let k2 = Arc::clone(&kernel);
-    let id2 = id.clone();
     let join = tokio::spawn(async move {
         k2.operator_send(vec![Item::new(
-            id2,
+            chat,
             json!({"type": "send", "text": "hi", "client_id": "c"}),
         )])
         .await
@@ -579,7 +578,9 @@ async fn send_streams_tokens_raw_on_both_channels() {
     );
     // the reply is the answer: thinking never leaves the agent (ai-core's
     // business, not this provider's)
-    assert_eq!(r["response"], "hello <call name=\"done\"></call>", "{r}");
+    assert_eq!(r["accepted"], json!(true), "{r}");
+    assert!(fantastic_ai_core::state::settle(&kernel, Duration::from_secs(20)).await);
+    assert_eq!(last_answer(&kernel, &id).await, "hello <call name=\"done\"></call>");
 }
 
 /// `endpoint` is REQUIRED on the record — refused AT THE WRITE (the kind's
@@ -611,20 +612,21 @@ async fn sampling_may_not_override_what_the_provider_owns() {
                    "sampling": {"store": true, "temperature": 0.1, "model": "x"}}),
         )])
         .await;
-    let r = kernel.operator_send(vec![Item::new(
-            pair_chat(&kernel, &id).await,
-            json!({"type": "send", "text": "hi", "client_id": "t"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(
-        r["error"],
-        json!(
-            "ValueError: responses_backend: `sampling` may not set model, store — those \
+    let mut rxd = kernel.ensure_inbox(&pair_chat(&kernel, &id).await);
+    send_once(&kernel, &id).await;
+    // the failed pass names the refusal in its `failed` status
+    let mut failed = Vec::new();
+    while let Some(v) = rxd.try_recv() {
+        if v.payload["type"] == "status" && v.payload["phase"] == "failed" {
+            failed.push(v.payload["detail"]["error"].as_str().unwrap_or_default().to_string());
+        }
+    }
+    assert!(
+        failed.iter().any(|e| e.contains(
+            "responses_backend: `sampling` may not set model, store — those \
              are the pass's (`model`, the chat's `max_tokens`) or the provider's own"
-        ),
-        "{r}"
+        )),
+        "{failed:?}"
     );
 }
 
@@ -745,14 +747,53 @@ fn raw_header(head: &str, name: &str) -> Option<String> {
     })
 }
 
+/// Send one message, wait until every agent is quiet, and return the ack.
 async fn send_once(kernel: &Arc<Kernel>, id: &AgentId) -> Value {
-    kernel.operator_send(vec![Item::new(
+    let ack = kernel.operator_send(vec![Item::new(
             pair_chat(kernel, id).await,
             json!({"type": "send", "text": "go", "client_id": "t"}),
         )])
         .await
         .remove(0)
-        .result
+        .result;
+    assert_eq!(ack["accepted"], json!(true), "{ack}");
+    assert!(
+        fantastic_ai_core::state::settle(kernel, Duration::from_secs(20)).await,
+        "the agents never went quiet"
+    );
+    ack
+}
+
+/// The chat's conversation rows, as it holds them.
+async fn chat_rows(kernel: &Arc<Kernel>, id: &AgentId) -> Vec<Value> {
+    let chat = pair_chat(kernel, id).await;
+    let r = kernel.operator_send(vec![Item::new(chat, json!({"type": "rows"}))])
+        .await
+        .remove(0)
+        .result;
+    r["rows"].as_array().cloned().unwrap_or_default()
+}
+
+/// The content of the chat's newest assistant row: its last pass's answer.
+async fn last_answer(kernel: &Arc<Kernel>, id: &AgentId) -> String {
+    chat_rows(kernel, id)
+        .await
+        .iter()
+        .rev()
+        .find(|r| r["role"] == "assistant")
+        .and_then(|r| r["content"].as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// The contents of the chat's error rows: each failed pass's.
+async fn error_rows(kernel: &Arc<Kernel>, id: &AgentId) -> Vec<String> {
+    chat_rows(kernel, id)
+        .await
+        .iter()
+        .filter(|r| r["kind"] == "error")
+        .filter_map(|r| r["content"].as_str().map(str::to_string))
+        .collect()
 }
 
 const DONE_OK: &str = "ok<call name=\"done\"></call>";
@@ -774,12 +815,11 @@ async fn a_body_cut_mid_stream_raises_stream_and_the_cause_chain() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, id) = mk_kernel(&tmp, &format!("http://127.0.0.1:{port}/v1/responses")).await;
     set_key(&kernel, &tmp, &id, "sk").await;
-    let r = send_once(&kernel, &id).await;
-    assert_eq!(r["raised"], json!(true), "{r}");
-    assert_eq!(
-        r["error"],
-        json!("RuntimeError: stream: error decoding response body ← error reading a body from connection ← end of file before message length reached"),
-        "{r}"
+    send_once(&kernel, &id).await;
+    let errs = error_rows(&kernel, &id).await;
+    assert!(
+        errs.iter().any(|e| e.contains("stream: error decoding response body ← error reading a body from connection ← end of file before message length reached")),
+        "{errs:?}"
     );
 }
 
@@ -793,10 +833,12 @@ async fn the_key_rides_verbatim_a_rotated_key_rides_next_and_nothing_pools() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, id) = mk_kernel(&tmp, &format!("http://127.0.0.1:{port}/v1/responses")).await;
     set_key(&kernel, &tmp, &id, "sk-pad\tinner").await;
-    assert_eq!(send_once(&kernel, &id).await["response"], json!(DONE_OK));
+    send_once(&kernel, &id).await;
+    assert_eq!(last_answer(&kernel, &id).await, DONE_OK);
     let first = log.heads().len();
     set_key(&kernel, &tmp, &id, "sk-next").await;
-    assert_eq!(send_once(&kernel, &id).await["response"], json!(DONE_OK));
+    send_once(&kernel, &id).await;
+    assert_eq!(last_answer(&kernel, &id).await, DONE_OK);
     let heads = log.heads();
     assert!(first >= 1 && heads.len() > first, "{heads:#?}");
     for h in &heads[..first] {
@@ -870,14 +912,14 @@ async fn a_stream_that_goes_quiet_fails_after_the_idle_window() {
     let (kernel, id) = mk_kernel_with(&tmp, &endpoint, json!({"stream_idle_seconds": 0.2})).await;
     set_key(&kernel, &tmp, &id, "sk").await;
     let started = std::time::Instant::now();
-    let r = send_once(&kernel, &id).await;
+    send_once(&kernel, &id).await;
     assert!(
         started.elapsed() < Duration::from_secs(30),
         "{:?}",
         started.elapsed()
     );
-    assert_eq!(r["raised"], json!(true), "{r}");
-    let err = r["error"].as_str().unwrap_or_default();
+    let errs = error_rows(&kernel, &id).await;
+    let err = errs.iter().find(|e| e.contains("stream_stalled")).map(String::as_str).unwrap_or_default();
     assert!(err.contains("responses_backend: stream_stalled"), "{err}");
     assert!(err.contains("sent no bytes for 0.2s"), "{err}");
     assert!(err.contains(&endpoint), "{err}");
@@ -892,9 +934,9 @@ async fn an_endpoint_that_never_answers_fails_after_the_idle_window() {
     let endpoint = format!("http://127.0.0.1:{port}/v1/responses");
     let (kernel, id) = mk_kernel_with(&tmp, &endpoint, json!({"stream_idle_seconds": 0.2})).await;
     set_key(&kernel, &tmp, &id, "sk").await;
-    let r = send_once(&kernel, &id).await;
-    assert_eq!(r["raised"], json!(true), "{r}");
-    let err = r["error"].as_str().unwrap_or_default();
+    send_once(&kernel, &id).await;
+    let errs = error_rows(&kernel, &id).await;
+    let err = errs.iter().find(|e| e.contains("stream_stalled")).map(String::as_str).unwrap_or_default();
     assert!(err.contains("stream_stalled"), "{err}");
     assert!(err.contains("sent no bytes for 0.2s"), "{err}");
 }

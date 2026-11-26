@@ -214,8 +214,8 @@ async fn closed(kernel: &Arc<Kernel>, agent: &AgentId, tag: &str, big: usize) ->
 }
 
 async fn call(kernel: &Arc<Kernel>, target: &AgentId, payload: Value) -> Value {
-    let out = kernel
-        .operator_send(vec![Item::new(target.clone(), payload)])
+    let out = crate::tests::settled(kernel, kernel
+        .operator_send(vec![Item::new(target.clone(), payload)]))
         .await
         .remove(0);
     assert_eq!(out.status.as_str(), "completed", "{:?}", out.result);
@@ -251,11 +251,9 @@ async fn prompt(kernel: &Arc<Kernel>, agent: &AgentId) -> String {
         crate::assembly::assemble_messages(
             agent,
             &state,
-            "next",
             kernel,
             "c",
             crate::caching::Caching::ProviderCache,
-            &crate::row_attrs::Stamp::now(),
         ),
     )
     .await
@@ -287,11 +285,9 @@ async fn project(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
         crate::assembly::assemble_messages(
             agent,
             &state,
-            "next",
             kernel,
             "cli",
             crate::caching::Caching::ProviderCache,
-            &crate::row_attrs::Stamp::now(),
         ),
     )
     .await
@@ -632,17 +628,16 @@ async fn context_forget_include_cleared() {
     assert_eq!(bad["arg"], "include_cleared", "{bad}");
 }
 
+/// `context_forget` never moves the store under a pass in flight (#795: nothing waits on
+/// a pass, so it is refused, `locked`, while one runs); once the pass ended it compacts.
 #[tokio::test]
 async fn context_forget_waits_for_a_running_turn() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "fw").await;
     let s = script(&backend, vec![pass(DONE)], Duration::from_millis(400));
-    let k2 = Arc::clone(&kernel);
-    let b2 = backend.clone();
-    let turn = tokio::spawn(async move {
-        k2.operator_send(vec![Item::new(b2, json!({"type": "send", "text": "go"}))])
-            .await
-    });
+    let _ = kernel
+        .operator_send(vec![Item::new(backend.clone(), json!({"type": "send", "text": "go"}))])
+        .await;
     for _ in 0..250 {
         if !s.requests.lock().unwrap().is_empty() {
             break;
@@ -653,19 +648,16 @@ async fn context_forget_waits_for_a_running_turn() {
         !s.requests.lock().unwrap().is_empty(),
         "the turn reached the model"
     );
-    let k3 = Arc::clone(&kernel);
-    let b3 = backend.clone();
-    let forget = tokio::spawn(async move {
-        k3.operator_send(vec![Item::new(b3, json!({"type": "context_forget"}))])
-            .await
-    });
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(!forget.is_finished(), "it waits for the turn");
-    turn.await.unwrap();
-    let out = tokio::time::timeout(Duration::from_secs(5), forget)
+    let busy = kernel
+        .operator_send(vec![Item::new(backend.clone(), json!({"type": "context_forget"}))])
         .await
-        .expect("forget ends once the turn does")
-        .unwrap()
+        .remove(0)
+        .result;
+    assert_eq!(busy["reason"], json!("locked"), "{busy}");
+    assert!(crate::tests::settle(&kernel).await);
+    let out = kernel
+        .operator_send(vec![Item::new(backend.clone(), json!({"type": "context_forget"}))])
+        .await
         .remove(0);
     assert_eq!(out.status.as_str(), "completed", "{:?}", out.result);
     assert!(out.result["pruned"].as_i64().is_some());
@@ -770,27 +762,16 @@ async fn folds_at_a_small_window_and_every_turn_answers() {
         let backend = backend.clone();
         let s = Arc::clone(&s);
         async move {
-            // ONE CHAIN PER AGENT (#227): a turn sent while the chain is alive is held
-            // and answered by a wake turn, which shifts the pass order this test
-            // scripts. Wait for the chain to end before each turn, so every turn is
-            // its own chain, as the script assumes.
-            for _ in 0..300 {
-                if !crate::state::state_for(&backend)
-                    .chain
-                    .lock()
-                    .unwrap()
-                    .alive
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
+            // A message sent while a pass runs is read by the next pass with what else
+            // arrived, which shifts the pass order this test scripts. Wait for the agent
+            // to be quiet before each message, so every message has its own pass.
+            crate::tests::settle(&kernel).await;
             s.passes.lock().unwrap().push_back(pass(reply));
-            let _ = kernel
+            let _ = crate::tests::settled(&kernel, kernel
                 .operator_send(vec![Item::new(
                     backend,
                     json!({"type": "send", "text": text, "client_id": "cell"}),
-                )])
+                )]))
                 .await;
         }
     };

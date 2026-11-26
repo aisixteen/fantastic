@@ -358,9 +358,13 @@ pub(crate) fn autofold(store: &[Value], idx: usize, msg: &Value) -> Autofolded {
             ..unchanged()
         },
         Some("user") => {
-            let answered = store[idx + 1..]
-                .iter()
-                .any(|t| t.get("role").and_then(Value::as_str) == Some("assistant"));
+            // ANSWERED: an answer after it read it. A message that arrived while a pass
+            // worked lies before that pass's answer, which did not read it: an answer
+            // reads the rows up to its parent (#795).
+            let answered = store[idx + 1..].iter().any(|t| {
+                t.get("role").and_then(Value::as_str) == Some("assistant")
+                    && t.get("parent").and_then(Value::as_i64).is_none_or(|p| p >= id)
+            });
             if !answered || parse_reply_tag(content).is_none() {
                 return unchanged();
             }

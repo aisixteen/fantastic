@@ -13,8 +13,8 @@ const DONE: &str = "<call name=\"done\"></call>";
 
 /// One verb sent to the agent; its result.
 async fn verb(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    kernel
-        .operator_send(vec![Item::new(agent.clone(), payload)])
+    crate::tests::settled(kernel, kernel
+        .operator_send(vec![Item::new(agent.clone(), payload)]))
         .await
         .remove(0)
         .result
@@ -44,23 +44,24 @@ async fn view_ids(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<i64> {
         .collect()
 }
 
-/// The message list the next turn would send, as the model view assembles it.
+/// The message list the next pass would send, as the model view assembles it, for a
+/// message `next` that arrives now (#795: its row is the newest; not stored here, so the
+/// history stays the test's).
 async fn messages(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
     let state = crate::state::state_for(agent);
-    let (msgs, _) = as_agent(
+    let (mut msgs, _) = as_agent(
         agent.clone(),
         crate::assembly::assemble_messages(
             agent,
             &state,
-            "next",
             kernel,
             "c",
             crate::caching::Caching::ProviderCache,
-            &crate::row_attrs::Stamp::now(),
         ),
     )
     .await
     .expect("assemble");
+    msgs.push(json!({"role": "user", "content": "next"}));
     msgs
 }
 
@@ -460,7 +461,7 @@ async fn a_turn_running_for_the_agent_refuses_the_fold() {
     let k2 = Arc::clone(&kernel);
     let b2 = backend.clone();
     let turn = tokio::spawn(async move {
-        k2.operator_send(vec![Item::new(b2, json!({"type": "send", "text": "go"}))])
+        crate::tests::settled(&k2, k2.operator_send(vec![Item::new(b2, json!({"type": "send", "text": "go"}))]))
             .await
     });
     for _ in 0..250 {

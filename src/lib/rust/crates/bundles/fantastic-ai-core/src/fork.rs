@@ -53,10 +53,12 @@ fn refuse(verb: &str, code: &str, why: &str, hint: &str, at: Option<i64>) -> Val
     v
 }
 
-/// A turn is running for this agent, or its chain is alive: its rows are moving.
+/// A pass is running for this agent, or a message waits for its next one: its rows are
+/// moving.
 fn mid_turn(agent_id: &AgentId) -> bool {
     let st = crate::state::state_for(agent_id);
-    st.chain.lock().expect("chain poisoned").alive || crate::state::is_generating(agent_id)
+    let life = st.life.lock().expect("life poisoned");
+    life.running || !life.unread.is_empty() || crate::state::is_generating(agent_id)
 }
 
 /// A conversation row: a chat turn (a fold included), not bookkeeping and not
@@ -203,12 +205,7 @@ pub async fn fork(
         return Ok(fantastic_kernel::refusal::missing(verb, "at"));
     };
     let (name, want_id) = (args.name.clone(), args.id.clone());
-    // A turn holds the FIFO lock for its whole run: the rows must not move under the copy.
-    let st = crate::state::state_for(agent_id);
-    let lock = Arc::clone(&st.lock);
-    let Ok(_turn) = lock.try_lock() else {
-        return Ok(parent_mid_turn(agent_id, at));
-    };
+    // The rows must not move under the copy.
     if mid_turn(agent_id) {
         return Ok(parent_mid_turn(agent_id, at));
     }
@@ -351,8 +348,6 @@ pub async fn mark(
     }
     let label = args.label.clone();
     let (note, version) = (args.note.clone(), args.version.clone());
-    let st = crate::state::state_for(agent_id);
-    let lock = Arc::clone(&st.lock);
     let busy = || {
         refuse(
             verb,
@@ -361,9 +356,6 @@ pub async fn mark(
             "mark once the running turn has answered",
             None,
         )
-    };
-    let Ok(_turn) = lock.try_lock() else {
-        return Ok(busy());
     };
     if mid_turn(agent_id) {
         return Ok(busy());

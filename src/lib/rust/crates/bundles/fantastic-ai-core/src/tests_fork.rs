@@ -12,8 +12,8 @@ use fantastic_kernel::test_support::as_agent;
 const DONE: &str = "<call name=\"done\"></call>";
 
 async fn verb(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    kernel
-        .operator_send(vec![Item::new(agent.clone(), payload)])
+    crate::tests::settled(kernel, kernel
+        .operator_send(vec![Item::new(agent.clone(), payload)]))
         .await
         .remove(0)
         .result
@@ -80,11 +80,9 @@ async fn messages(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
         crate::assembly::assemble_messages(
             agent,
             &state,
-            "next",
             kernel,
             "c",
             crate::caching::Caching::ProviderCache,
-            &crate::row_attrs::Stamp::now(),
         ),
     )
     .await
@@ -239,8 +237,7 @@ async fn fork_refuses_while_the_parent_is_mid_turn() {
     let tmp = TempDir::new().unwrap();
     let (kernel, parent) = mk_kernel(&tmp, "fk_busy").await;
     let all = three_turns(&kernel, &parent).await;
-    let lock = Arc::clone(&crate::state::state_for(&parent).lock);
-    let _turn = lock.lock().await;
+    let _turn = crate::tests::MidPass::new(&parent);
     let out = verb(
         &kernel,
         &parent,
@@ -473,8 +470,7 @@ async fn mark_lands_on_a_turn_boundary_outside_a_fold() {
     let all = three_turns(&kernel, &parent).await;
     // mid-turn: refused
     {
-        let lock = Arc::clone(&crate::state::state_for(&parent).lock);
-        let _turn = lock.lock().await;
+        let _turn = crate::tests::MidPass::new(&parent);
         let out = verb(&kernel, &parent, json!({"type": "mark", "label": "busy"})).await;
         assert_eq!(out["reason"], "locked", "{out}");
     }
@@ -756,8 +752,7 @@ async fn fork_and_mark_refusals_put_sentence_in_error_code_in_reason() {
     assert!(out["error"].as_str().unwrap().contains(' '), "{out}");
     assert!(out["hint"].is_string(), "{out}");
     assert!(out.get("at").is_some(), "{out}");
-    let lock = Arc::clone(&crate::state::state_for(&parent).lock);
-    let _turn = lock.lock().await;
+    let _turn = crate::tests::MidPass::new(&parent);
     let out = verb(&kernel, &parent, json!({"type": "mark", "label": "busy"})).await;
     assert_eq!(out["reason"], "locked", "{out}");
     assert_ne!(out["error"], out["reason"], "{out}");

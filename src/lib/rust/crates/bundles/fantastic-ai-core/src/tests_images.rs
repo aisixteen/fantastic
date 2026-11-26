@@ -25,8 +25,8 @@ fn png(w: u32, h: u32) -> Vec<u8> {
 }
 
 async fn ask(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    kernel
-        .operator_send(vec![Item::new(agent.clone(), payload)])
+    crate::tests::settled(kernel, kernel
+        .operator_send(vec![Item::new(agent.clone(), payload)]))
         .await
         .remove(0)
         .result

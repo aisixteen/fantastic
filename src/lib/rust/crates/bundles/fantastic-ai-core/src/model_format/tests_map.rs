@@ -31,23 +31,25 @@ async fn save(kernel: &Arc<Kernel>, agent: &AgentId, rows: &[Value]) -> Vec<i64>
     .expect("rows saved")
 }
 
-/// The next turn's messages in flight, as the assembly builds them.
+/// The next pass's messages in flight, as the assembly builds them: the arriving message
+/// `next`, stamped `stamp`, is stored first, as an arrival is (#795).
 async fn assembled(
     kernel: &Arc<Kernel>,
     agent: &AgentId,
     stamp: &crate::row_attrs::Stamp,
 ) -> Vec<Value> {
+    let mut row = json!({"role": "user", "content": "next", "id": kernel.mint_id()});
+    stamp.apply(&mut row);
+    save(kernel, agent, &[row]).await;
     let state = crate::state::state_for(agent);
     as_agent(
         agent.clone(),
         crate::assembly::assemble_messages(
             agent,
             &state,
-            "next",
             kernel,
             "c",
             crate::caching::Caching::ProviderCache,
-            stamp,
         ),
     )
     .await
@@ -520,8 +522,12 @@ async fn the_env_block_reads_the_first_row_of_the_thread() {
     let (kernel, agent) = mk_kernel(&tmp, "map_env").await;
     let block = |m: &[Value]| text(&message(decl, agent.as_str(), &Shown::of(&m[0]))).to_string();
     // an empty store: the arriving message is the thread's first row
-    let first = assembled(&kernel, &agent, &stamp_at(T1)).await;
-    assert!(env_line(&block(&first)).contains("2026-11-19 (UTC+00:00)"));
+    {
+        let (kernel, agent) = mk_kernel(&tmp, "map_env_first").await;
+        let first = assembled(&kernel, &agent, &stamp_at(T1)).await;
+        let block = text(&message(decl, agent.as_str(), &Shown::of(&first[0]))).to_string();
+        assert!(env_line(&block).contains("2026-11-19 (UTC+00:00)"), "{block}");
+    }
     // rows stored: the first row's date, not the arriving message's
     save(
         &kernel,

@@ -27,10 +27,10 @@ fn asker_passes(target: &AgentId) -> Vec<Vec<ScriptEvent>> {
 
 /// Start the asker's run: its first pass sends the inquiry.
 async fn start(kernel: &Arc<Kernel>, asker: &AgentId) {
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = crate::tests::settled(kernel, kernel.operator_send(vec![Item::new(
             asker.clone(),
             json!({"type": "send", "text": "ask", "client_id": "probe"}),
-        )])
+        )]))
         .await;
 }
 
@@ -38,7 +38,12 @@ async fn start(kernel: &Arc<Kernel>, asker: &AgentId) {
 /// its passes it lands: a fast failure can answer before the asker's own turn ends.
 async fn told(fb: &Arc<MockScript>, target: &AgentId, why: &str) {
     let error = format!("{}'s turn failed: {why}", target.as_str());
-    let head = format!(" · {} inquiry]", target.as_str());
+    told_error(fb, target, &error).await;
+}
+
+/// The asker is handed an error reply containing `error`, as the reply to its inquiry.
+async fn told_error(fb: &Arc<MockScript>, target: &AgentId, error: &str) {
+    let head = format!(" · {} inquiry", target.as_str());
     for _ in 0..400 {
         let seen: Vec<String> = fb
             .requests
@@ -47,7 +52,7 @@ async fn told(fb: &Arc<MockScript>, target: &AgentId, why: &str) {
             .iter()
             .map(|m| Value::Array(m.clone()).to_string())
             .collect();
-        if let Some(s) = seen.iter().find(|s| s.contains(&error)) {
+        if let Some(s) = seen.iter().find(|s| s.contains(error)) {
             assert!(s.contains("[reply to ") && s.contains(&head), "{s}");
             return;
         }
@@ -77,7 +82,9 @@ async fn a_store_refusal_tells_the_asker() {
     // the store lets the agent read, not append: the turn fails fast
     fantastic_kernel::test_support::grant(&kernel, a.as_str(), MEMORY, json!({"call": ["read"]}));
     start(&kernel, &peer_of(&a)).await;
-    told(&fb, &a, &format!("{a}: memory store")).await;
+    // the store refuses the message's own row (#795: a message is stored when it
+    // arrives), so the inquiry's reply is the store's refusal, naming the failed append
+    told_error(&fb, &a, &format!("{a}: memory store 'memory' append failed")).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

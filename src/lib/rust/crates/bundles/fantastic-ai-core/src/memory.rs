@@ -303,7 +303,10 @@ pub async fn refresh_head(self_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<
     let fresh = rows_of(&res, self_id);
     let mut heads = m.heads.lock().expect("heads poisoned");
     let h = heads.entry(self_id.0.clone()).or_default();
+    // THE HEAD AS IT IS NOW, not as it was before the read: a row appended while the read
+    // was out (a message arriving during a pass, #795) is in both, and is kept once
     let mut seen: std::collections::HashSet<i64> = ids.into_iter().collect();
+    seen.extend(h.iter().filter_map(|r| r.get("id").and_then(Value::as_i64)));
     for r in fresh {
         let rid = r.get("id").and_then(Value::as_i64);
         if rid.is_some_and(|i| seen.contains(&i)) || is_trace(&r) {
@@ -467,10 +470,16 @@ pub async fn save_history(
         {
             let mut heads = m.heads.lock().expect("heads poisoned");
             if let Some(h) = heads.get_mut(&self_id.0) {
-                if kind_of(&stored) == Some("clear") {
-                    h.clear();
+                // a head refresh that read the store while this append was out took
+                // the row already (#795): it is kept once
+                let id = stored.get("id").and_then(Value::as_i64);
+                let have = id.is_some() && h.iter().any(|x| x.get("id").and_then(Value::as_i64) == id);
+                if !have {
+                    if kind_of(&stored) == Some("clear") {
+                        h.clear();
+                    }
+                    h.push(stored.clone());
                 }
-                h.push(stored.clone());
             }
         }
         if !kind_of(&stored).is_some_and(|k| BOOKKEEPING.contains(&k)) {

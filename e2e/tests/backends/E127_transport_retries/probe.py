@@ -31,6 +31,7 @@ from pathlib import Path
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
 sys.path.insert(0, str(E2E))
 
+from helpers.host.passes import run_pass
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
 from helpers.host.ws import WSWatcher
 from helpers.lines import ALL, PROVIDER
@@ -92,22 +93,12 @@ def main() -> int:
         return [e for e in list(events) if e.get("type") == "status" and e.get("phase") == "retrying"]
 
     def run_turn(text: str):
-        """One send with the ws collector on; the done status is waited for."""
-        events, stop = watch(hk.port, AI)
+        """One send (acked, #795), its pass followed to its end (`done`/`failed`) over
+        the ws face: the outcome, the pass's events, the requests it made."""
         before = len(m.turns())
-        out = hk.send(AI, {"type": "send", "text": text, "client_id": "tab1"})
-        end = time.monotonic() + 15
-        while time.monotonic() < end and not any(
-            e.get("type") == "status" and e.get("phase") in ("done", "failed") for e in list(events)
-        ):
-            time.sleep(0.05)
-        stop.set()
-        # the events of THIS turn: up to its first end (`done`/`failed`)
-        seen = list(events)
-        first = next((i for i, e in enumerate(seen)
-                      if e.get("type") == "status" and e.get("phase") in ("done", "failed")), len(seen))
-        idle()  # the turn's work settles before the next case
-        return out, seen[: first + 1], m.turns()[before:]
+        out = run_pass(hk, AI, {"type": "send", "text": text, "client_id": "tab1"}, bound=15)
+        idle()  # the pass's work settles before the next case
+        return out, out["events"], m.turns()[before:]
 
     def idle(bound: float = 30) -> bool:
         end = time.monotonic() + bound

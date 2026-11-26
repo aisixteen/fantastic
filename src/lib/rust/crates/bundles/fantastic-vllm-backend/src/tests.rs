@@ -1237,14 +1237,27 @@ async fn the_last_budget_is_per_agent_and_freed_on_delete() {
                 .clone()
         }
     };
+    let chat = pair_chat(&kernel, &AgentId::from(id.as_str())).await;
     let out = kernel.operator_send(vec![Item::new(
-            pair_chat(&kernel, &AgentId::from(id.as_str())).await,
+            chat.clone(),
             json!({"type": "send", "text": "hi", "client_id": "t"}),
         )])
         .await
         .remove(0)
         .result;
-    assert_eq!(out["response"], json!("ok <call name=\"done\"></call>"), "{out}");
+    assert_eq!(out["accepted"], json!(true), "{out}");
+    assert!(fantastic_ai_core::state::settle(&kernel, std::time::Duration::from_secs(20)).await);
+    let rows = kernel.operator_send(vec![Item::new(chat, json!({"type": "rows"}))])
+        .await
+        .remove(0)
+        .result;
+    let answer = rows["rows"]
+        .as_array()
+        .and_then(|rs| rs.iter().rev().find(|r| r["role"] == "assistant"))
+        .and_then(|r| r["content"].as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert_eq!(answer, "ok <call name=\"done\"></call>", "{rows}");
     // Let the chain settle, or a pass that lands after the delete below records a
     // budget for the re-created id.
     let mut quiet = 0;

@@ -281,8 +281,8 @@ fn by_content(rows: &[Value], content: &str) -> Value {
 
 /// One verb sent to the agent; its result.
 async fn verb(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    kernel
-        .operator_send(vec![Item::new(agent.clone(), payload)])
+    crate::tests::settled(kernel, kernel
+        .operator_send(vec![Item::new(agent.clone(), payload)]))
         .await
         .remove(0)
         .result
@@ -291,13 +291,13 @@ async fn verb(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
 /// A send, once the last chain has ended (each send here is its own chain).
 async fn say(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) {
     until_true("the chain to end", || {
-        !crate::state::state_for(agent).chain.lock().unwrap().alive
+        crate::state::state_for(agent).is_quiet()
     })
     .await;
     let r = verb(kernel, agent, json!({"type": "send", "text": text})).await;
     assert!(r.get("error").is_none(), "{r}");
     until_true("the chain to end", || {
-        !crate::state::state_for(agent).chain.lock().unwrap().alive
+        crate::state::state_for(agent).is_quiet()
     })
     .await;
 }
@@ -1560,11 +1560,9 @@ async fn d10_output() -> Value {
         crate::assembly::assemble_messages(
             &agent,
             &state,
-            "next",
             &kernel,
             "c",
             crate::caching::Caching::ProviderCache,
-            &crate::row_attrs::Stamp::now(),
         ),
     )
     .await

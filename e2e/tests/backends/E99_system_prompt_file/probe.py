@@ -8,7 +8,7 @@ and an AI agent whose record names `file_bridge_id` (the view) + `system_prompt_
 (the view's path). The agent reads the file THROUGH the view, as itself, with the
 view's own verbs only (its own `pf` line: `read`, `watch`; nothing keeps a list of
 callers). Not set → nothing looked up, the default block; set and unusable →
-the turn FAILS loud (`reason: invalid_meta`), the model is never called:
+the pass FAILS loud (its `failed` status names why), the model is never called:
 
   1. the file is the block, its placeholders filled per agent (`{store}`), an
      unknown `{…}` kept verbatim;
@@ -47,6 +47,7 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 
 from helpers.host.driver import HostKernel, ensure_runtime, free_port, runtime
+from helpers.host.passes import run_pass
 from helpers.lines import ALL, GET, PROVIDER, call, is_unknown
 from helpers.verdict import verdict
 from runners._responses_stub import ResponsesStub
@@ -121,12 +122,13 @@ def main() -> int:
         prompt.write_text(text)
 
     def failed_turn() -> dict:
-        """A turn that must fail loud: its reply names why, no model request."""
+        """A pass that must fail loud: the send is acked (#795), its `failed` status
+        names why (`error`), no model request."""
         before = len(stub.requests)
-        r = hk.send("ai", {"type": "send", "text": "go"})
+        out = run_pass(hk, "ai", {"type": "send", "text": "go"}, bound=15)
         time.sleep(0.3)
         need(len(stub.requests) == before, "the model was not called on another block")
-        return r if isinstance(r, dict) else {}
+        return {"error": out["error"] or ""}
 
     def failed_until(pred, tries: int = 12) -> dict:
         r: dict = {}
@@ -139,10 +141,8 @@ def main() -> int:
 
     def failed_turn_quiet() -> dict:
         before = len(stub.requests)
-        r = hk.send("ai", {"type": "send", "text": "go"})
-        r = r if isinstance(r, dict) else {}
-        r["_called"] = len(stub.requests) > before
-        return r
+        out = run_pass(hk, "ai", {"type": "send", "text": "go"}, bound=15)
+        return {"error": out["error"] or "", "_called": len(stub.requests) > before}
 
     def view_of(bridge: str, view: str, path: str) -> None:
         """A `file_bridge` exposing `path` and its file view `view` of that path, a child
@@ -239,7 +239,7 @@ def main() -> int:
         update("ai", system_prompt_file=PATH)
         r = failed_turn()
         need(
-            r.get("reason") == "invalid_meta" and "no file_bridge_id" in str(r.get("error")),
+            "no file_bridge_id" in str(r.get("error")),
             f"a path without file_bridge_id fails loud: {str(r)[:200]}",
         )
         update("ai", system_prompt_file=None)
@@ -292,10 +292,9 @@ def main() -> int:
         turn_until(lambda s: s == "BACK\n")
         time.sleep(0.3)
         prompt.unlink()
-        r = failed_until(lambda r: r.get("reason") == "invalid_meta")
+        r = failed_until(lambda r: "prompt.md" in str(r.get("error")))
         need(
-            r.get("reason") == "invalid_meta"
-            and "prompt.md" in str(r.get("error"))
+            "prompt.md" in str(r.get("error"))
             and not r.get("_called"),
             f"the file deleted: the turn fails loud: {str(r)[:200]}",
         )
@@ -315,8 +314,7 @@ def main() -> int:
         need(r.get("updated") is True, f"ai names pf_sealed: {str(r)[:200]}")
         r = failed_turn()
         need(
-            r.get("reason") == "invalid_meta"
-            and "no agent 'pf_sealed'" in str(r.get("error"))
+            "no agent 'pf_sealed'" in str(r.get("error"))
             and "SECRET-ROLE" not in str(r),
             f"no line on the view: the turn fails with the unknown answer: {str(r)[:200]}",
         )

@@ -17,12 +17,12 @@ async fn mk_retrying(tmp: &TempDir, tag: &str, retries: i64) -> (Arc<Kernel>, Ag
     (kernel, agent)
 }
 
-/// One user message to the agent; the reply it gets back.
+/// One user message to the agent; its ack, read once the agent is quiet.
 async fn send_text(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) -> Value {
-    kernel.operator_send(vec![Item::new(
+    crate::tests::settled(kernel, kernel.operator_send(vec![Item::new(
             agent.clone(),
             json!({"type": "send", "text": text, "client_id": "c_retry"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result
@@ -41,7 +41,7 @@ async fn a_dropped_link_is_retried_and_the_turn_answers() {
         Duration::ZERO,
     );
     let r = send_text(&kernel, &agent, "hello").await;
-    assert_eq!(r["response"], json!(r#"ANSWER <call name="done"></call>"#), "{r}");
+    assert_eq!(json!(crate::tests::last_answer(&kernel, &agent).await), json!(r#"ANSWER <call name="done"></call>"#), "{r}");
     assert_eq!(s.passes_served(), 2);
     assert!(s.request(1).contains("[retry 1/2]"), "{}", s.request(1));
 }
@@ -61,7 +61,9 @@ async fn retries_run_out_and_the_turn_fails() {
     );
     let r = send_text(&kernel, &agent, "hello").await;
     // the link retry ran out after 2 requests, and the turn failed: nothing re-runs it (#795)
-    assert!(r["error"].as_str().unwrap_or_default().contains("connect failed again"), "{r}");
+    assert_eq!(r["accepted"], json!(true), "{r}");
+    let errors = crate::tests::error_rows(&kernel, &agent).await;
+    assert!(errors.iter().any(|e| e.contains("connect failed again")), "{errors:?}");
     assert!(s.request(1).contains("[retry 1/1]"), "{}", s.request(1));
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(s.passes_served(), 2, "the bounds stop it");
@@ -81,7 +83,9 @@ async fn a_model_error_is_never_retried() {
     );
     let r = send_text(&kernel, &agent, "hello").await;
     // no link retry, and no retry turn (#795): one request, the turn failed
-    assert!(r["error"].as_str().unwrap_or_default().contains("boom"), "{r}");
+    assert_eq!(r["accepted"], json!(true), "{r}");
+    let errors = crate::tests::error_rows(&kernel, &agent).await;
+    assert!(errors.iter().any(|e| e.contains("boom")), "{errors:?}");
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(s.passes_served(), 1, "a model error is never retried");
 }
@@ -100,7 +104,9 @@ async fn retries_are_off_by_default() {
     );
     let r = send_text(&kernel, &agent, "hello").await;
     // no link retry by default: one request, the turn failed (#795)
-    assert!(r["error"].as_str().unwrap_or_default().contains("connect failed"), "{r}");
+    assert_eq!(r["accepted"], json!(true), "{r}");
+    let errors = crate::tests::error_rows(&kernel, &agent).await;
+    assert!(errors.iter().any(|e| e.contains("connect failed")), "{errors:?}");
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(s.passes_served(), 1, "retries are off by default");
 }
@@ -136,9 +142,11 @@ async fn a_401_is_one_request_and_the_chain_gives_up() {
     assert!(until_passes(&s, 1).await);
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(s.passes_served(), 1, "a 401 is asked once");
+    assert_eq!(r["accepted"], json!(true), "{r}");
+    let errors = crate::tests::error_rows(&kernel, &agent).await;
     assert!(
-        r.to_string().contains("HTTP 401"),
-        "the send fails with the endpoint's error: {r}"
+        errors.iter().any(|e| e.contains("HTTP 401")),
+        "the pass fails with the endpoint's error: {errors:?}"
     );
     let ends = ending_statuses(&mut rx);
     let last = ends.last().expect("an ending status");

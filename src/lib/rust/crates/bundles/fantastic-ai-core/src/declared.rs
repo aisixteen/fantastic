@@ -36,7 +36,7 @@ pub struct Image {
     pub image_ref: Option<String>,
 }
 
-/// Run one turn on `text` and stream its tokens to the caller. The conversation is this agent's own (its memory store); one generation runs at a time and a caller that waits gets a `queued` status. A message that lands while the agent's chain is running is held and answered by the pass that reads it. Returns {response, client_id}.
+/// Send this agent a message: it is stored at once and read by the agent's next pass, which starts now when none runs; a message that lands while a pass runs is read by the next one. The conversation is this agent's own (its memory store). Nothing waits for the model: the answer, if the agent gives one, is its own later message. Returns {accepted, re, client_id} (`re`: the stored row's id).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Send {
@@ -46,16 +46,12 @@ pub struct Send {
     #[serde(default = "fantastic_kernel::inquiry::default_client_id")]
     #[schemars(schema_with = "fantastic_kernel::inquiry::client_id")]
     pub client_id: String,
-    /// Hand this pass's text to that agent id as a fresh turn, once.
-    pub send_to: Option<String>,
     /// Images that ride this message.
     pub images: Option<Vec<Image>>,
     /// Harness text, not a message: stored as a notice, honoured only on a send to self.
     pub notice: Option<bool>,
-    /// A reply to a call of a chain that has ended: recorded, never a turn.
+    /// A reply to a call of a previous incarnation: recorded, never read by a pass.
     pub late: Option<bool>,
-    /// The token of the chain this turn belongs to.
-    pub chain: Option<String>,
     /// The sending turn's message id.
     pub msg: Option<i64>,
     /// The message id this one answers.
@@ -85,7 +81,7 @@ pub struct Pause {
     pub reason: Option<String>,
 }
 
-/// Resume this agent: write one resumed row, then release the held messages in order, each as a fresh turn after it. Returns {resumed, released}.
+/// Resume this agent: write one resumed row, then ONE pass reads every message held (stored as it arrived; nothing is re-sent). Returns {resumed, released}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Resume {
@@ -156,7 +152,7 @@ pub struct Unembed {
     pub id: String,
 }
 
-/// A privacy-filtered snapshot of the queue and the generation in flight: full text only for the asking client's own entries. Answers at once, never queued behind a turn.
+/// A privacy-filtered snapshot of the messages not read yet and the pass in flight: full text only for the asking client's own entries. Answers at once.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Status {
@@ -234,7 +230,7 @@ pub struct ContextFold {
     pub summary: Option<String>,
 }
 
-/// Compact this agent's OWN store: drop the rows the model can no longer see and keep every fold. Waits for a running turn. Returns {pruned, kept_folds, unanchored}.
+/// Compact this agent's OWN store: drop the rows the model can no longer see and keep every fold. Refused while a pass runs. Returns {pruned, kept_folds, unanchored}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ContextForget {
@@ -327,7 +323,7 @@ pub struct ImageRef {
     pub media_type: String,
 }
 
-/// One stateless completion pass: no memory, no calls, no conversation kept. Each content token is emitted on this agent's stream as {type:'provider_token', rid, text}. Returns {rid, model, prompt_tokens, completion_tokens, stop_reason} or {rid, error, transport}.
+/// One stateless completion pass: no memory, no calls, no conversation kept. Each content token is emitted on this agent's stream as {type:'provider_token', rid, text}. Returns {rid, model, prompt_tokens, completion_tokens, stop_reason, text} — `text` the whole answer, what the caller reads — or {rid, error, transport}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Complete {

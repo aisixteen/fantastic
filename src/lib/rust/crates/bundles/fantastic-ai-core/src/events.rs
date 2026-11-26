@@ -58,7 +58,8 @@ pub async fn emit_status(
             (None, None)
         }
     };
-    let queue_depth = state.queue.lock().expect("queue poisoned").len();
+    // the messages stored and not read yet: the next pass reads them
+    let queue_depth = state.life.lock().expect("life poisoned").unread.len();
     let mut detail = extra_detail;
     if let Some(sid) = send_id {
         detail.entry("send_id").or_insert(json!(sid));

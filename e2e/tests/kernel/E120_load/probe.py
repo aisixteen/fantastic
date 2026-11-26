@@ -12,9 +12,11 @@ On the PACKAGED rust host, every call through `web_rest`:
   3. REST: 500 `reflect` POSTs over 16 client threads, every one answered;
   4. ONE BATCH: an AI agent (`vllm_backend` against a scripted local server),
      holding one `reflect` line per target, answers one turn with 500 `<call>`s — ONE kernel batch of 500 items to 500
-     hydrated agents; the next request carries all 500 replies as one turn
-     (`N of 500 in batch …`). Timed from the `send` POST to that next request
-     (the scripted answer's own stream is a few ms of it).
+     hydrated agents; each reply is its own message (`k of 500 in batch …`, #795),
+     read by the passes that follow, coalesced (a reply landing while a pass works
+     waits for the ONE next pass): every reply read once, by few passes. Timed from
+     the `send` POST until the agent is quiet with every reply read (the scripted
+     answers' own streams are a few ms of it).
 
 The numbers are REPORTED; the bounds only catch a gross regression (`BOUNDS`).
 """
@@ -191,28 +193,42 @@ def main() -> int:
         m.reply("Reflecting the pool.\n" + calls, 'Seen them all.\n<call name="done"></call>')
         t_sent = time.monotonic()
         out = hk.send(AI, {"type": "send", "text": "reflect the pool"}, timeout=300)
-        need(not out.get("error"), f"the batch turn ran: {str(out.get('error') or '')[:160]}")
+        need(out.get("accepted") is True, f"the send is acked: {str(out)[:160]}")
+
+        def read_replies(t: dict) -> list[str]:
+            """The reply blocks a request carries, each user message once."""
+            got = []
+            for x in t["body"].get("messages") or []:
+                if x.get("role") != "user":
+                    continue
+                c = x.get("content")
+                c = c if isinstance(c, str) else json.dumps(c)
+                got += re.findall(r"\[reply to \S+ · (p\d{4}) reflect[^\]]*of 500 in batch", c)
+            return got
+
+        def quiet() -> bool:
+            return not any(x.get("agent") == AI
+                           for x in hk.send("kernel", {"type": "ps"}).get("tasks") or [])
+
         end = t_sent + BOUNDS["batch_500"] * 2
-        while time.monotonic() < end and len(m.turns()) < 2:
+        while time.monotonic() < end and not (
+                len(m.turns()) >= 2 and sorted(set(read_replies(m.turns()[-1]))) == batch and quiet()):
             time.sleep(0.02)
         nums["batch_500"] = time.monotonic() - t_sent
         turns = m.turns()
-        nxt = ""
-        if len(turns) >= 2:
-            msgs = turns[1]["body"].get("messages") or []
-            nxt = next((x.get("content") for x in reversed(msgs) if x.get("role") == "user"), "")
-            nxt = nxt if isinstance(nxt, str) else json.dumps(nxt)
-        blocks = re.findall(r"\[reply to \S+ · (p\d{4}) reflect[^\]]*of 500 in batch", nxt)
+        last = read_replies(turns[-1]) if len(turns) >= 2 else []
         need(len(turns) >= 2 and nums["batch_500"] <= BOUNDS["batch_500"],
-             f"one batch of {N_BATCH} dispatched and its replies delivered in "
+             f"one batch of {N_BATCH} dispatched and its replies read in "
              f"{nums['batch_500']:.2f}s = {N_BATCH / max(nums['batch_500'], 1e-9):.0f} items/s")
-        need(sorted(blocks) == batch,
-             f"the next request carries all {N_BATCH} replies as one turn: {len(blocks)} blocks, "
-             f"{len(nxt)} chars")
-        end = time.monotonic() + 60
-        while time.monotonic() < end and any(
-                x.get("agent") == AI for x in hk.send("kernel", {"type": "ps"}).get("tasks") or []):
-            time.sleep(0.05)
+        need(sorted(last) == batch,
+             f"every one of the {N_BATCH} replies is read, once each: {len(last)} read, "
+             f"{len(set(last))} distinct")
+        # REPORTED: how many passes read the replies (a reply landing while a pass works
+        # waits for the one next pass); the bound only catches one pass per reply
+        passes = len(turns) - 1
+        nums["batch_passes"] = passes
+        need(1 <= passes <= N_BATCH // 4,
+             f"the replies are read by coalesced passes, not one pass per reply: {passes}")
     finally:
         hk.close()
         m.stop()

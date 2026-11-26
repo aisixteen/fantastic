@@ -1,42 +1,45 @@
-//! The generation: ONE provider pass per `send` — assemble the prompt,
-//! auto-compact to fit the window, stream tokens, persist history (RAW text out
-//! to the caller, `<think>`-stripped text into the store). Per-backend knobs ride
-//! on [`BackendConfig`].
+//! THE PASS, step by step (#795): an AI agent's pass is a record handed from one
+//! message to the next, never a task that waits.
 //!
-//! ONE PASS, and still no loop HERE — but that is not the same as "nothing
-//! happens". This module generates; [`crate::route::route_reply`] then dispatches
-//! whatever the completion named and delivers each reply to its own `reply_to`. A
-//! chain therefore advances one pass at a time, each pass woken by a delivered
-//! message. There is no loop in the kernel, and nothing wakes an agent but a message.
+//! 1. [`start`] (woken by [`crate::life::wake`]): the pass takes every unread message
+//!    (its TAIL, already stored), assembles its view from history, folds it to fit the
+//!    window, and sends its request to the model ([`crate::provider::begin`]). The step
+//!    ENDS there.
+//! 2. The request's SETTLE is the next step ([`settled`]): the WHOLE answer is read once
+//!    with the type's reader — the stream fed only the live view. An answer whose calls
+//!    are malformed or foreign, or that has no call, is re-asked with a second request,
+//!    up to [`CALL_RETRIES`] times, with the failed answer and its report; nothing of a
+//!    failed attempt is stored or routed. After the last one the harness stops the
+//!    pass with the `stop` call. An attempt whose thinking the harness cut at the
+//!    chat's cap (`stop_reason` [`THINKING_CUT`], #782) is re-asked ONCE with a short
+//!    "answer now" note; a second cut stops it the same way.
+//! 3. An ACCEPTED answer is stored as the pass's assistant row, the pass ENDS
+//!    ([`crate::life::end`]), and its calls go out ([`crate::route::route_reply`]),
+//!    each through [`fantastic_kernel::Kernel::call`]; each reply is a later message.
 //!
-//! INSIDE THE TURN, ATTEMPTS (#766, 1.5): an answer whose calls are malformed or
-//! foreign for the pass's model type is re-asked, up to [`CALL_RETRIES`] times, with
-//! the failed answer and its report; nothing of a failed attempt is stored or routed.
-//! An answer with NO CALL (prose, notes or thinking only, #795) is re-asked the same
-//! way, its report the type's no-call text. After the last one failed the harness stops
-//! the turn with the `stop` call ([`Generation::Stopped`]). An attempt whose thinking the harness cut at the chat's
-//! cap (`stop_reason` [`THINKING_CUT`], #782) is re-asked ONCE with a short "answer
-//! now" note and logged as a `retry`; a second cut stops the turn the same way.
+//! A failed request (the link, the provider, its deadline) ends the pass with its error
+//! row and a `failed` status; a link failure is first retried, visibly, up to the
+//! record's `transport_retries`. A cancel of the request ends the pass as stopped.
 
-use crate::assembly::assemble_messages;
 use crate::constants::CALL_RETRIES;
 use crate::context::estimate_tokens;
 use crate::events::{emit_status, to_caller, PartPublisher, PassParts};
 use crate::memory::{save_history, MemoryStoreError};
+use crate::model_format::cache::View;
 use crate::model_format::pass::{Mode, Pass};
-use crate::model_format::Out;
-use crate::provider::{Provider, ProviderError, ProviderEvent};
-use crate::state::BackendState;
+use crate::model_format::{Out, Outbound};
+use crate::provider::{Provider, ProviderError};
+use crate::state::{state_for, Arrival, BackendState, CurrentEntry};
 use crate::stream_parts::{cut_marker, PartSplitter};
 use crate::think::{without_thinking, THINKING_CUT};
-use crate::used::{Accepted, Counts, Landed, Window};
-use fantastic_kernel::{current_task, AgentId, Kernel, TaskId};
-use futures_util::StreamExt;
+use crate::used::{Counts, Landed, Window};
+use async_trait::async_trait;
+use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
-/// Per-backend knobs threaded through the shared `send` so a single path
-/// serves every backend. The provider is the streaming seam.
+/// Per-backend knobs threaded through every pass so a single path serves every
+/// backend. The provider is the seam.
 #[derive(Clone, Copy, Debug)]
 pub struct BackendConfig {
     /// Backend error-message prefix (e.g. `"ollama_backend"`), used by the
@@ -53,14 +56,12 @@ pub struct BackendConfig {
     pub model_window: i64,
 }
 
-/// Why a generation produced no completion. The two kinds settle differently,
-/// so they are not one string: python returns a projection refusal VERBATIM out
-/// of `_run` (no status event, no `client_id`, no raise), while a provider
-/// failure propagates.
+/// Why a pass produced no answer: each is said in its `failed` status, and the pass
+/// ends ([`failed`]).
+#[derive(Clone)]
 pub enum GenFailure {
     /// The context-projection seam refused (`too_small` failsafe, unknown
-    /// strategy). The dict is the reply — python `_run`'s
-    /// `if isinstance(projected, dict): return projected`.
+    /// strategy): its refusal.
     Projection(Value),
     /// The provider pass failed. See [`ProviderError`].
     Provider(ProviderError),
@@ -77,35 +78,6 @@ pub enum GenFailure {
     /// A fold's anchor cannot be known — python's `ValueError` out of
     /// `member_anchor`, which `_send`'s `except Exception` reports and re-raises.
     FoldAnchor(crate::folds::FoldAnchorError),
-}
-
-/// What one generation produced.
-pub enum Generation {
-    /// An ANSWER, stored as this turn's assistant row `message_id`. `text` is
-    /// RAW — thinking markers intact — because routing parses it.
-    Answered {
-        /// The raw completion text.
-        text: String,
-        /// The assistant row this turn was stored as.
-        message_id: i64,
-        /// Every closed call part, `(stream_id, body)` — routing stamps each
-        /// dispatched message with the stream it was previewed as (python's
-        /// `call_streams`).
-        call_streams: Vec<(String, String)>,
-        /// The model stopped with a block open: NOTHING of this pass dispatches,
-        /// its closed calls included.
-        cut: bool,
-    },
-    /// THE HARNESS STOPPED THE TURN (#766, 1.8): `1 + CALL_RETRIES` attempts in a row
-    /// wrote malformed calls or no call, so the model is not asked again. Stored: the incoming row
-    /// and the assistant row `message_id`, whose content is the `stop` call with
-    /// `reason`. Nothing is routed; the chain ends through the give-up.
-    Stopped {
-        /// The harness's reason (`res/<type>/stop_reason.txt`, the attempt count).
-        reason: String,
-        /// The assistant row this turn was stored as.
-        message_id: i64,
-    },
 }
 
 impl From<MemoryStoreError> for GenFailure {
@@ -137,59 +109,54 @@ pub fn incoming_row(text: &str, id: i64, parent: Option<i64>, notice: bool) -> V
     row
 }
 
-/// The incoming row of the turn in flight, with the images the turn attached.
-fn incoming_row_of(state: &BackendState, text: &str, id: i64, parent: Option<i64>) -> Value {
-    crate::images::stamped(
-        incoming_row(text, id, parent, notice_in_flight(state)),
-        attached_in_flight(state).as_ref(),
-    )
+
+/// What one pass is: whose, which, what it reads, and how it asks.
+pub(crate) struct Run {
+    kernel: Arc<Kernel>,
+    self_id: AgentId,
+    state: Arc<BackendState>,
+    cfg: BackendConfig,
+    provider: Arc<dyn Provider>,
+    /// The pass's number ([`crate::life::is_current`]).
+    epoch: u64,
+    /// The messages it reads, in arrival order.
+    tail: Vec<Arrival>,
+    /// The client id its events carry: its first message's.
+    client_id: String,
+    /// The row its answer answers: the newest it reads.
+    parent: i64,
+    /// Link failures retried so far (`transport_retries`).
+    retried: u32,
+    /// When the pass's ceiling (`send_timeout`) ends: its attempts share it; a link
+    /// retry starts it again.
+    deadline: std::time::Instant,
+    /// A test that drives one pass reads how it ended here, and its answer is not routed.
+    #[cfg_attr(not(test), allow(dead_code))]
+    observe: Observer,
 }
 
-/// The images the turn in flight attached.
-pub(crate) fn attached_in_flight(state: &BackendState) -> Option<crate::images::Attached> {
-    state
-        .current_meta
-        .lock()
-        .expect("current poisoned")
-        .as_ref()
-        .and_then(|c| c.attached.clone())
+#[cfg(test)]
+type Observer = Option<tokio::sync::oneshot::Sender<Result<Generation, GenFailure>>>;
+#[cfg(not(test))]
+type Observer = ();
+
+/// TESTS: how a driven pass ended ([`run_generation`]).
+#[cfg(test)]
+pub(crate) enum Generation {
+    /// Its answer row: the raw text, the row, whether it was cut.
+    Answered {
+        text: String,
+        message_id: i64,
+        cut: bool,
+    },
+    /// The harness stopped it: the reason and the `stop` row.
+    Stopped { reason: String, message_id: i64 },
 }
 
-/// Who sent the turn in flight: the `source` of its incoming row.
-fn incoming_source(state: &BackendState) -> String {
-    state
-        .current_meta
-        .lock()
-        .expect("current poisoned")
-        .as_ref()
-        .map(|c| c.origin.clone())
-        .unwrap_or_default()
-}
-
-/// Whether the turn in flight answers this layer's own text.
-fn notice_in_flight(state: &BackendState) -> bool {
-    state
-        .current_meta
-        .lock()
-        .expect("current poisoned")
-        .as_ref()
-        .is_some_and(|c| c.notice)
-}
-
-/// One generation: assemble (system + compacted history + user) → project context
-/// ONCE (auto-compact / notice / too_small) → ONE provider pass streaming tokens →
-/// persist. Runs INLINE in the `send` dispatch — which is itself a kernel task, so
-/// `cancel` drops this future (and with it the provider stream).
-///
-/// Returns the RAW completion text, thinking markers intact: [`crate::verbs::send`]
-/// hands it to the router, which reads only the ANSWER — a call written inside
-/// thinking never dispatches. The DURABLE turn is the answer.
-///
-/// The conversation is ALWAYS this agent's own (its memory store): there is no
-/// caller-supplied history — a one-off completion is a disposable agent with its
-/// own store; context for another agent travels in the text.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_generation(
+/// TESTS: ONE PASS of `self_id` over `user_text`, driven to its end: the message stored,
+/// the pass run, how it ended. Its answer is not routed.
+#[cfg(test)]
+pub(crate) async fn run_generation(
     provider: &Arc<dyn Provider>,
     self_id: &AgentId,
     state: &Arc<BackendState>,
@@ -198,28 +165,260 @@ pub async fn run_generation(
     client_id: &str,
     cfg: BackendConfig,
 ) -> Result<Generation, GenFailure> {
-    // A PROVIDER THAT CANNOT RUN REFUSES THE TURN FIRST — before the owed
-    // recall, the assembly and the projection, so the caller reads why it
-    // cannot answer rather than a window failure on a model that could never
-    // have answered. Python `_run` builds its provider (`_get_provider`, which
-    // may raise) before anything else.
-    provider.ready().map_err(GenFailure::Provider)?;
-    // THE CACHING MODE IS CHECKED FIRST TOO: a record that asks for provider caching
-    // on a backend that cannot cache is refused before any row is written, and so
-    // before the owed recall below (which writes a view and a recall row).
+    let m = crate::life::Incoming {
+        text: user_text,
+        client_id,
+        origin: client_id,
+        notice: false,
+        attached: None,
+    };
+    let row_id = crate::life::arrive(kernel, self_id, &m, false).await?;
+    let epoch = {
+        let mut life = state.life.lock().expect("life poisoned");
+        life.running = true;
+        life.epoch += 1;
+        life.epoch
+    };
+    let p = Arc::clone(provider);
+    *state.machine.lock().expect("machine poisoned") = Some(crate::state::Machine {
+        provider: Arc::new(move |_| Arc::clone(&p)),
+        cfg,
+    });
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let tail = vec![Arrival {
+        row_id,
+        client_id: client_id.to_string(),
+        origin: client_id.to_string(),
+        text: user_text.to_string(),
+        send_id: crate::helpers::mint_send_id(),
+        at: crate::helpers::now_secs(),
+        notice: false,
+    }];
+    begin_pass(Arc::clone(kernel), self_id.clone(), epoch, tail, Some(tx)).await;
+    rx.await.unwrap_or_else(|_| {
+        Err(GenFailure::Provider(ProviderError::cancelled("the pass ended unobserved")))
+    })
+}
+
+/// A driven pass ended: its test is told (tests only).
+#[cfg(test)]
+fn observed(run: &mut Run, how: Result<Generation, GenFailure>) -> bool {
+    match run.observe.take() {
+        Some(tx) => {
+            let _ = tx.send(how);
+            true
+        }
+        None => false,
+    }
+}
+
+/// THE WAKE NOTICE: the messages a pass reads arrived while the previous pass was
+/// working, so its answer row lies after them; the notice is the request's last
+/// message. No imperative: the model decides what to answer.
+fn arrived_notice(n: usize) -> String {
+    format!("[{n} message(s) arrived while you were working — they are above.]")
+}
+
+/// A PASS'S FIRST STEP: take the tail, assemble, send the request; the step ends there.
+pub(crate) async fn start(kernel: Arc<Kernel>, self_id: AgentId, epoch: u64, tail: Vec<Arrival>) {
+    #[cfg(test)]
+    begin_pass(kernel, self_id, epoch, tail, None).await;
+    #[cfg(not(test))]
+    begin_pass(kernel, self_id, epoch, tail, ()).await;
+}
+
+async fn begin_pass(
+    kernel: Arc<Kernel>,
+    self_id: AgentId,
+    epoch: u64,
+    mut tail: Vec<Arrival>,
+    observe: Observer,
+) {
+    let state = state_for(&self_id);
+    let machine = state.machine.lock().expect("machine poisoned").clone();
+    let Some(machine) = machine else {
+        eprintln!("  [ai] {self_id}: a pass cannot start: no call to the agent has run yet");
+        crate::life::end(&kernel, &self_id, epoch);
+        return;
+    };
+    let client_id = tail
+        .first()
+        .map_or_else(fantastic_kernel::inquiry::default_client_id, |a| a.client_id.clone());
+    // THE REQUEST ENDS WITH A USER MESSAGE: a tail that arrived while the last pass
+    // worked lies before its answer row, so a notice follows that row
+    let last_role = match crate::memory::load_history(&self_id, &kernel, false).await {
+        Ok(rows) => rows
+            .last()
+            .and_then(|r| r.get("role"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        Err(_) => None,
+    };
+    if last_role.as_deref() == Some("assistant") && !tail.is_empty() {
+        let text = arrived_notice(tail.len());
+        let m = crate::life::Incoming {
+            text: &text,
+            client_id: &client_id,
+            origin: self_id.as_str(),
+            notice: true,
+            attached: None,
+        };
+        if let Ok(row_id) = crate::life::arrive(&kernel, &self_id, &m, false).await {
+            tail.push(Arrival {
+                row_id,
+                client_id: client_id.clone(),
+                origin: self_id.as_str().to_string(),
+                text,
+                send_id: crate::helpers::mint_send_id(),
+                at: crate::helpers::now_secs(),
+                notice: true,
+            });
+        }
+    }
+    let (Some(first), Some(last)) = (tail.first().cloned(), tail.last().cloned()) else {
+        crate::life::end(&kernel, &self_id, epoch);
+        return;
+    };
+    *state.current_meta.lock().expect("current poisoned") = Some(CurrentEntry {
+        client_id: client_id.clone(),
+        text: last.text.clone(),
+        send_id: first.send_id.clone(),
+        queued_at: first.at,
+        origin: last.origin.clone(),
+        started_at: crate::helpers::now_secs(),
+        phase: "thinking".to_string(),
+        text_so_far: String::new(),
+        last_tool: None,
+        task_id: None,
+        parts: None,
+        stopped_by: None,
+        notice: tail.iter().all(|a| a.notice),
+        abort: Arc::new(tokio::sync::Notify::new()),
+        answers: last.row_id,
+        request: 0,
+    });
+    emit_status(&kernel, &state, &self_id, &client_id, "thinking", Map::new()).await;
+    let provider = (machine.provider)(&client_id);
+    let run = Run {
+        kernel,
+        self_id,
+        state,
+        cfg: machine.cfg,
+        provider,
+        epoch,
+        tail,
+        client_id,
+        parent: last.row_id,
+        retried: 0,
+        deadline: ceiling_from_now(),
+        observe,
+    };
+    prepare_and_ask(run).await;
+}
+
+/// The pass's ceiling (`send_timeout`), from now.
+fn ceiling_from_now() -> std::time::Instant {
+    std::time::Instant::now() + std::time::Duration::from_secs_f64(crate::constants::send_timeout_secs())
+}
+
+/// Assemble the pass and send its first request, or fail it.
+fn prepare_and_ask(run: Run) -> futures_util::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        match prepare(&run).await {
+            Ok(prep) => ask(Box::new(PassRec::new(run, prep))).await,
+            Err(f) => failed(run, f).await,
+        }
+    })
+}
+
+/// What a pass holds from its assembly to its answer.
+pub(crate) struct PassRec {
+    run: Run,
+    /// The pass path of the pass's type; after a type restart, `restarted` is the one
+    /// asked.
+    pass: Pass,
+    restarted: Option<Pass>,
+    may_restart: bool,
+    model_messages: Vec<Value>,
+    meta: Map<String, Value>,
+    /// The typed view of the sequence asked now: it holds the pass's pins.
+    view: Option<View<'static>>,
+    sent: Vec<Value>,
+    reask: Vec<Value>,
+    errors: Vec<String>,
+    window: Option<Window>,
+    cut_before: bool,
+    reason: Option<String>,
+    attempt: usize,
+    parts: Arc<tokio::sync::Mutex<PassParts>>,
+    gen_started: std::time::Instant,
+    prev_request: Option<crate::row_attrs::PrevRequest>,
+    seed: Option<Value>,
+}
+
+/// What the assembly gives a pass.
+struct Prepared {
+    pass: Pass,
+    model_messages: Vec<Value>,
+    meta: Map<String, Value>,
+    parts: Arc<tokio::sync::Mutex<PassParts>>,
+    prev_request: Option<crate::row_attrs::PrevRequest>,
+    seed: Option<Value>,
+}
+
+impl PassRec {
+    fn new(run: Run, p: Prepared) -> Self {
+        let view = p.pass.view(&p.model_messages, &p.meta);
+        let sent = view.messages.clone();
+        Self {
+            run,
+            pass: p.pass,
+            restarted: None,
+            may_restart: true,
+            model_messages: p.model_messages,
+            meta: p.meta,
+            view: Some(view),
+            sent,
+            reask: Vec::new(),
+            errors: Vec::new(),
+            window: None,
+            cut_before: false,
+            reason: None,
+            attempt: 1,
+            parts: p.parts,
+            gen_started: std::time::Instant::now(),
+            prev_request: p.prev_request,
+            seed: p.seed,
+        }
+    }
+
+    /// The pass path asked now.
+    fn cur(&self) -> &Pass {
+        self.restarted.as_ref().unwrap_or(&self.pass)
+    }
+}
+
+/// THE ASSEMBLY: the provider's readiness and the caching mode first, then the owed
+/// recall, the view over history (the tail is its newest rows), the projection that
+/// fits it to the window, and the cache marks.
+async fn prepare(run: &Run) -> Result<Prepared, GenFailure> {
+    let (kernel, self_id, state) = (&run.kernel, &run.self_id, &run.state);
+    // A PROVIDER THAT CANNOT RUN REFUSES THE PASS FIRST, before the owed recall, the
+    // assembly and the projection.
+    run.provider.ready().map_err(GenFailure::Provider)?;
+    // THE CACHING MODE IS CHECKED FIRST TOO: a record that asks for provider caching on
+    // a backend that cannot cache is refused before any row is written.
     let (caching, primer) = crate::caching::settings(&crate::helpers::agent_meta(self_id, kernel))
         .map_err(|why| GenFailure::Provider(ProviderError::value_error(why)))?;
-    // THE PASS PATH (#766): every model request of this run goes through it, the turn's
-    // and its helpers' (the owed recall, the projection's fold summaries). Its model
-    // type is fixed for the run.
-    let pass = Pass::new(Arc::clone(provider), self_id, state, kernel).await;
-    // A TYPE OTHER THAN THE LAST TURN'S (#766, 1.10): traced as `model_switched`
+    // THE PASS PATH (#766): every model request of this pass goes through it, its own
+    // and its helpers' (the owed recall, the projection's fold summaries).
+    let pass = Pass::new(Arc::clone(&run.provider), self_id, state, kernel).await;
+    // A TYPE OTHER THAN THE LAST PASS'S (#766, 1.10): traced as `model_switched`
     crate::model_format::trace::note_switch(self_id, kernel, state, &pass).await;
-    // THE CALIBRATION BELONGS TO THE TYPE IT WAS MEASURED UNDER (#766, Q37): a pass of
-    // another type than the last finished one is projected at 1.0.
+    // THE CALIBRATION BELONGS TO THE TYPE IT WAS MEASURED UNDER (#766, Q37)
     clear_calib_on_type_change(state, pass.kind);
-    // A RECALL OWED FROM THE LAST FOLD BATCH (or from a boot) runs first, so this
-    // turn is assembled over the head the recall chose — python `_recall_due`.
+    // A RECALL OWED FROM THE LAST FOLD BATCH (or from a boot) runs first, so this pass
+    // is assembled over the head the recall chose.
     let due = std::mem::take(&mut *state.recall_due.lock().expect("recall_due poisoned"));
     if due {
         crate::retrieval::context_recall(
@@ -227,25 +426,17 @@ pub async fn run_generation(
             false,
             kernel,
             Some(&pass),
-            cfg.model_window,
-            Some(client_id),
+            run.cfg.model_window,
+            Some(&run.client_id),
+            &run.tail.iter().map(|a| a.row_id).collect::<Vec<_>>(),
         )
         .await?;
     }
-    // THE INCOMING MESSAGE IS STAMPED FIRST: its `ts` and UTC offset (#766 1.13), set
-    // once here, are the ones its row keeps, and on a first request they are the date
-    // the environment section shows (the thread's first row)
-    let stamp = crate::row_attrs::Stamp::now();
-    let (mut messages, store_len) = assemble_messages(
-        self_id, state, user_text, kernel, client_id, caching, &stamp,
-    )
-    .await?;
-    // the incoming row as stored, whether the pass answers or dies: the stamp above
-    let incoming_row = |id: i64, parent: Option<i64>| {
-        let mut row = incoming_row_of(state, user_text, id, parent);
-        stamp.apply(&mut row);
-        crate::row_attrs::with_source(row, &incoming_source(state))
-    };
+    let (mut messages, store_len, read) =
+        crate::assembly::assemble_read(self_id, state, kernel, &run.client_id, caching).await?;
+    // WHAT THIS PASS READS IS READ (#795): a message stored after the tail was taken and
+    // before the history read is in this request; it wakes no pass after
+    crate::life::read_by_pass(self_id, &read);
     // KEEP (#641): a reply that will fold after the answer carries the call that keeps
     // what the model needs of it
     if caching.folds() {
@@ -253,28 +444,21 @@ pub async fn run_generation(
             messages.push(crate::history_view::mark_keep(last));
         }
     }
-    // Context-overflow projection: shape what the MODEL sees this turn to fit the
-    // window via the agent's `context_strategy`. Done ONCE at turn entry. The
-    // window is read off the record EVERY turn, so a model switched to a smaller
-    // one (`update_agent`) is fitted — folded — on its very next turn.
+    // Context-overflow projection: shape what the MODEL sees this pass to fit the window.
     let mut model_messages = match crate::projection::project_context(
         &pass,
         self_id,
         state,
         kernel,
-        client_id,
-        cfg.name,
-        cfg.model_window,
+        &run.client_id,
+        run.cfg.name,
+        run.cfg.model_window,
         messages,
         store_len,
     )
     .await
     {
         Ok(m) => m,
-        // too_small failsafe / unknown-strategy config error — the model is NOT
-        // called and the seam's dict IS the reply, python-verbatim: no
-        // `status(done)` closes a turn that never opened a provider pass, and no
-        // `client_id` is stapled onto a refusal python returns bare.
         Err(crate::projection::ProjectFail::Refusal(e)) => return Err(GenFailure::Projection(e)),
         Err(crate::projection::ProjectFail::Store(e)) => return Err(GenFailure::Store(e)),
         Err(crate::projection::ProjectFail::FoldSummary(e)) => {
@@ -284,176 +468,399 @@ pub async fn run_generation(
             return Err(GenFailure::FoldAnchor(e))
         }
     };
-
     let prev_request = state
         .prev_request
         .lock()
         .expect("prev_request poisoned")
         .clone();
-    // a restart keeps counting from the newest stored row: the request totals, and the
-    // token counts (#766, 1.7)
+    // a restart keeps counting from the newest stored row (#766, 1.7)
     let seed = if prev_request.is_none() {
         crate::row_attrs::seed_totals(self_id, kernel).await
     } else {
         None
     };
     crate::used::seed(self_id, state, kernel).await;
-
-    // THE AGENT'S CACHE MARKS (`cache_mark`): its system message, the primer's end, the
-    // last fold's, the tail. Only `provider_cache` places them; the backend forwards.
+    // THE AGENT'S CACHE MARKS (`cache_mark`): only `provider_cache` places them.
     if caching.marks() {
         crate::caching::mark(&mut model_messages, primer);
     }
     let meta = crate::helpers::agent_meta(self_id, kernel);
-    // STREAMING PARTS: the same chunks, split into parts as
-    // they are written — animation for the addressee, never action
-    // ([`crate::stream_parts`]). Kept on the in-flight entry, where `stop` and
-    // `on_cancel` find them. `part_start` carries `re` — the message this turn
-    // answers (the kernel task this dispatch runs as).
+    // STREAMING PARTS: the live view's chunks, split into parts as they are written —
+    // animation for the addressee, never action ([`crate::stream_parts`]). `part_start`
+    // carries `re`: the row this pass answers.
     let parts = Arc::new(tokio::sync::Mutex::new(PassParts {
         splitter: PartSplitter::new(self_id.as_str()),
         publisher: PartPublisher::new(
             Arc::clone(kernel),
             self_id.clone(),
-            client_id.to_string(),
-            current_task().map(TaskId::get),
+            run.client_id.clone(),
+            Some(run.parent),
         ),
     }));
-    if let Some(c) = state
-        .current_meta
-        .lock()
-        .expect("current poisoned")
-        .as_mut()
-    {
+    if let Some(c) = state.current_meta.lock().expect("current poisoned").as_mut() {
         c.parts = Some(Arc::clone(&parts));
     }
-    // GENERATION TIME — from the first request to the accepted stream's end (the `done`
-    // detail).
-    let gen_started = std::time::Instant::now();
-    let caller = Caller {
-        kernel,
-        state,
-        self_id,
-        client_id,
-        parts: &parts,
+    Ok(Prepared {
+        pass,
+        model_messages,
+        meta,
+        parts,
+        prev_request,
+        seed,
+    })
+}
+
+/// SEND THE REQUEST of the attempt `rec.attempt`: its step ends here. The settle comes
+/// to [`settled`] as a message.
+fn ask(rec: Box<PassRec>) -> futures_util::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        let mut request = rec.view.as_ref().map(|v| v.messages.clone()).unwrap_or_default();
+        request.extend(rec.reask.iter().cloned());
+        let (kernel, self_id, state, epoch) = (
+            Arc::clone(&rec.run.kernel),
+            rec.run.self_id.clone(),
+            Arc::clone(&rec.run.state),
+            rec.run.epoch,
+        );
+        let (serial, abort) = {
+            let mut cur = state.current_meta.lock().expect("current poisoned");
+            match cur.as_mut() {
+                Some(c) => {
+                    c.request += 1;
+                    c.task_id = None;
+                    (c.request, Arc::clone(&c.abort))
+                }
+                None => return,
+            }
+        };
+        let provider = Arc::clone(&rec.cur().provider);
+        // A FRESH reading per request: the provider's counts cleared first
+        provider.clear_prompt_tokens();
+        provider.clear_stop_reason();
+        let live = Arc::new(LiveView::new(&rec));
+        let feed = Arc::clone(&live);
+        let within = rec
+            .run
+            .deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .max(std::time::Duration::from_millis(1));
+        let deadline = (within, crate::constants::send_timeout_secs());
+        let done: crate::provider::Done =
+            Box::new(move |r| Box::pin(async move { settled(rec, feed, r).await }));
+        let pid = crate::provider::begin(
+            provider,
+            &kernel,
+            &self_id,
+            request,
+            None,
+            deadline,
+            abort,
+            live as Arc<dyn crate::provider::Live>,
+            done,
+        )
+        .await;
+        if let Some(pid) = pid.filter(|_| crate::life::is_current(&self_id, epoch)) {
+            if let Some(c) = state
+                .current_meta
+                .lock()
+                .expect("current poisoned")
+                .as_mut()
+                .filter(|c| c.request == serial)
+            {
+                c.task_id = Some(pid.0.to_string());
+            }
+        }
+    })
+}
+
+/// THE REQUEST SETTLED: the answer is read whole, then re-asked, accepted or stopped.
+async fn settled(mut rec: Box<PassRec>, live: Arc<LiveView>, r: Result<String, ProviderError>) {
+    if !crate::life::is_current(&rec.run.self_id, rec.run.epoch) {
+        // a `stop` or a cancel ended this pass already: nothing of it is acted on
+        return;
+    }
+    let raw = match r {
+        Ok(raw) => raw,
+        // A CANCEL OF THE REQUEST ends the pass as stopped, never re-asked
+        Err(e) if e.is_cancelled() => {
+            // its pins go first: nothing of the pass outlives its end
+            drop(rec.view.take());
+            let PassRec { run, .. } = *rec;
+            let entry = crate::state::take_current(&run.self_id);
+            if let Some(entry) = entry {
+                if let Err(e) = crate::verbs::close_stopped(&run.self_id, entry, &run.kernel).await {
+                    eprintln!("  [ai] {}: the stopped pass's rows: {e}", run.self_id);
+                }
+            }
+            crate::life::end(&run.kernel, &run.self_id, run.epoch);
+            return;
+        }
+        Err(e) => {
+            let f = abort_parts(&rec.parts, e).await;
+            drop(rec.view.take());
+            let PassRec { run, .. } = *rec;
+            return failed(run, f).await;
+        }
     };
-    let view_of = ViewOf {
-        model_messages: &model_messages,
-        meta: &meta,
+    live.finish().await;
+    // THE ANSWER IS READ WHOLE, from the settle: the stream fed only the live view
+    let mut reader = rec.cur().decl.reader.outbound();
+    let mut read = Read::default();
+    read.take(reader.feed(&raw));
+    if read.bad.is_none() {
+        read.take(reader.finish());
+    }
+    let attempt = rec.attempt;
+    for (added, removed) in std::mem::take(&mut read.repaired) {
+        let mut fields = Map::new();
+        fields.insert("attempt".into(), json!(attempt));
+        if !added.is_empty() {
+            fields.insert("added".into(), json!(added));
+        }
+        if !removed.is_empty() {
+            fields.insert("removed".into(), json!(removed));
+        }
+        let kind = rec.cur().kind;
+        rec.cur().events().push(Mode::Turn.name(), kind, "repaired", fields);
+    }
+    let report = rec.cur().report(Mode::Turn);
+    if attempt == 1 {
+        rec.window = Window::of(&report);
+    }
+    // THE THINKING CUT (#782): the model is re-asked ONCE for its answer, a second cut
+    // stops the pass
+    let thought_cut = read.bad.is_none() && report.stop_reason.as_deref() == Some(THINKING_CUT);
+    if thought_cut {
+        read.bad = Some(thinking_note(crate::model_format::NOTICE_THINKING_CUT, &rec.meta));
+    }
+    // AN ANSWER WITH NO CALL (#795, Q3): re-asked like a malformed one. A cut answer (a
+    // call still open at its end) is the cut path, never re-asked.
+    if read.bad.is_none() && !read.open && !crate::route::acts(&read.text) {
+        read.bad = Some((rec.cur().decl.texts)(crate::model_format::Section::NoCall).to_string());
+    }
+    let Some(why) = read.bad.take() else {
+        // THE ACCEPTED ATTEMPT: its view's chain is kept, its pins go
+        if let Some(view) = rec.view.take() {
+            let mut events = rec.cur().events();
+            view.finish(&mut events, Mode::Turn.name());
+        }
+        let accepted = rec.cur().accepted(&report);
+        return answered(rec, read.text, report, accepted, read.open).await;
     };
-    // THE ATTEMPTS (#766, 1.5 step 4): one sequence under the pass's type; a failed
-    // attempt whose reply named a model of another type restarts it once, under that
-    // type, with the same view mapped for it (Q26): the system block's sections too, so
-    // no request mixes two types' forms.
-    let mut restarted: Option<Pass> = None;
-    let seq = match attempts(&pass, true, &view_of, &caller).await? {
-        Seq::Restart(next) => {
-            let next = restarted.insert(*next);
+    // a thrown-away attempt: its counts go to the next row's `turn.rejected`
+    rec.cur().rejected(&report);
+    let error = first_line(&why).to_string();
+    let mut fields = Map::new();
+    fields.insert("attempt".into(), json!(attempt));
+    fields.insert("error".into(), json!(error));
+    fields.extend(retry_counts(&report));
+    let kind = rec.cur().kind;
+    rec.cur().events().push(Mode::Turn.name(), kind, "retry", fields);
+    rec.errors.push(error.clone());
+    // A REPLY NAMING A MODEL OF ANOTHER TYPE (Q26): the sequence restarts once under
+    // the new type, with the same view mapped for it
+    if rec.may_restart {
+        let model = rec.cur().provider.model();
+        if let Some(next) = rec.cur().retyped(&model) {
+            discard(&rec.run, &rec.parts, Some((attempt, &error))).await;
+            drop(rec.view.take());
             let mut fields = Map::new();
-            fields.insert("from".into(), json!(pass.kind));
+            fields.insert("from".into(), json!(rec.pass.kind));
             fields.insert("to".into(), json!(next.kind));
-            fields.insert(
-                "model".into(),
-                json!(next.model.clone().unwrap_or_default()),
-            );
-            next.events()
-                .push(Mode::Turn.name(), next.kind, "model_switched", fields);
-            attempts(next, false, &view_of, &caller).await?
+            fields.insert("model".into(), json!(next.model.clone().unwrap_or_default()));
+            next.events().push(Mode::Turn.name(), next.kind, "model_switched", fields);
+            let view = next.view(&rec.model_messages, &rec.meta);
+            rec.sent = view.messages.clone();
+            rec.view = Some(view);
+            rec.restarted = Some(next);
+            rec.may_restart = false;
+            rec.reask.clear();
+            rec.errors.clear();
+            rec.window = None;
+            rec.cut_before = false;
+            rec.reason = None;
+            rec.attempt = 1;
+            return ask(rec).await;
         }
-        other => other,
-    };
-    let cur: &Pass = restarted.as_ref().unwrap_or(&pass);
-    // THE PASS ENDED: the provider's prompt cache is warm from here (`fork_points`).
+    }
+    if thought_cut && rec.cut_before {
+        rec.reason = Some(thinking_note(crate::model_format::STOP_REASON_THINKING, &rec.meta));
+    }
+    rec.cut_before |= thought_cut;
+    if attempt > CALL_RETRIES || rec.reason.is_some() {
+        discard(&rec.run, &rec.parts, None).await;
+        drop(rec.view.take());
+        return stopped(rec).await;
+    }
+    discard(&rec.run, &rec.parts, Some((attempt, &error))).await;
+    // the re-ask pair holds the answer up to where it went wrong: what follows a `Bad`
+    // was read unseen (Q32)
+    let answer = without_thinking(
+        live.upto_bad(&raw)
+            .unwrap_or_else(|| upto_bad(rec.cur().decl.reader, &raw)),
+    );
+    // a cut pass or a thinking-only answer is mostly thinking: an empty answer is no
+    // message
+    if !answer.trim().is_empty() {
+        rec.reask.push(json!({"role": "assistant", "content": answer}));
+    }
+    rec.reask.push(json!({"role": "user", "content": why}));
+    rec.attempt += 1;
+    ask(rec).await;
+}
+
+/// `raw` up to the piece where `reader` reads a `Bad`, fed a char at a time as a stream
+/// would feed it; the whole of it when none comes.
+fn upto_bad<'a>(reader: &dyn crate::model_format::Reader, raw: &'a str) -> &'a str {
+    let mut out = reader.outbound();
+    for (i, c) in raw.char_indices() {
+        let end = i + c.len_utf8();
+        if out.feed(&raw[i..end]).iter().any(|o| matches!(o, Out::Bad { .. })) {
+            return &raw[..end];
+        }
+    }
+    raw
+}
+
+/// One answer as its reader tells it.
+#[derive(Default)]
+struct Read {
+    text: String,
+    bad: Option<String>,
+    open: bool,
+    repaired: Vec<(String, String)>,
+}
+
+impl Read {
+    /// The reader's output, in order: the first `Bad` ends what is taken.
+    fn take(&mut self, outs: Vec<Out>) {
+        for out in outs {
+            if self.bad.is_some() {
+                return;
+            }
+            match out {
+                Out::Text(t) | Out::Call { text: t } => self.text.push_str(&t),
+                Out::Bad { report } => self.bad = Some(report),
+                Out::Open { .. } => self.open = true,
+                Out::Repaired { added, removed } => self.repaired.push((added, removed)),
+            }
+        }
+    }
+}
+
+/// The sequence ended: the provider's cache is warm, and the calibration and the type
+/// are the ones of the sequence the row comes from. The window, what was sent and the
+/// request's parts.
+fn closing(rec: &PassRec) -> (Option<Window>, Vec<Value>, Vec<Value>) {
+    let state = &rec.run.state;
     *state.last_send_secs.lock().expect("last_send poisoned") = Some(crate::helpers::now_secs());
-    // THE ENDPOINT'S OWN COUNT calibrates our chars/4 estimate (python `_calib`), from
-    // the window: attempt 1 of the sequence the row comes from, the request the view was
-    // built for (#766, 1.7). After a type restart the old type's ratio goes first.
-    let (window, sent, request_parts) = match &seq {
-        Seq::Accepted { window, sent, .. } | Seq::Stopped { window, sent, .. } => {
-            let parts = crate::assembly::request_parts(cur.decl, &model_messages, sent);
-            (*window, sent.clone(), parts)
-        }
-        Seq::Restart(_) => unreachable!("a restarted sequence does not restart again"),
-    };
-    if cur.kind != pass.kind {
+    let request_parts = crate::assembly::request_parts(rec.cur().decl, &rec.model_messages, &rec.sent);
+    if rec.cur().kind != rec.pass.kind {
         *state.calib.lock().expect("calib poisoned") = None;
     }
-    *state.last_type.lock().expect("last_type poisoned") = Some(cur.kind);
-    calibrate(state, window, &sent);
-    let (last_text, report, accepted, open) = match seq {
-        Seq::Accepted {
-            text,
-            report,
-            accepted,
-            open,
-            ..
-        } => (text, report, accepted, open),
-        // THE HARNESS STOP (1.8): every attempt was malformed. The model is not asked
-        // again; the turn's call is the `stop`, its reason worded by the harness. Its
-        // row's `used` has nothing accepted: every attempt is in `turn.rejected`.
-        Seq::Stopped { errors, reason, .. } => {
-            let reason = reason.unwrap_or_else(|| {
-                crate::model_format::fill(
-                    (cur.decl.texts)(crate::model_format::Section::StopReason),
-                    &[("n", &errors.len().to_string())],
-                )
-            });
-            let mut args = Map::new();
-            args.insert("reason".to_string(), json!(reason));
-            let content = crate::tool_parse::render_call("stop", &args);
-            let mut fields = Map::new();
-            fields.insert("reason".into(), json!(reason));
-            fields.insert("errors".into(), json!(errors));
-            cur.events()
-                .push(Mode::Turn.name(), cur.kind, "stop", fields);
-            let in_id = kernel.mint_id();
-            let in_parent = incoming_parent(user_text);
-            let message_id = kernel.mint_id();
-            let mut row = json!({
-                "role": "assistant",
-                "content": content,
-                "id": message_id,
-                "parent": in_id,
-            });
-            let landing = crate::used::land(state, None);
-            let next = assistant_attributes(
-                &mut row,
-                self_id,
-                kernel,
-                provider,
-                &landing.landed,
-                window,
-                prev_request.as_ref(),
-                seed,
-                message_id,
-                request_parts,
-            );
-            save_history(self_id, kernel, &[incoming_row(in_id, in_parent), row]).await?;
-            landing.stored();
-            *state.prev_request.lock().expect("prev_request poisoned") = Some(next);
-            // THE TURN'S TRACE ROWS, once its rows are stored (#766, 1.10)
-            let events = crate::model_format::trace::of_turn(&pass, restarted.as_ref());
-            crate::model_format::trace::write(
-                self_id,
-                kernel,
-                state,
-                client_id,
-                Some(message_id),
-                events,
-            )
-            .await;
-            return Ok(Generation::Stopped { reason, message_id });
+    *state.last_type.lock().expect("last_type poisoned") = Some(rec.cur().kind);
+    calibrate(state, rec.window, &rec.sent);
+    (rec.window, rec.sent.clone(), request_parts)
+}
+
+/// THE HARNESS STOP (1.8): every attempt was malformed, or a second thinking cut. The
+/// model is not asked again; the pass's row is the `stop` call, its reason worded by the
+/// harness, and the give-up says so.
+async fn stopped(rec: Box<PassRec>) {
+    let (window, _sent, request_parts) = closing(&rec);
+    let reason = rec.reason.clone().unwrap_or_else(|| {
+        crate::model_format::fill(
+            (rec.cur().decl.texts)(crate::model_format::Section::StopReason),
+            &[("n", &rec.errors.len().to_string())],
+        )
+    });
+    let mut args = Map::new();
+    args.insert("reason".to_string(), json!(reason));
+    let content = crate::tool_parse::render_call("stop", &args);
+    let mut fields = Map::new();
+    fields.insert("reason".into(), json!(reason));
+    fields.insert("errors".into(), json!(rec.errors));
+    let kind = rec.cur().kind;
+    rec.cur().events().push(Mode::Turn.name(), kind, "stop", fields);
+    let run = &rec.run;
+    let message_id = run.kernel.mint_id();
+    let mut row = json!({
+        "role": "assistant",
+        "content": content,
+        "id": message_id,
+        "parent": run.parent,
+    });
+    let landing = crate::used::land(&run.state, None);
+    let next = assistant_attributes(
+        &mut row,
+        &run.self_id,
+        &run.kernel,
+        &run.provider,
+        &landing.landed,
+        window,
+        rec.prev_request.as_ref(),
+        rec.seed.clone(),
+        message_id,
+        request_parts,
+    );
+    if let Err(e) = save_history(&run.self_id, &run.kernel, &[row]).await {
+        let PassRec { run, .. } = *rec;
+        return failed(run, GenFailure::Store(e)).await;
+    }
+    landing.stored();
+    *run.state.prev_request.lock().expect("prev_request poisoned") = Some(next);
+    let events = crate::model_format::trace::of_turn(&rec.pass, rec.restarted.as_ref());
+    crate::model_format::trace::write(
+        &run.self_id,
+        &run.kernel,
+        &run.state,
+        &run.client_id,
+        Some(message_id),
+        events,
+    )
+    .await;
+    #[cfg(test)]
+    {
+        let mut rec = rec;
+        let how = Generation::Stopped {
+            reason: reason.clone(),
+            message_id,
+        };
+        if observed(&mut rec.run, Ok(how)) {
+            crate::life::end(&rec.run.kernel, &rec.run.self_id, rec.run.epoch);
+            return;
         }
-        Seq::Restart(_) => unreachable!("a restarted sequence does not restart again"),
-    };
-    // A block still open when the model stopped generating is CUT: an open call
-    // is never dispatched (`extract_tool_calls` skips it) and the turn's row says
-    // so.
-    // ONLY A SUCCESSFUL GENERATION DISPATCHES: a pass cut with
-    // a block open sends nothing, its earlier closed calls included, and the marker
-    // lists every call of the pass as not sent.
+        let run = &rec.run;
+        give_up_and_end(run, &reason).await;
+    }
+    #[cfg(not(test))]
+    give_up_and_end(run, &reason).await;
+}
+
+/// THE PASS GIVES UP (a harness stop, a failure no retry mends): its entry goes first,
+/// so the `failed/gave_up` status is the pass's last word, then the inquiry it read is
+/// told, then the pass ends.
+async fn give_up_and_end(run: &Run, reason: &str) {
+    let _ = crate::state::take_current(&run.self_id);
+    crate::route::give_up(&run.kernel, &run.self_id, &run.client_id, reason).await;
+    crate::life::end(&run.kernel, &run.self_id, run.epoch);
+}
+
+/// THE ACCEPTED ANSWER: stored as the pass's assistant row, the pass ends, and its calls
+/// go out.
+async fn answered(
+    rec: Box<PassRec>,
+    last_text: String,
+    report: crate::provider::ProviderReport,
+    accepted: crate::used::Accepted,
+    open: bool,
+) {
+    let (window, sent, request_parts) = closing(&rec);
+    let run = &rec.run;
+    // A block still open when the model stopped generating is CUT: nothing of the pass
+    // dispatches, its closed calls included, and the marker lists every call as not sent.
     let (cut_calls, call_streams) = {
-        let mut p = parts.lock().await;
+        let mut p = rec.parts.lock().await;
         let cut = open || p.splitter.open_call().is_some();
         let evs = p.splitter.finish();
         p.publisher.push(evs, true).await;
@@ -466,44 +873,26 @@ pub async fn run_generation(
             .collect();
         (cut.then_some(calls), p.splitter.closed_calls.clone())
     };
-
-    emit_status(kernel, state, self_id, client_id, "done", {
+    emit_status(&run.kernel, &run.state, &run.self_id, &run.client_id, "done", {
         let mut m = Map::new();
         m.insert("reason".to_string(), json!("ok"));
-        let context_window = crate::context::resolve_context_window(&meta, cfg.model_window);
+        let context_window = crate::context::resolve_context_window(&rec.meta, run.cfg.model_window);
         m.extend(usage_detail(
             window.map(Window::sum),
             Counts::of(&report).map(|c| c.completion),
             &sent,
             &last_text,
-            gen_started.elapsed().as_secs_f64(),
+            rec.gen_started.elapsed().as_secs_f64(),
             context_window,
         ));
         m
     })
     .await;
-
-    // ROW IDS for this turn: the incoming row (a root, or a delivered reply turn
-    // that names its parent on its tag) and the assistant row that answers it.
-    //
-    // MINTED HERE, AT THE APPEND — not at turn start. The store returns an
-    // owner's rows in ID order and the head cache keeps APPEND order; the two
-    // agree only while ids are minted as rows are appended. Minted at turn start,
-    // a fold or view row saved mid-turn (the projection) took a higher id yet
-    // landed first, and after a restart the conversation came back in a
-    // different order than the agent had lived it (python, E78).
-    let in_id = kernel.mint_id();
-    let in_parent = incoming_parent(user_text);
-    let message_id = kernel.mint_id();
-    // APPEND this send's user + assistant turns to the memory store so context
-    // management (compaction/recall) has the FULL conversation next turn.
-    //
-    // STRIPPED — the deliberation is not part of the conversation. Neither the
-    // caller's reply nor the router gets it (the send reply carries the answer
-    // only), and durable history loses the `<think>` spans, because a
-    // reasoning model re-fed its own prior deliberation drowns in it. A pass
-    // the model stopped with a block open leaves the CUT MARKER instead, on top
-    // of the context.
+    // THE ROW ID IS MINTED AT THE APPEND: ids agree with the store's order only while
+    // they are minted as rows are appended.
+    let message_id = run.kernel.mint_id();
+    // STRIPPED: the deliberation is not part of the conversation (its spans ride the
+    // row's thinking fields). A pass cut with a block open leaves the CUT MARKER.
     let mut row = json!({
         "role": "assistant",
         "content": match &cut_calls {
@@ -511,45 +900,377 @@ pub async fn run_generation(
             None => crate::call_check::repair(&without_thinking(&last_text)),
         },
         "id": message_id,
-        "parent": in_id,
+        "parent": run.parent,
     });
     // A `stop` THE MODEL WROTE (1.8) is traced with its reason and no `errors`
     if cut_calls.is_none() {
-        crate::model_format::trace::note_model_stop(
-            cur,
-            row["content"].as_str().unwrap_or_default(),
-        );
+        crate::model_format::trace::note_model_stop(rec.cur(), row["content"].as_str().unwrap_or_default());
     }
     if let Some(m) = row.as_object_mut() {
         m.extend(crate::think::thinking_fields(&last_text));
     }
-    let landing = crate::used::land(state, Some(accepted));
+    let landing = crate::used::land(&run.state, Some(accepted));
     let next = assistant_attributes(
         &mut row,
-        self_id,
-        kernel,
-        provider,
+        &run.self_id,
+        &run.kernel,
+        &run.provider,
         &landing.landed,
         window,
-        prev_request.as_ref(),
-        seed,
+        rec.prev_request.as_ref(),
+        rec.seed.clone(),
         message_id,
         request_parts,
     );
-    save_history(self_id, kernel, &[incoming_row(in_id, in_parent), row]).await?;
+    if let Err(e) = save_history(&run.self_id, &run.kernel, &[row]).await {
+        let PassRec { run, .. } = *rec;
+        return failed(run, GenFailure::Store(e)).await;
+    }
     landing.stored();
-    *state.prev_request.lock().expect("prev_request poisoned") = Some(next);
-    // THE TURN'S TRACE ROWS (#766, 1.10), its helpers' included, written once its rows
-    // are stored, in one append under the chat's key
-    let events = crate::model_format::trace::of_turn(&pass, restarted.as_ref());
-    crate::model_format::trace::write(self_id, kernel, state, client_id, Some(message_id), events)
-        .await;
-    Ok(Generation::Answered {
+    *run.state.prev_request.lock().expect("prev_request poisoned") = Some(next);
+    // THE PASS'S TRACE ROWS (#766, 1.10), its helpers' included, once its rows are stored
+    let events = crate::model_format::trace::of_turn(&rec.pass, rec.restarted.as_ref());
+    crate::model_format::trace::write(
+        &run.self_id,
+        &run.kernel,
+        &run.state,
+        &run.client_id,
+        Some(message_id),
+        events,
+    )
+    .await;
+    // a driven pass (tests) is told, and its answer is not routed
+    #[cfg(test)]
+    let rec = {
+        let mut rec = rec;
+        let how = Generation::Answered {
+            text: last_text.clone(),
+            message_id,
+            cut: cut_calls.is_some(),
+        };
+        if observed(&mut rec.run, Ok(how)) {
+            crate::life::end(&rec.run.kernel, &rec.run.self_id, rec.run.epoch);
+            return;
+        }
+        rec
+    };
+    route(rec, last_text, message_id, call_streams, cut_calls.is_some())
+}
+
+/// THE PASS ENDS with its row written, and its calls go out: the route is owed work
+/// until they are.
+fn route(rec: Box<PassRec>, last_text: String, message_id: i64, call_streams: Vec<(String, String)>, cut: bool) {
+    let run = &rec.run;
+    let mut clients: Vec<String> = run.tail.iter().map(|a| a.client_id.clone()).collect();
+    clients.dedup();
+    crate::life::owe(&run.self_id, 1);
+    crate::life::end(&run.kernel, &run.self_id, run.epoch);
+    let route = crate::route::Routed {
         text: last_text,
-        message_id,
+        client_id: run.client_id.clone(),
+        clients,
+        send_timeout: crate::route::route_deadline(&run.kernel),
+        model_window: run.cfg.model_window,
+        message_id: Some(message_id),
         call_streams,
-        cut: cut_calls.is_some(),
+        cut,
+    };
+    let (k, me) = (Arc::clone(&run.kernel), run.self_id.clone());
+    run.kernel.spawn_task(&run.self_id, "route_reply", async move {
+        crate::route::route_reply(me.clone(), Arc::clone(&k), route).await;
+        crate::life::owe(&me, -1);
+    });
+}
+
+/// THE PASS FAILED: said in the status, its error row stored (#177), an inquiry it
+/// read told; a link failure is retried first, visibly, up to the record's
+/// `transport_retries` (#198, Q4). The pass ends.
+fn failed(run: Run, f: GenFailure) -> futures_util::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        #[cfg(test)]
+        let mut run = run;
+        #[cfg(test)]
+        {
+            let retries = crate::record::ai::RECORD
+                .get(&crate::helpers::agent_meta(&run.self_id, &run.kernel), "transport_retries")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0) as u32;
+            let retried = matches!(&f, GenFailure::Provider(pe) if pe.is_transient() && run.retried < retries);
+            if !retried && observed(&mut run, Err(f.clone())) {
+                crate::life::end(&run.kernel, &run.self_id, run.epoch);
+                return;
+            }
+        }
+        let (kernel, self_id, state) = (Arc::clone(&run.kernel), run.self_id.clone(), Arc::clone(&run.state));
+        let detail = |reason: &str, error: &str| {
+            let mut m = Map::new();
+            m.insert("reason".to_string(), json!(reason));
+            m.insert("error".to_string(), json!(error));
+            m
+        };
+        let why = match f {
+            GenFailure::Provider(pe) => {
+                let retries = crate::record::ai::RECORD
+                    .get(&crate::helpers::agent_meta(&self_id, &kernel), "transport_retries")
+                    .and_then(|v| v.as_i64())
+                    .expect("transport_retries declares its default") as u32;
+                if pe.is_transient() && run.retried < retries {
+                    return retry(run, pe.message).await;
+                }
+                // a timeout's detail is its `reason` and the auto-fills, nothing else
+                let d = if pe.is_timed_out() {
+                    let mut m = Map::new();
+                    m.insert("reason".to_string(), json!("timeout"));
+                    m
+                } else {
+                    detail("error", &pe.message)
+                };
+                emit_status(&kernel, &state, &self_id, &run.client_id, "failed", d).await;
+                // A FAILED PASS stores its own error row (#177); a REFUSED RECORD
+                // (`ValueError`: the record cannot run) never opened a pass and stores
+                // nothing.
+                if pe.kind != "ValueError" {
+                    if let Err(e) = store_failed_pass(&run, &pe.message).await {
+                        eprintln!("  [ai] {self_id}: the pass's error row could not be stored: {e}");
+                    }
+                }
+                // A PROVIDER FAILURE NO RETRY MENDS gives up at once, its error the reason
+                if pe.permanent_code().is_some() {
+                    give_up_and_end(&run, &pe.message).await;
+                    return;
+                }
+                pe.message
+            }
+            // THE SEAM'S OWN WORDS: the projection refused (too small a window, an
+            // unknown strategy)
+            GenFailure::Projection(refusal) => {
+                let e = fantastic_kernel::refusal::error_text(&refusal).unwrap_or_else(|| refusal.to_string());
+                emit_status(&kernel, &state, &self_id, &run.client_id, "failed", detail("error", &e)).await;
+                e
+            }
+            GenFailure::Store(e) => {
+                emit_status(&kernel, &state, &self_id, &run.client_id, "failed", detail("error", &e.0)).await;
+                e.0
+            }
+            GenFailure::PromptFile(e) => {
+                emit_status(&kernel, &state, &self_id, &run.client_id, "failed", detail("error", &e.0)).await;
+                e.0
+            }
+            GenFailure::FoldSummary(e) => {
+                emit_status(&kernel, &state, &self_id, &run.client_id, "failed", detail("error", &e.0)).await;
+                e.0
+            }
+            GenFailure::FoldAnchor(e) => {
+                emit_status(&kernel, &state, &self_id, &run.client_id, "failed", detail("error", &e.0)).await;
+                e.0
+            }
+        };
+        // AN INQUIRY THIS PASS READ tells its asker (#722): no answer comes from it
+        let mut body = Map::new();
+        body.insert(
+            "error".to_string(),
+            json!(format!("{}'s turn failed: {why}", self_id.as_str())),
+        );
+        let mut clients: Vec<String> = run.tail.iter().map(|a| a.client_id.clone()).collect();
+        clients.dedup();
+        for c in clients {
+            crate::route::close_inquiry(&kernel, self_id.as_str(), &c, body.clone()).await;
+        }
+        crate::life::end(&kernel, &self_id, run.epoch);
     })
+}
+
+/// A LINK FAILURE, RETRIED (#198 part 2): a visible notice row, the `retrying` status,
+/// a short backoff, then the pass assembled and asked again.
+async fn retry(mut run: Run, message: String) {
+    let retries = crate::record::ai::RECORD
+        .get(&crate::helpers::agent_meta(&run.self_id, &run.kernel), "transport_retries")
+        .and_then(|v| v.as_i64())
+        .expect("transport_retries declares its default") as u32;
+    run.retried += 1;
+    let attempt = run.retried;
+    let _ = save_history(
+        &run.self_id,
+        &run.kernel,
+        &[json!({
+            "role": "user",
+            "parent": Value::Null,
+            "kind": "notice",
+            "content": format!(
+                "[retry {attempt}/{retries}] the link dropped ({message}) — retrying the turn"
+            ),
+        })],
+    )
+    .await;
+    let mut detail = Map::new();
+    detail.insert("attempt".to_string(), json!(attempt));
+    detail.insert("of".to_string(), json!(retries));
+    detail.insert("error".to_string(), json!(message));
+    emit_status(&run.kernel, &run.state, &run.self_id, &run.client_id, "retrying", detail).await;
+    // Backoff 2 s, 4 s, 8 s …; tests use a few milliseconds. A timer, not a wait on
+    // anyone: a `stop` meanwhile ends the pass, and nothing is asked again.
+    let wait = if cfg!(test) {
+        std::time::Duration::from_millis(5)
+    } else {
+        std::time::Duration::from_secs(1u64 << attempt)
+    };
+    tokio::time::sleep(wait).await;
+    if !crate::life::is_current(&run.self_id, run.epoch) {
+        return;
+    }
+    run.deadline = ceiling_from_now();
+    prepare_and_ask(run).await;
+}
+
+/// A pass that ends in a failure stores its error row (#177), after the rows it read,
+/// so the model reads the failure on its next pass and the operator sees it.
+async fn store_failed_pass(run: &Run, reason: &str) -> Result<(), String> {
+    let row = json!({
+        "role": "user",
+        "kind": "error",
+        "content": format!(
+            "[turn failed] {reason}. No answer was stored, and nothing this turn meant \
+             to send was dispatched."
+        ),
+        "id": run.kernel.mint_id(),
+        "parent": run.parent,
+    });
+    save_history(&run.self_id, &run.kernel, &[row])
+        .await
+        .map(|_| ())
+        .map_err(|e| e.0)
+}
+
+/// A FAILED ATTEMPT IS MARKED, THEN ITS PARTS GO (Q40): the `retrying` status
+/// `{attempt, of, error, kind: "call"}` first, when another attempt follows; then every
+/// open part aborts with the reason `malformed`, the attempt's text leaves the in-flight
+/// entry and a new splitter starts. Nothing streamed is taken back.
+async fn discard(run: &Run, parts: &tokio::sync::Mutex<PassParts>, retry: Option<(usize, &str)>) {
+    if let Some((attempt, error)) = retry {
+        let mut detail = Map::new();
+        detail.insert("attempt".to_string(), json!(attempt));
+        detail.insert("of".to_string(), json!(CALL_RETRIES));
+        detail.insert("error".to_string(), json!(error));
+        detail.insert("kind".to_string(), json!("call"));
+        emit_status(&run.kernel, &run.state, &run.self_id, &run.client_id, "retrying", detail).await;
+    }
+    {
+        let mut p = parts.lock().await;
+        // the deltas still batched reach their watchers first: an abort drops them
+        p.publisher.push(Vec::new(), true).await;
+        let evs = p.splitter.stop("malformed");
+        p.publisher.push(evs, true).await;
+        p.splitter = PartSplitter::new(run.self_id.as_str());
+    }
+    if let Some(c) = run.state.current_meta.lock().expect("current poisoned").as_mut() {
+        c.text_so_far.clear();
+    }
+}
+
+/// THE LIVE VIEW of one attempt (#795): its tokens through the type's reader, out as
+/// the caller's `token` events, the in-flight entry's `text_so_far` and the pass's parts.
+/// Display only: what runs is read from the settle. At a `Bad` nothing more is shown.
+struct LiveView {
+    kernel: Arc<Kernel>,
+    state: Arc<BackendState>,
+    self_id: AgentId,
+    client_id: String,
+    parts: Arc<tokio::sync::Mutex<PassParts>>,
+    reader: tokio::sync::Mutex<(Box<dyn Outbound>, bool, bool)>,
+    /// The raw text the live view was fed, and its length at the end of the token its
+    /// reader read a `Bad` in: the re-ask pair's answer, when the settle's text agrees.
+    seen: std::sync::Mutex<(String, Option<usize>)>,
+}
+
+impl LiveView {
+    /// The answer up to the end of the token the live reader read a `Bad` in, when the
+    /// settle's whole text begins with what the view was fed.
+    fn upto_bad<'a>(&self, raw: &'a str) -> Option<&'a str> {
+        let seen = self.seen.lock().expect("seen poisoned");
+        let at = seen.1?;
+        raw.starts_with(&seen.0[..at]).then(|| &raw[..at])
+    }
+
+    fn new(rec: &PassRec) -> Self {
+        Self {
+            kernel: Arc::clone(&rec.run.kernel),
+            state: Arc::clone(&rec.run.state),
+            self_id: rec.run.self_id.clone(),
+            client_id: rec.run.client_id.clone(),
+            parts: Arc::clone(&rec.parts),
+            // (the reader, the first piece is still to come, a `Bad` was read)
+            reader: tokio::sync::Mutex::new((rec.cur().decl.reader.outbound(), true, false)),
+            seen: std::sync::Mutex::new((String::new(), None)),
+        }
+    }
+
+    /// The reader's output, shown in order until a `Bad`.
+    async fn show(&self, outs: Vec<Out>, first: &mut bool, bad: &mut bool) {
+        for out in outs {
+            if *bad {
+                return;
+            }
+            match out {
+                Out::Text(t) | Out::Call { text: t } => self.send(&t, first).await,
+                Out::Bad { .. } => *bad = true,
+                Out::Open { .. } | Out::Repaired { .. } => {}
+            }
+        }
+    }
+
+    /// What the reader still holds at the stream's end.
+    async fn finish(&self) {
+        let mut g = self.reader.lock().await;
+        let (reader, first, bad) = &mut *g;
+        if *bad {
+            return;
+        }
+        let outs = reader.finish();
+        self.show(outs, first, bad).await;
+    }
+
+    /// One piece of the attempt's internal text: the first one opens its `streaming`
+    /// status.
+    async fn send(&self, t: &str, first: &mut bool) {
+        if *first {
+            *first = false;
+            emit_status(&self.kernel, &self.state, &self.self_id, &self.client_id, "streaming", Map::new()).await;
+        }
+        if t.is_empty() {
+            return;
+        }
+        if let Some(c) = self.state.current_meta.lock().expect("current poisoned").as_mut() {
+            c.text_so_far.push_str(t);
+        }
+        to_caller(
+            &self.kernel,
+            &self.self_id,
+            &self.client_id,
+            json!({"type": "token", "text": t, "source": self.self_id.as_str()}),
+        )
+        .await;
+        let mut p = self.parts.lock().await;
+        let evs = p.splitter.feed(t);
+        p.publisher.push(evs, false).await;
+    }
+}
+
+#[async_trait]
+impl crate::provider::Live for LiveView {
+    async fn token(&self, t: &str) {
+        let mut g = self.reader.lock().await;
+        let (reader, first, bad) = &mut *g;
+        if *bad {
+            return;
+        }
+        self.seen.lock().expect("seen poisoned").0.push_str(t);
+        let outs = reader.feed(t);
+        self.show(outs, first, bad).await;
+        if *bad {
+            let mut seen = self.seen.lock().expect("seen poisoned");
+            seen.1 = Some(seen.0.len());
+        }
+    }
 }
 
 /// The assistant row's `attributes`, stored and returned by the retrieval verbs, never
@@ -603,296 +1324,9 @@ fn assistant_attributes(
     next
 }
 
-/// Where an attempt's output goes as it streams: the caller's `token` events, the
-/// in-flight entry's `text_so_far` and the pass's parts.
-struct Caller<'a> {
-    kernel: &'a Arc<Kernel>,
-    state: &'a Arc<BackendState>,
-    self_id: &'a AgentId,
-    client_id: &'a str,
-    parts: &'a Arc<tokio::sync::Mutex<PassParts>>,
-}
-
-impl Caller<'_> {
-    /// One piece of an attempt's internal text, sent on today's path: the first one of
-    /// an attempt opens its `streaming` status.
-    async fn send(&self, t: &str, first: &mut bool) {
-        if *first {
-            *first = false;
-            emit_status(
-                self.kernel,
-                self.state,
-                self.self_id,
-                self.client_id,
-                "streaming",
-                Map::new(),
-            )
-            .await;
-        }
-        if t.is_empty() {
-            return;
-        }
-        {
-            let mut cur = self.state.current_meta.lock().expect("current poisoned");
-            if let Some(c) = cur.as_mut() {
-                c.text_so_far.push_str(t);
-            }
-        }
-        to_caller(
-            self.kernel,
-            self.self_id,
-            self.client_id,
-            json!({"type": "token", "text": t, "source": self.self_id.as_str()}),
-        )
-        .await;
-        let mut p = self.parts.lock().await;
-        let evs = p.splitter.feed(t);
-        p.publisher.push(evs, false).await;
-    }
-
-    /// A FAILED ATTEMPT IS MARKED, THEN ITS PARTS GO (Q40): the `retrying` status
-    /// `{attempt, of, error, kind: "call"}` first, when another attempt follows; then
-    /// every open part aborts with the reason `malformed`, the attempt's text leaves the
-    /// in-flight entry and a new splitter starts. Nothing streamed is taken back.
-    async fn discard(&self, retry: Option<(usize, &str)>) {
-        if let Some((attempt, error)) = retry {
-            let mut detail = Map::new();
-            detail.insert("attempt".to_string(), json!(attempt));
-            detail.insert("of".to_string(), json!(CALL_RETRIES));
-            detail.insert("error".to_string(), json!(error));
-            detail.insert("kind".to_string(), json!("call"));
-            emit_status(
-                self.kernel,
-                self.state,
-                self.self_id,
-                self.client_id,
-                "retrying",
-                detail,
-            )
-            .await;
-        }
-        {
-            let mut p = self.parts.lock().await;
-            // the deltas still batched reach their watchers first: an abort drops them
-            p.publisher.push(Vec::new(), true).await;
-            let evs = p.splitter.stop("malformed");
-            p.publisher.push(evs, true).await;
-            p.splitter = PartSplitter::new(self.self_id.as_str());
-        }
-        let mut cur = self.state.current_meta.lock().expect("current poisoned");
-        if let Some(c) = cur.as_mut() {
-            c.text_so_far.clear();
-        }
-    }
-}
-
-/// What a sequence of attempts maps its view from: the messages in flight (pieces) and
-/// the chat's record.
-struct ViewOf<'a> {
-    model_messages: &'a [Value],
-    meta: &'a Map<String, Value>,
-}
-
-/// How a sequence of attempts ended.
-enum Seq {
-    /// An attempt with no `Bad`: its internal text (reasoning intact), its report, its
-    /// counts held for the row, whether the stream ended inside a call (`Open`), the
-    /// sequence's window (attempt 1's), and the view it sent (mapped, no re-ask).
-    Accepted {
-        text: String,
-        report: crate::provider::ProviderReport,
-        accepted: Accepted,
-        open: bool,
-        window: Option<Window>,
-        sent: Vec<Value>,
-    },
-    /// Every attempt was malformed: each one's report, first line, in order (their
-    /// counts are in `used_pending`), the sequence's window (attempt 1's), and the view
-    /// it sent.
-    Stopped {
-        errors: Vec<String>,
-        window: Option<Window>,
-        sent: Vec<Value>,
-        /// The harness's reason when a second thinking cut stopped it (#782); `None`,
-        /// the malformed attempts' (`res/<type>/stop_reason.txt`).
-        reason: Option<String>,
-    },
-    /// A failed attempt's reply named a model of another type: the pass for it.
-    Restart(Box<Pass>),
-}
-
 /// A report's first line: the `error` of a `retrying` status and of the trace.
 fn first_line(report: &str) -> &str {
     report.lines().next().unwrap_or_default()
-}
-
-/// ONE SEQUENCE OF ATTEMPTS under `pass`'s type (1.5 step 4): its view rendered through
-/// the chat's cache, then up to `1 + CALL_RETRIES` requests. Each token goes through the
-/// type's reader; text and calls go on today's path as internal text, the model's raw
-/// text is kept for the re-ask. At a `Bad` nothing more of the attempt is forwarded and
-/// its stream is read to its end, unseen (Q32), so its report exists; the next attempt
-/// carries every failed attempt's raw text (no thinking) and report as a re-ask pair.
-/// `may_restart`: a failed attempt whose reply names a model of another type ends the
-/// sequence for a restart under that type (once per turn). A transport error aborts the
-/// parts and propagates: the turn is rerun whole (`verbs.rs`), from attempt 1.
-async fn attempts(
-    pass: &Pass,
-    may_restart: bool,
-    view_of: &ViewOf<'_>,
-    caller: &Caller<'_>,
-) -> Result<Seq, GenFailure> {
-    // THE TYPED VIEW (#766): each message mapped for the type through the chat's render
-    // cache; role, images and cache marks carried unchanged. It holds the pass's pins
-    // until the sequence is accepted (finished) or ends otherwise (dropped).
-    let typed_view = pass.view(view_of.model_messages, view_of.meta);
-    let sent = typed_view.messages.clone();
-    let mut reask: Vec<Value> = Vec::new();
-    let mut errors: Vec<String> = Vec::new();
-    let mut window: Option<Window> = None;
-    let mut cut_before = false;
-    let mut reason: Option<String> = None;
-    for attempt in 1..=1 + CALL_RETRIES {
-        let mut request = typed_view.messages.clone();
-        request.extend(reask.iter().cloned());
-        // A FRESH reading per request: it clears the provider's counts first, so a
-        // provider that reports nothing this time leaves no number of an earlier one.
-        let mut stream = match pass.request(&request, None).await {
-            Ok(stream) => stream,
-            Err(e) => return Err(abort_parts(caller.parts, e).await),
-        };
-        let mut reader = pass.decl.reader.outbound();
-        let mut raw = String::new();
-        let mut text = String::new();
-        let mut bad: Option<String> = None;
-        let mut open = false;
-        let mut first = true;
-        let mut repaired: Vec<(String, String)> = Vec::new();
-        while let Some(ev) = stream.next().await {
-            let ProviderEvent::Token(t) = match ev {
-                Ok(ev) => ev,
-                Err(e) => return Err(abort_parts(caller.parts, e).await),
-            };
-            if bad.is_some() {
-                // READ TO ITS END, UNSEEN (Q32): the endpoint's report then exists.
-                continue;
-            }
-            raw.push_str(&t);
-            let outs = reader.feed(&t);
-            take(
-                outs,
-                &mut text,
-                &mut bad,
-                &mut open,
-                &mut first,
-                &mut repaired,
-                caller,
-            )
-            .await;
-        }
-        drop(stream);
-        if bad.is_none() {
-            let outs = reader.finish();
-            take(
-                outs,
-                &mut text,
-                &mut bad,
-                &mut open,
-                &mut first,
-                &mut repaired,
-                caller,
-            )
-            .await;
-        }
-        for (added, removed) in repaired {
-            let mut fields = Map::new();
-            fields.insert("attempt".into(), json!(attempt));
-            if !added.is_empty() {
-                fields.insert("added".into(), json!(added));
-            }
-            if !removed.is_empty() {
-                fields.insert("removed".into(), json!(removed));
-            }
-            pass.events()
-                .push(Mode::Turn.name(), pass.kind, "repaired", fields);
-        }
-        let report = pass.report(Mode::Turn);
-        if attempt == 1 {
-            window = Window::of(&report);
-        }
-        // THE THINKING CUT (#782): the harness ended a thinking past the chat's cap; the
-        // model is re-asked ONCE for its answer, a second cut stops the turn
-        let thought_cut = bad.is_none() && report.stop_reason.as_deref() == Some(THINKING_CUT);
-        if thought_cut {
-            bad = Some(thinking_note(crate::model_format::NOTICE_THINKING_CUT, view_of.meta));
-        }
-        // AN ANSWER WITH NO CALL (#795, Q3): prose, notes or thinking only ran nothing.
-        // It is re-asked like a malformed one, its report the type's no-call text, and
-        // after the last attempt the harness stops the pass. A cut answer (a call still
-        // open at its end) is the cut path, never re-asked.
-        if bad.is_none() && !open && !crate::route::acts(&text) {
-            bad = Some((pass.decl.texts)(crate::model_format::Section::NoCall).to_string());
-        }
-        let Some(why) = bad else {
-            // THE ACCEPTED ATTEMPT: its calls, or a cut call. The pass
-            // finished: its view's chain is kept, its pins go.
-            typed_view.finish(&mut pass.events(), Mode::Turn.name());
-            let accepted = pass.accepted(&report);
-            return Ok(Seq::Accepted {
-                text,
-                report,
-                accepted,
-                open,
-                window,
-                sent,
-            });
-        };
-        // a thrown-away attempt: its counts go to the next row's `turn.rejected`
-        pass.rejected(&report);
-        let error = first_line(&why).to_string();
-        let mut fields = Map::new();
-        fields.insert("attempt".into(), json!(attempt));
-        fields.insert("error".into(), json!(error));
-        fields.extend(retry_counts(&report));
-        pass.events()
-            .push(Mode::Turn.name(), pass.kind, "retry", fields);
-        errors.push(error);
-        // A REPLY NAMING A MODEL OF ANOTHER TYPE (Q26): no re-ask pair from it, its raw
-        // text is in this type's form; the sequence restarts once under the new type.
-        if may_restart {
-            if let Some(next) = pass.retyped(&pass.provider.model()) {
-                caller
-                    .discard(Some((attempt, errors.last().map_or("", String::as_str))))
-                    .await;
-                drop(typed_view);
-                return Ok(Seq::Restart(Box::new(next)));
-            }
-        }
-        if thought_cut && cut_before {
-            reason = Some(thinking_note(crate::model_format::STOP_REASON_THINKING, view_of.meta));
-        }
-        cut_before |= thought_cut;
-        if attempt > CALL_RETRIES || reason.is_some() {
-            caller.discard(None).await;
-            break;
-        }
-        caller
-            .discard(Some((attempt, errors.last().map_or("", String::as_str))))
-            .await;
-        let answer = without_thinking(&raw);
-        // a cut pass or a thinking-only answer is mostly thinking: an empty answer is no
-        // message
-        if !answer.trim().is_empty() {
-            reask.push(json!({"role": "assistant", "content": answer}));
-        }
-        reask.push(json!({"role": "user", "content": why}));
-    }
-    drop(typed_view);
-    Ok(Seq::Stopped {
-        errors,
-        window,
-        sent,
-        reason,
-    })
 }
 
 /// `template` (the re-ask after a thinking cut, [`crate::think::THINKING_CUT`], or the
@@ -924,33 +1358,6 @@ fn clear_calib_on_type_change(state: &BackendState, kind: &str) {
     let last = *state.last_type.lock().expect("last_type poisoned");
     if last.is_some_and(|k| k != kind) {
         *state.calib.lock().expect("calib poisoned") = None;
-    }
-}
-
-/// An attempt's reader output, taken in order: text and calls sent on, the first `Bad`
-/// ends what is forwarded, an `Open` noted, a repair's closers kept for its trace event.
-async fn take(
-    outs: Vec<Out>,
-    text: &mut String,
-    bad: &mut Option<String>,
-    open: &mut bool,
-    first: &mut bool,
-    repaired: &mut Vec<(String, String)>,
-    caller: &Caller<'_>,
-) {
-    for out in outs {
-        if bad.is_some() {
-            return;
-        }
-        match out {
-            Out::Text(t) | Out::Call { text: t } => {
-                caller.send(&t, first).await;
-                text.push_str(&t);
-            }
-            Out::Bad { report } => *bad = Some(report),
-            Out::Open { .. } => *open = true,
-            Out::Repaired { added, removed } => repaired.push((added, removed)),
-        }
     }
 }
 
@@ -1018,7 +1425,7 @@ pub fn usage_detail(
 }
 
 /// Every open part ABORTS for its watchers (`"error"`), and the provider failure
-/// is handed back to propagate.
+/// is handed back.
 async fn abort_parts(parts: &tokio::sync::Mutex<PassParts>, e: ProviderError) -> GenFailure {
     let mut p = parts.lock().await;
     let evs = p.splitter.stop("error");

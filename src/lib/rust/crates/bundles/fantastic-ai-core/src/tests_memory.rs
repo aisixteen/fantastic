@@ -133,8 +133,8 @@ async fn a_turn_records_what_the_endpoint_reported() {
     )
     .await;
     let provider: Arc<dyn Provider> = Arc::new(Reporting(777));
+    crate::tests::wire(&ai, provider, CFG);
     let out = as_agent(ai.clone(), crate::verbs::send(
-        provider,
         &ai,
         &serde_json::from_value(json!({"text": "hello"})).expect("a send"),
         &kernel,
@@ -143,6 +143,7 @@ async fn a_turn_records_what_the_endpoint_reported() {
     .await
     .expect("send");
     assert!(out.get("error").is_none(), "{out}");
+    assert!(crate::tests::settle(&kernel).await, "the pass ran");
     let state = crate::state::state_for(&ai);
     assert!(state.calib.lock().unwrap().is_some_and(|c| c > 0.0));
     let st = call(&kernel, ai.as_str(), json!({"type": "context_status"})).await;
@@ -249,8 +250,8 @@ async fn a_turns_rows_are_minted_when_appended_so_id_order_is_append_order() {
         kernel: Arc::clone(&kernel),
         agent: ai.clone(),
     });
+    crate::tests::wire(&ai, provider, CFG);
     let out = as_agent(ai.clone(), crate::verbs::send(
-        provider,
         &ai,
         &serde_json::from_value(json!({"text": "hello"})).expect("a send"),
         &kernel,
@@ -259,6 +260,7 @@ async fn a_turns_rows_are_minted_when_appended_so_id_order_is_append_order() {
     .await
     .expect("send");
     assert!(out.get("error").is_none(), "{out}");
+    assert!(crate::tests::settle(&kernel).await, "the pass ran");
     let hist = fantastic_kernel::test_support::as_agent(
         ai.clone(),
         crate::memory::load_history(&ai, &kernel, false),
@@ -269,7 +271,8 @@ async fn a_turns_rows_are_minted_when_appended_so_id_order_is_append_order() {
     let mut sorted = ids.clone();
     sorted.sort_unstable();
     assert_eq!(ids, sorted, "append order diverged from id order");
-    assert_eq!(contents(&hist)[..2], [json!("mid"), json!("hello")]);
+    // the message is stored when it arrives (#795), the mid-pass row after it
+    assert_eq!(contents(&hist)[..2], [json!("hello"), json!("mid")]);
 }
 
 // ── the row event ──────────────────────────────────────────────────────

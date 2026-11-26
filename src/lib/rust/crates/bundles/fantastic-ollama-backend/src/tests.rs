@@ -184,19 +184,16 @@ async fn send_streams_tokens_and_emits_done() {
 
     let (kernel, backend) = mk_kernel(&tmp, "tok", &server.uri()).await;
     // the chat holds the turn and streams to its caller; the provider completes it
-    let backend = pair_chat(&kernel, &backend).await;
-    let mut rx = rebind_backend_inbox(&kernel, &backend);
+    let chat = pair_chat(&kernel, &backend).await;
+    let mut rx = rebind_backend_inbox(&kernel, &chat);
     let client_id = "browser_tok";
 
-    let reply = kernel.operator_send(vec![Item::new(
-            backend.clone(),
-            json!({"type": "send", "text": "hi", "client_id": client_id}),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let reply = send_once(&kernel, &backend, client_id).await;
     assert_eq!(reply["client_id"], client_id);
-    assert_eq!(reply["response"], "Hello world <call name=\"done\"></call>");
+    assert_eq!(
+        last_answer(&kernel, &backend).await,
+        "Hello world <call name=\"done\"></call>"
+    );
 
     let events = drain(&mut rx).await;
     let token_count = events
@@ -254,7 +251,9 @@ async fn an_envelope_dispatches_and_streams_verbatim() {
         .await
         .remove(0)
         .result;
-    assert_eq!(reply["response"], envelope, "verbatim text: {reply:#?}");
+    assert_eq!(reply["accepted"], json!(true), "{reply:#?}");
+    assert!(fantastic_ai_core::state::settle(&kernel, Duration::from_secs(20)).await);
+    assert_eq!(last_answer(&kernel, &backend).await, envelope, "verbatim text");
 
     let routed = tmp.path().join(".fantastic").join("routed");
     for _ in 0..250 {
@@ -336,15 +335,12 @@ async fn thinking_streams_wrapped_and_persists_stripped() {
 
     let (kernel, backend) = mk_kernel(&tmp, "think", &server.uri()).await;
     let _rx = rebind_backend_inbox(&kernel, &backend);
-    let reply = kernel.operator_send(vec![Item::new(
-            pair_chat(&kernel, &backend).await,
-            json!({"type": "send", "text": "hi", "client_id": "c_think"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    // the reply is the answer: thinking never leaves the agent
-    assert_eq!(reply["response"], json!("ack <call name=\"done\"></call>"), "{reply}");
+    send_once(&kernel, &backend, "c_think").await;
+    // the stored answer: thinking never leaves the agent
+    assert_eq!(
+        last_answer(&kernel, &backend).await,
+        "ack <call name=\"done\"></call>"
+    );
     let h = kernel.operator_send(vec![Item::new(
             pair_chat(&kernel, &backend).await,
             json!({"type": "history"}),
@@ -830,14 +826,54 @@ fn full_response(content_type: &str, body: &str) -> (Vec<u8>, bool) {
     )
 }
 
+/// Send one message, wait until every agent is quiet, and return the ack.
 async fn send_once(kernel: &Arc<Kernel>, backend: &AgentId, client: &str) -> Value {
-    kernel.operator_send(vec![Item::new(
-            pair_chat(kernel, backend).await,
+    let chat = pair_chat(kernel, backend).await;
+    let ack = kernel.operator_send(vec![Item::new(
+            chat,
             json!({"type": "send", "text": "hi", "client_id": client}),
         )])
         .await
         .remove(0)
-        .result
+        .result;
+    assert_eq!(ack["accepted"], json!(true), "{ack}");
+    assert!(
+        fantastic_ai_core::state::settle(kernel, Duration::from_secs(20)).await,
+        "the agents never went quiet"
+    );
+    ack
+}
+
+/// The chat's conversation rows, as it holds them.
+async fn chat_rows(kernel: &Arc<Kernel>, backend: &AgentId) -> Vec<Value> {
+    let chat = pair_chat(kernel, backend).await;
+    let r = kernel.operator_send(vec![Item::new(chat, json!({"type": "rows"}))])
+        .await
+        .remove(0)
+        .result;
+    r["rows"].as_array().cloned().unwrap_or_default()
+}
+
+/// The content of the chat's newest assistant row: its last pass's answer.
+async fn last_answer(kernel: &Arc<Kernel>, backend: &AgentId) -> String {
+    chat_rows(kernel, backend)
+        .await
+        .iter()
+        .rev()
+        .find(|r| r["role"] == "assistant")
+        .and_then(|r| r["content"].as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// The contents of the chat's error rows: each failed pass's.
+async fn error_rows(kernel: &Arc<Kernel>, backend: &AgentId) -> Vec<String> {
+    chat_rows(kernel, backend)
+        .await
+        .iter()
+        .filter(|r| r["kind"] == "error")
+        .filter_map(|r| r["content"].as_str().map(str::to_string))
+        .collect()
 }
 
 /// The mid-stream transport error is raised with THIS backend's own wording
@@ -854,12 +890,12 @@ async fn a_body_cut_mid_stream_raises_in_ollamas_words() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "cut", &format!("http://127.0.0.1:{port}")).await;
     let _rx = rebind_backend_inbox(&kernel, &backend);
-    let r = send_once(&kernel, &backend, "c_cut").await;
-    assert_eq!(r["raised"], json!(true), "{r}");
-    assert_eq!(
-        r["error"],
-        json!("RuntimeError: ollama: stream error: error decoding response body"),
-        "{r}"
+    send_once(&kernel, &backend, "c_cut").await;
+    let errs = error_rows(&kernel, &backend).await;
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("ollama: stream error: error decoding response body")),
+        "{errs:?}"
     );
 }
 
@@ -876,8 +912,11 @@ async fn a_final_ndjson_line_without_a_newline_still_counts() {
         .await;
     let (kernel, backend) = mk_kernel(&tmp, "eofline", &server.uri()).await;
     let _rx = rebind_backend_inbox(&kernel, &backend);
-    let r = send_once(&kernel, &backend, "c_eof").await;
-    assert_eq!(r["response"], json!("Hello world <call name=\"done\"></call>"), "{r}");
+    send_once(&kernel, &backend, "c_eof").await;
+    assert_eq!(
+        last_answer(&kernel, &backend).await,
+        "Hello world <call name=\"done\"></call>"
+    );
     // and a thinking-only turn cut at EOF (no newline) still closes its span once
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -891,15 +930,16 @@ async fn a_final_ndjson_line_without_a_newline_still_counts() {
     let (kernel, backend) = mk_kernel(&tmp2, "eofthink", &server.uri()).await;
     let chat = pair_chat(&kernel, &backend).await;
     let mut rx = rebind_backend_inbox(&kernel, &chat);
-    let r = send_once(&kernel, &backend, "c_eof2").await;
+    send_once(&kernel, &backend, "c_eof2").await;
     // a thinking-only answer is re-asked, and every attempt is one: the harness stops
     // the turn (#795); the chat's own stream shows the span, closed once per attempt
     assert!(
-        r["response"].as_str().unwrap_or_default().starts_with("<call name=\"stop\">"),
-        "{r}"
+        last_answer(&kernel, &backend).await.starts_with("<call name=\"stop\">"),
+        "{:?}",
+        chat_rows(&kernel, &backend).await
     );
-    let streamed: String = drain(&mut rx)
-        .await
+    let evs = drain(&mut rx).await;
+    let streamed: String = evs
         .iter()
         .filter(|e| e.get("type").and_then(Value::as_str) == Some("token"))
         .filter_map(|e| e.get("text").and_then(Value::as_str))
@@ -941,8 +981,10 @@ async fn every_pass_opens_its_own_connection() {
     let (kernel, backend) = mk_kernel(&tmp, "conn", &format!("http://127.0.0.1:{port}")).await;
     let _rx = rebind_backend_inbox(&kernel, &backend);
     let done = json!("ok<call name=\"done\"></call>");
-    assert_eq!(send_once(&kernel, &backend, "c1").await["response"], done);
-    assert_eq!(send_once(&kernel, &backend, "c1").await["response"], done);
+    send_once(&kernel, &backend, "c1").await;
+    assert_eq!(last_answer(&kernel, &backend).await, done.as_str().unwrap());
+    send_once(&kernel, &backend, "c1").await;
+    assert_eq!(last_answer(&kernel, &backend).await, done.as_str().unwrap());
     let heads = log.heads();
     assert!(heads.len() >= 2, "{heads:#?}");
     assert!(
@@ -1022,14 +1064,14 @@ async fn a_stream_that_goes_quiet_fails_after_the_idle_window() {
     .await;
     let _rx = rebind_backend_inbox(&kernel, &backend);
     let started = std::time::Instant::now();
-    let r = send_once(&kernel, &backend, "c_quiet").await;
+    send_once(&kernel, &backend, "c_quiet").await;
     assert!(
         started.elapsed() < Duration::from_secs(30),
         "{:?}",
         started.elapsed()
     );
-    assert_eq!(r["raised"], json!(true), "{r}");
-    let err = r["error"].as_str().unwrap_or_default();
+    let errs = error_rows(&kernel, &backend).await;
+    let err = errs.iter().find(|e| e.contains("stream_stalled")).map(String::as_str).unwrap_or_default();
     assert!(err.contains("ollama_backend: stream_stalled"), "{err}");
     assert!(err.contains("sent no bytes for 0.2s"), "{err}");
     assert!(err.contains(&endpoint), "{err}");
@@ -1050,9 +1092,9 @@ async fn an_endpoint_that_never_answers_fails_after_the_idle_window() {
     )
     .await;
     let _rx = rebind_backend_inbox(&kernel, &backend);
-    let r = send_once(&kernel, &backend, "c_silent").await;
-    assert_eq!(r["raised"], json!(true), "{r}");
-    let err = r["error"].as_str().unwrap_or_default();
+    send_once(&kernel, &backend, "c_silent").await;
+    let errs = error_rows(&kernel, &backend).await;
+    let err = errs.iter().find(|e| e.contains("stream_stalled")).map(String::as_str).unwrap_or_default();
     assert!(err.contains("stream_stalled"), "{err}");
     assert!(err.contains("sent no bytes for 0.2s"), "{err}");
 }

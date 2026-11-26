@@ -321,6 +321,161 @@ fn call_envelope(target: &str, payload: Value, reply_to: Option<&str>) -> String
     crate::tool_parse::render_call("send", &args)
 }
 
+fantastic_kernel::stand_in_verbs!(sleeper_verbs { SendV "send" { text: Option<String>, client_id: Option<String>, ms: Option<i64>, msg: Option<i64>, stream_id: Option<String> } });
+
+/// A NON-AI agent whose `send` answers after `ms` (its record's, default 1500).
+struct Sleeper;
+
+#[async_trait]
+impl fantastic_kernel::bundle::Handler for Sleeper {
+    type Call = sleeper_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A slow test stand-in."
+    }
+    fn name(&self) -> &str {
+        "sleeper"
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        sleeper_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        sleeper_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
+    }
+    async fn handle(
+        &self,
+        agent_id: &AgentId,
+        call: Self::Call,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<fantastic_kernel::bundle::Reply, fantastic_kernel::bundle::BundleError> {
+        Ok(Some(match call {
+            sleeper_verbs::Call::SendV(a) => {
+                tokio::time::sleep(Duration::from_millis(a.ms.unwrap_or(1500) as u64)).await;
+                json!({"slept": true, "text": a.text})
+            }
+            sleeper_verbs::Call::Reflect(_) => json!({"id": agent_id.as_str(), "sentence": "slow"}),
+        }))
+    }
+}
+
+/// A kernel with the mock AI and a SLOW non-AI agent `sleeper` it holds a line on.
+pub(crate) async fn with_sleeper(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
+    let kernel = base_kernel(tmp, |k| k.bundles.register("sleeper.tools", Sleeper)).await;
+    let backend_id = id_for(tmp, tag);
+    let file_id = format!("ff_{backend_id}");
+    add_file_bridge(&kernel, &file_id, &tmp.path().join(".fantastic")).await;
+    let backend = add_backend(&kernel, &backend_id, &file_id).await;
+    let _ = kernel
+        .operator_send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "sleeper.tools", "id": "sleeper"}),
+        )])
+        .await;
+    let _ = kernel
+        .operator_send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({
+                "type": "update_agent",
+                "id": backend.as_str(),
+                "can": {"$parent": {"call": ["*"]}, file_id: {"call": ["*"]}, "cli": {"call": ["*"]}, MEMORY: {"call": ["*"]}, "sleeper": {"call": ["*"]}, "kernel_state": {"call": ["ack_deadletter"]}},
+            }),
+        )])
+        .await;
+    (kernel, backend)
+}
+
+/// WAIT UNTIL EVERY AGENT OF `kernel` IS QUIET (#795): a `send` acks once its message
+/// is stored, so a test that reads what the message did waits for the passes it woke,
+/// their calls and the replies those woke. `false` when they did not go quiet.
+pub(crate) async fn settle(kernel: &Arc<Kernel>) -> bool {
+    crate::state::settle(kernel, Duration::from_secs(20)).await
+}
+
+/// `sent`, then [`settle`]: the outcome of the send itself (its ack), read once every
+/// agent is quiet.
+pub(crate) async fn settled<T>(kernel: &Arc<Kernel>, sent: impl std::future::Future<Output = T>) -> T {
+    let out = sent.await;
+    settle(kernel).await;
+    out
+}
+
+/// Wire `agent`'s passes to `provider`, as every call to its bundle does.
+pub(crate) fn wire(agent: &AgentId, provider: Arc<dyn Provider>, cfg: BackendConfig) {
+    *crate::state::state_for(agent).machine.lock().unwrap() = Some(crate::state::Machine {
+        provider: Arc::new(move |_| Arc::clone(&provider)),
+        cfg,
+    });
+}
+
+/// A PASS IN FLIGHT for `agent` while this lives (its life says `running`): what a verb
+/// that refuses mid-pass sees.
+pub(crate) struct MidPass(AgentId);
+
+impl MidPass {
+    pub(crate) fn new(agent: &AgentId) -> Self {
+        crate::state::state_for(agent).life.lock().unwrap().running = true;
+        Self(agent.clone())
+    }
+}
+
+impl Drop for MidPass {
+    fn drop(&mut self) {
+        crate::state::state_for(&self.0).life.lock().unwrap().running = false;
+    }
+}
+
+/// `agent`'s history, read as the agent.
+pub(crate) async fn history_of(
+    kernel: &Arc<Kernel>,
+    agent: &AgentId,
+) -> crate::memory::MemResult<Vec<Value>> {
+    fantastic_kernel::test_support::as_agent(
+        agent.clone(),
+        crate::memory::load_history(agent, kernel, false),
+    )
+    .await
+}
+
+/// The contents of `agent`'s stored reply rows (`[reply to …]`), in order: each reply
+/// to a call is its own message (#795).
+pub(crate) async fn reply_rows(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<String> {
+    history_of(kernel, agent)
+        .await
+        .expect("the history reads")
+        .iter()
+        .filter(|r| r["role"] == "user")
+        .filter_map(|r| r["content"].as_str())
+        .filter(|c| c.starts_with("[reply to "))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The contents of `agent`'s error rows: each failed pass's (#177).
+pub(crate) async fn error_rows(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<String> {
+    history_of(kernel, agent)
+        .await
+        .expect("the history reads")
+        .iter()
+        .filter(|r| r["kind"] == "error")
+        .filter_map(|r| r["content"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// The content of `agent`'s newest assistant row: the answer of its last pass.
+pub(crate) async fn last_answer(kernel: &Arc<Kernel>, agent: &AgentId) -> String {
+    history_of(kernel, agent)
+        .await
+        .expect("the history reads")
+        .iter()
+        .rev()
+        .find(|r| r["role"] == "assistant")
+        .and_then(|r| r["content"].as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
 /// One pass that emits one whole text chunk.
 pub(crate) fn pass(text: impl Into<String>) -> Vec<ScriptEvent> {
     vec![ScriptEvent::Token(text.into())]
@@ -345,7 +500,7 @@ impl Handler for MockBundle {
     ) -> Result<Reply, BundleError> {
         // EVERY VERB through the one shared table, exactly as a real chat
         // dispatches it — boot is a new incarnation there too.
-        let script = script_for(agent_id);
+        let me = agent_id.clone();
         let reflect = || {
             json!({
                 "id": agent_id.as_str(),
@@ -361,9 +516,11 @@ impl Handler for MockBundle {
             call,
             kernel,
             self.cfg,
+            // the script registered for the agent WHEN THE PASS STARTS: a pass may start
+            // outside a call to the bundle, after a test scripted it anew
             move |_client| {
                 Arc::new(MockProvider {
-                    script: Arc::clone(&script),
+                    script: script_for(&me),
                 }) as Arc<dyn Provider>
             },
             reflect,
@@ -678,16 +835,16 @@ async fn send_streams_tokens_and_emits_done() {
     );
     let mut rx = rebind_backend_inbox(&kernel, &backend);
     let client_id = "browser_tok";
-    let reply = kernel
+    let reply = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "hi", "client_id": client_id}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
     assert_eq!(reply["client_id"], client_id);
-    assert_eq!(reply["response"], "Hello world <call name=\"done\"></call>");
+    assert_eq!(json!(crate::tests::last_answer(&kernel, &backend).await), "Hello world <call name=\"done\"></call>");
 
     let events = drain(&mut rx).await;
     let token_count = events
@@ -753,17 +910,18 @@ async fn thinking_is_streamed_raw_but_neither_dispatched_nor_persisted() {
     );
     let mut rx = rebind_backend_inbox(&kernel, &backend);
     let client_id = "browser_think";
-    let reply = kernel
+    let reply = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "hi", "client_id": client_id}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
 
     // The REPLY is the answer — no marker, no deliberation.
-    let answer = reply["response"].as_str().expect("response text");
+    let answer = crate::tests::last_answer(&kernel, &backend).await;
+    let answer = answer.as_str();
     assert_eq!(answer, "the answer <call name=\"done\"></call>", "{reply}");
 
     // The token stream (the agent's own inbox) is raw — markers intact.
@@ -829,15 +987,15 @@ async fn a_thinking_only_turn_is_discarded_and_rerolled() {
         Duration::ZERO,
     );
     let _rx = rebind_backend_inbox(&kernel, &backend);
-    let reply = kernel
+    let reply = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "hi", "client_id": "c_thonly"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
-    assert_eq!(reply["response"], json!("<call name=\"done\"></call>"), "{reply:#?}");
+    assert_eq!(json!(crate::tests::last_answer(&kernel, &backend).await), json!("<call name=\"done\"></call>"), "{reply:#?}");
     assert!(reply.get("raised").is_none(), "{reply:#?}");
     assert_eq!(s.passes_served(), 2, "the thinking-only attempt was not re-asked");
     assert!(
@@ -909,11 +1067,11 @@ async fn status_current_shape_matches_python() {
     let send_kernel = Arc::clone(&kernel);
     let backend_for_task = backend.clone();
     let join = tokio::spawn(async move {
-        send_kernel
+        crate::tests::settled(&send_kernel, send_kernel
             .operator_send(vec![Item::new(
                 backend_for_task,
                 json!({"type": "send", "text": "go", "client_id": "probe"}),
-            )])
+            )]))
             .await
             .remove(0)
             .result
@@ -1002,37 +1160,38 @@ async fn status_current_shape_matches_python() {
     let _ = join.await.unwrap();
 }
 
-/// The `send` reply names the row this turn produced. python `_send`
-/// returns `{response, client_id, message_id}` (the closed call parts
-/// feed routing only, never the reply); rust minted the id (routing
-/// needs it to parent the next turn) and then dropped it from the reply, so a
-/// caller could not name the row its own send wrote.
+/// The `send` reply is the ACK (#795): `{accepted, re, client_id}`, `re` naming the row
+/// the message was stored as; the pass's answer row answers that row (its `parent`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn send_reply_carries_message_id() {
+async fn send_reply_carries_the_stored_row() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_tid").await;
     let _s = script(&backend, vec![pass("ack <call name=\"done\"></call>")], Duration::ZERO);
-    let r = kernel
+    let r = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "ping", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
     assert_eq!(
         r.as_object().unwrap().keys().collect::<Vec<_>>(),
-        vec!["response", "client_id", "message_id"],
+        vec!["accepted", "re", "client_id"],
         "{r:#?}"
     );
-    let message_id = r["message_id"].as_i64().expect("message_id is a row id");
-    // It NAMES the assistant row this turn appended.
+    let re = r["re"].as_i64().expect("re is a row id");
     let rows = conversation(&kernel, &backend).await;
+    let incoming = rows
+        .iter()
+        .find(|row| row["id"].as_i64() == Some(re))
+        .expect("the row the reply names");
+    assert_eq!(incoming["content"], json!("ping"));
     let assistant = rows
         .iter()
-        .find(|row| row["id"].as_i64() == Some(message_id))
-        .expect("the row the reply names");
-    assert_eq!(assistant["role"], json!("assistant"));
+        .find(|row| row["role"] == json!("assistant"))
+        .expect("the answer row");
+    assert_eq!(assistant["parent"], json!(re), "the answer answers the stored row");
     assert_eq!(assistant["content"], json!("ack <call name=\"done\"></call>"));
 }
 
@@ -1061,8 +1220,8 @@ impl Drop for Ceiling {
 }
 
 /// The ceiling is a python FLOAT: `FANTASTIC_AI_SEND_TIMEOUT=0.05` is a
-/// 50ms ceiling (rust parsed `u64`, failed, and silently used 180), the refusal
-/// spells the value with python's `repr`, and the `status(done)` detail carries
+/// 50ms ceiling on a pass (rust parsed `u64`, failed, and silently used 180), its
+/// error row spells the value with python's `repr`, and the `status(failed)` detail carries
 /// `reason` plus the auto-fills and nothing else (rust added
 /// `partial_chars`/`partial_head`/`partial_tail`, a shape python never emits).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1079,11 +1238,11 @@ async fn a_stalled_provider_times_out_at_the_python_float_ceiling() {
     );
     let mut rx = rebind_backend_inbox(&kernel, &backend);
     let started = std::time::Instant::now();
-    let r = kernel
+    let r = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -1092,13 +1251,11 @@ async fn a_stalled_provider_times_out_at_the_python_float_ceiling() {
         Some(v) => std::env::set_var("FANTASTIC_AI_SEND_TIMEOUT", v),
         None => std::env::remove_var("FANTASTIC_AI_SEND_TIMEOUT"),
     }
-    assert_eq!(
-        r,
-        json!({
-            "error": "send: timeout after 0.05s",
-            "reason": "timeout",
-            "client_id": "probe"
-        })
+    assert_eq!(r["accepted"], json!(true), "{r}");
+    let errors = error_rows(&kernel, &backend).await;
+    assert!(
+        errors.iter().any(|e| e.contains("send: timeout after 0.05s")),
+        "the pass's error row spells the float: {errors:?}"
     );
     assert!(
         elapsed < Duration::from_millis(500),
@@ -1306,11 +1463,11 @@ async fn recall_pages_durable_store_and_context_status_shape() {
     let (kernel, backend) = mk_kernel(&tmp, "recall").await;
     script(&backend, vec![pass("noted")], Duration::ZERO);
     // Plant a distinctive fact in the durable store via a normal send.
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "my project codename is HALCYON", "client_id": "chat"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -1375,11 +1532,11 @@ async fn history_persists_and_round_trips() {
     );
     let _rx = rebind_backend_inbox(&kernel, &backend);
     let client_id = "browser_hist";
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "ping", "client_id": client_id}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -1453,11 +1610,11 @@ async fn chat_persists_with_no_loader_provider_wired() {
         Duration::ZERO,
     );
     let _rx2 = rebind_backend_inbox(&kernel, &backend);
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "ping", "client_id": "cli"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -1492,11 +1649,11 @@ async fn chat_persists_with_no_loader_provider_wired() {
     );
 }
 
-/// The backend's bespoke `interrupt` is GONE — an in-flight `send` is a KERNEL
-/// TASK, so it is cancelled the way any dispatch is: find it in `ps`, kill it
-/// with `cancel`. The bundle's `on_cancel` hook closes the turn out (a `done`
-/// event reaches the caller) and the blocked `send` resolves to
-/// `{"cancelled": true}` — the substrate's contract, not this bundle's.
+/// The backend's bespoke `interrupt` is GONE — a pass's request is a KERNEL TASK (#795:
+/// the provider's `complete`, or here the chat's own task reading an in-process
+/// provider), so it is cancelled the way any dispatch is: find it in `ps`, kill it with
+/// `cancel`. The cancelled request ends its pass as stopped (a `done` event reaches the
+/// caller, a marker row is kept) — the substrate's contract, not this bundle's.
 #[tokio::test]
 async fn kernel_cancel_kills_an_in_flight_send() {
     let tmp = TempDir::new().unwrap();
@@ -1504,21 +1661,18 @@ async fn kernel_cancel_kills_an_in_flight_send() {
     script(&backend, vec![pass("slow")], Duration::from_secs(2));
     let mut rx = rebind_backend_inbox(&kernel, &backend);
     let client_id = "browser_intr";
-    let k = Arc::clone(&kernel);
-    let b = backend.clone();
-    let c = client_id.to_string();
-    let send_join = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
-            b.clone(),
-            json!({"type": "send", "text": "hi", "client_id": c}),
+    let ack = kernel
+        .operator_send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "hi", "client_id": client_id}),
         )])
         .await
         .remove(0)
-        .result
-    });
+        .result;
+    assert_eq!(ack["accepted"], json!(true), "{ack}");
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Discover the generation in the live task table…
+    // Discover the pass's request in the live task table…
     let table = kernel
         .operator_send(vec![Item::new(
             AgentId::from("kernel"),
@@ -1531,9 +1685,9 @@ async fn kernel_cancel_kills_an_in_flight_send() {
         .as_array()
         .expect("tasks")
         .iter()
-        .find(|t| t["agent"] == json!(backend.as_str()) && t["verb"] == json!("send"))
+        .find(|t| t["agent"] == json!(backend.as_str()) && t["verb"] == json!("complete"))
         .and_then(|t| t["id"].as_i64())
-        .expect("the in-flight send must be in `ps`");
+        .expect("the pass's request must be in `ps`");
 
     // …and kill it with the universal system verb.
     let r = kernel
@@ -1546,19 +1700,20 @@ async fn kernel_cancel_kills_an_in_flight_send() {
         .result;
     assert_eq!(r["cancelled"], json!(true));
     assert_eq!(r["killed"], json!([task_id]));
+    assert!(settle(&kernel).await, "the agent never went quiet");
 
-    let reply = send_join.await.expect("send join");
-    assert_eq!(reply, json!({"cancelled": true}));
-
-    // The `on_cancel` hook closed the turn out: the caller still gets its `done`.
+    // The cancelled request closed the pass out: the caller still gets its `done`.
     let events = drain(&mut rx).await;
     assert!(
         events
             .iter()
             .any(|e| e.get("type").and_then(Value::as_str) == Some("status")
-                && e.get("phase").and_then(Value::as_str) == Some("done")),
+                && e.get("phase").and_then(Value::as_str) == Some("done")
+                && e["detail"]["reason"] == json!("cancelled")),
         "expected a done event after cancel: {events:#?}",
     );
+    let rows = history_of(&kernel, &backend).await.expect("history");
+    assert!(rows.iter().any(|r| r["kind"] == json!("stopped")), "{rows:#?}");
     // …and the backend no longer reports a phantom generation.
     let st = kernel
         .operator_send(vec![Item::new(backend.clone(), json!({"type": "status"}))])
@@ -1579,10 +1734,10 @@ async fn status_during_in_flight_shows_phase() {
     let b = backend.clone();
     let c = client_id.to_string();
     let send_join = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, k.operator_send(vec![Item::new(
             b.clone(),
             json!({"type": "send", "text": "hi", "client_id": c}),
-        )])
+        )]))
         .await
         .remove(0)
         .result
@@ -1637,11 +1792,11 @@ async fn a_model_call_is_dispatched_and_the_result_returns() {
         ],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "what is here?"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -1690,11 +1845,11 @@ async fn a_self_chain_does_not_deadlock() {
         Duration::ZERO,
     );
     tokio::time::timeout(Duration::from_secs(5), async {
-        let _ = kernel
+        let _ = crate::tests::settled(&kernel, kernel
             .operator_send(vec![Item::new(
                 backend.clone(),
                 json!({"type": "send", "text": "go"}),
-            )])
+            )]))
             .await
             .remove(0)
             .result;
@@ -1735,11 +1890,11 @@ async fn the_self_chain_carries_no_call_stack() {
         ],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "_call_stack": ["upstream"]}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -1757,7 +1912,7 @@ async fn an_inbound_cycle_is_refused_before_the_lock() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_cyc").await;
     let s = script(&backend, vec![pass("must never run")], Duration::ZERO);
-    let r = kernel
+    let r = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({
@@ -1765,7 +1920,7 @@ async fn an_inbound_cycle_is_refused_before_the_lock() {
                 "text": "go",
                 "_call_stack": ["upstream", backend.as_str()],
             }),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -1806,11 +1961,11 @@ async fn reply_to_omitted_defaults_to_self() {
         ],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -1818,15 +1973,15 @@ async fn reply_to_omitted_defaults_to_self() {
         until_passes(&fo, 1).await,
         "the send itself must still happen"
     );
+    // the reply to a message to an AI is its ACK: it comes back to self, stored as a
+    // reply, and wakes nothing (Q2)
+    assert!(settle(&kernel).await);
+    let replies = reply_rows(&kernel, &backend).await;
     assert!(
-        until_passes(&s, 2).await,
-        "an omitted reply_to must come back to self"
+        replies.iter().any(|r| r.contains(&format!("{peer} send")) && r.contains("<accepted>true</accepted>")),
+        "an omitted reply_to must come back to self, tagged as a reply: {replies:#?}"
     );
-    assert!(
-        s.request(1).contains("[reply to "),
-        "and arrive tagged as a reply: {}",
-        s.request(1)
-    );
+    assert_eq!(s.passes_served(), 1, "an ack wakes nothing");
 }
 
 /// Fire-and-forget still exists — it just has to be ASKED for. `reply_to:null`
@@ -1850,11 +2005,11 @@ async fn discarding_a_reply_must_be_said_explicitly() {
         ],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -1888,11 +2043,11 @@ async fn a_failed_call_comes_back_to_the_model() {
         ],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -1920,11 +2075,11 @@ async fn a_call_with_no_target_is_reported_not_swallowed() {
     // model is the grammar's sentence, naming BOTH ways to address one.
     let bad = r#"<call name="send"><routing><reply_to>self</reply_to></routing><payload><type>reflect</type></payload></call>"#;
     let s = script(&backend, vec![pass(bad), pass("ok")], Duration::ZERO);
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -1947,11 +2102,11 @@ async fn a_send_with_no_payload_names_what_is_missing() {
     let (kernel, backend) = mk_kernel(&tmp, "rt_nopl").await;
     let bad = r#"<call name="send"><routing><target_id>totals</target_id></routing><payload></payload></call>"#;
     let s = script(&backend, vec![pass(bad), pass("ok")], Duration::ZERO);
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -1979,11 +2134,11 @@ async fn an_unparseable_call_reaches_the_model_as_an_error() {
         "<path>a</path></payload></call>"
     );
     let s = script(&backend, vec![pass(broken), pass("ok")], Duration::ZERO);
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -2008,11 +2163,11 @@ async fn a_broken_call_beside_a_good_one_is_still_reported() {
         r#"<call name="send"><routing><target_id>n</target_id></routing><payload><code>oops</payload></call>"#
     );
     let s = script(&backend, vec![pass(text), pass("ok")], Duration::ZERO);
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -2033,11 +2188,11 @@ async fn a_verb_in_the_tool_slot_is_refused_by_name() {
     let (kernel, backend) = mk_kernel(&tmp, "rt_verb").await;
     let call = r#"<call name="reflect"><target_id>core</target_id></call>"#;
     let s = script(&backend, vec![pass(call), pass("ok")], Duration::ZERO);
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -2051,56 +2206,6 @@ async fn a_verb_in_the_tool_slot_is_refused_by_name() {
     assert!(
         turn2.contains("send, done, inquiry_answer"),
         "it must name the closed set: {turn2}"
-    );
-}
-
-/// `send_to` delivers this pass's TEXT to a peer — once. It must NOT propagate: a
-/// caller cannot spend the model's turns for it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_caller_send_to_hands_off_once() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, a) = mk_kernel(&tmp, "rt_hand").await;
-    let b = add_peer(&kernel, &tmp, &a).await;
-    // `done`, because a call-less turn is NUDGED now and never reaches the
-    // hand-off: the caller's `send_to` applies to a FINISHED turn.
-    let fa = script(
-        &a,
-        vec![
-            pass(r#"the answer from a <call name="done"></call>"#),
-            pass("a must not run again"),
-        ],
-        Duration::ZERO,
-    );
-    let fb = script(
-        &b,
-        vec![
-            pass(r#"b replied <call name="done"></call>"#),
-            pass("b must not run again"),
-        ],
-        Duration::ZERO,
-    );
-    let _ = kernel
-        .operator_send(vec![Item::new(
-            a.clone(),
-            json!({"type": "send", "text": "go", "client_id": "probe", "send_to": b.as_str()}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert!(
-        until_passes(&fb, 1).await,
-        "the peer never received the reply"
-    );
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(
-        fb.request(0).contains("the answer from a"),
-        "{}",
-        fb.request(0)
-    );
-    assert_eq!(
-        (fa.passes_served(), fb.passes_served()),
-        (1, 1),
-        "send_to must not propagate"
     );
 }
 
@@ -2118,30 +2223,26 @@ async fn an_error_reply_does_not_route() {
         ],
         Duration::ZERO,
     );
-    let r = kernel
+    let r = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
-    assert!(
-        r["error"].as_str().unwrap_or("").contains("exploded"),
-        "{r:#?}"
-    );
+    assert_eq!(r["accepted"], json!(true), "{r:#?}");
+    let errors = error_rows(&kernel, &backend).await;
+    assert!(errors.iter().any(|e| e.contains("exploded")), "{errors:?}");
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(s.passes_served(), 1, "a failed pass is not re-run");
 }
 
-/// PROVIDER FAILURE, KIND 2: unmapped — python re-raises it out of the
-/// handler, and the kernel settles a raise as `{error:"<Type>: <msg>",
-/// raised:true}` on a FAILED execution. `status(done, reason='error')` still
-/// announces it first, carrying `str(e)` WITHOUT the exception-type prefix.
-/// A COMPLETED `{error, client_id}` would leave no AI failure retryable or
-/// dead-letterable.
+/// PROVIDER FAILURE, KIND 2: unmapped. The message was acked when it was stored (#795);
+/// the failed pass is said in ONE `status(failed, reason='error')` carrying `str(e)`
+/// WITHOUT the exception-type prefix, and in its error row: never silent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unmapped_provider_error_settles_raised() {
+async fn an_unmapped_provider_error_is_said_once_and_kept_as_a_row() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_raise").await;
     let _s = script(
@@ -2153,18 +2254,18 @@ async fn unmapped_provider_error_settles_raised() {
         Duration::ZERO,
     );
     let mut rx = rebind_backend_inbox(&kernel, &backend);
-    let r = kernel
+    let r = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
-    assert_eq!(r["error"], json!("RuntimeError: provider exploded"));
-    assert_eq!(r["raised"], json!(true));
-    // The RAISE carries the type; the EVENT carries `str(e)` alone.
-    assert!(r.get("client_id").is_none(), "{r:#?}");
+    assert_eq!(r["accepted"], json!(true), "{r:#?}");
+    let errors = error_rows(&kernel, &backend).await;
+    assert!(errors.iter().any(|e| e.contains("provider exploded")), "{errors:?}");
+    // the EVENT carries `str(e)` alone
     let evs = drain(&mut rx).await;
     let done: Vec<&Value> = evs
         .iter()
@@ -2178,12 +2279,11 @@ async fn unmapped_provider_error_settles_raised() {
     assert_eq!(done[0]["detail"]["error"], json!("provider exploded"));
 }
 
-/// A CONTEXT-PROJECTION refusal is not a provider failure. python returns
-/// the seam's dict out of `_run` VERBATIM — no `status(done)` closes a turn that
-/// never opened a provider pass, no `client_id` is stapled on, and the handler
-/// does not fail. The seam's own `context(too_small)` event is the only one.
+/// A CONTEXT-PROJECTION refusal is not a provider failure: no request is sent, so no
+/// `status(done)` closes one; the pass that could not be sent says so in its `failed`
+/// status, the seam's own words, and the seam's `context(too_small)` event is told.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_projection_refusal_is_returned_verbatim_and_does_not_raise() {
+async fn a_projection_refusal_fails_the_pass_in_the_seams_words() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_toosmall").await;
     // A window the kernel's own system block cannot fit — the `too_small`
@@ -2196,30 +2296,26 @@ async fn a_projection_refusal_is_returned_verbatim_and_does_not_raise() {
         .await;
     let _s = script(&backend, vec![pass("never reached")], Duration::ZERO);
     let mut rx = rebind_backend_inbox(&kernel, &backend);
-    let r = kernel
+    let r = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
-    assert!(
-        r["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("mock_backend: context_insufficient — "),
-        "{r:#?}"
-    );
-    assert!(
-        r.get("raised").is_none(),
-        "a refusal is not a raise: {r:#?}"
-    );
-    assert!(
-        r.get("client_id").is_none(),
-        "python returns the seam dict bare: {r:#?}"
-    );
+    assert_eq!(r["accepted"], json!(true), "{r:#?}");
     let evs = drain(&mut rx).await;
+    assert!(
+        evs.iter().any(|v| {
+            v["type"] == json!("status")
+                && v["phase"] == json!("failed")
+                && v["detail"]["error"]
+                    .as_str()
+                    .is_some_and(|e| e.contains("mock_backend: context_insufficient — "))
+        }),
+        "the refusal is said: {evs:#?}"
+    );
     assert!(
         !evs.iter().any(|v| {
             v.get("type").and_then(Value::as_str) == Some("status")
@@ -2313,11 +2409,11 @@ async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
         ],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -2341,11 +2437,11 @@ async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
         ],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "again"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -2379,11 +2475,9 @@ async fn the_default_prompt_states_the_mechanism_not_a_strategy() {
         crate::assembly::assemble_messages(
             &backend,
             &state,
-            "hi",
             &kernel,
             "probe",
             crate::caching::Caching::ProviderCache,
-            &crate::row_attrs::Stamp::now(),
         ),
     )
     .await
@@ -2428,22 +2522,15 @@ async fn the_default_prompt_states_the_mechanism_not_a_strategy() {
     );
 }
 
-/// Routing is its OWN `ps` row, labelled `route_reply`.
-///
-/// Two reasons it is a separate task and not inline work: the row must not be
-/// labelled `send` (an operator reading `ps` would see a generation that already
-/// finished), and it must survive the dispatch that spawned it — the follow-up turn
-/// happens after `send` has returned to its caller. `Kernel::spawn_task` gives both,
-/// plus a `CURRENT_TASK` scope so the turns the chain spawns nest under it.
-///
-/// The peer's provider stalls for half a second, which is what makes the row
-/// observable at all.
+/// Routing is its OWN task, labelled `route_reply` (a `task` row of the agent's): never
+/// the pass's request, and never labelled `send` — once the agent is quiet, nothing of
+/// it is still in `ps` (#795: it ends once its calls are out).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn routing_is_its_own_ps_row() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_ps").await;
     let peer = add_peer(&kernel, &tmp, &backend).await;
-    let fo = script(&peer, vec![pass("slow peer")], Duration::from_millis(500));
+    let fo = script(&peer, vec![pass(r#"slow peer <call name="done"></call>"#)], Duration::from_millis(500));
     script(
         &backend,
         vec![pass(call_envelope(
@@ -2453,16 +2540,19 @@ async fn routing_is_its_own_ps_row() {
         ))],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
     assert!(until_passes(&fo, 1).await, "the peer was never reached");
-
+    let routed = fantastic_kernel::test_support::rows_about(&kernel, &backend)
+        .into_iter()
+        .any(|r| r.get("kind") == Some(&json!("task")) && r.get("verb") == Some(&json!("route_reply")));
+    assert!(routed, "routing must be its own `route_reply` task");
     let table = kernel
         .operator_send(vec![Item::new(
             AgentId::from("kernel"),
@@ -2472,18 +2562,11 @@ async fn routing_is_its_own_ps_row() {
         .remove(0)
         .result;
     let tasks = table["tasks"].as_array().expect("tasks");
-    let route_row = tasks
-        .iter()
-        .find(|t| t["agent"] == json!(backend.as_str()) && t["verb"] == json!("route_reply"));
-    assert!(
-        route_row.is_some(),
-        "routing must be its own `route_reply` row: {tasks:#?}"
-    );
     assert!(
         !tasks
             .iter()
             .any(|t| t["agent"] == json!(backend.as_str()) && t["verb"] == json!("send")),
-        "the generation is finished — nothing may still be labelled `send`: {tasks:#?}"
+        "the pass is finished — nothing may still be labelled `send`: {tasks:#?}"
     );
 }
 
@@ -2509,11 +2592,11 @@ async fn silent_chain_turns_are_nudged_until_a_call_or_done() {
         ],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -2547,18 +2630,18 @@ async fn a_dead_turn_is_discarded_and_rerolled() {
         ],
         Duration::ZERO,
     );
-    let r = kernel
+    let r = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
-    assert_eq!(r["response"], json!(r#"<call name="done"></call>"#), "{r:#?}");
+    assert_eq!(json!(crate::tests::last_answer(&kernel, &backend).await), json!(r#"<call name="done"></call>"#), "{r:#?}");
     assert_eq!(
         r.as_object().unwrap().keys().collect::<Vec<_>>(),
-        vec!["response", "client_id", "message_id"],
+        vec!["accepted", "re", "client_id"],
         "{r:#?}"
     );
     assert_eq!(s.passes_served(), 2, "the thinking-only attempt was not re-asked");
@@ -2613,11 +2696,11 @@ async fn a_call_less_answer_is_reasked_inside_the_pass_then_the_harness_stops_it
     // a browser-style client: its events land on the agent's own inbox, where
     // they can be read (`cli` events go to the terminal instead)
     let mut rx = rebind_backend_inbox(&kernel, &backend);
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "tab1"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -2679,11 +2762,11 @@ async fn a_done_call_ends_the_chain_without_a_nudge() {
         ],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -2707,11 +2790,11 @@ async fn a_first_turn_with_no_call_is_nudged_too() {
         ],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "hi"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -2732,19 +2815,18 @@ async fn a_first_turn_with_no_call_is_nudged_too() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_model_call_carries_the_layer_default_timeout() {
     let tmp = TempDir::new().unwrap();
-    let (kernel, a) = mk_kernel(&tmp, "rt_dl").await;
-    let b = add_peer(&kernel, &tmp, &a).await;
-    // The peer's generation takes 2s. The layer's deadline is 0.2s, and NO
-    // `timeout` arg is written in the envelope — the default has to do the work.
-    let _sb = script(&b, vec![pass("too late")], Duration::from_secs(2));
+    // A NON-AI target that answers after 2s (an AI acks at once, #795). The layer's
+    // deadline is 0.2s, and NO `timeout` arg is written in the envelope — the default
+    // has to do the work.
+    let (kernel, a) = with_sleeper(&tmp, "rt_dl").await;
     let sa = script(
         &a,
         vec![pass("read it <call name=\"done\"></call>")],
         Duration::ZERO,
     );
     let call = call_envelope(
-        b.as_str(),
-        json!({"type": "send", "text": "hi", "client_id": "probe"}),
+        "sleeper",
+        json!({"type": "send", "text": "hi", "ms": 2000}),
         Some("self"),
     );
     fantastic_kernel::test_support::as_agent(
@@ -2752,14 +2834,16 @@ async fn every_model_call_carries_the_layer_default_timeout() {
         crate::route::route_reply(
             a.clone(),
             Arc::clone(&kernel),
-            call,
-            "probe".to_string(),
-            None,
-            0.2,
-            crate::constants::DEFAULT_CONTEXT_WINDOW,
-            None,
-            Vec::new(),
-            false,
+            crate::route::Routed {
+                text: call,
+                clients: vec!["probe".to_string()],
+                client_id: "probe".to_string(),
+                send_timeout: 0.2,
+                model_window: crate::constants::DEFAULT_CONTEXT_WINDOW,
+                message_id: None,
+                call_streams: Vec::new(),
+                cut: false,
+            },
         ),
     )
     .await;
@@ -2812,14 +2896,16 @@ async fn a_malformed_timeout_arg_is_refused_by_name() {
         crate::route::route_reply(
             a.clone(),
             Arc::clone(&kernel),
-            call,
-            "probe".to_string(),
-            None,
-            0.2,
-            crate::constants::DEFAULT_CONTEXT_WINDOW,
-            None,
-            Vec::new(),
-            false,
+            crate::route::Routed {
+                text: call,
+                clients: vec!["probe".to_string()],
+                client_id: "probe".to_string(),
+                send_timeout: 0.2,
+                model_window: crate::constants::DEFAULT_CONTEXT_WINDOW,
+                message_id: None,
+                call_streams: Vec::new(),
+                cut: false,
+            },
         ),
     )
     .await;
@@ -2862,14 +2948,16 @@ async fn a_reply_to_naming_no_agent_dispatches_nothing_and_says_so() {
         crate::route::route_reply(
             a.clone(),
             Arc::clone(&kernel),
-            call,
-            "probe".to_string(),
-            None,
-            5.0,
-            crate::constants::DEFAULT_CONTEXT_WINDOW,
-            None,
-            Vec::new(),
-            false,
+            crate::route::Routed {
+                text: call,
+                clients: vec!["probe".to_string()],
+                client_id: "probe".to_string(),
+                send_timeout: 5.0,
+                model_window: crate::constants::DEFAULT_CONTEXT_WINDOW,
+                message_id: None,
+                call_streams: Vec::new(),
+                cut: false,
+            },
         ),
     )
     .await;
@@ -2889,8 +2977,7 @@ async fn a_reply_to_naming_no_agent_dispatches_nothing_and_says_so() {
 /// A turn whose calls all carried `reply_to:null` DISPATCHED REAL WORK. It is
 /// owed no reply, and it is not a silent turn: the gate is python's `not calls
 /// and not units`, never the blocks, so the model is never told "your turn
-/// emitted no <call> element" about a turn that did — nor, on a chat turn, is
-/// that text handed to `send_to` on top.
+/// emitted no <call> element" about a turn that did.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn all_fire_and_forget_calls_are_not_a_silent_turn() {
     let tmp = TempDir::new().unwrap();
@@ -2910,21 +2997,20 @@ async fn all_fire_and_forget_calls_are_not_a_silent_turn() {
     );
     let sb = script(
         &b,
-        vec![pass("the handoff would land here")],
+        vec![pass("nothing lands here")],
         Duration::ZERO,
     );
     // A CHAIN turn (its incoming text is a delivered reply) — exactly the turn the
     // nudge exists for, so nothing but the dispatch can be what keeps it quiet.
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             a.clone(),
             json!({
                 "type": "send",
                 "text": "[reply to core:1 · core ping]\nok",
                 "client_id": "probe",
-                "send_to": b.as_str(),
             }),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -2934,16 +3020,12 @@ async fn all_fire_and_forget_calls_are_not_a_silent_turn() {
         1,
         "a dispatching turn must not be nudged"
     );
-    assert_eq!(
-        sb.passes_served(),
-        0,
-        "and must not fall through to send_to"
-    );
+    assert_eq!(sb.passes_served(), 0, "and reaches nobody else");
 }
 
 /// Two reads through the agent's own file leg — files of `chars` each — at a
-/// 4.5k window; returns the turn that received both replies.
-async fn two_reads_turn(tag: &str, frac: f64) -> (String, i64) {
+/// 4.5k window; the two reply rows that came back, and the inline cap.
+async fn two_reads_turn(tag: &str, frac: f64) -> (Vec<String>, i64) {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, tag).await;
     let _ = kernel
@@ -2978,52 +3060,46 @@ async fn two_reads_turn(tag: &str, frac: f64) -> (String, i64) {
                 ),
             )),
             pass("both back <call name=\"done\"></call>"),
+            pass("both back <call name=\"done\"></call>"),
         ],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
-    assert!(until_passes(&s, 2).await, "the batch never came back");
-    let reqs = s.requests.lock().unwrap();
-    let last = reqs[1].last().cloned().unwrap_or(Value::Null);
-    (last["content"].as_str().unwrap_or("").to_string(), cap)
+    assert!(until_passes(&s, 2).await, "the replies never came back");
+    assert!(settle(&kernel).await, "the agent never went quiet");
+    let replies = reply_rows(&kernel, &backend).await;
+    assert_eq!(replies.len(), 2, "{replies:#?}");
+    (replies, cap)
 }
 
-/// Two greps, each under the cap, must not arrive as ONE message the next turn
-/// cannot fit. The replies of a batch share the cap: the first fits and is
-/// inline, the one that would push the message past it is held.
+/// THE CAP IS PER REPLY (#795: each reply is its own message): a reply over the inline
+/// cap is held and stubbed by its origin line; the stored message stays within the cap.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_inline_cap_bounds_the_whole_batch_not_each_reply() {
-    let (turn, cap) = two_reads_turn("rt_batchcap", 0.6).await;
-    let (first, second) = turn.split_once("\n\n").expect("two blocks");
-    assert!(
-        first.contains(&"a".repeat(100)) && !first.contains("NOT inlined"),
-        "{first}"
-    );
-    assert!(
-        second.contains("NOT inlined") && !second.contains(&"b".repeat(100)),
-        "{second}"
-    );
-    assert!(
-        crate::context::estimate_one(&json!({"role": "user", "content": turn})) <= cap + 64,
-        "{turn}"
-    );
+async fn the_inline_cap_bounds_each_reply() {
+    let (replies, cap) = two_reads_turn("rt_batchcap", 1.2).await;
+    for r in &replies {
+        assert!(r.contains("NOT inlined"), "{r}");
+        assert!(!r.contains(&"a".repeat(100)) && !r.contains(&"b".repeat(100)), "{r}");
+        assert!(
+            crate::context::estimate_one(&json!({"role": "user", "content": r})) <= cap + 64,
+            "{r}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replies_that_fit_together_are_all_inline() {
-    let (turn, _) = two_reads_turn("rt_batchfit", 0.3).await;
-    assert!(!turn.contains("NOT inlined"), "{turn}");
-    assert!(
-        turn.contains(&"a".repeat(100)) && turn.contains(&"b".repeat(100)),
-        "{turn}"
-    );
+    let (replies, _) = two_reads_turn("rt_batchfit", 0.3).await;
+    let all = replies.join("\n\n");
+    assert!(!all.contains("NOT inlined"), "{all}");
+    assert!(all.contains(&"a".repeat(100)) && all.contains(&"b".repeat(100)), "{all}");
 }
 
 /// The batch stamp lives INSIDE the `[reply to …]` tag, where the shared prompt
@@ -3045,16 +3121,17 @@ async fn the_batch_stamp_lives_inside_the_reply_tag() {
         ],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
     assert!(until_passes(&s, 2).await, "the batch never came back");
-    let turn2 = s.request(1);
+    assert!(settle(&kernel).await);
+    let turn2 = reply_rows(&kernel, &backend).await.join("\n\n");
     assert!(
         turn2.contains(" · 1 of 2 in batch ") && turn2.contains(" · 2 of 2 in batch "),
         "the stamp must be composed into the tag: {turn2}"
@@ -3096,23 +3173,30 @@ async fn two_identical_turns_get_different_batch_tokens() {
             pass(twice.clone()),
             pass(twice),
             pass("enough <call name=\"done\"></call>"),
+            pass("enough <call name=\"done\"></call>"),
+            pass("enough <call name=\"done\"></call>"),
         ],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
     assert!(until_passes(&s, 3).await, "the second batch never landed");
-    let first = batch_token_of(&s.request(1));
-    let second = batch_token_of(&s.request(2));
-    assert_ne!(
-        first, second,
-        "two identical turns must be distinguishable at a glance"
+    assert!(settle(&kernel).await);
+    let tokens: std::collections::BTreeSet<String> = reply_rows(&kernel, &backend)
+        .await
+        .iter()
+        .filter(|r| r.contains("1 of 2 in batch "))
+        .map(|r| batch_token_of(r))
+        .collect();
+    assert!(
+        tokens.len() >= 2,
+        "two identical turns must be distinguishable at a glance: {tokens:?}"
     );
 }
 
@@ -3141,11 +3225,11 @@ async fn reflect_replies_carry_no_cut_notice() {
         ],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -3183,11 +3267,11 @@ async fn a_failed_handoff_is_a_status_event_with_detail() {
         ))],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -3213,22 +3297,18 @@ async fn a_failed_handoff_is_a_status_event_with_detail() {
     assert_eq!(s.passes_served(), 1);
 }
 
-/// EACH DELIVERY IS ITS OWN `deliver_reply` KERNEL TASK, and the router
-/// does not wait for it. A `send` to an AI agent holds that agent's FIFO lock
-/// for the whole turn, so awaiting deliveries inline would make reply 2 of a
-/// 4-call turn wait for the conversation reply 1 started.
-///
-/// Each of those tasks is also a `task` ROW on the target (python's
-/// `ai_rows_read.json` rows 427/435/445/462), under the very id `ps` reports.
+/// THE ROUTER DOES NOT WAIT FOR A DELIVERY (#795): a reply handed to another agent is
+/// that agent's `send`, through `Kernel::call`, so a slow peer holds nothing of this
+/// agent's; the hand-off is a `send` call row on the peer, never a row of its
+/// conversation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn delivery_is_a_deliver_reply_task_not_awaited() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_dsoon").await;
     let peer = add_peer(&kernel, &tmp, &backend).await;
-    // The peer's own turn is SLOW. If the router awaited the delivery, this
-    // agent's `send` could not return before the peer finished.
-    script(&peer, vec![pass("peer ack")], Duration::from_millis(800));
-    let _s = script(
+    // The peer's own pass is SLOW.
+    let fp = script(&peer, vec![pass(r#"peer ack <call name="done"></call>"#)], Duration::from_millis(800));
+    let s = script(
         &backend,
         vec![pass(call_envelope(
             "kernel_state",
@@ -3243,61 +3323,28 @@ async fn delivery_is_a_deliver_reply_task_not_awaited() {
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
         )])
-        .await
-        .remove(0)
-        .result;
-    // The routing pass itself is detached, so give it a moment to spawn.
-    tokio::time::sleep(Duration::from_millis(150)).await;
+        .await;
+    assert!(until_passes(&s, 1).await);
+    assert!(until_passes(&fp, 1).await, "the reply never reached the peer");
+    // the reply reached the peer's pass before its slow answer: nothing waited on it
     assert!(
         started.elapsed() < Duration::from_millis(700),
         "the router awaited the delivery: {:?}",
         started.elapsed()
     );
-    let table = kernel
-        .operator_send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({"type": "ps"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let row = table["tasks"]
-        .as_array()
-        .expect("tasks")
-        .iter()
-        .find(|t| t["verb"] == json!("deliver_reply"))
-        .unwrap_or_else(|| panic!("no deliver_reply task row: {table:#?}"));
-    assert_eq!(
-        row["agent"],
-        json!(peer.as_str()),
-        "the task belongs to the TARGET: {row:#?}"
-    );
-    // A FORK IS A MESSAGE: the delivery's pid is the id of a `task`
-    // execution row about the target, so a finished delivery is still
-    // explainable from the kernel's rows.
-    let store: Vec<_> = fantastic_kernel::test_support::rows_about(&kernel, &peer)
+    assert!(settle(&kernel).await);
+    let handed = fantastic_kernel::test_support::rows_about(&kernel, &peer)
         .into_iter()
-        .filter(|r| {
-            r.get("kind") == Some(&json!("task")) && r.get("verb") == Some(&json!("deliver_reply"))
-        })
-        .collect();
-    assert_eq!(
-        store.len(),
-        1,
-        "one `deliver_reply` row per delivery: {store:?}"
-    );
-    assert_eq!(store[0]["id"], row["id"], "the task id is the row id");
-    // …and it is the KERNEL's bookkeeping: the conversation never sees it.
+        .filter(|r| r.get("kind") == Some(&json!("call")) && r.get("verb") == Some(&json!("send")))
+        .count();
+    assert_eq!(handed, 1, "one hand-off, as the peer's `send`");
     assert!(
-        fantastic_kernel::test_support::as_agent(
-            peer.clone(),
-            crate::memory::load_history(&peer, &kernel, false)
-        )
-        .await
-        .expect("store read")
-        .iter()
-        .all(|r| r.get("verb") != Some(&json!("deliver_reply"))),
-        "a delivery task reached the peer's conversation"
+        history_of(&kernel, &peer)
+            .await
+            .expect("store read")
+            .iter()
+            .all(|r| r.get("verb") != Some(&json!("send"))),
+        "a call row reached the peer's conversation"
     );
 }
 
@@ -3322,113 +3369,6 @@ fn only_failed_and_timed_out_count_as_a_failed_handoff() {
     }
     // The raw status is what python puts in `error` — no prefix, python's spelling.
     assert_eq!(Status::TimedOut.as_str(), "timed_out");
-}
-
-/// ONE event on contention, and it is the `status` one — never a bare
-/// `{type:'queued'}` ahead of it, an undocumented type python never sends,
-/// which would break any per-submission event count and every cross-runtime
-/// event-stream diff.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn contended_sends_emit_one_queued_status_and_no_bare_queued_event() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, backend) = mk_kernel(&tmp, "q1").await;
-    // Both passes END their chain: a call-less turn is nudged now, and each
-    // nudge is another submission queueing behind the same lock — which is the
-    // very thing this test counts.
-    script(
-        &backend,
-        vec![
-            pass(r#"first <call name="done"></call>"#),
-            pass(r#"second <call name="done"></call>"#),
-        ],
-        Duration::from_millis(400),
-    );
-    let mut rx = rebind_backend_inbox(&kernel, &backend);
-    let client_id = "browser_q";
-    let k = Arc::clone(&kernel);
-    let b = backend.clone();
-    let c = client_id.to_string();
-    let first = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
-            b,
-            json!({"type": "send", "text": "one", "client_id": c}),
-        )])
-        .await
-        .remove(0)
-        .result
-    });
-    tokio::time::sleep(Duration::from_millis(120)).await;
-    let _ = kernel
-        .operator_send(vec![Item::new(
-            backend.clone(),
-            json!({"type": "send", "text": "two", "client_id": client_id}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let _ = first.await.expect("first send");
-    let mut events = drain(&mut rx).await;
-    while let Some(v) = rx.try_recv() {
-        events.push(v.payload);
-    }
-    assert!(
-        !events
-            .iter()
-            .any(|e| e.get("type").and_then(Value::as_str) == Some("queued")),
-        "the bare `queued` event is not part of the contract: {events:#?}"
-    );
-    let queued: Vec<&Value> = events
-        .iter()
-        .filter(|e| {
-            e.get("type").and_then(Value::as_str) == Some("status")
-                && e.get("phase").and_then(Value::as_str) == Some("queued")
-        })
-        .collect();
-    assert_eq!(
-        queued.len(),
-        1,
-        "one contended submission, one queued status: {events:#?}"
-    );
-    assert!(queued[0]["detail"]["ahead"].is_number(), "{:#?}", queued[0]);
-}
-
-/// `recall` answers the turn WHOLE. Rust capped each recalled turn at 2000
-/// chars while python returned it verbatim — same verb, same store, two different
-/// replies, and the cut half is exactly what a model pages back FOR.
-#[tokio::test]
-async fn recall_returns_the_turn_whole() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, backend) = mk_kernel(&tmp, "rec_whole").await;
-    script(&backend, vec![pass("noted")], Duration::ZERO);
-    let long = format!("HEAD {} TAIL", "x".repeat(6000));
-    let _ = kernel
-        .operator_send(vec![Item::new(
-            backend.clone(),
-            json!({"type": "send", "text": long, "client_id": "chat"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let r = kernel
-        .operator_send(vec![Item::new(
-            backend.clone(),
-            json!({"type": "recall", "query": "HEAD"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let msgs = r["messages"].as_array().expect("recall messages");
-    let content = msgs[0]["content"].as_str().expect("content");
-    assert_eq!(
-        content.chars().count(),
-        long.chars().count(),
-        "{}",
-        &content[..80]
-    );
-    assert!(
-        content.ends_with("TAIL"),
-        "the tail is what was being paged back"
-    );
 }
 
 /// The reaction cursor is the DURABLE STORE's length, not the model view's. The
@@ -3461,11 +3401,9 @@ async fn the_compaction_cursor_is_the_store_length_not_the_view() {
         crate::assembly::assemble_messages(
             &backend,
             &state,
-            "hi",
             &kernel,
             "probe",
             crate::caching::Caching::ProviderCache,
-            &crate::row_attrs::Stamp::now(),
         ),
     )
     .await
@@ -3503,6 +3441,45 @@ async fn the_compaction_cursor_is_the_store_length_not_the_view() {
     );
 }
 
+/// `recall` answers the turn WHOLE. Rust capped each recalled turn at 2000
+/// chars while python returned it verbatim — same verb, same store, two different
+/// replies, and the cut half is exactly what a model pages back FOR.
+#[tokio::test]
+async fn recall_returns_the_turn_whole() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "rec_whole").await;
+    script(&backend, vec![pass("noted")], Duration::ZERO);
+    let long = format!("HEAD {} TAIL", "x".repeat(6000));
+    let _ = crate::tests::settled(&kernel, kernel
+        .operator_send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": long, "client_id": "chat"}),
+        )]))
+        .await
+        .remove(0)
+        .result;
+    let r = kernel
+        .operator_send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "recall", "query": "HEAD"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let msgs = r["messages"].as_array().expect("recall messages");
+    let content = msgs[0]["content"].as_str().expect("content");
+    assert_eq!(
+        content.chars().count(),
+        long.chars().count(),
+        "{}",
+        &content[..80]
+    );
+    assert!(
+        content.ends_with("TAIL"),
+        "the tail is what was being paged back"
+    );
+}
+
 /// SEVEN PARALLEL CALLS, NO `reply_to` — a well-formed turn batching seven
 /// `reflect` sends with the key omitted must not end the chain with NOTHING
 /// back: no reply block, no error, no timeout, no cancel. An omitted key means
@@ -3529,14 +3506,16 @@ async fn a_batch_of_calls_without_reply_to_all_come_back() {
         crate::route::route_reply(
             a.clone(),
             Arc::clone(&kernel),
-            text,
-            "probe".to_string(),
-            None,
-            30.0,
-            crate::constants::DEFAULT_CONTEXT_WINDOW,
-            None,
-            Vec::new(),
-            false,
+            crate::route::Routed {
+                text,
+                clients: vec!["probe".to_string()],
+                client_id: "probe".to_string(),
+                send_timeout: 30.0,
+                model_window: crate::constants::DEFAULT_CONTEXT_WINDOW,
+                message_id: None,
+                call_streams: Vec::new(),
+                cut: false,
+            },
         ),
     )
     .await;
@@ -3544,12 +3523,9 @@ async fn a_batch_of_calls_without_reply_to_all_come_back() {
         until_passes(&sa, 1).await,
         "seven dispatched calls produced NO follow-up turn — the replies were dropped"
     );
-    let turn = sa.request(0);
-    let blocks = turn.matches("[reply to ").count();
-    assert!(
-        blocks >= 7,
-        "every call is owed a block; got {blocks} in: {turn}"
-    );
+    assert!(settle(&kernel).await);
+    let replies = reply_rows(&kernel, &a).await;
+    assert_eq!(replies.len(), 7, "every call is owed a block: {replies:#?}");
 }
 
 /// THE REAL PATH: dispatch `send` at the agent and let ITS OWN routing run.
@@ -3575,11 +3551,11 @@ async fn routing_survives_the_dispatch_that_spawned_it() {
     );
     // ONE send, exactly as a caller makes it. Turn 1 emits the batch; the
     // follow-up turn only happens if the spawned routing delivered.
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "send", "text": "build it", "client_id": "probe"}),
-        )])
+        )]))
         .await;
     assert!(
         until_passes(&sa, 2).await,
@@ -3620,11 +3596,11 @@ async fn a_batch_that_includes_a_peer_ai_still_delivers() {
         ],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "send", "text": "explore", "client_id": "probe"}),
-        )])
+        )]))
         .await;
     assert!(
         until_passes(&sa, 2).await,
@@ -3650,22 +3626,22 @@ async fn done_leaves_the_agent_idle_and_the_next_message_wakes_it() {
         ],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "hi", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
     assert!(until_passes(&s, 1).await, "the first pass never ran");
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(s.passes_served(), 1, "done left the agent idle");
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "again", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -3690,17 +3666,17 @@ async fn done_with_a_message_queued_and_the_queue_wakes_it() {
     let k = Arc::clone(&kernel);
     let b = backend.clone();
     let first = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(b, json!({"type": "send", "text": "one"}))])
+        crate::tests::settled(&k, k.operator_send(vec![Item::new(b, json!({"type": "send", "text": "one"}))]))
             .await
             .remove(0)
             .result
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "two"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -3710,263 +3686,167 @@ async fn done_with_a_message_queued_and_the_queue_wakes_it() {
     assert!(s.request(1).contains("two"), "{}", s.request(1));
 }
 
-/// ONE CHAIN PER AGENT (#227): a message that lands mid-chain joins the chain.
-/// It is held (not a second pass), and the chain's next pass reads it.
+/// A send acks at once (#795): the second message is stored while the first pass runs
+/// and read by the next pass, never a second pass beside it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_message_mid_chain_joins_the_chain() {
+async fn a_message_that_lands_during_a_pass_is_read_by_the_next_pass() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "joins").await;
     let peer = add_peer(&kernel, &tmp, &backend).await;
     let ask = call_envelope(peer.as_str(), json!({"type": "send", "text": "ask"}), None);
-    let a = script(
-        &backend,
-        vec![pass(ask), pass(r#"<call name="done"></call>"#)],
-        Duration::ZERO,
-    );
-    let _r = script(&peer, vec![pass("answered")], Duration::from_millis(300));
-    let k = Arc::clone(&kernel);
-    let b = backend.clone();
-    let first = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
-            b,
-            json!({"type": "send", "text": "go", "client_id": "g"}),
-        )])
+    let gate = script(&backend, vec![pass(ask), pass(r#"<call name="done"></call>"#)], Duration::ZERO)
+        .hold_next();
+    let a = script_for(&backend);
+    let _r = script(&peer, vec![pass(r#"answered <call name="done"></call>"#)], Duration::ZERO);
+    let first = kernel
+        .operator_send(vec![Item::new(backend.clone(), json!({"type": "send", "text": "go", "client_id": "g"}))])
         .await
         .remove(0)
-        .result
-    });
+        .result;
+    assert_eq!(first["accepted"], json!(true), "{first}");
     assert!(until_passes(&a, 1).await, "the first pass never started");
-    // A held send RETURNS THE ANSWER of the pass that reads it (#227): it stays
-    // pending while held, so it runs as its own task.
-    let k2 = Arc::clone(&kernel);
-    let b2 = backend.clone();
-    let second = tokio::spawn(async move {
-        k2.operator_send(vec![Item::new(
-            b2,
-            json!({"type": "send", "text": "two", "client_id": "t"}),
-        )])
+    // a message that lands while the pass runs: acked at once, not waiting for it
+    let two = kernel
+        .operator_send(vec![Item::new(backend.clone(), json!({"type": "send", "text": "two", "client_id": "t"}))])
         .await
         .remove(0)
-        .result
-    });
-    until_held(&backend, 1).await;
-    assert!(!second.is_finished(), "a held send waits for its answer");
-    let _ = first.await.expect("first send");
-    assert!(until_passes(&a, 2).await, "the reply never woke the chain");
-    let two = second.await.expect("second send");
-    assert!(
-        two.get("response").is_some(),
-        "the held send gets its answer: {two}"
-    );
+        .result;
+    assert_eq!(two["accepted"], json!(true), "{two}");
+    assert!(two["re"].as_i64().is_some(), "{two}");
+    gate.notify_one();
+    assert!(settle(&kernel).await, "the agents never went quiet");
+    assert_eq!(a.passes_served(), 2, "one more pass, never a second beside the first");
     assert!(a.request(1).contains("two"), "{}", a.request(1));
-    tokio::time::sleep(Duration::from_millis(600)).await;
-    assert_eq!(a.passes_served(), 2, "a joined message is no extra pass");
-    // The peer's prose answer is nudged for a call (#227 test): its pass count is
-    // not what this test checks, so it is not asserted.
 }
 
-/// ONE CHAIN PER AGENT (#227): a chain that ends with a held message wakes ONCE
-/// for it, and that wake turn reads the held message.
+/// THE COALESCED WAKE (#795): three messages that land during a pass are read by ONE
+/// next pass, all three in its view, after a notice that they arrived meanwhile.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_chain_that_ends_with_a_held_message_wakes_once() {
+async fn messages_arriving_during_a_pass_are_read_by_one_next_pass() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "wakeonce").await;
     let s = script(
         &backend,
-        vec![
-            pass(r#"<call name="done"></call>"#),
-            pass(r#"<call name="done"></call>"#),
-        ],
-        Duration::from_millis(300),
+        vec![pass(r#"<call name="done"></call>"#), pass(r#"<call name="done"></call>"#)],
+        Duration::ZERO,
     );
-    let k = Arc::clone(&kernel);
-    let b = backend.clone();
-    let first = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
-            b,
-            json!({"type": "send", "text": "one", "client_id": "o"}),
-        )])
-        .await
-        .remove(0)
-        .result
-    });
+    let gate = s.hold_next();
+    let _ = kernel
+        .operator_send(vec![Item::new(backend.clone(), json!({"type": "send", "text": "one", "client_id": "o"}))])
+        .await;
     assert!(until_passes(&s, 1).await, "the first pass never started");
-    let k2 = Arc::clone(&kernel);
-    let b2 = backend.clone();
-    let second = tokio::spawn(async move {
-        k2.operator_send(vec![Item::new(
-            b2,
-            json!({"type": "send", "text": "two", "client_id": "t"}),
-        )])
-        .await
-        .remove(0)
-        .result
-    });
-    until_held(&backend, 1).await;
-    assert!(!second.is_finished(), "a held send waits for its answer");
-    let _ = first.await.expect("first send");
-    assert!(
-        until_passes(&s, 2).await,
-        "the held message never woke the agent"
-    );
-    let two = second.await.expect("second send");
-    assert!(two.get("response").is_some(), "{two}");
+    for text in ["two", "three", "four"] {
+        let r = kernel
+            .operator_send(vec![Item::new(backend.clone(), json!({"type": "send", "text": text, "client_id": "t"}))])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["accepted"], json!(true), "{r}");
+    }
+    gate.notify_one();
+    assert!(settle(&kernel).await, "the agent never went quiet");
+    assert_eq!(s.passes_served(), 2, "exactly one pass for the three");
     let wake = s.request(1);
-    assert!(wake.contains("arrived while you were working"), "{wake}");
-    assert!(wake.contains("two"), "{wake}");
-    tokio::time::sleep(Duration::from_millis(600)).await;
-    assert_eq!(
-        s.passes_served(),
-        2,
-        "exactly one wake for the held message"
-    );
+    assert!(wake.contains("3 message(s) arrived while you were working"), "{wake}");
+    for text in ["two", "three", "four"] {
+        assert!(wake.contains(text), "{text}: {wake}");
+    }
 }
 
-/// ONE CHAIN PER AGENT (#227): `stop` ends the chain and wakes nothing, even
-/// with a message held for it.
+/// `stop` ends the pass and wakes nothing (#795): a message that landed during it stays
+/// stored, unread, and no pass runs for it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stop_ends_the_chain_and_wakes_nothing() {
+async fn stop_ends_the_pass_and_wakes_nothing() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "stopnowake").await;
-    let s = script(
-        &backend,
-        vec![pass(r#"<call name="done"></call>"#)],
-        Duration::from_millis(500),
-    );
-    let k = Arc::clone(&kernel);
-    let b = backend.clone();
-    let first = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
-            b,
-            json!({"type": "send", "text": "one", "client_id": "o"}),
-        )])
-        .await
-        .remove(0)
-        .result
-    });
-    assert!(until_passes(&s, 1).await, "the first pass never started");
-    let k2 = Arc::clone(&kernel);
-    let b2 = backend.clone();
-    let second = tokio::spawn(async move {
-        k2.operator_send(vec![Item::new(
-            b2,
-            json!({"type": "send", "text": "two", "client_id": "t"}),
-        )])
-        .await
-        .remove(0)
-        .result
-    });
-    until_held(&backend, 1).await;
+    let s = script(&backend, vec![pass(r#"<call name="done"></call>"#)], Duration::ZERO);
+    let gate = s.hold_next();
     let _ = kernel
+        .operator_send(vec![Item::new(backend.clone(), json!({"type": "send", "text": "one", "client_id": "o"}))])
+        .await;
+    assert!(until_passes(&s, 1).await, "the first pass never started");
+    let two = kernel
+        .operator_send(vec![Item::new(backend.clone(), json!({"type": "send", "text": "two", "client_id": "t"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(two["accepted"], json!(true), "{two}");
+    let stopped = kernel
         .operator_send(vec![Item::new(backend.clone(), json!({"type": "stop"}))])
         .await
         .remove(0)
         .result;
-    let _ = first.await;
-    // A held send whose chain was stopped gets the cancelled shape (#227).
-    let second_out = second.await.expect("second send");
-    assert_eq!(second_out["cancelled"], json!(true), "{second_out}");
-    tokio::time::sleep(Duration::from_millis(800)).await;
-    assert_eq!(s.passes_served(), 1, "stop woke the held message");
+    assert_eq!(stopped["stopped"], json!(true), "{stopped}");
+    gate.notify_one();
+    assert!(settle(&kernel).await, "the agent never went quiet");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(s.passes_served(), 1, "stop woke the unread message");
 }
 
-/// ONE CHAIN PER AGENT (#227): a held send returns the answer of the pass that
-/// reads it, not a bare `held` acknowledgement.
+/// A SEND TO AN AI IS AN ACK (#795): `{accepted, re, client_id}`, returned before the
+/// model has answered — the message is the stored row `re`, and the answer comes later
+/// as the agent's own row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_held_send_returns_the_answer_of_the_pass_that_reads_it() {
+async fn a_send_to_an_ai_returns_its_ack_before_any_request() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "heldanswer").await;
     let s = script(
         &backend,
-        vec![
-            pass(r#"<call name="done"></call>"#),
-            pass(r#"ANSWER-OF-THE-READING-PASS <call name="done"></call>"#),
-        ],
-        Duration::from_millis(300),
+        vec![pass(r#"ANSWER-OF-THE-PASS <call name="done"></call>"#)],
+        Duration::ZERO,
     );
-    let k = Arc::clone(&kernel);
-    let b = backend.clone();
-    let first = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
-            b,
-            json!({"type": "send", "text": "one", "client_id": "o"}),
-        )])
+    let gate = s.hold_next();
+    let out = kernel
+        .operator_send(vec![Item::new(backend.clone(), json!({"type": "send", "text": "one", "client_id": "o"}))])
         .await
         .remove(0)
-        .result
-    });
-    assert!(until_passes(&s, 1).await, "the first pass never started");
-    let k2 = Arc::clone(&kernel);
-    let b2 = backend.clone();
-    let second = tokio::spawn(async move {
-        k2.operator_send(vec![Item::new(
-            b2,
-            json!({"type": "send", "text": "two", "client_id": "t"}),
-        )])
-        .await
-        .remove(0)
-        .result
-    });
-    until_held(&backend, 1).await;
-    let _ = first.await.expect("first send");
-    // The held message is READ by the chain's next pass, which says so in its request.
+        .result;
+    assert_eq!(out["accepted"], json!(true), "{out}");
+    assert_eq!(out["client_id"], json!("o"), "{out}");
+    assert!(out.get("response").is_none(), "an ack carries no answer: {out}");
+    let re = out["re"].as_i64().expect("the stored row's id");
+    let rows = history_of(&kernel, &backend).await.expect("history");
     assert!(
-        until_passes(&s, 2).await,
-        "the held message never got its pass"
+        rows.iter().any(|r| r["id"] == json!(re) && r["content"] == json!("one")),
+        "the message is stored before the ack: {rows:?}"
     );
-    let reading = s.request(1);
     assert!(
-        reading.contains("arrived while you were working") && reading.contains("two"),
-        "the reading pass did not carry the held message: {reading}"
+        !rows.iter().any(|r| r["role"] == "assistant"),
+        "no answer exists when the ack returns: {rows:?}"
     );
-    let out = second.await.expect("second send");
-    assert!(
-        out["response"]
-            .as_str()
-            .is_some_and(|r| r.contains("ANSWER-OF-THE-READING-PASS")),
-        "{out}"
-    );
+    gate.notify_one();
+    assert!(settle(&kernel).await, "the agent never went quiet");
+    assert!(last_answer(&kernel, &backend).await.contains("ANSWER-OF-THE-PASS"));
 }
 
-/// ONE CHAIN PER AGENT (#227, bug 1): a turn whose calls all reply ELSEWHERE
-/// (`reply_to` null) brings no message back to the agent, so its chain ends and
-/// the next message runs its own pass instead of being held forever.
+/// A pass whose calls all reply ELSEWHERE (`reply_to` null) brings no message back:
+/// the agent is idle, and the next message runs its own pass.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_turn_whose_calls_all_reply_elsewhere_ends_the_chain() {
+async fn a_pass_whose_calls_reply_elsewhere_leaves_the_agent_idle() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "elsewhere").await;
     let peer = add_peer(&kernel, &tmp, &backend).await;
     let elsewhere = format!(
         r#"<call name="send"><routing><target_id>{peer}</target_id><reply_to>null</reply_to></routing><payload><type>send</type><text>hi</text></payload></call>"#
     );
-    let s = script(
-        &backend,
-        vec![pass(elsewhere), pass("second turn")],
-        Duration::ZERO,
-    );
-    let _r = script(&peer, vec![pass("answered")], Duration::ZERO);
-    let first = kernel
-        .operator_send(vec![Item::new(
-            backend.clone(),
-            json!({"type": "send", "text": "go", "client_id": "g"}),
-        )])
-        .await;
+    let s = script(&backend, vec![pass(elsewhere), pass("second turn")], Duration::ZERO);
+    let _r = script(&peer, vec![pass(r#"answered <call name="done"></call>"#)], Duration::ZERO);
+    let first = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(
+        backend.clone(),
+        json!({"type": "send", "text": "go", "client_id": "g"}),
+    )]))
+    .await;
     assert!(first.iter().all(|o| o.result.get("error").is_none()));
-    // The chain must end on its own, so this message runs a pass rather than
-    // being held until the send ceiling.
-    let second = kernel
-        .operator_send(vec![Item::new(
-            backend.clone(),
-            json!({"type": "send", "text": "next", "client_id": "n"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert!(
-        until_passes(&s, 2).await,
-        "the next message was held: the chain never ended"
-    );
-    assert!(second.get("held").is_none(), "{second}");
+    assert_eq!(s.passes_served(), 1, "nothing came back to wake it");
+    let second = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(
+        backend.clone(),
+        json!({"type": "send", "text": "next", "client_id": "n"}),
+    )]))
+    .await
+    .remove(0)
+    .result;
+    assert_eq!(second["accepted"], json!(true), "{second}");
+    assert!(until_passes(&s, 2).await, "the next message ran no pass");
 }
 
 /// Poll `cond` until it holds, with a deadline — a wait on the CONDITION, never a
@@ -3982,16 +3862,10 @@ pub(crate) async fn until_true(what: &str, cond: impl Fn() -> bool) {
     }
 }
 
-/// Wait until `n` messages are held behind the agent's chain.
-async fn until_held(backend: &AgentId, n: usize) {
-    until_true("a message to be held", || {
-        crate::state::state_for(backend)
-            .chain
-            .lock()
-            .unwrap()
-            .held
-            .len()
-            >= n
+/// Wait until `n` messages are stored and not read yet: the next pass reads them.
+async fn until_unread(backend: &AgentId, n: usize) {
+    until_true("a message to wait unread", || {
+        crate::state::state_for(backend).life.lock().unwrap().unread.len() >= n
     })
     .await;
 }
@@ -4007,410 +3881,182 @@ async fn has_late_row(kernel: &Arc<Kernel>, backend: &AgentId) -> bool {
     rows.iter().any(|r| r["kind"] == "late")
 }
 
-/// Wait (with a deadline) for a `late` row.
-async fn until_late_row(kernel: &Arc<Kernel>, backend: &AgentId) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while !has_late_row(kernel, backend).await {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "no late row was recorded"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-}
-
-type HeldBehind = (
-    TempDir,
-    Arc<Kernel>,
-    AgentId,
-    Arc<MockScript>,
-    tokio::task::JoinHandle<Value>,
-    tokio::task::JoinHandle<Value>,
-);
-
-/// A slow first pass (1.5 s) with a second message held behind it. Returns the
-/// two sends' handles.
-async fn held_behind_a_slow_pass(tag: &str) -> HeldBehind {
+/// A pass held at its request (`gate`), with a second message stored during it.
+async fn unread_behind_a_pass(tag: &str) -> (TempDir, Arc<Kernel>, AgentId, Arc<MockScript>, Arc<tokio::sync::Notify>) {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, tag).await;
     let s = script(
         &backend,
-        vec![
-            pass(r#"<call name="done"></call>"#),
-            pass(r#"<call name="done"></call>"#),
-        ],
-        Duration::from_millis(1500),
+        vec![pass(r#"<call name="done"></call>"#), pass(r#"<call name="done"></call>"#)],
+        Duration::ZERO,
     );
-    let (k, b) = (Arc::clone(&kernel), backend.clone());
-    let first = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
-            b,
-            json!({"type": "send", "text": "one", "client_id": "o"}),
-        )])
-        .await
-        .remove(0)
-        .result
-    });
+    let gate = s.hold_next();
+    let _ = kernel
+        .operator_send(vec![Item::new(backend.clone(), json!({"type": "send", "text": "one", "client_id": "o"}))])
+        .await;
     assert!(until_passes(&s, 1).await, "the first pass never started");
-    let (k, b) = (Arc::clone(&kernel), backend.clone());
-    let second = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
-            b,
-            json!({"type": "send", "text": "two", "client_id": "t"}),
-        )])
-        .await
-        .remove(0)
-        .result
-    });
-    until_held(&backend, 1).await;
-    (tmp, kernel, backend, s, first, second)
-}
-
-/// `end` (a verb to the agent, or `None` for a shutdown) ends the chain: the held
-/// sender is released at once with an error, not left to the send ceiling.
-async fn the_chain_ends_and_the_held_are_released(tag: &str, end: Option<Value>) {
-    let (_tmp, kernel, backend, _s, _first, second) = held_behind_a_slow_pass(tag).await;
-    match end {
-        Some(verb) => {
-            let _ = kernel
-                .operator_send(vec![Item::new(backend.clone(), verb)])
-                .await;
-        }
-        None => crate::state::drop_state(&backend),
-    }
-    let out = tokio::time::timeout(Duration::from_secs(5), second)
-        .await
-        .expect("the held sender was left waiting")
-        .expect("second send");
-    assert!(out["error"].is_string(), "{out}");
-    assert_eq!(out["held"], json!(true), "{out}");
-    assert!(
-        !crate::state::state_for(&backend)
-            .chain
-            .lock()
-            .unwrap()
-            .alive,
-        "the chain is still alive"
-    );
-}
-
-/// ONE CHAIN PER AGENT (#227, bug 2): a reboot ends the chain.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_reboot_ends_the_chain_and_releases_the_held() {
-    the_chain_ends_and_the_held_are_released("rebootchain", Some(json!({"type": "boot"}))).await;
-}
-
-/// ONE CHAIN PER AGENT (#227, bug 2): a context clear ends the chain.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_context_clear_ends_the_chain_and_releases_the_held() {
-    the_chain_ends_and_the_held_are_released(
-        "clearchain",
-        Some(json!({"type": "context_clear", "why": "fresh start"})),
-    )
-    .await;
-}
-
-/// ONE CHAIN PER AGENT (#227, bug 3): an agent that shuts down (`on_delete` drops
-/// its state through `drop_state`) releases its held senders.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_shutdown_releases_the_held_senders() {
-    the_chain_ends_and_the_held_are_released("shutchain", None).await;
-}
-
-/// ONE CHAIN PER AGENT (#227, bug 3): a wake turn that cannot be delivered (the
-/// gate refuses it, the target is gone) ends the chain and releases the senders
-/// it was for. Here the target does not exist, so its `send` answers an error.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_wake_that_cannot_be_delivered_releases_the_held_senders() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, _backend) = mk_kernel(&tmp, "wakerefused").await;
-    let ghost = AgentId::from("no_such_agent_for_the_wake");
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    {
-        let state = crate::state::state_for(&ghost);
-        let mut c = state.chain.lock().unwrap();
-        c.alive = true;
-        c.token = "tok".to_string();
-        c.held.push(crate::state::HeldMsg {
-            client_id: "h".to_string(),
-            send_id: "sid".to_string(),
-            reply: tx,
-            origin: "h".to_string(),
-            text: String::new(),
-            queued_at: 0.0,
-            task_id: None,
-            row_id: 0,
-        });
-    }
-    crate::route::deliver(
-        &kernel,
-        ghost.as_str(),
-        "wake",
-        "h",
-        crate::state::incarnation(&ghost),
-        true,
-        "tok".to_string(),
-    )
-    .await;
-    let out = tokio::time::timeout(Duration::from_secs(5), rx)
-        .await
-        .expect("the held sender was left waiting")
-        .expect("sender dropped");
-    assert!(out["error"].is_string(), "{out}");
-    assert!(!crate::state::state_for(&ghost).chain.lock().unwrap().alive);
-}
-
-/// ONE CHAIN PER AGENT (#227, bug 3): a wake that never reaches the FIFO lock
-/// within the ceiling releases the senders it was for (the watchdog).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_wake_that_never_runs_releases_the_held_senders_at_the_ceiling() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, backend) = mk_kernel(&tmp, "wakenever").await;
-    let state = crate::state::state_for(&backend);
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    {
-        let mut c = state.chain.lock().unwrap();
-        c.alive = true;
-        c.token = "tok".to_string();
-        c.held.push(crate::state::HeldMsg {
-            client_id: "h".to_string(),
-            send_id: "sid".to_string(),
-            reply: tx,
-            origin: "h".to_string(),
-            text: String::new(),
-            queued_at: 0.0,
-            task_id: None,
-            row_id: 0,
-        });
-    }
-    // The FIFO lock is taken, so the wake can never run.
-    let _busy = Arc::clone(&state.lock).lock_owned().await;
-    crate::route::chain_ended_within(&kernel, &backend, Duration::from_millis(200));
-    let out = tokio::time::timeout(Duration::from_secs(5), rx)
-        .await
-        .expect("the held sender was left waiting past the ceiling")
-        .expect("sender dropped");
-    assert!(out["error"].is_string(), "{out}");
-    assert!(!state.chain.lock().unwrap().alive);
-}
-
-/// Whether `ps` shows a `chain_wake_watch` task of the agent.
-async fn wake_watch_in_ps(kernel: &Arc<Kernel>, backend: &AgentId) -> bool {
-    let table = kernel
-        .operator_send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({"type": "ps"}),
-        )])
+    let two = kernel
+        .operator_send(vec![Item::new(backend.clone(), json!({"type": "send", "text": "two", "client_id": "t"}))])
         .await
         .remove(0)
         .result;
-    table["tasks"]
-        .as_array()
-        .expect("tasks")
-        .iter()
-        .any(|t| t["agent"] == json!(backend.as_str()) && t["verb"] == json!("chain_wake_watch"))
+    assert_eq!(two["accepted"], json!(true), "{two}");
+    (tmp, kernel, backend, s, gate)
 }
 
-/// A chain that ends with a held send and is woken leaves no wake watchdog behind
-/// once the wake answers: nothing idles out the send ceiling in `ps`.
+/// A REBOOT mid-pass (#795): the pass in flight acts on nothing when its request settles,
+/// and the messages it and its successor were to read — stored, acked — are read by ONE
+/// pass of the new incarnation: nothing acked is lost.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_woken_held_send_leaves_no_wake_watchdog() {
-    // the send ceiling is process-wide: run under the default one
-    let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
-    let (_tmp, kernel, backend, _s, first, second) = held_behind_a_slow_pass("wakewatchgone").await;
-    let out = tokio::time::timeout(Duration::from_secs(10), second)
+async fn a_reboot_reads_the_unread_messages_in_one_pass() {
+    let (_tmp, kernel, backend, s, gate) = unread_behind_a_pass("rebootchain").await;
+    let _ = kernel
+        .operator_send(vec![Item::new(backend.clone(), json!({"type": "boot"}))])
+        .await;
+    gate.notify_one();
+    assert!(settle(&kernel).await, "the agent never went quiet");
+    assert_eq!(s.passes_served(), 2, "one pass after the boot");
+    let read = s.request(1);
+    assert!(read.contains("one") && read.contains("two"), "{read}");
+    let answers = history_of(&kernel, &backend)
         .await
-        .expect("the held sender was never answered")
-        .expect("second send");
-    assert!(out.get("error").is_none(), "{out}");
-    first.await.expect("first send");
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while wake_watch_in_ps(&kernel, &backend).await {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "chain_wake_watch is still in ps after the wake answered"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+        .expect("history")
+        .iter()
+        .filter(|r| r["role"] == "assistant")
+        .count();
+    assert_eq!(answers, 1, "the cut pass stored nothing");
 }
 
-/// ONE CHAIN PER AGENT (#227, bug 4): a routed reply carries the token of the
-/// chain that DECIDED it, read when it was decided — not the token a newer chain
-/// has when the delivery finally runs. Single-threaded, so nothing runs between
-/// the decision and the newer chain starting.
-#[tokio::test]
-async fn a_routed_reply_carries_the_token_read_when_it_was_decided() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, backend) = mk_kernel(&tmp, "tokenwhen").await;
-    let s = script(
-        &backend,
-        vec![pass(r#"<call name="done"></call>"#)],
-        Duration::ZERO,
-    );
-    let state = crate::state::state_for(&backend);
-    {
-        let mut c = state.chain.lock().unwrap();
-        c.alive = true;
-        c.token = "old".to_string();
-    }
-    fantastic_kernel::test_support::as_agent(backend.clone(), async {
-        crate::route::deliver_soon(&kernel, backend.as_str(), "an old reply", "cli", true);
-    })
-    .await;
-    {
-        // A NEW chain began before the delivery ran.
-        let mut c = state.chain.lock().unwrap();
-        c.token = "new".to_string();
-    }
-    // The old reply is held or recorded — never a turn of the new chain.
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let held = !state.chain.lock().unwrap().held.is_empty();
-        if held || s.passes_served() > 0 || has_late_row(&kernel, &backend).await {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the old reply went nowhere"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert_eq!(
-        s.passes_served(),
-        0,
-        "the old reply ran as a turn of the new chain"
-    );
+/// A CONTEXT CLEAR starts a new thread: the message not read yet belongs to the old one
+/// and wakes no pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_context_clear_leaves_the_unread_to_the_old_thread() {
+    let (_tmp, kernel, backend, s, gate) = unread_behind_a_pass("clearchain").await;
+    let _ = kernel
+        .operator_send(vec![Item::new(backend.clone(), json!({"type": "context_clear", "why": "fresh start"}))])
+        .await;
+    gate.notify_one();
+    assert!(settle(&kernel).await, "the agent never went quiet");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(s.passes_served(), 1, "the cleared message woke a pass");
 }
 
-/// ONE CHAIN PER AGENT (#227, bug 5): `stop` rotates the token, so a routed reply
-/// still in flight across the stop is recorded, not run — the chain does not
-/// resume after a stop.
+/// An agent that shuts down (`on_delete` drops its state) runs nothing after: a request
+/// that settles later acts on nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shutdown_runs_nothing_after() {
+    let (_tmp, _kernel, backend, s, gate) = unread_behind_a_pass("shutchain").await;
+    crate::state::drop_state(&backend);
+    gate.notify_one();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(s.passes_served(), 1, "a pass ran after the shutdown");
+}
+
+/// A REPLY DECIDED BEFORE A `stop` lands after it as a `late` row and runs nothing
+/// (#795, was the chain token #227 bugs 4 and 5): the stop ended the work it answers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reply_in_flight_across_a_stop_runs_nothing() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "stopinflight").await;
-    let s = script(
-        &backend,
-        vec![
-            pass(r#"<call name="done"></call>"#),
-            pass(r#"<call name="done"></call>"#),
-        ],
-        Duration::from_millis(1500),
-    );
-    let (k, b) = (Arc::clone(&kernel), backend.clone());
-    let first = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
-            b,
-            json!({"type": "send", "text": "one", "client_id": "o"}),
+    let s = script(&backend, vec![pass(r#"<call name="done"></call>"#)], Duration::ZERO);
+    let gate = s.hold_next();
+    let _ = kernel
+        .operator_send(vec![Item::new(backend.clone(), json!({"type": "send", "text": "one", "client_id": "o"}))])
+        .await;
+    assert!(until_passes(&s, 1).await, "the first pass never started");
+    // a reply routed under the work in flight: decided now
+    let born = crate::route::Born::of(backend.as_str());
+    let _ = kernel
+        .operator_send(vec![Item::new(backend.clone(), json!({"type": "stop"}))])
+        .await;
+    gate.notify_one();
+    fantastic_kernel::test_support::as_agent(
+        backend.clone(),
+        crate::route::deliver(&kernel, &backend, backend.as_str(), "[reply to 1 · peer]\nanswered", "cli", born, false, true),
+    )
+    .await;
+    assert!(settle(&kernel).await, "the agent never went quiet");
+    assert!(has_late_row(&kernel, &backend).await, "the reply was not kept late");
+    assert_eq!(s.passes_served(), 1, "the work resumed after a stop");
+}
+
+/// A reply decided by a previous incarnation lands as a `late` row and runs nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_routed_reply_across_a_reboot_is_late() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "tokenwhen").await;
+    let s = script(&backend, vec![pass(r#"<call name="done"></call>"#)], Duration::ZERO);
+    let _ = kernel
+        .operator_send(vec![Item::new(backend.clone(), json!({"type": "boot"}))])
+        .await;
+    let born = crate::route::Born::of(backend.as_str());
+    let _ = kernel
+        .operator_send(vec![Item::new(backend.clone(), json!({"type": "boot"}))])
+        .await;
+    fantastic_kernel::test_support::as_agent(
+        backend.clone(),
+        crate::route::deliver(&kernel, &backend, backend.as_str(), "an old reply", "cli", born, true, true),
+    )
+    .await;
+    assert!(settle(&kernel).await, "the agent never went quiet");
+    assert!(has_late_row(&kernel, &backend).await, "the old reply was not kept late");
+    assert_eq!(s.passes_served(), 0, "the old reply ran a pass of the new incarnation");
+}
+
+/// A peer's message is a message like any other: read by a pass, never `late`.
+#[tokio::test]
+async fn a_peer_reply_is_read_never_late() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "awaitnew").await;
+    let s = script(&backend, vec![pass(r#"<call name="done"></call>"#)], Duration::ZERO);
+    let peer = add_peer(&kernel, &tmp, &backend).await;
+    let target = backend.clone();
+    let k = Arc::clone(&kernel);
+    let out = fantastic_kernel::test_support::as_agent(peer, async move {
+        k.send(vec![Item::new(
+            target,
+            json!({"type": "send", "text": "[reply to 1 · peer]\nanswered", "client_id": "cli"}),
         )])
         .await
         .remove(0)
         .result
-    });
-    assert!(until_passes(&s, 1).await, "the first pass never started");
-    // A reply routed to the agent under this chain, decided now and still in
-    // flight (it waits on the FIFO lock the running pass holds).
-    fantastic_kernel::test_support::as_agent(backend.clone(), async {
-        crate::route::deliver_soon(
-            &kernel,
-            backend.as_str(),
-            "[reply to 1 · peer]\nanswered",
-            "cli",
-            true,
-        );
     })
     .await;
-    let _ = kernel
-        .operator_send(vec![Item::new(backend.clone(), json!({"type": "stop"}))])
-        .await;
-    let _ = first.await;
-    until_late_row(&kernel, &backend).await;
-    assert_eq!(s.passes_served(), 1, "the chain resumed after a stop");
+    assert_eq!(out["accepted"], json!(true), "{out}");
+    assert!(settle(&kernel).await, "the agent never went quiet");
+    assert_eq!(s.passes_served(), 1, "the reply was not read");
+    assert!(!has_late_row(&kernel, &backend).await, "a peer's reply was recorded as late");
 }
 
-/// ONE CHAIN PER AGENT (#227): a reply to an `await`ed call is routed UNTOKENED
-/// (the replier, not the agent, is the origin then), so a NEW chain that began
-/// meanwhile does not turn it into a `late` row: it is held for that chain's
-/// next pass, never dropped.
-#[tokio::test]
-async fn an_await_reply_after_a_new_chain_began_is_held_not_dropped() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, backend) = mk_kernel(&tmp, "awaitnew").await;
-    let s = script(
-        &backend,
-        vec![pass(r#"<call name="done"></call>"#)],
-        Duration::ZERO,
-    );
-    let state = crate::state::state_for(&backend);
-    {
-        // An operator message started a NEW chain after the await.
-        let mut c = state.chain.lock().unwrap();
-        c.alive = true;
-        c.token = "new".to_string();
-    }
-    let k = Arc::clone(&kernel);
-    let target = backend.as_str().to_string();
-    let target = AgentId::from(target.as_str());
-    let peer = add_peer(&kernel, &tmp, &backend).await;
-    // The routed reply of an `await`ed call: the replier is the origin, so the
-    // delivery carries NO chain token. It goes through the kernel, so the
-    // handler runs as the TARGET (its store writes are its own).
-    tokio::spawn(fantastic_kernel::test_support::as_agent(peer, async move {
-        let _ = k.operator_send(vec![Item::new(
-                    target,
-                    json!({"type": "send", "text": "[reply to 1 · peer]\nanswered", "client_id": "cli"}),
-                )])
-                .await;
-    }));
-    // The reply is read by a pass (or held for the live chain's next one) —
-    // either way it is acted on, never recorded as `late`.
-    until_true("the await's reply to be acted on", || {
-        s.passes_served() > 0 || !state.chain.lock().unwrap().held.is_empty()
-    })
-    .await;
-    assert!(
-        !has_late_row(&kernel, &backend).await,
-        "an await's reply was recorded as late instead of acted on"
-    );
-}
-
-/// ONE CHAIN PER AGENT (#227): an inquiry's ANSWER obeys the hold like any other
-/// message — read by the chain's next pass, never a second chain of its own.
+/// An inquiry's ANSWER is a message like any other: one that lands during a pass is read
+/// by the next pass, never a pass of its own beside it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_inquiry_answer_obeys_the_hold() {
+async fn an_inquiry_answer_is_read_by_the_next_pass() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "inquiryhold").await;
     let s = script(
         &backend,
-        vec![
-            pass(r#"<call name="done"></call>"#),
-            pass(r#"<call name="done"></call>"#),
-        ],
-        Duration::from_millis(1500),
+        vec![pass(r#"<call name="done"></call>"#), pass(r#"<call name="done"></call>"#)],
+        Duration::ZERO,
     );
-    let (k, b) = (Arc::clone(&kernel), backend.clone());
-    let _first = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
-            b,
-            json!({"type": "send", "text": "one", "client_id": "o"}),
-        )])
-        .await
-        .remove(0)
-        .result
-    });
+    let gate = s.hold_next();
+    let _ = kernel
+        .operator_send(vec![Item::new(backend.clone(), json!({"type": "send", "text": "one", "client_id": "o"}))])
+        .await;
     assert!(until_passes(&s, 1).await, "the first pass never started");
-    let (k, b) = (Arc::clone(&kernel), backend.clone());
-    let second = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
-            b,
+    let answer = kernel
+        .operator_send(vec![Item::new(
+            backend.clone(),
             json!({"type": "send", "text": "[reply to p9 · peer inquiry]\nyes", "client_id": "t"}),
         )])
         .await
         .remove(0)
-        .result
-    });
-    until_held(&backend, 1).await;
-    assert!(!second.is_finished(), "the answer ran a chain of its own");
+        .result;
+    assert_eq!(answer["accepted"], json!(true), "{answer}");
+    gate.notify_one();
+    assert!(settle(&kernel).await, "the agent never went quiet");
+    assert_eq!(s.passes_served(), 2);
+    assert!(s.request(1).contains("yes"), "{}", s.request(1));
 }
 
 /// A `<to>` list becomes ONE COPY PER RECIPIENT, and every copy carries the whole
@@ -4434,11 +4080,11 @@ async fn a_to_list_fans_out_one_copy_per_recipient_carrying_the_list() {
         vec![pass(r#"heard <call name="done"></call>"#)],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -4464,11 +4110,11 @@ async fn history_answers_the_digest_and_the_full_turns() {
         Duration::ZERO,
     );
     let _rx = rebind_backend_inbox(&kernel, &backend);
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "ping"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -4513,11 +4159,11 @@ async fn history_limit_below_one_is_refused_by_name() {
         Duration::ZERO,
     );
     let _rx = rebind_backend_inbox(&kernel, &backend);
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "ping"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -4545,11 +4191,11 @@ async fn the_history_digest_pages_forward() {
         Duration::ZERO,
     );
     let _rx = rebind_backend_inbox(&kernel, &backend);
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "ping"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -5081,6 +4727,7 @@ async fn recall_long_head(
             ))),
             crate::constants::DEFAULT_CONTEXT_WINDOW,
             client_id,
+            &[],
         ),
     )
     .await
@@ -5285,11 +4932,9 @@ async fn a_fold_projection_over_budget_writes_folds() {
         crate::assembly::assemble_messages(
             &backend,
             &state,
-            "next",
             &kernel,
             "cli",
             crate::caching::Caching::ProviderCache,
-            &crate::row_attrs::Stamp::now(),
         ),
     )
     .await
@@ -5323,9 +4968,10 @@ async fn a_fold_projection_over_budget_writes_folds() {
     );
 }
 
-/// Under `context_strategy: none` an over-budget turn is REFUSED — the reply
+/// Under `context_strategy: none` an over-budget pass is REFUSED — its `failed` status
 /// names the prompt size and the budget, nothing reaches the model, nothing is
-/// written or dropped. python: `test_an_over_budget_turn_is_refused_under_none`.
+/// written (but the message, stored when it arrived) or dropped. python:
+/// `test_an_over_budget_turn_is_refused_under_none`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_over_budget_turn_is_refused_under_none() {
     let tmp = TempDir::new().unwrap();
@@ -5363,18 +5009,25 @@ async fn an_over_budget_turn_is_refused_under_none() {
     };
     let before = load().await;
     assert!(before.len() >= 20, "{}", before.len());
-    let r = kernel
+    let r = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
-    let err = r["error"].as_str().unwrap_or_default().to_string();
+    assert_eq!(r["accepted"], json!(true), "{r:#?}");
+    let evs = drain(&mut rx).await;
+    let err = evs
+        .iter()
+        .find(|v| v["type"] == json!("status") && v["phase"] == json!("failed"))
+        .and_then(|v| v["detail"]["error"].as_str())
+        .unwrap_or_else(|| panic!("the refusal is said: {evs:#?}"))
+        .to_string();
     let rest = err
         .strip_prefix("mock_backend: context full: ")
-        .unwrap_or_else(|| panic!("{r:#?}"));
+        .unwrap_or_else(|| panic!("{err}"));
     assert!(
         rest.ends_with("clear, fold by hand, or raise context_window"),
         "{err}"
@@ -5389,22 +5042,19 @@ async fn an_over_budget_turn_is_refused_under_none() {
     assert!(prompt >= 1 && prompt > budget, "{err}");
     assert!(!err.contains("unknown context_strategy"), "{err}");
     assert!(!err.contains("context_insufficient"), "{err}");
-    assert!(r.get("raised").is_none(), "{r:#?}");
-    assert!(r.get("client_id").is_none(), "{r:#?}");
     assert_eq!(s.passes_served(), 0, "no request reached the backend");
+    // the message itself was stored when it arrived (#795); nothing else was written,
+    // dropped or rewritten
     let after = load().await;
-    assert_eq!(before, after, "nothing written, dropped or rewritten");
+    assert_eq!(before[..], after[..before.len()], "nothing dropped or rewritten");
+    assert_eq!(after.len(), before.len() + 1, "{after:#?}");
+    assert_eq!(after.last().unwrap()["content"], json!("go"));
     assert!(
         !after
             .iter()
             .any(|x| x["kind"] == "fold" || x["kind"] == "recall"),
         "{after:#?}"
     );
-    assert!(
-        !after.iter().any(|x| x["content"].as_str() == Some("go")),
-        "the live turn was not stored"
-    );
-    let evs = drain(&mut rx).await;
     let has = |ty: &str, phase: &str| {
         evs.iter().any(|v| {
             v.get("type").and_then(Value::as_str) == Some(ty)
@@ -5466,12 +5116,10 @@ async fn successive_fold_projections_do_not_nest_into_a_chain() {
             crate::assembly::assemble_messages(
                 &backend,
                 &state,
-                "next",
                 &kernel,
                 "cli",
                 crate::caching::Caching::ProviderCache,
-                &crate::row_attrs::Stamp::now(),
-            ),
+        ),
         )
         .await
         .expect("store read");
@@ -5764,11 +5412,11 @@ async fn inquiry_round_with(
             gate.notify_one();
         });
     }
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "decide", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -5783,45 +5431,35 @@ fn answer_call(text: &str) -> String {
     format!("<call name=\"inquiry_answer\"><answer>{text}</answer></call>")
 }
 
-/// A held send reads `alive` before it stores its row; the chain can end in that
-/// await. The late push must revive the chain and wake it, or no pass ever reads it.
+/// A message stored as the pass in flight ends is not lost between them (#795): the
+/// unread list and `running` change under one lock, so the pass's end wakes the next
+/// pass for it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_message_held_on_a_chain_that_just_ended_wakes_it() {
+async fn a_message_stored_as_a_pass_ends_wakes_the_next() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "held_dead").await;
-    let s = script(
-        &backend,
-        vec![pass(r#"<call name="done"></call>"#)],
-        Duration::ZERO,
-    );
+    let s = script(&backend, vec![pass(r#"<call name="done"></call>"#)], Duration::ZERO);
     let state = crate::state::state_for(&backend);
-    state.chain.lock().unwrap().alive = true;
-    // The chain ends (nothing held yet) while the send is still storing its row.
-    crate::route::chain_ended(&kernel, &backend);
-    assert!(!state.chain.lock().unwrap().alive);
-    let (tx, _rx) = tokio::sync::oneshot::channel();
-    // the held send runs in the agent's own dispatch
+    let epoch = {
+        let mut life = state.life.lock().unwrap();
+        life.running = true;
+        life.epoch += 1;
+        life.epoch
+    };
     fantastic_kernel::test_support::as_agent(backend.clone(), async {
-        crate::verbs::push_held_or_wake(
-            &kernel,
-            &backend,
-            crate::state::HeldMsg {
-                client_id: "h".to_string(),
-                send_id: "sid".to_string(),
-                reply: tx,
-                origin: "h".to_string(),
-                text: String::new(),
-                queued_at: 0.0,
-                task_id: None,
-                row_id: 0,
-            },
-        );
+        let m = crate::life::Incoming {
+            text: "late in the pass",
+            client_id: "h",
+            origin: "h",
+            notice: false,
+            attached: None,
+        };
+        crate::life::arrive(&kernel, &backend, &m, true).await.expect("stored");
+        assert_eq!(s.passes_served(), 0, "no pass beside the running one");
+        crate::life::end(&kernel, &backend, epoch);
     })
     .await;
-    assert!(
-        until_passes(&s, 1).await,
-        "the late held message never woke the chain"
-    );
+    assert!(until_passes(&s, 1).await, "the message never woke the next pass");
 }
 
 /// However fast the answer lands, the asker wakes once with it.
@@ -5901,11 +5539,11 @@ async fn ending_without_an_answer_leaves_the_inquiry_open_for_a_later_pass() {
         ],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "decide", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -5921,11 +5559,11 @@ async fn ending_without_an_answer_leaves_the_inquiry_open_for_a_later_pass() {
         .find(|(agent, _)| agent == peer.as_str())
         .map(|(_, c)| c.clone())
         .expect("the inquiry is still open");
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             peer.clone(),
             json!({"type": "send", "text": "answer it now", "client_id": client}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -5964,11 +5602,11 @@ async fn an_answer_with_nothing_open_is_told_so() {
         ],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "hi", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -6198,25 +5836,35 @@ async fn a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on() {
         json!({"role": "user", "content": "GOAL"}),
     )
     .await;
+    // answered: a boot finds nothing unread (#795)
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "assistant", "content": "on it <call name=\"done\"></call>"}),
+    )
+    .await;
     // A boot bumps the incarnation, so a delivery decided BEFORE it is late.
-    let born = crate::state::incarnation(&backend);
+    let n = crate::state::incarnation(&backend);
+    let born = crate::route::Born::of(backend.as_str());
     let _ = kernel
         .operator_send(vec![Item::new(backend.clone(), json!({"type": "boot"}))])
         .await;
-    assert_eq!(crate::state::incarnation(&backend), born + 1);
+    assert_eq!(crate::state::incarnation(&backend), n + 1);
     fantastic_kernel::test_support::as_agent(
         AgentId::from(backend.as_str()),
         crate::route::deliver(
             &kernel,
+            &backend,
             backend.as_str(),
             "[reply to 1 · n r]\nlate",
             "cli",
             born,
             false,
-            String::new(),
+            true,
         ),
     )
     .await;
+    assert!(settle(&kernel).await, "the agent never went quiet");
     assert_eq!(s.passes_served(), 0, "no turn ran for the late reply");
     let rows = fantastic_kernel::test_support::as_agent(
         backend.clone(),
@@ -6236,90 +5884,18 @@ async fn a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on() {
         AgentId::from(backend.as_str()),
         crate::route::deliver(
             &kernel,
+            &backend,
             backend.as_str(),
             "fresh",
             "cli",
-            born + 1,
+            crate::route::Born::of(backend.as_str()),
             false,
-            String::new(),
+            true,
         ),
     )
     .await;
+    assert!(settle(&kernel).await, "the agent never went quiet");
     assert!(s.passes_served() >= 1, "a live reply is a turn");
-}
-
-#[tokio::test]
-async fn send_to_is_kept_raw_and_dropped_only_when_blank() {
-    // python keeps `send_to` VERBATIM and drops it only when it is not a string
-    // or is blank after a full strip. Rust trimmed it, so `' peer '` silently
-    // became `peer` — a different agent from the one the caller named.
-    //
-    // `send_to` fires on the `done` branch (a call-less turn is NUDGED first and
-    // returns — python's order, and rust's).
-    let tmp = TempDir::new().unwrap();
-    let (kernel, backend) = mk_kernel(&tmp, "sendto").await;
-    let peer = format!("ff_{}", backend.as_str());
-    script(
-        &backend,
-        vec![pass("the answer <call name=\"done\"></call>")],
-        Duration::ZERO,
-    );
-    let _rx = rebind_backend_inbox(&kernel, &backend);
-    let _ = kernel
-        .operator_send(vec![Item::new(
-            backend.clone(),
-            json!({"type": "send", "text": "hi", "send_to": format!(" {peer} ")}),
-        )])
-        .await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    // READ THE KERNEL'S CALL ROWS: the same peer is also the persistence store,
-    // so target alone does not identify a hand-off. A `call` row names both.
-    let handed = |kernel: &Arc<Kernel>, peer: &str| -> bool {
-        fantastic_kernel::test_support::rows_about(kernel, &AgentId::from(peer))
-            .iter()
-            .any(|r| r["kind"] == json!("call") && r["verb"] == json!("send"))
-    };
-    assert!(
-        !handed(&kernel, &peer),
-        "the raw ` peer ` is NOT the agent `peer` — nothing may be handed to it"
-    );
-
-    // A blank-after-strip / non-string `send_to` makes no hand-off either, and a
-    // NAMED one still does.
-    for (bad, expect) in [
-        (json!("\n\t"), false),
-        (json!(7), false),
-        (json!(peer.clone()), true),
-    ] {
-        let tag = format!("st_{}", expect);
-        let (kernel, backend) = mk_kernel(&tmp, &tag).await;
-        let peer = format!("ff_{}", backend.as_str());
-        let arg = if bad.is_string() && bad.as_str() == Some(peer.as_str()) {
-            json!(peer)
-        } else {
-            bad.clone()
-        };
-        let arg = if expect { json!(peer) } else { arg };
-        script(
-            &backend,
-            vec![pass("done here <call name=\"done\"></call>")],
-            Duration::ZERO,
-        );
-        let _rx = rebind_backend_inbox(&kernel, &backend);
-        let _ = kernel
-            .operator_send(vec![Item::new(
-                backend.clone(),
-                json!({"type": "send", "text": "hi", "send_to": arg}),
-            )])
-            .await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(
-            handed(&kernel, &peer),
-            expect,
-            "send_to {bad} must {} hand off",
-            if expect { "" } else { "NOT" }
-        );
-    }
 }
 
 /// Bodies are scanned in the order they ARRIVED (python's `_mem.bodies` dict,
@@ -6509,11 +6085,11 @@ async fn a_non_string_type_tags_the_reply_with_python_str() {
         Duration::ZERO,
     );
     let _rx = rebind_backend_inbox(&kernel, &backend);
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await;
     assert!(
         until_passes(&s, 2).await,
@@ -6742,9 +6318,10 @@ fn a_peer_sends_payload_keeps_pythons_key_order() {
     );
 }
 
-/// THE TURN'S ROW IDS ARE MINTED WHEN APPENDED — after assembly, whose system
-/// block dispatches `reflect`s that take their (kernel) call ids first. So the
-/// reflect's call id is below the user row's, and that below the assistant's.
+/// THE ROW IDS ARE MINTED WHEN APPENDED: the message's when it arrives (#795), before
+/// the pass's assembly, whose system block dispatches `reflect`s that take their
+/// (kernel) call ids; the answer's after them. So the user row's id is below the
+/// reflect's call id, and that below the assistant's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_turns_row_ids_are_minted_after_the_assembly_reflects() {
     let tmp = TempDir::new().unwrap();
@@ -6754,17 +6331,22 @@ async fn the_turns_row_ids_are_minted_after_the_assembly_reflects() {
         vec![pass("ack <call name=\"done\"></call>")],
         Duration::ZERO,
     );
-    let r = kernel
+    let r = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
-    let message_id = r["message_id"].as_i64().expect("message_id is a row id");
+    assert_eq!(r["accepted"], json!(true), "{r}");
     let calls = fantastic_kernel::test_support::rows_about(&kernel, &backend);
     let rows = conversation(&kernel, &backend).await;
+    let message_id = rows
+        .iter()
+        .find(|row| row["role"] == json!("assistant"))
+        .and_then(|row| row["id"].as_i64())
+        .expect("the answer row");
     let reflect = calls
         .iter()
         .filter(|row| {
@@ -6780,9 +6362,9 @@ async fn the_turns_row_ids_are_minted_after_the_assembly_reflects() {
         .min()
         .expect("the incoming row");
     assert!(
-        reflect < user && user < message_id,
-        "assembly's reflect ({reflect}) must precede the user row ({user}) \
-         and the assistant row ({message_id})"
+        user < reflect && reflect < message_id,
+        "the user row ({user}) must precede assembly's reflect ({reflect}), \
+         and that the assistant row ({message_id})"
     );
 }
 
@@ -6987,17 +6569,15 @@ async fn delete_drops_every_row_but_the_incarnation() {
     let id = backend.as_str().to_string();
     let file_id = format!("ff_{id}");
     let old = crate::state::state_for(&backend);
-    old.queue
-        .lock()
-        .unwrap()
-        .push_back(crate::state::QueuedEntry {
-            client_id: "c".into(),
-            text: "t".into(),
-            send_id: "s".into(),
-            queued_at: 0.0,
-            notice: false,
-            origin: "h".into(),
-        });
+    old.life.lock().unwrap().unread.push(crate::state::Arrival {
+        row_id: 1,
+        client_id: "c".into(),
+        origin: "h".into(),
+        text: "t".into(),
+        send_id: "s".into(),
+        at: 0.0,
+        notice: false,
+    });
     *old.projection.lock().unwrap() = Some(json!({"fired": false}));
     *old.compaction_mark.lock().unwrap() = Some((1, "c".into()));
     *old.folds_since.lock().unwrap() = 1;
@@ -7038,7 +6618,7 @@ async fn delete_drops_every_row_but_the_incarnation() {
     add_backend(&kernel, &id, &file_id).await;
     let fresh = crate::state::state_for(&backend);
     assert!(!Arc::ptr_eq(&old, &fresh), "a deleted id's slot is rebuilt");
-    assert!(fresh.queue.lock().unwrap().is_empty());
+    assert!(fresh.life.lock().unwrap().unread.is_empty());
     assert!(fresh.current_meta.lock().unwrap().is_none());
     assert!(fresh.projection.lock().unwrap().is_none());
     assert!(fresh.compaction_mark.lock().unwrap().is_none());
@@ -7229,11 +6809,11 @@ async fn answer_only(
         ],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -7321,11 +6901,11 @@ async fn a_broken_call_is_reported_instead_of_the_no_call_reminder() {
         vec![pass(E59_ANSWER), pass("<call name=\"done\"></call>")],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -7358,11 +6938,11 @@ async fn a_broken_call_beside_a_good_one_fails_the_attempt() {
         ],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -7390,11 +6970,11 @@ async fn a_wrapped_call_is_not_dispatched_and_the_top_level_one_runs() {
         ],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -7424,11 +7004,11 @@ async fn an_empty_wrapper_is_reported_by_name_not_only_reminded() {
         ],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -7462,11 +7042,11 @@ async fn broken_only_turns_count_toward_giving_up() {
             .collect(),
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -7510,11 +7090,11 @@ async fn the_no_call_report_is_never_stored_and_the_task_is_not_a_notice() {
         vec![pass("just prose"), pass("<call name=\"done\"></call>")],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await;
     assert!(until_passes(&s, 2).await);
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -7536,11 +7116,11 @@ async fn a_batch_with_a_reply_is_not_a_notice() {
         vec![pass(good), pass("<call name=\"done\"></call>")],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await;
     assert!(until_passes(&s, 2).await);
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -7587,10 +7167,10 @@ async fn a_peer_cannot_mark_its_message_a_notice() {
     let k = Arc::clone(&kernel);
     let b = backend.clone();
     let out = fantastic_kernel::test_support::as_agent("peer_x", async move {
-        k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, k.operator_send(vec![Item::new(
             b,
             json!({"type": "send", "text": "hidden?", "notice": true}),
-        )])
+        )]))
         .await
     })
     .await;
@@ -7687,11 +7267,11 @@ async fn an_inline_send_is_refused_and_nothing_reaches_the_target() {
         ],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
+        )]))
         .await;
     assert!(
         until_passes(&s, 2).await,
@@ -7774,11 +7354,11 @@ async fn a_routing_name_in_the_payload_of_a_routed_call_is_delivered() {
         vec![pass(call), pass("saw it <call name=\"done\"></call>")],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
+        )]))
         .await;
     assert!(until_passes(&s, 2).await, "the reply must reach the model");
     let turn = s.request(1);
@@ -7805,11 +7385,11 @@ async fn two_empty_answers_are_reasked_and_the_third_attempt_runs() {
         vec![pass(dead), pass(dead), pass("<call name=\"done\"></call>")],
         Duration::ZERO,
     );
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -7946,11 +7526,11 @@ async fn restarted_turn_sees(clear_first: bool, task_text: &str) -> String {
         .await
         .remove(0)
         .result;
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "start ais", "client_id": "c218"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
@@ -8203,9 +7783,39 @@ pub(crate) struct EchoProvider;
 /// Says "hel" + "lo" + the model it was built on.
 struct EchoWords(String);
 
+/// The gate an `m-gated…` pass (one per model name) waits on before it streams: a test holds the provider's
+/// `complete` in flight with it.
+pub(crate) fn echo_gate(model: &str) -> Arc<tokio::sync::Notify> {
+    static GATES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Notify>>>> =
+        std::sync::OnceLock::new();
+    let mut gates = GATES.get_or_init(Default::default).lock().unwrap();
+    Arc::clone(gates.entry(model.to_string()).or_default())
+}
+
 #[async_trait]
 impl Provider for EchoWords {
     async fn chat(&self, m: &[Value], _x: Option<i64>) -> Result<ProviderStream, ProviderError> {
+        // `m-gated`: the pass waits on `echo_gate` before it answers `done`
+        if self.0.starts_with("m-gated") {
+            echo_gate(&self.0).notified().await;
+            return Ok(Box::pin(futures_util::stream::iter(vec![Ok(
+                ProviderEvent::Token("released <call name=\"done\"></call>".to_string()),
+            )])));
+        }
+        // `m-reask`: a malformed answer, then (re-asked) a good one
+        if self.0 == "m-reask" {
+            let reasked = m
+                .iter()
+                .any(|x| x["role"] == "assistant" && x["content"].to_string().contains("oops"));
+            let text = if reasked {
+                "fixed <call name=\"done\"></call>"
+            } else {
+                "broken <call name=\"send\">oops<routing><target_id>x</target_id></routing><payload><type>reflect</type></payload></call>"
+            };
+            return Ok(Box::pin(futures_util::stream::iter(vec![Ok(
+                ProviderEvent::Token(text.to_string()),
+            )])));
+        }
         // `m-call`: the answer is a call to `vault` (once), then done — the chat's own call
         if self.0 == "m-call" {
             let replied = m.iter().any(|x| x["content"].to_string().contains("vault"));
@@ -8358,16 +7968,17 @@ async fn an_ai_chat_holds_the_conversation_and_completes_through_its_provider() 
         .remove(0)
         .result;
     assert_eq!(made["id"], "chat1", "{made}");
-    let r = kernel
+    let r = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             AgentId::from("chat1"),
             json!({"type": "send", "text": "hi"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
     assert_eq!(
-        r["response"], "hello from m-small <call name=\"done\"></call>",
+        crate::tests::last_answer(&kernel, &AgentId::from("chat1")).await,
+        "hello from m-small <call name=\"done\"></call>",
         "no model on the chat: the provider's default: {r}"
     );
     let rec = kernel.resolve_target("chat1").unwrap().record();
@@ -8424,15 +8035,19 @@ async fn an_ai_chat_holds_the_conversation_and_completes_through_its_provider() 
         &AgentId::from("chat1"),
         json!({"model": "m-big"}).as_object().unwrap().clone(),
     );
-    let r = kernel
+    let r = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             AgentId::from("chat1"),
             json!({"type": "send", "text": "again"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result;
-    assert_eq!(r["response"], "hello from m-big <call name=\"done\"></call>", "{r}");
+    assert_eq!(
+        crate::tests::last_answer(&kernel, &AgentId::from("chat1")).await,
+        "hello from m-big <call name=\"done\"></call>",
+        "{r}"
+    );
     let rows = kernel
         .operator_send(vec![Item::new(
             AgentId::from("chat1"),
@@ -8472,12 +8087,12 @@ async fn a_chats_call_is_judged_by_the_chats_grants_not_its_providers() {
     fantastic_kernel::test_support::grant(&kernel, "prov", "vault", json!({"call": ["*"]}));
     let memory = fantastic_ram_store::test_support::memory_meta(
         &kernel,
-        "chat1",
+        "chat_grants",
         json!({"cli": {"call": ["*"]}, "prov": {"call": ["complete", "watch"]}}),
     )
     .await;
     let mut create = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "ai_chat.tools",
-                            "id": "chat1", "provider_id": "prov", "context_window": 32768});
+                            "id": "chat_grants", "provider_id": "prov", "context_window": 32768});
     for (k, v) in memory {
         create[k] = v;
     }
@@ -8486,18 +8101,18 @@ async fn a_chats_call_is_judged_by_the_chats_grants_not_its_providers() {
         .await
         .remove(0)
         .result;
-    assert_eq!(made["id"], "chat1", "{made}");
-    let _ = kernel
+    assert_eq!(made["id"], "chat_grants", "{made}");
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
-            AgentId::from("chat1"),
+            AgentId::from("chat_grants"),
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await;
     let mut text = String::new();
     for _ in 0..50 {
         let rows = kernel
             .operator_send(vec![Item::new(
-                AgentId::from("chat1"),
+                AgentId::from("chat_grants"),
                 json!({"type": "rows"}),
             )])
             .await
@@ -8608,16 +8223,16 @@ async fn an_ai_chat_reflect_carries_its_html_view_and_the_calls_it_needs() {
         );
     })
     .await;
-    let create = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "ai_chat.tools", "id": "chat1"});
+    let create = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "ai_chat.tools", "id": "chat_reflect"});
     let made = kernel
         .operator_send(vec![Item::new(AgentId::from("kernel_state"), create)])
         .await
         .remove(0)
         .result;
-    assert_eq!(made["id"], "chat1", "{made}");
+    assert_eq!(made["id"], "chat_reflect", "{made}");
     let refl = kernel
         .operator_send(vec![Item::new(
-            AgentId::from("chat1"),
+            AgentId::from("chat_reflect"),
             json!({"type": "reflect"}),
         )])
         .await
@@ -8632,7 +8247,7 @@ async fn an_ai_chat_reflect_carries_its_html_view_and_the_calls_it_needs() {
     assert_eq!(
         view["calls"],
         json!({
-            "chat1": ["watch", "reflect", "history", "rows", "status", "send", "stop", "context_clear", "unembed"],
+            "chat_reflect": ["watch", "reflect", "history", "rows", "status", "send", "stop", "context_clear", "unembed"],
             "user": ["inquiries", "answer_inquiry"],
         })
     );
@@ -8721,3 +8336,6 @@ async fn a_provider_completes_on_its_default_model_field_and_lists_and_sets_it()
     .await;
     assert_eq!(r["model"], "m-big", "the new default: {r}");
 }
+
+#[path = "tests_life.rs"]
+mod life_machine;

@@ -161,11 +161,11 @@ async fn answers(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<String> {
 }
 
 async fn send_go(kernel: &Arc<Kernel>, backend: &AgentId) -> Value {
-    kernel
+    crate::tests::settled(kernel, kernel
         .operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )])
+        )]))
         .await
         .remove(0)
         .result
@@ -387,6 +387,15 @@ impl Provider for Steps {
     fn model(&self) -> String {
         self.model.lock().unwrap().clone()
     }
+}
+
+/// END THE PASS IN FLIGHT as a cancel does (#795: a pass is no future to drop): the
+/// agent's `stop`, then until its request's settle has dropped the pass's view.
+async fn stop_pass(kernel: &Arc<Kernel>, agent: &AgentId) {
+    let _ = fantastic_kernel::test_support::as_agent(agent.clone(), crate::verbs::stop(agent, None, kernel)).await;
+    let st = crate::state::state_for(agent);
+    until_true("the stopped pass to drop its view", || st.render_cache.stats().pins == 0).await;
+    assert!(crate::tests::settle(kernel).await);
 }
 
 /// One generation of `agent` on `provider`, run as the agent, as `send` runs it.
@@ -717,8 +726,12 @@ async fn failed_attempt_dispatches_nothing() {
     assert!(until_passes(&s, 3).await, "the replies never came back");
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(fb.passes_served(), 1, "the peer ran once: attempt 2's call");
-    let batch = last_content(&s, 2);
-    assert_eq!(batch.matches("kernel reflect").count(), 1, "{batch}");
+    let replies = crate::tests::reply_rows(&kernel, &a).await;
+    assert_eq!(
+        replies.iter().filter(|r| r.contains("kernel reflect")).count(),
+        1,
+        "{replies:#?}"
+    );
 }
 
 // T4, T9 (status half in tests_stopped.rs)
@@ -733,8 +746,8 @@ async fn stop_after_n() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     let n = 1 + crate::constants::CALL_RETRIES;
     assert_eq!(s.passes_served(), n);
-    assert!(reply["message_id"].as_i64().is_some(), "{reply}");
-    let response = reply["response"].as_str().unwrap_or_default();
+    assert!(reply["re"].as_i64().is_some(), "{reply}");
+    let response = crate::tests::last_answer(&kernel, &backend).await;
     assert!(response.starts_with("<call name=\"stop\">"), "{reply}");
     let reason = crate::model_format::fill(
         crate::model_format::default::STOP_REASON,
@@ -829,7 +842,7 @@ async fn transport_error_unchanged() {
     let reply = send_go(&kernel, &backend).await;
     assert_eq!(s.passes_served(), 2);
     assert!(s.request(1).contains("[retry 1/1]"), "{}", s.request(1));
-    assert_eq!(reply["response"], json!(DONE), "{reply}");
+    assert_eq!(crate::tests::last_answer(&kernel, &backend).await, DONE, "{reply}");
 
     // mid-re-ask: the rerun starts at attempt 1, with no re-ask pair of the earlier run
     let tmp = TempDir::new().unwrap();
@@ -856,7 +869,7 @@ async fn transport_error_unchanged() {
             .any(|m| m["content"] == json!(report)),
         "{rerun}"
     );
-    assert_eq!(reply["response"], json!(DONE), "{reply}");
+    assert_eq!(crate::tests::last_answer(&kernel, &backend).await, DONE, "{reply}");
 }
 
 // T7
@@ -925,9 +938,9 @@ async fn cancel_during_reask() {
         .as_array()
         .expect("tasks")
         .iter()
-        .find(|t| t["agent"] == json!(backend.as_str()) && t["verb"] == json!("send"))
+        .find(|t| t["agent"] == json!(backend.as_str()) && t["verb"] == json!("complete"))
         .and_then(|t| t["id"].as_i64())
-        .expect("the send in `ps`");
+        .expect("the pass's request in `ps`");
     let r = kernel
         .operator_send(vec![Item::new(
             AgentId::from("kernel"),
@@ -938,7 +951,7 @@ async fn cancel_during_reask() {
         .result;
     assert_eq!(r["cancelled"], json!(true), "{r}");
     let reply = send.await.expect("send join");
-    assert_eq!(reply, json!({"cancelled": true}));
+    assert_eq!(reply["accepted"], json!(true), "{reply}");
     let report = hermes_report(DONE).expect("bad for hermes");
     for row in store_rows(&kernel, &backend).await {
         let text = row["content"].as_str().unwrap_or_default();
@@ -985,13 +998,11 @@ async fn retries_share_the_ceiling() {
         started.elapsed()
     );
     assert_eq!(s.passes_served(), 2);
-    assert_eq!(
-        reply,
-        json!({
-            "error": "send: timeout after 0.4s",
-            "reason": "timeout",
-            "client_id": "probe"
-        })
+    assert_eq!(reply["accepted"], json!(true), "{reply}");
+    let errors = crate::tests::error_rows(&kernel, &backend).await;
+    assert!(
+        errors.iter().any(|e| e.contains("send: timeout after 0.4s")),
+        "one ceiling for the pass, its attempts within it: {errors:?}"
     );
 }
 
@@ -1130,8 +1141,8 @@ async fn no_cut_streak() {
 // T19
 /// `default` streams live, so a `Bad` known only at the stream's end follows tokens the
 /// caller already has: they are not taken back. The order is attempt 1's tokens, the
-/// `retrying` marker, the parts' aborts, attempt 2's tokens. A `send_to` target
-/// receives nothing of the discarded attempt: it is handed the accepted text only.
+/// `retrying` marker, the parts' aborts, attempt 2's tokens. The stored answer holds
+/// nothing of the discarded attempt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn streamed_then_bad_is_marked() {
     let tmp = TempDir::new().unwrap();
@@ -1144,11 +1155,11 @@ async fn streamed_then_bad_is_marked() {
     assert!(default_report(bad).is_some());
     let _s = script_as(&a, PLAIN, vec![chars(bad), chars(DONE)]);
     let mut rx = watch(&kernel, &a).await;
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             a.clone(),
-            json!({"type": "send", "text": "go", "client_id": "tab1", "send_to": b.as_str()}),
-        )])
+            json!({"type": "send", "text": "go", "client_id": "tab1"}),
+        )]))
         .await;
     let evs = events_until(&mut rx, ends_call).await;
     let retry = evs
@@ -1180,11 +1191,10 @@ async fn streamed_then_bad_is_marked() {
         .filter_map(|v| v["text"].as_str())
         .collect();
     assert_eq!(after, DONE);
-    // the `send_to` hand-off carries the accepted text, nothing of attempt 1
-    assert!(until_passes(&fb, 1).await, "the hand-off never came");
-    let handed = last_in(&fb, 0);
-    assert!(handed.contains(DONE), "{handed}");
-    assert!(!handed.contains("Working."), "{handed}");
+    // the stored answer is the accepted attempt's, nothing of attempt 1
+    let answer = crate::tests::last_answer(&kernel, &a).await;
+    assert_eq!(answer, DONE, "{answer}");
+    let _ = (&fb, &b);
 }
 
 // T20
@@ -1288,6 +1298,7 @@ async fn drop_cancels_complete() {
     let run = generate(&kernel, &backend, &steps);
     let r = tokio::time::timeout(Duration::from_millis(500), run).await;
     assert!(r.is_err(), "the attempt never ends on its own");
+    stop_pass(&kernel, &backend).await;
     assert_eq!(steps.asked().len(), 2, "the re-ask was streaming");
     assert_eq!(steps.dropped(), 1, "its stream went with the generation");
     assert_eq!(
@@ -1382,6 +1393,18 @@ async fn default_turn_same_as_before() {
             + i64::try_from(INQUIRY_WAIT.len()).unwrap()
             - i64::try_from(BASE_INQUIRY_WAIT.len()).unwrap();
         assert!(grown > 0, "{name}: the stop wording is in the how-to");
+        // and the async replies (#795): the `## Replies` section and the working section,
+        // measured against their text before it
+        let replies_of = |h: &str| -> usize {
+            let a = h.find("## Replies").expect("a replies section");
+            let b = h.find("## How to call an agent").expect("the next section");
+            b - a
+        };
+        let grown = grown
+            + i64::try_from(replies_of(howto)).unwrap()
+            - i64::try_from(BASE_REPLIES.len()).unwrap()
+            + i64::try_from(crate::model_format::default::HOWTO_WORKING.len()).unwrap()
+            - i64::try_from(BASE_WORKING.len()).unwrap();
         let attrs = &mut want_row["attributes"];
         for p in attrs["parts"]["list"].as_array_mut().into_iter().flatten() {
             if p["part"] == json!("verb_docs") {
@@ -1437,6 +1460,10 @@ no call is rerolled.
 
 /// The inquiry's wait, as the how-to on `4fd5bb4d` wrote it, and as it reads now that
 /// a pass ends with `done` (#795).
+/// The `## Replies` section of the `default` how-to before #795, byte for byte.
+const BASE_REPLIES: &str = include_str!("model_format/res/test/b2/base_replies_default.txt");
+/// The `default` working section before #795, byte for byte.
+const BASE_WORKING: &str = include_str!("model_format/res/test/b2/base_working_default.txt");
 const BASE_INQUIRY_WAIT: &str = "work on, or `<call name=\"await\"></call>`\nfor it.";
 const INQUIRY_WAIT: &str = "work on, or end your answer with\n`<call name=\"done\"></call>` until it comes.";
 
@@ -1830,6 +1857,7 @@ async fn cancel_keeps_pure_entries() {
     )
     .await;
     assert!(r.is_err(), "the pass was cancelled");
+    stop_pass(&kernel, &backend).await;
     assert_eq!(
         cache.chain(HERMES),
         chain,
@@ -1872,6 +1900,7 @@ async fn pins_released_on_drop() {
     )
     .await;
     assert!(r.is_err());
+    stop_pass(&kernel, &backend).await;
     assert_eq!(pins(), 0, "cancelled");
 
     // failed on the link
@@ -2021,11 +2050,11 @@ async fn a_harness_stop_is_told_to_the_asker() {
         Duration::ZERO,
     );
     let s = script(&a, (0..12).map(|_| pass(FOREIGN)).collect(), Duration::ZERO);
-    let _ = kernel
+    let _ = crate::tests::settled(&kernel, kernel
         .operator_send(vec![Item::new(
             b.clone(),
             json!({"type": "send", "text": "ask", "client_id": "probe"}),
-        )])
+        )]))
         .await;
     assert!(until_passes(&fb, 3).await, "the asker never got the answer");
     tokio::time::sleep(Duration::from_millis(300)).await;

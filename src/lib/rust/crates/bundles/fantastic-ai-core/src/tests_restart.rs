@@ -1,7 +1,8 @@
 //! #726: a chain in flight across a kernel restart. Everything is records: the
-//! first kernel dies with a chain mid-flight (the lead's call to a slow peer out, an
-//! asker's message HELD on the lead's chain); a second kernel boots on what the
-//! first one flushed. The calls that died are dead letters, every agent they concern
+//! first kernel dies with a chain mid-flight (the lead's call to a slow NON-AI peer out
+//! (a send to an AI is acked at once and never cut, #795), the
+//! lead's pass over an asker's message held at its request); a second kernel boots on
+//! what the first one flushed. The calls that died are dead letters, every agent they concern
 //! is told once at its boot, and the lead's chain goes on from there.
 
 use super::*;
@@ -10,9 +11,10 @@ const DONE: &str = "<call name=\"done\"></call>";
 const RECALL: &str = "You are rebuilding your own working context";
 
 /// A call to `target`, its reply back to self.
-fn send_call(target: &str, text: &str) -> String {
+fn send_call(target: &str, text: &str, ms: Option<u64>) -> String {
+    let ms = ms.map(|m| format!("<ms>{m}</ms>")).unwrap_or_default();
     format!(
-        "<call name=\"send\"><routing><target_id>{target}</target_id><reply_to>self</reply_to></routing><payload><type>send</type><text>{text}</text></payload></call>"
+        "<call name=\"send\"><routing><target_id>{target}</target_id><reply_to>self</reply_to></routing><payload><type>send</type><text>{text}</text>{ms}</payload></call>"
     )
 }
 
@@ -27,7 +29,7 @@ struct Ids {
 /// send to the others, the root naming the memory store. Not started. `next_id`:
 /// where the id counter goes on (the root record's bound, in a real reboot).
 async fn world(tmp: &TempDir, next_id: Option<i64>) -> (Arc<Kernel>, Ids) {
-    let kernel = base_kernel(tmp, |_| {}).await;
+    let kernel = base_kernel(tmp, |k| k.bundles.register("sleeper.tools", Sleeper)).await;
     if let Some(n) = next_id {
         let mut meta = Map::new();
         meta.insert("next_id".to_string(), json!(n));
@@ -40,7 +42,17 @@ async fn world(tmp: &TempDir, next_id: Option<i64>) -> (Arc<Kernel>, Ids) {
         lead: AgentId::from(lead),
     };
     let all = [ids.lead.clone(), ids.slow.clone(), ids.asker.clone()];
-    for a in &all {
+    // the slow peer is the slow non-AI stand-in
+    let r = kernel
+        .operator_send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "sleeper.tools", "id": ids.slow.as_str()}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(r.get("error").is_none(), "{r}");
+    for a in all.iter().filter(|a| **a != ids.slow) {
         let leg = format!("ff_{a}");
         add_file_bridge(
             &kernel,
@@ -50,7 +62,7 @@ async fn world(tmp: &TempDir, next_id: Option<i64>) -> (Arc<Kernel>, Ids) {
         .await;
         add_backend(&kernel, a.as_str(), &leg).await;
     }
-    for a in &all {
+    for a in all.iter().filter(|a| **a != ids.slow) {
         let line = json!({"call": ["*"]});
         let mut can = json!({"$parent": line, "cli": line, MEMORY: line});
         can[format!("ff_{a}")] = line.clone();
@@ -107,23 +119,24 @@ async fn asked(s: &Arc<MockScript>, needle: &str) -> String {
 }
 
 /// The first life: the lead's call to `slow` is out (slow is mid-pass), and the
-/// asker's message is held on the lead's chain. Returns what the store holds then,
+/// asker's message is stored at the lead (acked at once, #795), its pass held at the
+/// request. Returns what the store holds then,
 /// and where the id counter goes on.
 async fn first_life(tmp: &TempDir) -> (Value, i64) {
     let (kernel, ids) = world(tmp, None).await;
     assert_eq!(kernel.start(false).await["started"], json!(true));
-    // slow's pass outlives this kernel
-    let ss = script(&ids.slow, vec![pass(DONE)], Duration::from_secs(3600));
-    let _sl = script(
+    // the lead's call to the slow peer (an hour of sleep) outlives this kernel
+    let sl = script(
         &ids.lead,
-        vec![pass(send_call(ids.slow.as_str(), "work"))],
+        vec![pass(send_call(ids.slow.as_str(), "work", Some(3_600_000)))],
         Duration::ZERO,
     );
     let _sa = script(
         &ids.asker,
-        vec![pass(send_call(ids.lead.as_str(), "question"))],
+        vec![pass(send_call(ids.lead.as_str(), "question", None))],
         Duration::ZERO,
     );
+    // no settle: the lead's call stays open
     let r = kernel.operator_send(vec![Item::new(
             ids.lead.clone(),
             json!({"type": "send", "text": "start the work", "client_id": "o"}),
@@ -132,10 +145,12 @@ async fn first_life(tmp: &TempDir) -> (Value, i64) {
         .remove(0)
         .result;
     assert!(r.get("error").is_none(), "{r}");
-    assert!(
-        until_passes(&ss, 1).await,
-        "the lead's call never reached slow"
-    );
+    until_true("the lead's call to be out", || {
+        crate::state::state_for(&ids.lead).life.lock().unwrap().open > 0
+    })
+    .await;
+    // the lead's next request is held: the asker's message wakes a pass that never ends
+    let _held = sl.hold_next();
     let r = kernel.operator_send(vec![Item::new(
             ids.asker.clone(),
             json!({"type": "send", "text": "ask the lead", "client_id": "o"}),
@@ -144,7 +159,10 @@ async fn first_life(tmp: &TempDir) -> (Value, i64) {
         .remove(0)
         .result;
     assert!(r.get("error").is_none(), "{r}");
-    until_held(&ids.lead, 1).await;
+    assert!(
+        until_passes(&sl, 2).await,
+        "the asker's message woke no pass of the lead"
+    );
     // what reached the store is all the next life has
     kernel.flush_executions().await;
     let tables = kernel.operator_send(vec![Item::new(
@@ -210,11 +228,10 @@ fn a_chain_cut_by_a_restart_is_told_as_dead_letters_and_goes_on() {
             }
         };
         let sl = script(&ids.lead, Vec::new(), Duration::ZERO);
-        let ss = script(&ids.slow, Vec::new(), Duration::ZERO);
         let sa = script(&ids.asker, Vec::new(), Duration::ZERO);
         // the lead resends what it still needs; the others are done
         *sl.responder.lock().unwrap() = Some(Box::new({
-            let resend = send_call(ids.slow.as_str(), "work again");
+            let resend = send_call(ids.slow.as_str(), "work again", Some(10));
             let on = answer(resend);
             move |msgs: &[Value]| {
                 if last(msgs).contains("ANSWERED") {
@@ -224,11 +241,11 @@ fn a_chain_cut_by_a_restart_is_told_as_dead_letters_and_goes_on() {
                 }
             }
         }));
-        *ss.responder.lock().unwrap() = Some(Box::new(answer(DONE.to_string())));
         *sa.responder.lock().unwrap() = Some(Box::new(answer(DONE.to_string())));
         assert_eq!(kernel.start(true).await["started"], json!(true));
 
-        // THE LEDGER: both calls that died are dead letters, nothing is in flight
+        // THE LEDGER: the call that died is a dead letter, nothing is in flight; the
+        // asker's message to the lead was acked at once, so it is no dead letter
         let entries = kernel.operator_send(vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({"type": "ledger", "limit": 1000}),
@@ -243,21 +260,22 @@ fn a_chain_cut_by_a_restart_is_told_as_dead_letters_and_goes_on() {
             .iter()
             .filter(|e| e["status"] == json!("cancelled"))
             .collect();
-        let to = |t: &AgentId| {
-            cut.iter()
-                .find(|e| e["target"] == json!(t.as_str()))
-                .and_then(|e| e["id"].as_i64())
-                .unwrap_or_else(|| panic!("a cut call to {t}: {entries:?}"))
-        };
-        let (work, question) = (to(&ids.slow), to(&ids.lead));
-        assert_eq!(cut.len(), 2, "{cut:?}");
+        let work = cut
+            .iter()
+            .find(|e| e["target"] == json!(ids.slow.as_str()))
+            .and_then(|e| e["id"].as_i64())
+            .unwrap_or_else(|| panic!("a cut call to {}: {entries:?}", ids.slow));
+        assert!(
+            !cut.iter().any(|e| e["target"] == json!(ids.lead.as_str())),
+            "the asker's message was acked, never cut: {cut:?}"
+        );
         assert!(
             cut.iter().all(|e| e["outcome"]["error"]
                 == json!(fantastic_kernel::executions::CUT_BY_RESTART)),
             "{cut:?}"
         );
 
-        // THE LEAD is told both: its reply will not come, the held message was cut
+        // THE LEAD is told its reply will not come
         let told = asked(&sl, "[restart]").await;
         assert!(
             told.contains(&format!(
@@ -266,32 +284,22 @@ fn a_chain_cut_by_a_restart_is_told_as_dead_letters_and_goes_on() {
             )),
             "{told}"
         );
-        assert!(
-            told.contains(&format!(
-                "[from {} \u{b7} dead letter {question}] a message to you was cut",
-                ids.asker
-            )),
-            "{told}"
-        );
-        // THE ASKER (the held sender) is told its message died
-        let told = asked(&sa, "[restart]").await;
-        assert!(
-            told.contains(&format!(
-                "[reply to {question} \u{b7} {} send] no reply will come",
-                ids.lead
-            )),
-            "{told}"
-        );
-        // SLOW, cut mid-pass, is told the message it was answering died
-        let told = asked(&ss, "[restart]").await;
-        assert!(
-            told.contains(&format!("[from {} \u{b7} dead letter {work}]", ids.lead)),
-            "{told}"
-        );
+        // THE ASKER's message is not lost: stored and acked, the boot's pass reads it
+        until_true("the lead to read the asker's message", || {
+            sl.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| Value::Array(m.clone()).to_string().contains("question"))
+        })
+        .await;
 
         // THE CHAIN GOES ON: the lead's resend is answered and reaches it
-        let back = asked(&sl, "ANSWERED").await;
+        let back = asked(&sl, "slept").await;
         assert!(back.contains(&format!("{} send", ids.slow)), "{back}");
+        // nothing of the asker was cut, so nothing tells it
+        assert!(settle(&kernel).await, "the agents never went quiet");
+        assert_eq!(sa.passes_served(), 0, "the asker is told nothing");
 
         // TOLD ONCE: a reboot of the lead tells it nothing again
         tokio::time::sleep(Duration::from_millis(300)).await;

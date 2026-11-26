@@ -1,9 +1,9 @@
 //! `ai_chat.tools` — THE AI AGENT, apart from any provider.
 //!
 //! It holds the conversation (memory, folds, history, the `<call>` parse and
-//! route, fork, watch, embed: every ai_core verb) and completes each turn through
-//! the provider agent its record names (`provider_id`), by `complete`
-//! ([`crate::remote_provider`]). It knows no provider's kind, endpoint or key:
+//! route, fork, watch, embed: every ai_core verb) and completes each pass through
+//! the provider agent its record names (`provider_id`), by a `complete` call whose
+//! settle is the pass's next step ([`crate::remote_provider`]). It knows no provider's kind, endpoint or key:
 //! those live on the provider agent. The request knobs are the chat's own
 //! ([`crate::record::RequestKnobs`]), sent with each request (#632). A provider on a connected kernel
 //! (`<guid>|<id>`) serves it the same way. Roles and other meta bundles extend
@@ -134,7 +134,8 @@ impl Handler for AiChatBundle {
         call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let provider = |_client: &str| chat_provider(agent_id, kernel);
+        let (me, k) = (agent_id.clone(), Arc::clone(kernel));
+        let provider = move |_client: &str| chat_provider(&me, &k);
         let reflect = || {
             let mut out = verbs::reflect_base(agent_id, kernel, MAN, CFG.model_window);
             let meta = crate::helpers::agent_meta(agent_id, kernel);
@@ -167,8 +168,8 @@ impl Handler for AiChatBundle {
         Ok(())
     }
 
-    /// A cancel of this chat's turn closes it (the provider's pass, a call of the turn,
-    /// is cancelled with it).
+    /// A cancel of one of this chat's tasks: a pass is none, and the cancel of its
+    /// request ends it through the request's settle.
     async fn on_cancel(
         &self,
         agent_id: &AgentId,

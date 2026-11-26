@@ -11,7 +11,6 @@
 use super::*;
 use crate::stream_parts::{cut_marker, Part, PartEvent, PartKind, PartSplitter};
 use fantastic_kernel::test_support::{as_agent, grant};
-use fantastic_kernel::Status;
 use futures_util::StreamExt;
 use std::collections::HashMap;
 
@@ -218,24 +217,25 @@ impl Handler for SlowBundle {
         call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        // An unscripted agent (its `boot` at create) serves DONE passes.
-        let script = Arc::clone(
-            slow_scripts()
-                .entry(agent_id.as_str().to_string())
-                .or_insert_with(|| {
-                    Arc::new(SlowScript {
-                        scripts: std::sync::Mutex::new(std::collections::VecDeque::new()),
-                        step: std::sync::Mutex::new(Duration::ZERO),
-                        requests: std::sync::Mutex::new(Vec::new()),
-                    })
-                }),
-        );
+        // An unscripted agent (its `boot` at create) serves DONE passes. The script is
+        // the one registered WHEN THE PASS STARTS: a pass may start outside a call to
+        // the bundle, after a test scripted it anew.
+        let me = agent_id.as_str().to_string();
+        let script_now = move || {
+            Arc::clone(slow_scripts().entry(me.clone()).or_insert_with(|| {
+                Arc::new(SlowScript {
+                    scripts: std::sync::Mutex::new(std::collections::VecDeque::new()),
+                    step: std::sync::Mutex::new(Duration::ZERO),
+                    requests: std::sync::Mutex::new(Vec::new()),
+                })
+            }))
+        };
         let reply = verbs::handle(
             agent_id,
             call,
             kernel,
             CFG,
-            move |_client| Arc::new(SlowProvider(Arc::clone(&script))) as Arc<dyn Provider>,
+            move |_client| Arc::new(SlowProvider(script_now())) as Arc<dyn Provider>,
             || json!({"id": "slow_backend"}),
         )
         .await?;
@@ -410,7 +410,9 @@ async fn a_model_that_stops_with_a_block_open_leaves_the_marker_on_top() {
         "<call name=\"send\"><routing><target_id>notes</target_id></routing><payload><type>refl";
     let fp = slow(&ai, &[open_call, DONE], Duration::ZERO);
     call(&kernel, ai.as_str(), json!({"type": "send", "text": "go"})).await;
-    // a cut pass ends: the next message's turn sees the marker (#795, nothing re-asks it)
+    // a cut pass ends: the next message's pass sees the marker (#795, nothing re-asks
+    // it). Sent once the first pass is over: one sent while it reads would be its own
+    assert!(crate::tests::settle(&kernel).await);
     call(&kernel, ai.as_str(), json!({"type": "send", "text": "next"})).await;
     until_requests(&fp, 2).await;
     let marker = last_assistant(&fp, 1);
@@ -456,10 +458,10 @@ async fn stop_during_a_stalled_stream_clears_generating() {
     let k = Arc::clone(&kernel);
     let target = ai.clone();
     let turn = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, k.operator_send(vec![Item::new(
             target,
             json!({"type": "send", "text": "go", "client_id": "tab"}),
-        )])
+        )]))
         .await
         .remove(0)
     });
@@ -487,7 +489,8 @@ async fn stop_during_a_stalled_stream_clears_generating() {
     .remove(0)
     .result;
     assert_eq!(after["generating"], json!(false), "{after}");
-    assert_eq!(turn.await.unwrap().status, Status::Cancelled);
+    // the message was acked when it was stored (#795): the stop ends the pass, not the send
+    assert_eq!(turn.await.unwrap().result["accepted"], json!(true));
     // the stopped notice: the turn keeps its message, and a user row of kind
     // `stopped` says who stopped it — no bare marker is stored as an answer
     let rows = conversation(&kernel, &ai).await;
@@ -546,10 +549,10 @@ async fn stop_closes_a_stalled_turn_the_kernel_cancel_did_not_reach() {
     let k = Arc::clone(&kernel);
     let target = ai.clone();
     let turn = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, k.operator_send(vec![Item::new(
             target,
             json!({"type": "send", "text": "go", "client_id": "tab"}),
-        )])
+        )]))
         .await
         .remove(0)
     });
@@ -612,20 +615,12 @@ async fn stop_reaches_a_reply_woken_turn() {
     let fp = slow(&ai, &["never"], Duration::from_secs(600));
     let k = Arc::clone(&kernel);
     let target = ai.clone();
-    let born = crate::state::incarnation(&ai);
-    // the delivery is the agent's own task, spawned in its dispatch
+    let born = crate::route::Born::of(ai.as_str());
+    // the reply is the agent's own arrival, delivered in its task
     as_agent(ai.clone(), async {
         kernel.spawn_task(&ai, "deliver_reply", async move {
-            crate::route::deliver(
-                &k,
-                target.as_str(),
-                "tool reply",
-                "tab",
-                born,
-                false,
-                String::new(),
-            )
-            .await;
+            crate::route::deliver(&k, &target, target.as_str(), "tool reply", "tab", born, false, true)
+                .await;
         });
     })
     .await;
@@ -686,10 +681,10 @@ async fn stop_aborts_a_send_the_kernel_cancel_does_not_find() {
     let k = Arc::clone(&kernel);
     let target = ai.clone();
     let turn = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, k.operator_send(vec![Item::new(
             target,
             json!({"type": "send", "text": "go", "client_id": "tab"}),
-        )])
+        )]))
         .await
         .remove(0)
     });
@@ -708,14 +703,9 @@ async fn stop_aborts_a_send_the_kernel_cancel_does_not_find() {
     .await
     .remove(0);
     assert_eq!(out.result, json!({"stopped": true}), "{:?}", out.result);
-    // the send's abort arm returned: a cancelled answer, not a stream left open
+    // the message was acked when it was stored (#795); the stop's abort ended the pass
     let turn_out = turn.await.expect("the turn task");
-    assert_eq!(
-        turn_out.result["cancelled"],
-        json!(true),
-        "{:?}",
-        turn_out.result
-    );
+    assert_eq!(turn_out.result["accepted"], json!(true), "{:?}", turn_out.result);
     let after = as_agent(
         "rx",
         kernel.operator_send(vec![Item::new(ai.clone(), json!({"type": "status"}))]),
@@ -762,10 +752,10 @@ async fn a_receiver_stops_the_stream_and_the_turn_keeps_a_marker() {
     let k = Arc::clone(&kernel);
     let target = ai.clone();
     let turn = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, k.operator_send(vec![Item::new(
             target,
             json!({"type": "send", "text": "go", "client_id": "tab"}),
-        )])
+        )]))
         .await
         .remove(0)
     });
@@ -778,7 +768,8 @@ async fn a_receiver_stops_the_stream_and_the_turn_keeps_a_marker() {
     .await
     .remove(0);
     assert_eq!(out.result, json!({"stopped": true}), "{:?}", out.result);
-    assert_eq!(turn.await.unwrap().status, Status::Cancelled);
+    // the message was acked when it was stored (#795): the stop ends the pass, not the send
+    assert_eq!(turn.await.unwrap().result["accepted"], json!(true));
     let seen = types(&drain_parts(&mut w));
     assert_eq!(
         seen.last().map(String::as_str),
@@ -1013,10 +1004,10 @@ async fn status_during_a_stream_is_json() {
     let k = Arc::clone(&kernel);
     let target = ai.clone();
     let turn = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, k.operator_send(vec![Item::new(
             target,
             json!({"type": "send", "text": "go"}),
-        )])
+        )]))
         .await
         .remove(0)
     });
@@ -1049,6 +1040,7 @@ async fn a_cut_pass_sends_nothing_not_even_its_closed_calls() {
     let pass = format!("{done_one} then {open_two}");
     let fp = slow(&ai, &[&pass, DONE], Duration::ZERO);
     call(&kernel, ai.as_str(), json!({"type": "send", "text": "go"})).await;
+    assert!(crate::tests::settle(&kernel).await);
     call(&kernel, ai.as_str(), json!({"type": "send", "text": "next"})).await;
     until_requests(&fp, 2).await;
     let marker = last_assistant(&fp, 1);
