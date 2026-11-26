@@ -392,7 +392,7 @@ impl Provider for Steps {
 /// END THE PASS IN FLIGHT as a cancel does (#795: a pass is no future to drop): the
 /// agent's `stop`, then until its request's settle has dropped the pass's view.
 async fn stop_pass(kernel: &Arc<Kernel>, agent: &AgentId) {
-    let _ = fantastic_kernel::test_support::as_agent(agent.clone(), crate::verbs::stop(agent, None, kernel)).await;
+    let _ = fantastic_kernel::test_support::as_agent(agent.clone(), crate::verbs::stopped(agent, None, kernel)).await;
     let st = crate::state::state_for(agent);
     until_true("the stopped pass to drop its view", || st.render_cache.stats().pins == 0).await;
     assert!(crate::tests::settle(kernel).await);

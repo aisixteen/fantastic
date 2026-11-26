@@ -394,14 +394,112 @@ fn ceiling_from_now() -> std::time::Instant {
     std::time::Instant::now() + std::time::Duration::from_secs_f64(crate::constants::send_timeout_secs())
 }
 
-/// Assemble the pass and send its first request, or fail it.
+/// Assemble the pass and send its first request, or fail it: the provider's readiness
+/// and the caching mode are checked first, then the pass's type is resolved (a step:
+/// [`Pass::begin`]) and the previous pass's type read (a step:
+/// [`crate::model_format::trace::previous_type`]); [`Prep`] goes on from there.
 fn prepare_and_ask(run: Run) -> futures_util::future::BoxFuture<'static, ()> {
     Box::pin(async move {
-        match prepare(&run).await {
+        // A PROVIDER THAT CANNOT RUN REFUSES THE PASS FIRST, before the owed recall, the
+        // assembly and the projection.
+        if let Err(e) = run.provider.ready() {
+            return failed(run, GenFailure::Provider(e)).await;
+        }
+        // THE CACHING MODE IS CHECKED FIRST TOO: a record that asks for provider caching
+        // on a backend that cannot cache is refused before any row is written.
+        let caching = match crate::caching::settings(&crate::helpers::agent_meta(&run.self_id, &run.kernel)) {
+            Ok(c) => c,
+            Err(why) => return failed(run, GenFailure::Provider(ProviderError::value_error(why))).await,
+        };
+        // THE PASS PATH (#766): every model request of this pass goes through it, its own
+        // and its helpers' (the owed recall, the projection's fold summaries).
+        let rows = run.history.clone().unwrap_or_default();
+        let (k, me, st, p) = (
+            Arc::clone(&run.kernel),
+            run.self_id.clone(),
+            Arc::clone(&run.state),
+            Arc::clone(&run.provider),
+        );
+        Pass::begin(p, &me, &st, &k, rows, (run, caching), |(run, caching), pass| async move {
+            if !crate::life::is_current(&run.self_id, run.epoch) {
+                return;
+            }
+            let (k, me, st) = (Arc::clone(&run.kernel), run.self_id.clone(), Arc::clone(&run.state));
+            let prep = Prep { run, caching, pass };
+            crate::model_format::trace::previous_type(&me, &k, &st, prep, |prep, from| prep.typed(from)).await;
+        })
+        .await;
+    })
+}
+
+/// A pass being assembled: what its steps hand on until its first request.
+struct Prep {
+    run: Run,
+    caching: (crate::caching::Caching, Option<i64>),
+    pass: Pass,
+}
+
+impl Prep {
+    /// The previous pass's type is known: a type other than it is traced as
+    /// `model_switched` (#766, 1.10), and the calibration measured under it dropped
+    /// (#766, Q37); then the prompt file is brought current (steps,
+    /// [`crate::prompt_file::refresh`]).
+    async fn typed(self, from: Option<String>) {
+        if !crate::life::is_current(&self.run.self_id, self.run.epoch) {
+            return;
+        }
+        crate::model_format::trace::note_switch(&self.pass, from);
+        clear_calib_on_type_change(&self.run.state, self.pass.kind);
+        let (k, me) = (Arc::clone(&self.run.kernel), self.run.self_id.clone());
+        crate::prompt_file::refresh(&me, &k, self, Self::filed).await;
+    }
+
+    /// The prompt file is current: A RECALL OWED FROM THE LAST FOLD BATCH (or from a
+    /// boot) runs first, so this pass is assembled over the head the recall chose; the
+    /// history is then read again (a step).
+    async fn filed(self) {
+        if !crate::life::is_current(&self.run.self_id, self.run.epoch) {
+            return;
+        }
+        let run = &self.run;
+        let due = std::mem::take(&mut *run.state.recall_due.lock().expect("recall_due poisoned"));
+        if !due {
+            let store = run.history.clone();
+            return self.assemble(store).await;
+        }
+        let recalled = crate::retrieval::context_recall(
+            &run.self_id,
+            false,
+            &run.kernel,
+            Some(&self.pass),
+            self.pass.decl,
+            run.cfg.model_window,
+            Some(&run.client_id),
+            &run.tail.iter().map(|a| a.row_id).collect::<Vec<_>>(),
+            &run.me,
+        )
+        .await;
+        if let Err(e) = recalled {
+            return failed(self.run, e.into()).await;
+        }
+        // a recall rewrote the view and the head: the history is read again
+        let (k, me) = (Arc::clone(&self.run.kernel), self.run.self_id.clone());
+        crate::steps::history(&me, &k, self, Self::assemble).await;
+    }
+
+    /// THE ASSEMBLY over `store`, the history the pass read: the view over it (the tail
+    /// is its newest rows), the projection that fits it to the window, and the cache
+    /// marks; then the first request.
+    async fn assemble(self, store: crate::memory::MemResult<Vec<Value>>) {
+        if !crate::life::is_current(&self.run.self_id, self.run.epoch) {
+            return;
+        }
+        let Self { run, caching, pass } = self;
+        match prepared(&run, pass, caching, store).await {
             Ok(prep) => ask(Box::new(PassRec::new(run, prep))).await,
             Err(f) => failed(run, f).await,
         }
-    })
+    }
 }
 
 /// What a pass holds from its assembly to its answer.
@@ -471,50 +569,21 @@ impl PassRec {
     }
 }
 
-/// THE ASSEMBLY: the provider's readiness and the caching mode first, then the owed
-/// recall, the view over history (the tail is its newest rows), the projection that
-/// fits it to the window, and the cache marks.
-async fn prepare(run: &Run) -> Result<Prepared, GenFailure> {
+/// The pass assembled over `store`: its view, fitted to the window, its counts seeded
+/// from the newest row it read, its cache marks and its live parts.
+async fn prepared(
+    run: &Run,
+    pass: Pass,
+    (caching, primer): (crate::caching::Caching, Option<i64>),
+    store: crate::memory::MemResult<Vec<Value>>,
+) -> Result<Prepared, GenFailure> {
     let (kernel, self_id, state) = (&run.kernel, &run.self_id, &run.state);
-    // A PROVIDER THAT CANNOT RUN REFUSES THE PASS FIRST, before the owed recall, the
-    // assembly and the projection.
-    run.provider.ready().map_err(GenFailure::Provider)?;
-    // THE CACHING MODE IS CHECKED FIRST TOO: a record that asks for provider caching on
-    // a backend that cannot cache is refused before any row is written.
-    let (caching, primer) = crate::caching::settings(&crate::helpers::agent_meta(self_id, kernel))
-        .map_err(|why| GenFailure::Provider(ProviderError::value_error(why)))?;
-    // THE PASS PATH (#766): every model request of this pass goes through it, its own
-    // and its helpers' (the owed recall, the projection's fold summaries).
-    let pass = Pass::new(Arc::clone(&run.provider), self_id, state, kernel).await;
-    // A TYPE OTHER THAN THE LAST PASS'S (#766, 1.10): traced as `model_switched`
-    crate::model_format::trace::note_switch(self_id, kernel, state, &pass).await;
-    // THE CALIBRATION BELONGS TO THE TYPE IT WAS MEASURED UNDER (#766, Q37)
-    clear_calib_on_type_change(state, pass.kind);
-    // A RECALL OWED FROM THE LAST FOLD BATCH (or from a boot) runs first, so this pass
-    // is assembled over the head the recall chose.
-    let due = std::mem::take(&mut *state.recall_due.lock().expect("recall_due poisoned"));
-    if due {
-        crate::retrieval::context_recall(
-            self_id,
-            false,
-            kernel,
-            Some(&pass),
-            run.cfg.model_window,
-            Some(&run.client_id),
-            &run.tail.iter().map(|a| a.row_id).collect::<Vec<_>>(),
-            &run.me,
-        )
-        .await?;
-    }
-    // THE HISTORY THE PASS'S STEP READ ([`gather`]); a recall rewrote the view and the
-    // head, so the history is read again after one
-    let store = if due {
-        crate::memory::load_history(self_id, kernel, false).await?
-    } else {
-        run.history.clone()?
-    };
+    let store = store?;
+    // a restart keeps counting from the newest row the pass read (#766, 1.7)
+    let newest_totals = crate::row_attrs::seed_totals(&store);
+    crate::used::seed(state, &store);
     let (mut messages, store_len, read) =
-        crate::assembly::assemble_read(self_id, state, kernel, caching, store, &run.me).await?;
+        crate::assembly::assemble_read(self_id, state, kernel, caching, store, &run.me)?;
     // WHAT THIS PASS READS IS READ (#795): a message stored after the tail was taken and
     // before the history read is in this request; it wakes no pass after
     crate::life::read_by_pass(self_id, &read);
@@ -549,18 +618,13 @@ async fn prepare(run: &Run) -> Result<Prepared, GenFailure> {
             return Err(GenFailure::FoldAnchor(e))
         }
     };
+    // read after the projection: a compaction makes the next request a checkpoint
     let prev_request = state
         .prev_request
         .lock()
         .expect("prev_request poisoned")
         .clone();
-    // a restart keeps counting from the newest stored row (#766, 1.7)
-    let seed = if prev_request.is_none() {
-        crate::row_attrs::seed_totals(self_id, kernel).await
-    } else {
-        None
-    };
-    crate::used::seed(self_id, state, kernel).await;
+    let seed = if prev_request.is_none() { newest_totals } else { None };
     // THE AGENT'S CACHE MARKS (`cache_mark`): only `provider_cache` places them.
     if caching.marks() {
         crate::caching::mark(&mut model_messages, primer);
@@ -668,12 +732,19 @@ async fn settled(mut rec: Box<PassRec>, live: Arc<LiveView>, r: Result<String, P
             drop(rec.view.take());
             let PassRec { run, .. } = *rec;
             let entry = crate::state::take_current(&run.self_id);
-            if let Some(entry) = entry {
-                if let Err(e) = crate::verbs::close_stopped(&run.self_id, entry, &run.kernel).await {
+            let Some(entry) = entry else {
+                crate::life::end(&run.kernel, &run.self_id, run.epoch);
+                return;
+            };
+            // the stopped pass's rows are a step; the pass ends once they are written
+            let (k, me) = (Arc::clone(&run.kernel), run.self_id.clone());
+            crate::verbs::close_stopped(&me, entry, &k, run, |run, r| async move {
+                if let Err(e) = r {
                     eprintln!("  [ai] {}: the stopped pass's rows: {e}", run.self_id);
                 }
-            }
-            crate::life::end(&run.kernel, &run.self_id, run.epoch);
+                crate::life::end(&run.kernel, &run.self_id, run.epoch);
+            })
+            .await;
             return;
         }
         Err(e) => {

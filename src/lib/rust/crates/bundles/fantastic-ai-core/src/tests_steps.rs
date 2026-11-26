@@ -471,3 +471,66 @@ async fn a_message_the_kernel_hands_over_is_stored_and_read() {
     let read = Value::Array(served_for(a).requests.lock().unwrap()[0].clone()).to_string();
     assert!(read.contains("handed over"), "{read}");
 }
+
+/// A call to `agent` from the operator, its settle to come.
+fn call_bg(kernel: &Arc<Kernel>, agent: &str, payload: Value) -> tokio::task::JoinHandle<fantastic_kernel::Outcome> {
+    let (k, item) = (Arc::clone(kernel), Item::new(AgentId::from(agent), payload));
+    tokio::spawn(async move { k.operator_send(vec![item]).await.remove(0) })
+}
+
+/// A MEMORY VERB IS ANSWERED BY ITS STEPS (#795): its handler defers and sends its store
+/// read; while the store holds the read the call stays open, and the read's settle is
+/// the step that goes on and answers it — for each verb that reads the agent's store.
+#[tokio::test]
+async fn a_memory_verb_is_answered_by_the_settle_of_its_store_read() {
+    let verbs = [
+        (json!({"type": "history"}), "rows"),
+        (json!({"type": "recall"}), "messages"),
+        (json!({"type": "grep", "query": "x", "ids": [1]}), "matches"),
+        (json!({"type": "fork_points"}), "points"),
+        (json!({"type": "pause"}), "paused"),
+        (json!({"type": "context_forget"}), "pruned"),
+        (json!({"type": "context_clear"}), "cleared"),
+    ];
+    for (i, (payload, key)) in verbs.into_iter().enumerate() {
+        let tmp = TempDir::new().unwrap();
+        let a = format!("steps_t6_{i}");
+        let kernel = setup(&tmp, &a, None).await;
+        let g = gate(&a, What::Read);
+        let verb = payload["type"].clone();
+        let settle = call_bg(&kernel, &a, payload);
+        assert!(
+            until(|| g.held.load(Ordering::SeqCst) >= 1).await,
+            "{verb}: the store read never went out"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!settle.is_finished(), "{verb} was answered before its read settled");
+        let _ = g.open.send(true);
+        let out = tokio::time::timeout(Duration::from_secs(5), settle)
+            .await
+            .unwrap_or_else(|_| panic!("{verb} never settled"))
+            .unwrap();
+        assert_eq!(out.status, fantastic_kernel::Status::Completed, "{verb}: {}", out.result);
+        assert!(out.result.get(key).is_some(), "{verb}: {}", out.result);
+    }
+}
+
+/// A VERB'S STORE FAILURE IS ITS RAISE, from its step: a store that does not exist fails
+/// the call as a `MemoryStoreError`, as an awaited read did.
+#[tokio::test]
+async fn a_memory_verb_whose_store_is_gone_fails_as_a_raise() {
+    let tmp = TempDir::new().unwrap();
+    let a = "steps_t7";
+    let kernel = setup(&tmp, a, Some("no_such_store")).await;
+    let out = tokio::time::timeout(Duration::from_secs(5), call_bg(&kernel, a, json!({"type": "history"})))
+        .await
+        .expect("history never settled")
+        .unwrap();
+    assert_eq!(out.status, fantastic_kernel::Status::Failed, "{}", out.result);
+    assert_eq!(out.result["raised"], json!(true), "{}", out.result);
+    assert!(
+        out.result["error"].as_str().is_some_and(|e| e.starts_with("MemoryStoreError: ")),
+        "{}",
+        out.result
+    );
+}

@@ -2361,7 +2361,7 @@ enum Ran {
 }
 
 mod deliver;
-pub use deliver::Deferred;
+pub use deliver::{Asker, Deferred};
 pub(crate) use deliver::DeferTable;
 pub(crate) mod gate;
 mod kernel_verbs;

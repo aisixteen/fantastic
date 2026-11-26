@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 
 use crate::events::emit_status;
 use crate::helpers::now_secs;
-use crate::memory::{head, save_history, store_call, MemResult};
+use crate::memory::{store_call, MemResult};
 use crate::state::state_for;
 
 const PAUSE: &str = "pause";
@@ -34,15 +34,14 @@ pub struct PauseView {
     pub since: Option<f64>,
 }
 
-/// Read the pause state off the store head: the last `pause`/`resume` row decides
+/// The pause state off the store head's `rows`: the last `pause`/`resume` row decides
 /// whether the agent is paused.
-pub async fn view(agent_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<PauseView> {
-    let rows = head(agent_id, kernel).await?;
+fn view_of(rows: &[Value]) -> PauseView {
     let mut out = PauseView {
         paused: false,
         since: None,
     };
-    for r in &rows {
+    for r in rows {
         match r.get("kind").and_then(Value::as_str) {
             Some(PAUSE) => {
                 out.paused = true;
@@ -55,7 +54,18 @@ pub async fn view(agent_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<PauseVi
             _ => {}
         }
     }
-    Ok(out)
+    out
+}
+
+/// The pause state, as a step (#795): the store head read ([`crate::steps::head`]),
+/// then [`view_of`].
+async fn view<R, F, Fut>(agent_id: &AgentId, kernel: &Arc<Kernel>, rec: R, next: F)
+where
+    R: Send + 'static,
+    F: FnOnce(R, MemResult<PauseView>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    crate::steps::head(agent_id, kernel, rec, move |rec, rows| next(rec, rows.map(|r| view_of(&r)))).await;
 }
 
 /// The chat's `status` outside a call — `paused` or `idle` — on its own inbox, for
@@ -103,62 +113,90 @@ pub async fn announce_at_boot(agent_id: &AgentId, kernel: &Arc<Kernel>) -> MemRe
 }
 
 /// `pause` — stop the in-flight generation and hold incoming messages. Already
-/// paused: a no-op with the same reply.
-pub async fn pause(
+/// paused: a no-op with the same reply. The head read, the stop's rows and the pause
+/// row are steps (#795); `settle` answers the call.
+pub(crate) async fn pause(
     agent_id: &AgentId,
-    reason: Option<&str>,
+    reason: Option<String>,
     kernel: &Arc<Kernel>,
-) -> Result<Value, BundleError> {
-    let v = view(agent_id, kernel).await?;
-    if v.paused {
-        return Ok(json!({"paused": true, "held": crate::life::unread_count(agent_id)}));
-    }
-    // The stop writes the `[stopped by …]` marker and closes the open parts.
-    let _ = crate::verbs::stop(agent_id, None, kernel).await;
-    crate::life::set_paused(agent_id, true);
-    save_history(
-        agent_id,
-        kernel,
-        &[json!({
-            "kind": PAUSE,
-            "paused_since": now_secs(),
-            "reason": reason,
-        })],
-    )
-    .await?;
-    announce(agent_id, kernel, "paused").await;
-    Ok(json!({"paused": true, "held": 0}))
+    settle: crate::steps::Settle,
+) {
+    let (me, k) = (agent_id.clone(), Arc::clone(kernel));
+    let who = crate::verbs::stopper();
+    view(agent_id, kernel, (reason, settle), move |(reason, settle), v| async move {
+        let v = match v {
+            Ok(v) => v,
+            Err(e) => return settle.with(Err::<Value, _>(e)),
+        };
+        if v.paused {
+            return settle.with(Ok::<_, BundleError>(
+                json!({"paused": true, "held": crate::life::unread_count(&me)}),
+            ));
+        }
+        // The stop writes the `[stopped by …]` marker and closes the open parts.
+        let (me2, k2) = (me.clone(), Arc::clone(&k));
+        crate::verbs::stop(&me, None, who, &k, (reason, settle), move |(reason, settle), _| async move {
+            crate::life::set_paused(&me2, true);
+            let row = json!({
+                "kind": PAUSE,
+                "paused_since": now_secs(),
+                "reason": reason,
+            });
+            let (me3, k3) = (me2.clone(), Arc::clone(&k2));
+            crate::steps::append(&me2, &k2, &[row], settle, move |settle, r| async move {
+                if let Err(e) = r {
+                    return settle.with(Err::<Value, _>(e));
+                }
+                announce(&me3, &k3, "paused").await;
+                settle.with(Ok::<_, BundleError>(json!({"paused": true, "held": 0})));
+            })
+            .await;
+        })
+        .await;
+    })
+    .await;
 }
 
 /// `resume` — write one resumed row (with the note), then ONE pass reads every message
-/// held (#795): nothing is re-sent. Not paused: a no-op.
-pub async fn resume(
+/// held (#795): nothing is re-sent. Not paused: a no-op. The head read and the row are
+/// steps; `settle` answers the call.
+pub(crate) async fn resume(
     agent_id: &AgentId,
-    note: Option<&str>,
+    note: Option<String>,
     kernel: &Arc<Kernel>,
-) -> Result<Value, BundleError> {
-    let v = view(agent_id, kernel).await?;
-    if !v.paused {
-        return Ok(json!({"resumed": false, "released": 0}));
-    }
-    let since = v.since.unwrap_or_else(now_secs);
-    let secs = (now_secs() - since).max(0.0);
-    let mut content = format!("[resumed after a pause of {secs:.0}s]");
-    if let Some(note) = note {
-        content.push_str(&format!(" {note}"));
-    }
-    save_history(
-        agent_id,
-        kernel,
-        &[json!({"kind": RESUME, "role": "user", "content": content})],
-    )
-    .await?;
-    crate::life::set_paused(agent_id, false);
-    let released = crate::life::unread_count(agent_id);
-    if released == 0 {
-        announce(agent_id, kernel, "idle").await;
-    } else {
-        crate::life::wake(kernel, agent_id);
-    }
-    Ok(json!({"resumed": true, "released": released}))
+    settle: crate::steps::Settle,
+) {
+    let (me, k) = (agent_id.clone(), Arc::clone(kernel));
+    view(agent_id, kernel, (note, settle), move |(note, settle), v| async move {
+        let v = match v {
+            Ok(v) => v,
+            Err(e) => return settle.with(Err::<Value, _>(e)),
+        };
+        if !v.paused {
+            return settle.with(Ok::<_, BundleError>(json!({"resumed": false, "released": 0})));
+        }
+        let since = v.since.unwrap_or_else(now_secs);
+        let secs = (now_secs() - since).max(0.0);
+        let mut content = format!("[resumed after a pause of {secs:.0}s]");
+        if let Some(note) = note {
+            content.push_str(&format!(" {note}"));
+        }
+        let row = json!({"kind": RESUME, "role": "user", "content": content});
+        let (me2, k2) = (me.clone(), Arc::clone(&k));
+        crate::steps::append(&me, &k, &[row], settle, move |settle, r| async move {
+            if let Err(e) = r {
+                return settle.with(Err::<Value, _>(e));
+            }
+            crate::life::set_paused(&me2, false);
+            let released = crate::life::unread_count(&me2);
+            if released == 0 {
+                announce(&me2, &k2, "idle").await;
+            } else {
+                crate::life::wake(&k2, &me2);
+            }
+            settle.with(Ok::<_, BundleError>(json!({"resumed": true, "released": released})));
+        })
+        .await;
+    })
+    .await;
 }

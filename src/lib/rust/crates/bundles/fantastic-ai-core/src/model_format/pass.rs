@@ -97,16 +97,56 @@ pub(crate) struct Pass {
 }
 
 impl Pass {
-    /// The pass of `self_id`'s next request: its type from the model id
-    /// ([`super::rules::model_of`], [`super::rules::type_of`]).
+    /// THE PASS OF `self_id`'S NEXT REQUEST, as a STEP (#795): its type from the model id
+    /// ([`super::rules::model_of`], whose `models` ask is a call of its own;
+    /// [`super::rules::type_of`]), `rows` the history the pass read; `next` gets it.
+    pub(crate) async fn begin<R, F, Fut>(
+        provider: Arc<dyn Provider>,
+        self_id: &AgentId,
+        state: &Arc<BackendState>,
+        kernel: &Arc<Kernel>,
+        rows: Vec<Value>,
+        rec: R,
+        next: F,
+    ) where
+        R: Send + 'static,
+        F: FnOnce(R, Self) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let meta = crate::helpers::agent_meta(self_id, kernel);
+        let (st, me, m) = (Arc::clone(state), self_id.clone(), meta.clone());
+        super::rules::model_of(kernel, &meta, state, rows, rec, move |rec, model| async move {
+            let pass = Self::with_model(provider, &me, &st, &m, model);
+            next(rec, pass).await;
+        })
+        .await;
+    }
+
+    /// TESTS: [`Self::begin`] driven to its end over the chat's history.
+    #[cfg(test)]
     pub(crate) async fn new(
         provider: Arc<dyn Provider>,
         self_id: &AgentId,
         state: &Arc<BackendState>,
         kernel: &Arc<Kernel>,
     ) -> Self {
-        let meta = crate::helpers::agent_meta(self_id, kernel);
-        let model = super::rules::model_of(self_id, kernel, &meta, state).await;
+        let rows = crate::memory::load_history(self_id, kernel, false).await.unwrap_or_default();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        Self::begin(provider, self_id, state, kernel, rows, tx, |tx, p| async move {
+            let _ = tx.send(p);
+        })
+        .await;
+        rx.await.expect("the pass step ran")
+    }
+
+    /// The pass of `self_id`'s next request for the model id `model`.
+    pub(crate) fn with_model(
+        provider: Arc<dyn Provider>,
+        self_id: &AgentId,
+        state: &Arc<BackendState>,
+        meta: &Map<String, Value>,
+        model: Option<String>,
+    ) -> Self {
         let kind = super::rules::type_of(
             super::rules::shipped(),
             model.as_deref().unwrap_or_default(),

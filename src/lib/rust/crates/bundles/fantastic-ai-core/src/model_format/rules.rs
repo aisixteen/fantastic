@@ -123,46 +123,60 @@ pub(crate) fn first_set(sources: [Option<&str>; 4]) -> Option<&str> {
     sources.into_iter().flatten().find(|s| !s.is_empty())
 }
 
-/// The model id of the chat's next pass ([`model_of_with`] over the kernel): the provider
-/// named by the record's `provider_id` is asked `models`, and the newest stored assistant
-/// row is read, each only when nothing earlier names a model.
-pub(crate) async fn model_of(
-    self_id: &AgentId,
+/// THE MODEL ID OF THE CHAT'S NEXT PASS, as a STEP (#795; [`begin`] then [`answered`]):
+/// the provider named by the record's `provider_id` is asked `models` (a call, whose
+/// settle is the next step) only when nothing earlier names a model, and the newest
+/// assistant row of `rows` — the history the pass read — only when nothing else does.
+pub(crate) async fn model_of<R, F, Fut>(
     kernel: &Arc<Kernel>,
     meta: &Map<String, Value>,
-    state: &BackendState,
-) -> Option<String> {
-    model_of_with(
-        meta,
-        state,
-        |provider| ask_models(kernel, provider),
-        || newest_row_model(self_id, kernel),
-    )
-    .await
+    state: &Arc<BackendState>,
+    rows: Vec<Value>,
+    rec: R,
+    next: F,
+) where
+    R: Send + 'static,
+    F: FnOnce(R, Option<String>) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let newest = move || newest_model_in(&rows);
+    match begin(meta, state, newest) {
+        Begun::Is(m) => next(rec, m).await,
+        Begun::Ask { provider, newest } => {
+            let item = Item::new(AgentId::from(provider.as_str()), json!({"type": "models"}));
+            let st = Arc::clone(state);
+            crate::steps::call(kernel, item, rec, move |rec, out| async move {
+                next(rec, answered(&st, models_answer(&out), newest)).await;
+            })
+            .await;
+        }
+    }
+}
+
+/// Where [`begin`] got to: the model id (or none), or the provider to ask `models` first,
+/// with the newest row's reader for after.
+pub(crate) enum Begun<N> {
+    /// Known now.
+    Is(Option<String>),
+    /// The provider's `models` default is asked first ([`answered`]).
+    Ask { provider: String, newest: N },
 }
 
 /// The model id of the chat's next pass, first that is set: the record's `model`; the
 /// model the provider last named (`model_seen`); the provider's `models` default, asked
-/// through `ask` once per `(provider_id, model)` pair, and only when the record names a
-/// provider (`ask` gives `None` when no answer came: not delivered, not completed, or a
-/// transport refusal; that is not kept, and the next pass asks again; an answer, a
-/// refusal or one with no default included, is kept for the pair); the newest assistant row's model, read through `newest`. `None`: no source
-/// names one, and the pass is of the [`super::DEFAULT`] type.
+/// once per `(provider_id, model)` pair, and only when the record names a provider (no
+/// answer — not delivered, not completed, or a transport refusal — is not kept, and the
+/// next pass asks again; an answer, a refusal or one with no default included, is kept
+/// for the pair); the newest assistant row's model, read through `newest`. `None`: no
+/// source names one, and the pass is of the [`super::DEFAULT`] type.
 ///
 /// When the record's pair differs from the one last resolved, what the provider named
 /// before was for another provider or model: `model_seen` is cleared.
-pub(crate) async fn model_of_with<A, AF, N, NF>(
+pub(crate) fn begin<N: FnOnce() -> Option<String>>(
     meta: &Map<String, Value>,
     state: &BackendState,
-    ask: A,
     newest: N,
-) -> Option<String>
-where
-    A: FnOnce(String) -> AF,
-    AF: Future<Output = Option<Option<String>>>,
-    N: FnOnce() -> NF,
-    NF: Future<Output = Option<String>>,
-{
+) -> Begun<N> {
     let field = |k: &str| {
         meta.get(k)
             .and_then(Value::as_str)
@@ -193,7 +207,7 @@ where
         .expect("model_seen poisoned")
         .clone();
     if let Some(m) = first_set([record.as_deref(), seen.as_deref(), None, None]) {
-        return Some(m.to_string());
+        return Begun::Is(Some(m.to_string()));
     }
     let asked = state
         .model_key
@@ -201,32 +215,59 @@ where
         .expect("model_key poisoned")
         .as_ref()
         .and_then(|k| k.models_default.clone());
-    let default = match asked {
-        Some(d) => d,
-        None => {
-            match provider {
-                Some(p) => match ask(p).await {
-                    Some(d) => {
-                        if let Some(k) =
-                            state.model_key.lock().expect("model_key poisoned").as_mut()
-                        {
-                            k.models_default = Some(d.clone());
-                        }
-                        d
-                    }
-                    // no answer (the provider is not up yet, the call failed): kept as
-                    // nothing, so a later pass asks again
-                    None => None,
-                },
-                None => None,
+    match (asked, provider) {
+        (Some(d), _) => Begun::Is(after_default(d.as_deref(), newest)),
+        (None, Some(provider)) => Begun::Ask { provider, newest },
+        (None, None) => Begun::Is(after_default(None, newest)),
+    }
+}
+
+/// The provider's `models` answer came (`None`: no answer): an answer is kept for the
+/// pair, and the model id is the default it names, else the newest row's.
+pub(crate) fn answered<N: FnOnce() -> Option<String>>(
+    state: &BackendState,
+    answer: Option<Option<String>>,
+    newest: N,
+) -> Option<String> {
+    let default = match answer {
+        Some(d) => {
+            if let Some(k) = state.model_key.lock().expect("model_key poisoned").as_mut() {
+                k.models_default = Some(d.clone());
             }
+            d
         }
+        // no answer (the provider is not up yet, the call failed): kept as nothing, so
+        // a later pass asks again
+        None => None,
     };
-    if let Some(m) = first_set([None, None, default.as_deref(), None]) {
+    after_default(default.as_deref(), newest)
+}
+
+/// The `models` default when it names one, else the newest row's model.
+fn after_default<N: FnOnce() -> Option<String>>(default: Option<&str>, newest: N) -> Option<String> {
+    if let Some(m) = first_set([None, None, default, None]) {
         return Some(m.to_string());
     }
-    let row = newest().await;
+    let row = newest();
     first_set([None, None, None, row.as_deref()]).map(str::to_string)
+}
+
+/// TESTS: [`begin`] and [`answered`] in one, `ask` answering the `models` call.
+#[cfg(test)]
+pub(crate) fn model_of_with<A, N>(
+    meta: &Map<String, Value>,
+    state: &BackendState,
+    ask: A,
+    newest: N,
+) -> Option<String>
+where
+    A: FnOnce(String) -> Option<Option<String>>,
+    N: FnOnce() -> Option<String>,
+{
+    match begin(meta, state, newest) {
+        Begun::Is(m) => m,
+        Begun::Ask { provider, newest } => answered(state, ask(provider), newest),
+    }
 }
 
 /// The `default` of a `models` answer: none when the answer is a refusal (it has an
@@ -242,18 +283,10 @@ pub(crate) fn default_in(answer: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Ask the provider agent `provider` for its `models`, as the chat: `None` when no answer
-/// came (not delivered, not completed, or a `transport_error` refusal); else the answer's
-/// `default`, none when it refuses another way or names none.
-async fn ask_models(kernel: &Arc<Kernel>, provider: String) -> Option<Option<String>> {
-    let out = kernel
-        .send(vec![Item::new(
-            AgentId::from(provider.as_str()),
-            json!({"type": "models"}),
-        )])
-        .await
-        .into_iter()
-        .next()?;
+/// A `models` call's settle as the model's source reads it: `None` when no answer came
+/// (not completed, or a `transport_error` refusal); else the answer's `default`, none
+/// when it refuses another way or names none.
+fn models_answer(out: &fantastic_kernel::Outcome) -> Option<Option<String>> {
     if out.status != fantastic_kernel::Status::Completed
         || out.result.get("reason").and_then(Value::as_str)
             == Some(fantastic_kernel::refusal::TRANSPORT_ERROR)
@@ -263,12 +296,9 @@ async fn ask_models(kernel: &Arc<Kernel>, provider: String) -> Option<Option<Str
     Some(default_in(&out.result))
 }
 
-/// The `attributes.model` of the newest assistant row the chat holds.
-async fn newest_row_model(self_id: &AgentId, kernel: &Arc<Kernel>) -> Option<String> {
-    crate::memory::load_history(self_id, kernel, false)
-        .await
-        .ok()?
-        .iter()
+/// The `attributes.model` of the newest assistant row among `rows`.
+pub(crate) fn newest_model_in(rows: &[Value]) -> Option<String> {
+    rows.iter()
         .rev()
         .find(|r| r.get("role").and_then(Value::as_str) == Some("assistant"))?
         .get("attributes")?

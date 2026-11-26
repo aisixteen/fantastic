@@ -70,6 +70,28 @@ impl Deferred {
     }
 }
 
+/// WHO ASKED for the verb a dispatch runs: its `current_origin()` (the operator when
+/// that is `None`), captured in that dispatch so a later step of the verb can act for
+/// its asker ([`Kernel::call_for`]). Only the kernel's origin scope makes one: a verb can
+/// act for its own asker, never name another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Asker(Option<AgentId>);
+
+impl Asker {
+    /// The asker of the dispatch running here; `None` where no origin scope is set at
+    /// all (a bare `tokio::spawn`).
+    #[must_use]
+    pub fn current() -> Option<Self> {
+        origin_scope().map(Self)
+    }
+
+    /// The asking agent; `None` for the operator.
+    #[must_use]
+    pub fn id(&self) -> Option<&AgentId> {
+        self.0.as_ref()
+    }
+}
+
 struct Slot {
     tx: Option<tokio::sync::oneshot::Sender<Outcome>>,
     rx: Option<tokio::sync::oneshot::Receiver<Outcome>>,
@@ -145,6 +167,24 @@ impl Kernel {
             kernel.finish(owed, &out, Some(then), caller).await;
         }));
         Outcome::accepted(pid)
+    }
+
+    /// THE ASKER'S CALL: [`Self::call`] sent for `asker` — with sender and origin both
+    /// the agent that asked for the verb whose dispatch captured it ([`Asker::current`]),
+    /// as [`Self::send_as_caller`] sends — so a later step of that verb still acts for
+    /// its asker, checked as it. The continuation runs as the agent that makes this
+    /// call, as for [`Self::call`].
+    pub async fn call_for<F, Fut>(self: &Arc<Self>, asker: &Asker, item: Item, then: F) -> Outcome
+    where
+        F: FnOnce(Outcome) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let me = current_sender();
+        let then = move |out| CURRENT_SENDER.scope(me, then(out));
+        let a = asker.0.clone();
+        CURRENT_ORIGIN
+            .scope(a.clone(), CURRENT_SENDER.scope(a, self.call(item, then)))
+            .await
     }
 
     /// DEFER this dispatch's settle: called by a handler whose answer comes from

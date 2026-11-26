@@ -8,9 +8,9 @@ use crate::context::{budget as agent_budget, output_reserve, resolve_context_win
 use crate::declared::{History, Inquiry, Recall, Rows, Status, Unwatch, Watch};
 use crate::events::emit_status;
 use crate::helpers::{agent_meta, safe_client};
-use crate::memory::{load_history, MemResult};
+use crate::memory::MemResult;
 use crate::model_format::pass::Pass;
-use crate::projection::{derive_reaction, round3, TRIGGER};
+use crate::projection::{round3, TRIGGER};
 use crate::provider::Provider;
 use crate::state::{state_for, status_snapshot, CurrentEntry};
 use crate::stream_parts::{Part, PartKind};
@@ -110,7 +110,7 @@ where
 /// the raise a handler's error makes (`failed`, `{error, raised}`), a store's refusal
 /// that of its `MemoryStoreError`. `None`: the handler ran as the kernel's bookkeeping
 /// (an `await_set` wake), which answers no call — nothing settles, and an `Err` is said.
-fn settle_with<E: Into<BundleError>>(kernel: &Kernel, d: Option<fantastic_kernel::Deferred>, result: Result<Value, E>) {
+pub(crate) fn settle_with<E: Into<BundleError>>(kernel: &Kernel, d: Option<fantastic_kernel::Deferred>, result: Result<Value, E>) {
     let Some(d) = d else {
         if let Err(e) = result {
             eprintln!("  [ai] a message the kernel handed over was not taken: {}", e.into());
@@ -172,20 +172,25 @@ pub async fn on_cancel(
 /// Close out a pass that was STOPPED — by a cancel of its request or by `stop` — from
 /// its in-flight entry, which the caller has taken. The open parts abort, the pass
 /// leaves what it had visibly said and a `[stopped by …]` marker row after the messages
-/// it read (stored when they arrived), and `status` goes to `done` with
-/// `reason='cancelled'`.
-pub async fn close_stopped(
+/// it read (stored when they arrived; the append is a step, #795), and `status` goes to
+/// `done` with `reason='cancelled'`; then `next` gets how the rows' write went.
+pub(crate) async fn close_stopped<R, F, Fut>(
     agent_id: &AgentId,
     entry: CurrentEntry,
     kernel: &Arc<Kernel>,
-) -> Result<(), BundleError> {
-    let state = state_for(agent_id);
+    rec: R,
+    next: F,
+) where
+    R: Send + 'static,
+    F: FnOnce(R, Result<(), BundleError>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
     let mut unsent: Vec<Part> = Vec::new();
-    // HELD TO THE END OF THE HOOK: the doomed stream loop runs on another worker
+    // HELD TO THE END OF THE CLOSE: the doomed stream loop runs on another worker
     // until the kernel drops it, and must not open a part after these aborts.
-    let mut _parts_guard = None;
+    let mut parts_guard = None;
     if let Some(parts) = &entry.parts {
-        let mut p = parts.lock().await;
+        let mut p = Arc::clone(parts).lock_owned().await;
         unsent = p
             .splitter
             .parts
@@ -195,7 +200,7 @@ pub async fn close_stopped(
             .collect();
         let evs = p.splitter.stop("stopped");
         p.publisher.push(evs, true).await;
-        _parts_guard = Some(p);
+        parts_guard = Some(p);
     }
     let who = entry
         .stopped_by
@@ -226,10 +231,6 @@ pub async fn close_stopped(
         "id": kernel.mint_id(),
         "parent": prev,
     }));
-    crate::memory::save_history(agent_id, kernel, &rows)
-        .await
-        // python's `str(e)` — the message alone, as the kernel's log line prints it.
-        .map_err(|e| BundleError::from(e.0))?;
     let client_id = entry.client_id;
     let mut detail = Map::new();
     detail.insert("reason".to_string(), json!("cancelled"));
@@ -238,28 +239,51 @@ pub async fn close_stopped(
     // to read: python passes `started_at` explicitly from the entry it took, and
     // rust's cancel detail was the one `done` event missing it.
     detail.insert("started_at".to_string(), json!(entry.started_at));
-    emit_status(kernel, &state, agent_id, &client_id, "done", detail).await;
-    Ok(())
+    let (me, k) = (agent_id.clone(), Arc::clone(kernel));
+    crate::steps::append(agent_id, kernel, &rows, (rec, parts_guard), move |(rec, guard), r| async move {
+        if let Err(e) = r {
+            drop(guard);
+            // python's `str(e)` — the message alone, as the kernel's log line prints it.
+            return next(rec, Err(BundleError::from(e.0))).await;
+        }
+        emit_status(&k, &state_for(&me), &me, &client_id, "done", detail).await;
+        drop(guard);
+        next(rec, Ok(())).await;
+    })
+    .await;
 }
 
 /// `stop` — python `_stop`. args: `stream_id:str?` (a part of the pass in flight).
 /// STOP this agent's pass in flight — how a receiver of its streaming parts stops it:
 /// the request is cancelled (its stream closes), open parts abort, the pass keeps a
-/// `[stopped by <you>]` marker. Stop means stop: the messages not read yet stay
-/// stored and wake nothing. Returns `{stopped:bool}`: `false` when nothing is in flight
-/// or `stream_id` is not one of this pass's parts.
-pub async fn stop(agent_id: &AgentId, stream_id: Option<&str>, kernel: &Arc<Kernel>) -> Value {
+/// `[stopped by <you>]` marker (a step). Stop means stop: the messages not read yet
+/// stay stored and wake nothing. `next` gets `{stopped:bool}`: `false` when nothing is
+/// in flight or `stream_id` is not one of this pass's parts.
+pub async fn stop<R, F, Fut>(
+    agent_id: &AgentId,
+    stream_id: Option<&str>,
+    who: String,
+    kernel: &Arc<Kernel>,
+    rec: R,
+    next: F,
+) where
+    R: Send + 'static,
+    F: FnOnce(R, Value) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
     let state = state_for(agent_id);
-    let parts = {
-        let cur = state.current_meta.lock().expect("current poisoned");
-        match cur.as_ref() {
-            Some(c) => c.parts.clone(),
-            None => return json!({"stopped": false}),
-        }
+    let current = state
+        .current_meta
+        .lock()
+        .expect("current poisoned")
+        .as_ref()
+        .map(|c| c.parts.clone());
+    let Some(parts) = current else {
+        return next(rec, json!({"stopped": false})).await;
     };
     if let Some(sid) = stream_id {
         let Some(parts) = parts else {
-            return json!({"stopped": false});
+            return next(rec, json!({"stopped": false})).await;
         };
         let known = parts
             .lock()
@@ -269,17 +293,13 @@ pub async fn stop(agent_id: &AgentId, stream_id: Option<&str>, kernel: &Arc<Kern
             .iter()
             .any(|p| sid == p.stream_id.as_str());
         if !known {
-            return json!({"stopped": false});
+            return next(rec, json!({"stopped": false})).await;
         }
     }
-    let who = fantastic_kernel::current_origin()
-        .map(|a| a.0)
-        .filter(|w| !w.is_empty())
-        .unwrap_or_else(|| "operator".to_string());
     // THE PASS ENDS NOW: its request's settle acts on nothing from here
     crate::life::abandon(agent_id);
     let Some(mut entry) = crate::state::take_current(agent_id) else {
-        return json!({"stopped": false});
+        return next(rec, json!({"stopped": false})).await;
     };
     entry.stopped_by = Some(who);
     // the request in flight: an in-process provider's read drops its stream on the
@@ -292,10 +312,33 @@ pub async fn stop(agent_id: &AgentId, stream_id: Option<&str>, kernel: &Arc<Kern
             println!("  [stop] {} kernel cancel did not reach task {pid}: {reached}", agent_id.0);
         }
     }
-    if let Err(e) = close_stopped(agent_id, entry, kernel).await {
-        return json!({"stopped": true, "error": e.to_string()});
-    }
-    json!({"stopped": true})
+    close_stopped(agent_id, entry, kernel, rec, move |rec, r| async move {
+        let reply = match r {
+            Ok(()) => json!({"stopped": true}),
+            Err(e) => json!({"stopped": true, "error": e.to_string()}),
+        };
+        next(rec, reply).await;
+    })
+    .await;
+}
+
+/// Who stops a pass from the dispatch running here: its asker, else the operator.
+pub(crate) fn stopper() -> String {
+    fantastic_kernel::current_origin()
+        .map(|a| a.0)
+        .filter(|w| !w.is_empty())
+        .unwrap_or_else(|| "operator".to_string())
+}
+
+/// TESTS: [`stop`] driven to its end.
+#[cfg(test)]
+pub(crate) async fn stopped(agent_id: &AgentId, stream_id: Option<&str>, kernel: &Arc<Kernel>) -> Value {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    stop(agent_id, stream_id, stopper(), kernel, tx, |tx, v| async move {
+        let _ = tx.send(v);
+    })
+    .await;
+    rx.await.unwrap_or(Value::Null)
 }
 
 /// `rows` — a VIEW of this agent's conversation exactly as the agent HOLDS it in
@@ -384,16 +427,45 @@ fn digest(r: &Value) -> Value {
 ///
 /// ONE SHAPE: `{rows, next, total, fold?}`. Bodies are behind `recall` / `grep`,
 /// never here.
-pub async fn history(
+pub(crate) async fn history(
     agent_id: &AgentId,
-    args: &History,
+    args: History,
     kernel: &Arc<Kernel>,
     model_window: i64,
-) -> MemResult<Value> {
+    settle: crate::steps::Settle,
+) {
+    let (me, k) = (agent_id.clone(), Arc::clone(kernel));
+    // ONE READ, a step (#795): the whole conversation for a fold, else the head
+    if args.fold.is_some() {
+        crate::steps::whole(agent_id, kernel, (args, settle), move |(args, settle), r| async move {
+            settle.with(r.map(|all| history_page(&me, &args, &k, model_window, all, Vec::new())));
+        })
+        .await;
+    } else {
+        crate::steps::refreshed(agent_id, kernel, (args, settle), move |(args, settle), r| async move {
+            settle.with(r.map(|head| {
+                let cards: Vec<Value> = head.iter().filter(|r| crate::embed::is_card_row(r)).cloned().collect();
+                history_page(&me, &args, &k, model_window, crate::memory::turns(head), cards)
+            }));
+        })
+        .await;
+    }
+}
+
+/// The `history` reply over what its read gave: `rows`, the whole conversation for a
+/// fold, else the head's turns; `cards`, the head's card rows.
+fn history_page(
+    agent_id: &AgentId,
+    args: &History,
+    kernel: &Kernel,
+    model_window: i64,
+    rows: Vec<Value>,
+    cards: Vec<Value>,
+) -> Value {
     let mut head: Option<Value> = None;
     let rows: Vec<Value> = match args.fold {
         Some(fold_id) => {
-            let everything = load_history(agent_id, kernel, true).await?;
+            let everything = rows;
             let by_id: std::collections::HashMap<i64, &Value> = everything
                 .iter()
                 .filter_map(|r| r.get("id").and_then(Value::as_i64).map(|i| (i, r)))
@@ -410,7 +482,7 @@ pub async fn history(
                     format!("history: {fold_id} is not a fold in your conversation"),
                 );
                 with(&mut r, "arg", json!("fold"));
-                return Ok(r);
+                return r;
             };
             let refs: Vec<i64> = f
                 .get("refs")
@@ -428,7 +500,7 @@ pub async fn history(
                 .filter_map(|m| by_id.get(m).map(|r| (*r).clone()))
                 .collect()
         }
-        None => load_history(agent_id, kernel, false).await?,
+        None => rows,
     };
     let mut digests: Vec<Value> = rows
         .iter()
@@ -439,8 +511,7 @@ pub async fn history(
     // them; the page redraws them from here, in their place among the turns.
     let mut card_count = 0;
     if args.fold.is_none() {
-        let cards: Vec<Value> = crate::embed::card_rows(agent_id, kernel)
-            .await?
+        let cards: Vec<Value> = cards
             .iter()
             .filter(|r| r.get("id").and_then(Value::as_i64).is_some())
             .map(digest)
@@ -474,7 +545,7 @@ pub async fn history(
     if let Some(h) = head {
         out["fold"] = h;
     }
-    Ok(out)
+    out
 }
 
 /// Render ONE stored turn for a `recall` reply — python `_recall_render`.
@@ -518,13 +589,23 @@ fn own_search_reply(agent_id: &AgentId, m: &Value) -> bool {
 /// The reply is python's and nothing more: `{messages, total, truncated[,
 /// note]}`. There is no `client_id` — a model reading its own recall was handed
 /// a key python does not send.
-pub async fn recall(
+pub(crate) async fn recall(
     agent_id: &AgentId,
-    args: &Recall,
+    args: Recall,
     kernel: &Arc<Kernel>,
     model_window: i64,
-) -> MemResult<Value> {
-    let full = load_history(agent_id, kernel, true).await?;
+    settle: crate::steps::Settle,
+) {
+    // the whole conversation is read by a step (#795); the page is cut from it
+    let (me, k) = (agent_id.clone(), Arc::clone(kernel));
+    crate::steps::whole(agent_id, kernel, (args, settle), move |(args, settle), r| async move {
+        settle.with(r.map(|full| recall_page(&me, &args, &k, model_window, &full)));
+    })
+    .await;
+}
+
+/// The `recall` reply over `full`, the whole conversation.
+fn recall_page(agent_id: &AgentId, args: &Recall, kernel: &Kernel, model_window: i64, full: &[Value]) -> Value {
     // BY ID: the row whole — its content and, when it had any, its thinking.
     if let Some(id) = args.id {
         let Some((i, row)) = full
@@ -537,7 +618,7 @@ pub async fn recall(
                 format!("recall: {id} is not a row in your conversation"),
             );
             with(&mut r, "arg", json!("id"));
-            return Ok(r);
+            return r;
         };
         let mut m = json!({"index": i, "role": row.get("role"), "content": recall_render(row)});
         if let Some(t) = row
@@ -573,7 +654,7 @@ pub async fn recall(
                 format!("{text}\n[{how}]")
             });
         }
-        return Ok(json!({"messages": [m], "total": 1, "truncated": false}));
+        return json!({"messages": [m], "total": 1, "truncated": false});
     }
     let q = args.query.as_deref().map(str::to_lowercase);
     let limit = args.limit as usize;
@@ -662,16 +743,28 @@ pub async fn recall(
         };
         reply["note"] = json!(note);
     }
-    Ok(reply)
+    reply
 }
 
 /// `context_status` verb: the context-budget posture + the last overflow
-/// projection + the model's derived reaction to it. Read-only.
-pub async fn context_status(
+/// projection + the model's derived reaction to it. Read-only. The reaction reads the
+/// head after a projection fired — a step (#795).
+pub(crate) async fn context_status(
     agent_id: &AgentId,
     kernel: &Arc<Kernel>,
     model_window: i64,
-) -> MemResult<Value> {
+    settle: crate::steps::Settle,
+) {
+    let state = state_for(agent_id);
+    let (me, k) = (agent_id.clone(), Arc::clone(kernel));
+    crate::projection::derive_reaction(agent_id, &state, kernel, settle, move |settle, r| async move {
+        settle.with(r.map(|reaction| status_of_context(&me, &k, model_window, reaction)));
+    })
+    .await;
+}
+
+/// The `context_status` reply, the reaction read.
+fn status_of_context(agent_id: &AgentId, kernel: &Kernel, model_window: i64, reaction: Option<Value>) -> Value {
     let meta = agent_meta(agent_id, kernel);
     let state = state_for(agent_id);
     let last_projection = state
@@ -680,9 +773,7 @@ pub async fn context_status(
         .expect("projection poisoned")
         .clone()
         .unwrap_or(Value::Null);
-    let last_reaction = derive_reaction(agent_id, &state, kernel)
-        .await?
-        .unwrap_or(Value::Null);
+    let last_reaction = reaction.unwrap_or(Value::Null);
     // RAW, as python's `rec.get("context_strategy", DEFAULT_STRATEGY)`: only an
     // ABSENT key means `compact`.
     let strategy = meta
@@ -691,7 +782,7 @@ pub async fn context_status(
         .unwrap_or_else(|| json!(crate::strategies::DEFAULT_STRATEGY));
     let calib = state.calib.lock().expect("calib poisoned").unwrap_or(1.0);
     let reported = *state.reported.lock().expect("reported poisoned");
-    Ok(json!({
+    json!({
         "context_window": resolve_context_window(&meta, model_window),
         "output_reserve": output_reserve(&meta),
         "budget": agent_budget(&meta, model_window),
@@ -702,7 +793,7 @@ pub async fn context_status(
         "last_projection": last_projection,
         "last_reaction": last_reaction,
         "view_source": state.view_source.lock().expect("view_source poisoned").clone(),
-    }))
+    })
 }
 
 pub use crate::constants::{send_timeout_secs, SEND_TIMEOUT_SECS};
@@ -1107,7 +1198,14 @@ where
         Call::Boot(_) => boot(agent_id, kernel).await,
         Call::Send(a) => send(agent_id, &a, kernel, cfg).await?,
         // A receiver of this agent's streaming parts stops the generation.
-        Call::Stop(a) => stop(agent_id, a.stream_id.as_deref(), kernel).await,
+        Call::Stop(a) => {
+            let settle = crate::steps::deferred(kernel);
+            stop(agent_id, a.stream_id.as_deref(), stopper(), kernel, settle, |settle, v| async move {
+                settle.with(Ok::<_, BundleError>(v));
+            })
+            .await;
+            Value::Null
+        }
         // What the agent HOLDS in memory — its loaded head, never a store read.
         Call::Rows(a) => rows(agent_id, &a, kernel),
         // ONE ASK VERB, WHOEVER IS ASKED: a person answers `inquiry` from a
@@ -1117,60 +1215,115 @@ where
             let text = inquiry_text(&a);
             inquiry_accept(agent_id, &a, &text, kernel).await?
         }
-        Call::History(a) => history(agent_id, &a, kernel, cfg.model_window).await?,
+        Call::History(a) => {
+            history(agent_id, a, kernel, cfg.model_window, crate::steps::deferred(kernel)).await;
+            Value::Null
+        }
         // A CARD in the chat: a host agent's panel, shown inline (#339).
-        Call::Embed(a) => crate::embed::embed(agent_id, &a.id, kernel).await?,
-        Call::Unembed(a) => crate::embed::unembed(agent_id, &a.id, kernel).await?,
+        Call::Embed(a) => {
+            crate::embed::embed(agent_id, &a.id, kernel, crate::steps::deferred(kernel)).await;
+            Value::Null
+        }
+        Call::Unembed(a) => {
+            crate::embed::unembed(agent_id, &a.id, kernel, crate::steps::deferred(kernel)).await;
+            Value::Null
+        }
         Call::Status(a) => status(agent_id, &a),
-        Call::ContextStatus(_) => context_status(agent_id, kernel, cfg.model_window).await?,
-        Call::Recall(a) => recall(agent_id, &a, kernel, cfg.model_window).await?,
+        Call::ContextStatus(_) => {
+            context_status(agent_id, kernel, cfg.model_window, crate::steps::deferred(kernel)).await;
+            Value::Null
+        }
+        Call::Recall(a) => {
+            recall(agent_id, a, kernel, cfg.model_window, crate::steps::deferred(kernel)).await;
+            Value::Null
+        }
         // FIND the line anywhere in memory — rows, shared rows, bodies held this run.
-        Call::Grep(a) => crate::retrieval::grep(agent_id, &a, kernel, cfg.model_window).await?,
+        Call::Grep(a) => {
+            crate::retrieval::grep(agent_id, a, kernel, cfg.model_window, crate::steps::deferred(kernel)).await;
+            Value::Null
+        }
         // Rebuild the view from the store: on boot, after folds, on request.
         // A dry recall makes no model call, so it builds no pass (#766).
         Call::ContextRecall(a) => {
             let dry = a.dry == Some(true);
-            let pass = if dry {
-                None
-            } else {
-                let p = provider_for(&fantastic_kernel::inquiry::default_client_id());
-                Some(Pass::new(p, agent_id, &state_for(agent_id), kernel).await)
-            };
-            // its own `reflect` is a step (#795); the recall settles this call once it ran
-            let d = kernel.defer().ok();
+            let p = provider_for(&fantastic_kernel::inquiry::default_client_id());
+            // its history, its pass's type, its prompt file and its own `reflect` are steps
+            // (#795); the recall settles this call once it ran
+            let settle = crate::steps::deferred(kernel);
             let (k, me, window) = (Arc::clone(kernel), agent_id.clone(), cfg.model_window);
-            crate::steps::own_reflect(agent_id, kernel, (d, pass), move |(d, pass), reflected| async move {
-                let r = crate::retrieval::context_recall(&me, dry, &k, pass.as_ref(), window, None, &[], &reflected).await;
-                settle_with(&k, d, r);
+            crate::steps::history(agent_id, kernel, settle, move |settle, rows| async move {
+                let st = state_for(&me);
+                let (k2, me2) = (Arc::clone(&k), me.clone());
+                Pass::begin(p, &me, &st, &k, rows.unwrap_or_default(), settle, move |settle, pass| async move {
+                    let (k3, me3) = (Arc::clone(&k2), me2.clone());
+                    crate::prompt_file::refresh(&me2, &k2, (settle, pass), move |(settle, pass)| async move {
+                        let (k4, me4) = (Arc::clone(&k3), me3.clone());
+                        crate::steps::own_reflect(&me3, &k3, (settle, pass), move |(settle, pass), reflected| async move {
+                            // A dry recall makes no model call, so it uses no pass (#766).
+                            let used = (!dry).then_some(&pass);
+                            let r = crate::retrieval::context_recall(
+                                &me4, dry, &k4, used, pass.decl, window, None, &[], &reflected,
+                            )
+                            .await;
+                            settle.with(r);
+                        })
+                        .await;
+                    })
+                    .await;
+                })
+                .await;
             })
             .await;
             Value::Null
         }
         // A new thread on the same store: the view starts here, nothing is deleted.
         Call::ContextClear(a) => {
-            crate::retrieval::context_clear(agent_id, a.why.as_deref(), kernel, cfg.model_window)
-                .await?
+            let settle = crate::steps::deferred(kernel);
+            crate::retrieval::context_clear(agent_id, a.why, kernel, cfg.model_window, settle).await;
+            Value::Null
         }
         // Fold a chosen stretch of the view into one fold row — the operator's mark.
         Call::ContextFold(a) => {
             let p = provider_for(&fantastic_kernel::inquiry::default_client_id());
-            let pass = Pass::new(p, agent_id, &state_for(agent_id), kernel).await;
-            crate::retrieval::context_fold(agent_id, &a, kernel, &pass, cfg.model_window).await?
+            // its pass's type is a step (#795), over the history it read (a step)
+            let settle = crate::steps::deferred(kernel);
+            let (k, me, window) = (Arc::clone(kernel), agent_id.clone(), cfg.model_window);
+            crate::steps::history(agent_id, kernel, settle, move |settle, rows| async move {
+                let st = state_for(&me);
+                let (k2, me2) = (Arc::clone(&k), me.clone());
+                Pass::begin(p, &me, &st, &k, rows.unwrap_or_default(), settle, move |settle, pass| async move {
+                    let r = crate::retrieval::context_fold(&me2, &a, &k2, &pass, window).await;
+                    settle.with(r);
+                })
+                .await;
+            })
+            .await;
+            Value::Null
         }
         // Compact the store: drop the rows the folds already summarise.
         Call::ContextForget(a) => {
-            crate::retrieval::context_forget(agent_id, a.include_cleared == Some(true), kernel)
-                .await?
+            let settle = crate::steps::deferred(kernel);
+            crate::retrieval::context_forget(agent_id, a.include_cleared == Some(true), kernel, settle).await;
+            Value::Null
         }
         // A NEW agent from this one's first rows; a mark to fork from; this agent's marks.
-        Call::Fork(a) => crate::fork::fork(agent_id, &a, kernel).await?,
-        Call::Mark(a) => crate::fork::mark(agent_id, &a, kernel).await?,
-        Call::ForkPoints(a) => crate::fork::fork_points(agent_id, &a, kernel).await?,
+        Call::Fork(a) => crate::fork::fork(agent_id, a, kernel).await,
+        Call::Mark(a) => crate::fork::mark(agent_id, &a, kernel).await,
+        Call::ForkPoints(a) => {
+            crate::fork::fork_points(agent_id, a, kernel, crate::steps::deferred(kernel)).await;
+            Value::Null
+        }
         // THE ROW EVENT: this agent announces its own rows to its watchers.
         Call::Watch(a) => watch(agent_id, &a, kernel).await?,
         Call::Unwatch(a) => unwatch(agent_id, &a, kernel),
-        Call::Pause(a) => crate::pause::pause(agent_id, a.reason.as_deref(), kernel).await?,
-        Call::Resume(a) => crate::pause::resume(agent_id, a.note.as_deref(), kernel).await?,
+        Call::Pause(a) => {
+            crate::pause::pause(agent_id, a.reason, kernel, crate::steps::deferred(kernel)).await;
+            Value::Null
+        }
+        Call::Resume(a) => {
+            crate::pause::resume(agent_id, a.note, kernel, crate::steps::deferred(kernel)).await;
+            Value::Null
+        }
     };
     Ok(reply)
 }

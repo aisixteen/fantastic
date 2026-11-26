@@ -24,7 +24,7 @@ use serde_json::{json, Map, Value};
 
 use super::pass::{Mode, Pass};
 use crate::constants::TRACE_CAP;
-use crate::memory::{rows_of, store_call};
+use crate::memory::rows_of;
 use crate::state::BackendState;
 
 /// The `kind` of a trace row.
@@ -75,41 +75,42 @@ pub(crate) fn of_turn(pass: &Pass, restarted: Option<&Pass>) -> Vec<Value> {
     rows
 }
 
-/// The model type of the chat's previous turn pass: the RAM one, else (after a restart)
-/// the `type` of the newest trace row its store holds. `None` on a chat's first pass,
-/// and after a restart with no trace row left.
-pub(crate) async fn previous_type(
+/// The model type of the chat's previous pass, as a STEP (#795): the RAM one, else
+/// (after a restart) the `type` of the newest trace row its store holds, read by a call
+/// whose settle is the next step. `None` on a chat's first pass, and after a restart with
+/// no trace row left.
+pub(crate) async fn previous_type<R, F, Fut>(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
     state: &BackendState,
-) -> Option<String> {
+    rec: R,
+    next: F,
+) where
+    R: Send + 'static,
+    F: FnOnce(R, Option<String>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
     let ram = *state.last_type.lock().expect("last_type poisoned");
     if let Some(kind) = ram {
-        return Some(kind.to_string());
+        return next(rec, Some(kind.to_string())).await;
     }
-    let res = store_call(
-        self_id,
-        kernel,
-        json!({"type": "read", "kinds": [KIND], "order": "desc", "limit": 1}),
-    )
-    .await
-    .ok()?;
-    rows_of(&res, self_id)
-        .first()
-        .and_then(|r| r.get("type"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
+    let ask = json!({"type": "read", "kinds": [KIND], "order": "desc", "limit": 1});
+    crate::steps::rows(self_id, kernel, ask, rec, move |rec, rows| async move {
+        let kind = rows.ok().and_then(|rows| {
+            rows.first()
+                .and_then(|r| r.get("type"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+        next(rec, kind).await;
+    })
+    .await;
 }
 
-/// A `model_switched {from, to, model}` event on `pass` when the chat's previous turn
-/// pass was of another type ([`previous_type`]).
-pub(crate) async fn note_switch(
-    self_id: &AgentId,
-    kernel: &Arc<Kernel>,
-    state: &BackendState,
-    pass: &Pass,
-) {
-    let Some(from) = previous_type(self_id, kernel, state).await else {
+/// A `model_switched {from, to, model}` event on `pass` when the chat's previous pass
+/// was of another type (`from`, [`previous_type`]).
+pub(crate) fn note_switch(pass: &Pass, from: Option<String>) {
+    let Some(from) = from else {
         return;
     };
     if from == pass.kind {

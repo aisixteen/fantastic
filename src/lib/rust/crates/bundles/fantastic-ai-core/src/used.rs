@@ -25,7 +25,6 @@
 
 use std::sync::Arc;
 
-use fantastic_kernel::{AgentId, Kernel};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
@@ -288,7 +287,7 @@ impl Landed {
 
 /// `running` seeded once per state, before the chat's first row of this process: the
 /// newest assistant row's `used.running`, else nothing yet.
-pub(crate) async fn seed(self_id: &AgentId, state: &BackendState, kernel: &Arc<Kernel>) {
+pub(crate) fn seed(state: &BackendState, rows: &[Value]) {
     if state
         .used_running
         .lock()
@@ -297,9 +296,7 @@ pub(crate) async fn seed(self_id: &AgentId, state: &BackendState, kernel: &Arc<K
     {
         return;
     }
-    let seeded = crate::row_attrs::seed_used(self_id, kernel)
-        .await
-        .unwrap_or_default();
+    let seeded = crate::row_attrs::seed_used(rows).unwrap_or_default();
     let mut r = state.used_running.lock().expect("used_running poisoned");
     if r.is_none() {
         *r = Some(seeded);

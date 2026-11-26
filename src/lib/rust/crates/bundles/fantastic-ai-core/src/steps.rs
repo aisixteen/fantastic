@@ -53,6 +53,33 @@ where
     }
 }
 
+/// ONE CALL FOR THE ASKER of the verb a step belongs to, as a step
+/// ([`Kernel::call_for`]): sent and checked as `asker`; its settle (or its refusal at
+/// launch) runs `next` with `rec`, as this agent.
+pub(crate) async fn call_for<R, F, Fut>(kernel: &Arc<Kernel>, asker: &fantastic_kernel::Asker, item: Item, rec: R, next: F)
+where
+    R: Send + 'static,
+    F: FnOnce(R, Outcome) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let slot = Arc::new(Mutex::new(Some((rec, next))));
+    let held = Arc::clone(&slot);
+    let ack = kernel
+        .call_for(asker, item, move |out| async move {
+            let taken = held.lock().expect("step poisoned").take();
+            if let Some((rec, next)) = taken {
+                next(rec, out).await;
+            }
+        })
+        .await;
+    if ack.status != Status::Accepted {
+        let taken = slot.lock().expect("step poisoned").take();
+        if let Some((rec, next)) = taken {
+            next(rec, ack).await;
+        }
+    }
+}
+
 /// ONE CALL TO THE AGENT'S OWN MEMORY STORE, as a step: `payload` (and the request
 /// body at `data`, for the byte verbs) to the store the record names, as the agent; the
 /// next step gets the reply checked — a missing store, a refusal or a failed dispatch is
@@ -112,11 +139,22 @@ where
     F: FnOnce(R, MemResult<Vec<Value>>) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
+    refreshed(self_id, kernel, rec, move |rec, r| next(rec, r.map(crate::memory::turns))).await;
+}
+
+/// THE HEAD BROUGHT UP TO THE STORE, as a step ([`crate::memory::refresh_head`]): read
+/// whole the first time, else the rows after its newest merged in; the next step gets
+/// the head's rows, bookkeeping and card rows included.
+pub(crate) async fn refreshed<R, F, Fut>(self_id: &AgentId, kernel: &Arc<Kernel>, rec: R, next: F)
+where
+    R: Send + 'static,
+    F: FnOnce(R, MemResult<Vec<Value>>) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
     let read = crate::memory::head_read(self_id, kernel);
     let (me, k) = (self_id.clone(), Arc::clone(kernel));
     store(self_id, kernel, read.payload(), None, rec, move |rec, r| async move {
-        let rows = r.map(|(res, _)| crate::memory::turns(read.merge(&me, &k, &res)));
-        next(rec, rows).await;
+        next(rec, r.map(|(res, _)| read.merge(&me, &k, &res))).await;
     })
     .await;
 }
@@ -131,4 +169,97 @@ where
 {
     let item = Item::new(self_id.clone(), json!({"type": "reflect", "tree": "none"}));
     call(kernel, item, rec, move |rec, out| next(rec, out.result)).await;
+}
+
+/// THE AGENT'S WHOLE CONVERSATION, as a step ([`crate::memory::load_history`] with
+/// `behind = true`): every row the store holds, before a `clear` too; the next step
+/// gets the turns.
+pub(crate) async fn whole<R, F, Fut>(self_id: &AgentId, kernel: &Arc<Kernel>, rec: R, next: F)
+where
+    R: Send + 'static,
+    F: FnOnce(R, MemResult<Vec<Value>>) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    rows(self_id, kernel, json!({"type": "read"}), rec, move |rec, r| next(rec, r.map(crate::memory::turns)))
+        .await;
+}
+
+/// ONE STORE READ, as a step: the rows the store answers `payload` with, each tagged
+/// with the agent ([`crate::memory::rows_of`]).
+pub(crate) async fn rows<R, F, Fut>(self_id: &AgentId, kernel: &Arc<Kernel>, payload: Value, rec: R, next: F)
+where
+    R: Send + 'static,
+    F: FnOnce(R, MemResult<Vec<Value>>) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let me = self_id.clone();
+    store(self_id, kernel, payload, None, rec, move |rec, r| async move {
+        next(rec, r.map(|(res, _)| crate::memory::rows_of(&res, &me))).await;
+    })
+    .await;
+}
+
+/// THE HEAD CACHE, as a step ([`crate::memory::head`]): the cached head when there is
+/// one, else read whole from the store (from its last `clear`).
+pub(crate) async fn head<R, F, Fut>(self_id: &AgentId, kernel: &Arc<Kernel>, rec: R, next: F)
+where
+    R: Send + 'static,
+    F: FnOnce(R, MemResult<Vec<Value>>) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    if let Some(h) = crate::memory::cached_head(self_id, kernel) {
+        return next(rec, Ok(h)).await;
+    }
+    let read = crate::memory::HeadRead::Whole;
+    let (me, k) = (self_id.clone(), Arc::clone(kernel));
+    store(self_id, kernel, read.payload(), None, rec, move |rec, r| async move {
+        next(rec, r.map(|(res, _)| read.merge(&me, &k, &res))).await;
+    })
+    .await;
+}
+
+/// A HANDLER THAT ANSWERS LATER (#795): its execution defers, and `settle` is how its
+/// steps settle it — once, from whichever step ends the work. `None` in a kernel
+/// bookkeeping run, which answers no call: the steps run, nothing settles.
+pub(crate) fn deferred(kernel: &Arc<Kernel>) -> Settle {
+    Settle {
+        kernel: Arc::clone(kernel),
+        d: kernel.defer().ok(),
+    }
+}
+
+/// How a deferred handler settles ([`deferred`]).
+pub(crate) struct Settle {
+    kernel: Arc<Kernel>,
+    d: Option<fantastic_kernel::Deferred>,
+}
+
+impl Settle {
+    /// Settle the handler's execution with `result`: an `Err` is the raise its error
+    /// makes (`failed`, `{error, raised}`).
+    pub(crate) fn with<E: Into<fantastic_kernel::bundle::BundleError>>(self, result: Result<Value, E>) {
+        crate::verbs::settle_with(&self.kernel, self.d, result);
+    }
+}
+
+/// THE AGENT'S VIEW WRITTEN, as a step ([`crate::memory::save_view`]): the folds and the
+/// view row in one append; the next step gets the map of the folds' ids (provisional ->
+/// minted).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn save_view<R, F, Fut>(
+    self_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    folds: &[Value],
+    ids: &[Value],
+    budget: i64,
+    why: &str,
+    rec: R,
+    next: F,
+) where
+    R: Send + 'static,
+    F: FnOnce(R, MemResult<std::collections::BTreeMap<i64, i64>>) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let (rows, map) = crate::memory::view_rows(kernel, folds, ids, budget, why);
+    append(self_id, kernel, &rows, rec, move |rec, r| next(rec, r.map(|_| map))).await;
 }

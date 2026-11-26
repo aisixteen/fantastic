@@ -1014,7 +1014,7 @@ async fn cancelled_turn_writes_no_rows() {
     until_asked(&p, 3).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     // the pass ends mid-way: a stop (#795: a pass is no task to drop)
-    let _ = as_agent(a.clone(), crate::verbs::stop(&a, None, &kernel)).await;
+    let _ = as_agent(a.clone(), crate::verbs::stopped(&a, None, &kernel)).await;
     let _ = h.await;
     assert_eq!(traces(&kernel, &a).await, before);
     assert!(traces_of(&kernel, &a, "e11_b").await.is_empty());
@@ -1430,7 +1430,7 @@ async fn crashed_pass_writes_no_rows() {
         until_asked(&p, asked + n).await;
         tokio::time::sleep(Duration::from_millis(100)).await;
         // the pass ends mid-way: a stop (#795: a pass is no task to drop)
-        let _ = as_agent(a.clone(), crate::verbs::stop(&a, None, &kernel)).await;
+        let _ = as_agent(a.clone(), crate::verbs::stopped(&a, None, &kernel)).await;
         let _ = h.await;
         crate::state::drop_state(&a);
         assert!(traces_of(&kernel, &a, &client).await.is_empty(), "{point}");

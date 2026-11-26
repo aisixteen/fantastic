@@ -4284,6 +4284,8 @@ async fn the_cli_caller_round_trips_through_the_cli_agent() {
     struct Token {
         client_id: String,
         source: String,
+        /// The event's place in a run of them; the first of a run is slow to print.
+        n: Option<u64>,
     }
     fantastic_kernel::verbs! { "token" => Token }
     #[async_trait]
@@ -4311,6 +4313,9 @@ async fn the_cli_caller_round_trips_through_the_cli_agent() {
             _kernel: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
             if let Call::Token(t) = call {
+                if t.n == Some(0) {
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                }
                 self.0
                     .lock()
                     .expect("sink poisoned")
@@ -4348,6 +4353,13 @@ async fn the_cli_caller_round_trips_through_the_cli_agent() {
         crate::events::to_caller(&kernel, &backend, "cli", json!({"type": "token"})),
     )
     .await;
+    // the event is a call to the `cli` agent (#795): it lands once that call ran
+    for _ in 0..250 {
+        if !seen.lock().expect("sink poisoned").is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     let handed = seen.lock().expect("sink poisoned").clone();
     assert_eq!(handed.len(), 1, "the cli handler must run: {handed:?}");
     assert_eq!(handed[0]["client_id"], json!("cli"));
@@ -4368,6 +4380,29 @@ async fn the_cli_caller_round_trips_through_the_cli_agent() {
     let ev = agent_rx.try_recv().expect("the browser event").payload;
     assert_eq!(ev["client_id"], json!("browser_tok"));
     assert_eq!(seen.lock().expect("sink poisoned").len(), 1);
+
+    // A RUN OF EVENTS reaches the terminal IN ORDER, and nothing waits for it: each is
+    // sent once the one before it settled, so the slow first one is still printing when
+    // the run has been handed over
+    for n in 0..5u64 {
+        fantastic_kernel::test_support::as_agent(
+            backend.clone(),
+            crate::events::to_caller(&kernel, &backend, "cli", json!({"type": "token", "n": n})),
+        )
+        .await;
+    }
+    assert!(
+        seen.lock().expect("sink poisoned").len() < 6,
+        "the run waited for the terminal to print"
+    );
+    for _ in 0..250 {
+        if seen.lock().expect("sink poisoned").len() == 6 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let order: Vec<Value> = seen.lock().expect("sink poisoned")[1..].iter().map(|t| t["n"].clone()).collect();
+    assert_eq!(order, (0..5u64).map(|n| json!(n)).collect::<Vec<_>>(), "the terminal's feed is out of order");
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -4718,13 +4753,13 @@ async fn recall_long_head(
         .await;
     let r = fantastic_kernel::test_support::as_agent(backend.clone(), async {
         let me = crate::assembly::self_reflect(backend, kernel).await;
+        let pass = crate::model_format::pass::Pass::for_test(Arc::clone(&provider));
         crate::retrieval::context_recall(
             backend,
             payload["dry"] == json!(true),
             kernel,
-            Some(&crate::model_format::pass::Pass::for_test(Arc::clone(
-                &provider,
-            ))),
+            Some(&pass),
+            pass.decl,
             crate::constants::DEFAULT_CONTEXT_WINDOW,
             client_id,
             &[],
@@ -7426,12 +7461,15 @@ async fn driver_store(
             json!({"role":"assistant","parent":old,"content":"done with the old job"}),
         )
         .await;
-        fantastic_kernel::test_support::as_agent(
-            backend.clone(),
-            crate::retrieval::context_clear(backend, Some("new job"), kernel, 32768),
-        )
-        .await
-        .expect("clear");
+        let cleared = kernel
+            .operator_send(vec![Item::new(
+                backend.clone(),
+                json!({"type": "context_clear", "why": "new job"}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert!(cleared.get("cleared").is_some(), "{cleared}");
     } else {
         let hello = put_row(kernel, backend, json!({"role":"user","content":"hello"})).await;
         put_row(

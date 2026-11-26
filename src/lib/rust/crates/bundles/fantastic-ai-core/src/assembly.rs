@@ -15,7 +15,9 @@
 //! void every emergence result taken afterwards.
 
 use crate::caching::Caching;
-use crate::memory::{load_history, MemoryStoreError};
+#[cfg(test)]
+use crate::memory::load_history;
+use crate::memory::MemoryStoreError;
 use crate::model_format::map::{Env, Howto, Piece, SysBody, SysPiece};
 use crate::model_format::{Decl, Section};
 use crate::prompt_file::PromptFileError;
@@ -242,8 +244,9 @@ pub(crate) async fn default_system_content(
     kernel: &Arc<Kernel>,
     decl: &Decl<'_>,
 ) -> Result<String, MemoryStoreError> {
-    let env = thread_env(self_id, kernel).await?;
+    let env = load_history(self_id, kernel, false).await?.first().and_then(Env::of);
     let me = self_reflect(self_id, kernel).await;
+    refreshed(self_id, kernel).await;
     Ok(crate::model_format::map::system(
         decl,
         &default_pieces(self_id, kernel, env, &me),
@@ -262,6 +265,18 @@ pub(crate) async fn self_reflect(self_id: &AgentId, kernel: &Arc<Kernel>) -> Val
         .await
         .remove(0)
         .result
+}
+
+/// TESTS: the prompt file brought current, driven to its end
+/// ([`crate::prompt_file::refresh`]).
+#[cfg(test)]
+pub(crate) async fn refreshed(self_id: &AgentId, kernel: &Arc<Kernel>) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    crate::prompt_file::refresh(self_id, kernel, tx, |tx| async move {
+        let _ = tx.send(());
+    })
+    .await;
+    let _ = rx.await;
 }
 
 /// The default block as its pieces: this agent's own reflect and the how-to
@@ -305,19 +320,6 @@ pub(crate) fn self_text(self_id: &AgentId, me: &Value) -> String {
     format!("You are `{}`. {}", self_id, render_reflect(&me))
 }
 
-/// The first row of the current thread as the environment section reads it: the head's
-/// first row (the store's first, or the newest `[cleared …]` row). `None`: an empty
-/// thread (the arriving message is then the first row).
-async fn thread_env(
-    self_id: &AgentId,
-    kernel: &Arc<Kernel>,
-) -> Result<Option<Env>, MemoryStoreError> {
-    Ok(load_history(self_id, kernel, false)
-        .await?
-        .first()
-        .and_then(Env::of))
-}
-
 /// THE system block a turn uses, as `decl` writes it — the one choice
 /// `assemble_messages` builds the turn on and `context_recall` sizes the body budget
 /// against, so the two never drift (python `_system_content`). PRECEDENCE:
@@ -328,24 +330,29 @@ async fn thread_env(
 /// Whichever prompt is in force has its placeholders filled; none is ever
 /// appended to another.
 ///
+/// `store`: the thread's rows, as a step read them (the environment's date is its first
+/// row's); the prompt file is as the pass's refresh step left it
+/// ([`crate::prompt_file::refresh`]).
+///
 /// # Errors
-/// The memory store failed, or a set `system_prompt_file` is unusable.
-pub(crate) async fn system_content(
+/// A set `system_prompt_file` is unusable.
+pub(crate) fn system_content(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
     decl: &Decl<'_>,
     me: &Value,
+    store: &[Value],
 ) -> Result<String, BlockFail> {
-    let env = thread_env(self_id, kernel).await?;
+    let env = store.first().and_then(Env::of);
     Ok(crate::model_format::map::system(
         decl,
-        &system_pieces(self_id, kernel, env, me).await?,
+        &system_pieces(self_id, kernel, env, me)?,
     ))
 }
 
 /// The system block a turn uses, piece by piece: the block is their mapped texts end to
 /// end. `env`: the first row of the thread.
-pub(crate) async fn system_pieces(
+pub(crate) fn system_pieces(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
     env: Option<Env>,
@@ -356,7 +363,7 @@ pub(crate) async fn system_pieces(
     // live and taken verbatim — no placeholders, and neither replaces anything.
     // Absent or null adds nothing (python `_system_content`).
     let meta = crate::helpers::agent_meta(self_id, kernel);
-    let inner = inner_system_pieces(self_id, kernel, env, me).await?;
+    let inner = inner_system_pieces(self_id, kernel, env, me)?;
     let wrap = |key: &str| {
         crate::record::record_wrap_prompt(&meta, key).map(|s| vec![piece("system_text", s)])
     };
@@ -385,7 +392,7 @@ pub(crate) async fn system_pieces(
 }
 
 /// The prompt in force, before the pre/post wrap of [`system_content`].
-async fn inner_system_pieces(
+fn inner_system_pieces(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
     env: Option<Env>,
@@ -397,7 +404,7 @@ async fn inner_system_pieces(
         return Ok(render_prompt(&s, self_id, kernel, "system_text", env, me));
     }
     // Set and unusable is an `Err` — the turn fails, never the default below.
-    if let Some(s) = crate::prompt_file::text(self_id, kernel).await? {
+    if let Some(s) = crate::prompt_file::current(self_id, kernel)? {
         return Ok(render_prompt(&s, self_id, kernel, "prompt_file", env, me));
     }
     Ok(default_pieces(self_id, kernel, env, me))
@@ -478,8 +485,8 @@ pub(crate) async fn assemble_messages(
     let _ = client_id;
     let store = load_history(self_id, kernel, false).await?;
     let me = self_reflect(self_id, kernel).await;
+    refreshed(self_id, kernel).await;
     assemble_read(self_id, state, kernel, caching, store, &me)
-        .await
         .map(|(messages, store_len, _)| (messages, store_len))
 }
 
@@ -487,7 +494,7 @@ pub(crate) async fn assemble_messages(
 /// [`crate::steps::history`]), and `me`, its own `reflect`: the messages, the head's
 /// length and the ids of the rows the history read held — a pass reads every message
 /// stored by then, the ones that arrived after its tail was taken too.
-pub(crate) async fn assemble_read(
+pub(crate) fn assemble_read(
     self_id: &AgentId,
     state: &Arc<BackendState>,
     kernel: &Arc<Kernel>,
@@ -508,13 +515,14 @@ pub(crate) async fn assemble_read(
     } else {
         store.first().and_then(Env::of)
     };
-    let pieces = system_pieces(self_id, kernel, env, me).await?;
+    let pieces = system_pieces(self_id, kernel, env, me)?;
     let mut messages = vec![json!({"role": "system", "sys": pieces})];
     // THE VIEW ARRAY IS THE STATE. When a projection (or a recall) has written
     // one, the body is exactly what it chose — each listed row at its recorded
     // resolution — plus only the rows that landed AFTER it, trimmed. Python
     // `_assemble`.
-    let view = crate::memory::load_view(self_id, kernel).await?;
+    // the head the pass's history step read is cached: its view row is there
+    let view = crate::memory::cached_view(self_id, kernel);
     let listed = listed_entries(&store, view.as_ref());
     // An EMPTY ids list is a `context_clear`'s view, not a stale one: the body is
     // the store from the clear on. Python `view is None or not view["ids"]`.

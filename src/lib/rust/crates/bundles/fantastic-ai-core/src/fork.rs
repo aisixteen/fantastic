@@ -25,9 +25,7 @@ use serde_json::{json, Map, Value};
 use crate::constants::{CACHE_LIFETIME_SECS, MAX_MARKS};
 use crate::folds::{chains, is_fold, is_open, refs_of, row_id};
 use crate::helpers::{agent_meta, now_secs};
-use crate::memory::{
-    rows_of, save_history, store_call, store_of, MemResult, BOOKKEEPING, TURN_ROLES,
-};
+use crate::memory::{store_of, MemoryStoreError, BOOKKEEPING, TURN_ROLES};
 
 /// Rows that belong to the live state of ONE agent, never to a prefix a fork
 /// inherits: the pause state, the messages held for it, a late arrival, the marks
@@ -180,52 +178,107 @@ fn plan(rows: &[Value], at: i64) -> Result<Vec<Value>, NoFork> {
     Ok(out)
 }
 
-/// The parent's whole store, in id order.
-async fn whole_store(agent_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<Vec<Value>> {
-    let res = store_call(agent_id, kernel, json!({"type": "read"})).await?;
-    Ok(rows_of(&res, agent_id))
-}
-
 /// `fork {at, name?, id?}`: a new agent from this one's rows up to `at`. Returns
 /// `{id, copied, at}`. `from:{agent, at}` runs the same verb on THAT agent, as a
-/// gated send of this one.
-///
-/// # Errors
-/// The memory store refused a read of the parent's rows.
+/// gated send of this one. Its calls are steps (#795): the parent's whole store read,
+/// the create (and its rollback) for the asker, the copy; the fork settles once they
+/// ran. A refusal before any call is the reply.
 pub async fn fork(
     agent_id: &AgentId,
-    args: &crate::declared::Fork,
+    args: crate::declared::Fork,
     kernel: &Arc<Kernel>,
-) -> MemResult<Value> {
+) -> Value {
     let verb = "fork";
     if let Some(from) = &args.from {
-        return Ok(fork_from(args, from, kernel).await);
+        return fork_from(&args, from, kernel).await;
     }
     let Some(at) = args.at else {
-        return Ok(fantastic_kernel::refusal::missing(verb, "at"));
+        return fantastic_kernel::refusal::missing(verb, "at");
     };
-    let (name, want_id) = (args.name.clone(), args.id.clone());
     // The rows must not move under the copy.
     if mid_turn(agent_id) {
-        return Ok(parent_mid_turn(agent_id, at));
+        return parent_mid_turn(agent_id, at);
     }
-    let rows = whole_store(agent_id, kernel).await?;
-    let copy = match plan(&rows, at) {
-        Ok(c) => c,
-        Err(no) => return Ok(refuse(verb, no.code, &no.why, no.hint, Some(at))),
+    // THE ASKER: the create (and its rollback) is sent for whoever asked for the fork
+    // ([`Kernel::call_for`]), and checked as that asker.
+    let Some(asker) = fantastic_kernel::Asker::current() else {
+        return refuse(verb, UNKNOWN_AGENT, "no one asked for this fork", "", Some(at));
     };
-    store_of(agent_id, kernel)?;
+    let settle = crate::steps::deferred(kernel);
+    let (me, k) = (agent_id.clone(), Arc::clone(kernel));
+    let read = json!({"type": "read"});
+    crate::steps::rows(agent_id, kernel, read, (args, settle), move |(args, settle), rows| async move {
+        let rows = match rows {
+            Ok(r) => r,
+            Err(e) => return settle.with(Err::<Value, _>(e)),
+        };
+        let copy = match plan(&rows, at) {
+            Ok(c) => c,
+            Err(no) => return settle.with(Ok::<_, MemoryStoreError>(refuse(verb, no.code, &no.why, no.hint, Some(at)))),
+        };
+        let create = match fork_card(&me, &k, &args, at) {
+            Ok(c) => c,
+            Err(r) => return settle.with(r),
+        };
+        let (me2, k2) = (me.clone(), Arc::clone(&k));
+        let make = Item::new(AgentId::from("kernel"), create);
+        crate::steps::call_for(&k, &asker.clone(), make, settle, move |settle, made| async move {
+            let made = made.result;
+            if made.get("error").is_some_and(|e| !e.is_null()) {
+                let mut m = made;
+                m["at"] = Value::from(at);
+                return settle.with(Ok::<_, MemoryStoreError>(m));
+            }
+            let new_id = AgentId::from(made.get("id").and_then(Value::as_str).unwrap_or_default());
+            // THE COPY: ONE `copy` on the store, sent as this agent, of the planned rows
+            // from this agent's key to the fork's, ids kept, all or nothing. The store
+            // asks the kernel whether the caller may read this agent and holds create or
+            // update over the fork (its child: it does). A refusal deletes the half-made
+            // agent, as the asker, and the fork is refused.
+            let n = copy.len();
+            let ids: Vec<i64> = copy.iter().filter_map(row_id).collect();
+            let payload = json!({"type": "copy", "from": me2.as_str(), "to": new_id.as_str(), "ids": ids});
+            let k3 = Arc::clone(&k2);
+            crate::steps::store(&me2, &k2, payload, None, settle, move |settle, wrote| async move {
+                let Err(e) = wrote else {
+                    return settle.with(Ok::<_, MemoryStoreError>(json!({"id": new_id.0, "copied": n, "at": at})));
+                };
+                let refused = refuse(
+                    verb,
+                    "store_refused",
+                    &format!("the memory store refused the copy: {e}"),
+                    "this agent must hold `copy` on its memory store",
+                    Some(at),
+                );
+                let undo = Item::new(AgentId::from("kernel"), json!({"type": "delete_agent", "id": new_id.0}));
+                crate::steps::call_for(&k3, &asker, undo, settle, move |settle, _| async move {
+                    settle.with(Ok::<_, MemoryStoreError>(refused));
+                })
+                .await;
+            })
+            .await;
+        })
+        .await;
+    })
+    .await;
+    Value::Null
+}
+
+/// THE CARD of a fork at `at`: the parent's record, minus what is the parent's alone,
+/// as the `create_agent` that makes it — or the reply that refuses it.
+fn fork_card(
+    agent_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    args: &crate::declared::Fork,
+    at: i64,
+) -> Result<Value, Result<Value, MemoryStoreError>> {
+    let verb = "fork";
+    let (name, want_id) = (args.name.clone(), args.id.clone());
+    store_of(agent_id, kernel).map_err(Err)?;
     let Some(parent) = kernel.resolve_target(agent_id.as_str()) else {
-        return Ok(refuse(
-            verb,
-            UNKNOWN_AGENT,
-            "the agent is gone",
-            "",
-            Some(at),
-        ));
+        return Err(Ok(refuse(verb, UNKNOWN_AGENT, "the agent is gone", "", Some(at))));
     };
-    // THE CARD: the parent's record, minus what is the parent's alone. Its `can`
-    // rides along: written by the asker's create, checked as the asker's write.
+    // Its `can` rides along: written by the asker's create, checked as the asker's write.
     let mut meta = agent_meta(agent_id, kernel);
     meta.remove("delete_lock");
     let shown = parent.name_or_id();
@@ -234,13 +287,7 @@ pub async fn fork(
         Value::from(name.unwrap_or_else(|| format!("{shown} fork"))),
     );
     let Some(handler_module) = parent.handler_module.clone() else {
-        return Ok(refuse(
-            verb,
-            UNKNOWN_AGENT,
-            "the agent runs no bundle",
-            "",
-            Some(at),
-        ));
+        return Err(Ok(refuse(verb, UNKNOWN_AGENT, "the agent runs no bundle", "", Some(at))));
     };
     // THE PLACE: under the forker itself, as its child — so the asker needs a create
     // line covering the forker's children, and no line on its parent.
@@ -254,50 +301,7 @@ pub async fn fork(
         Some(id) => create.insert("id".to_string(), json!(id)),
         None => create.shift_remove("id"),
     };
-    // THE ASKER: the create (and its rollback) is sent for whoever asked for the
-    // fork ([`Kernel::send_as_caller`]), and checked as that asker.
-    let made = as_asker(kernel, Value::Object(create)).await;
-    if made.get("error").is_some_and(|e| !e.is_null()) {
-        let mut m = made;
-        m["at"] = Value::from(at);
-        return Ok(m);
-    }
-    let new_id = AgentId::from(made.get("id").and_then(Value::as_str).unwrap_or_default());
-    // THE COPY: ONE `copy` on the store, sent as this agent, of the planned rows
-    // from this agent's key to the fork's, ids kept, all or nothing. The store asks
-    // the kernel whether the caller may read this agent and holds create or update
-    // over the fork (its child: it does). A refusal deletes the half-made agent,
-    // as the asker, and the fork is refused.
-    let n = copy.len();
-    let ids: Vec<i64> = copy.iter().filter_map(row_id).collect();
-    let wrote = store_call(
-        agent_id,
-        kernel,
-        json!({"type": "copy", "from": agent_id.as_str(), "to": new_id.as_str(), "ids": ids}),
-    )
-    .await;
-    if let Err(e) = wrote {
-        let _ = as_asker(kernel, json!({"type": "delete_agent", "id": new_id.0})).await;
-        return Ok(refuse(
-            verb,
-            "store_refused",
-            &format!("the memory store refused the copy: {e}"),
-            "this agent must hold `copy` on its memory store",
-            Some(at),
-        ));
-    }
-    Ok(json!({"id": new_id.0, "copied": n, "at": at}))
-}
-
-/// One kernel tree verb sent to the root for the asker of the running verb
-/// ([`Kernel::send_as_caller`]): checked as that asker, and refused for work that
-/// carries no origin at all.
-async fn as_asker(kernel: &Arc<Kernel>, payload: Value) -> Value {
-    kernel
-        .send_as_caller(vec![Item::new(AgentId::from("kernel"), payload)])
-        .await
-        .remove(0)
-        .result
+    Ok(Value::Object(create))
 }
 
 fn parent_mid_turn(agent_id: &AgentId, at: i64) -> Value {
@@ -344,94 +348,116 @@ async fn fork_from(
 
 /// `mark {label, note?, version?}`: mark this agent's own history at a turn
 /// boundary, outside any fold — a point `fork` always accepts. Keeps the last
-/// [`MAX_MARKS`]. Returns `{marked, at, label}`.
-///
-/// # Errors
-/// The memory store refused a read or a write.
+/// [`MAX_MARKS`]. Returns `{marked, at, label}`. The store read, the mark's append and
+/// the prune of older marks are steps (#795).
 pub async fn mark(
     agent_id: &AgentId,
     args: &crate::declared::Mark,
     kernel: &Arc<Kernel>,
-) -> MemResult<Value> {
+) -> Value {
     let verb = "mark";
     if args.label.trim().is_empty() {
-        return Ok(bad(verb, "label", "a non-empty string"));
+        return bad(verb, "label", "a non-empty string");
     }
     let label = args.label.clone();
     let (note, version) = (args.note.clone(), args.version.clone());
-    let busy = || {
-        refuse(
-            verb,
-            LOCKED,
-            &format!("a turn is running for {agent_id}"),
-            "mark once the running turn has answered",
-            None,
-        )
-    };
+    let busy = refuse(
+        verb,
+        LOCKED,
+        &format!("a turn is running for {agent_id}"),
+        "mark once the running turn has answered",
+        None,
+    );
     if mid_turn(agent_id) {
-        return Ok(busy());
+        return busy;
     }
-    let rows = whole_store(agent_id, kernel).await?;
-    let Some(at) = rows
-        .iter()
-        .filter(|r| is_conversation(r))
-        .filter_map(row_id)
-        .max()
-    else {
-        return Ok(refuse(
-            verb,
-            NOT_FOUND,
-            "there is nothing in the conversation to mark",
-            "mark after the first turn",
-            None,
-        ));
-    };
-    if let Err(no) = plan(&rows, at) {
-        return Ok(refuse(
-            verb,
-            BAD_ARG,
-            &no.why,
-            "mark once the turn has ended",
-            Some(at),
-        ));
-    }
-    let ids = save_history(
-        agent_id,
-        kernel,
-        &[json!({"kind": "mark", "label": label, "note": note, "version": version, "at": at})],
-    )
-    .await?;
-    let marked = ids.first().copied().unwrap_or_default();
-    // THE LAST N: older marks go in the same step.
-    let mut marks: Vec<i64> = rows
-        .iter()
-        .filter(|r| kind_of(r) == Some("mark"))
-        .filter_map(row_id)
-        .collect();
-    marks.push(marked);
-    if marks.len() > MAX_MARKS {
-        let doomed: Vec<i64> = marks[..marks.len() - MAX_MARKS].to_vec();
-        store_call(agent_id, kernel, json!({"type": "prune", "ids": doomed})).await?;
-        // The head cache holds what the store just dropped: read it afresh.
-        crate::memory::forget_head(agent_id, kernel);
-    }
-    Ok(json!({"marked": marked, "at": at, "label": label}))
+    let settle = crate::steps::deferred(kernel);
+    let (me, k) = (agent_id.clone(), Arc::clone(kernel));
+    crate::steps::rows(agent_id, kernel, json!({"type": "read"}), settle, move |settle, rows| async move {
+        let rows = match rows {
+            Ok(r) => r,
+            Err(e) => return settle.with(Err::<Value, _>(e)),
+        };
+        let Some(at) = rows
+            .iter()
+            .filter(|r| is_conversation(r))
+            .filter_map(row_id)
+            .max()
+        else {
+            return settle.with(Ok::<_, MemoryStoreError>(refuse(
+                verb,
+                NOT_FOUND,
+                "there is nothing in the conversation to mark",
+                "mark after the first turn",
+                None,
+            )));
+        };
+        if let Err(no) = plan(&rows, at) {
+            return settle.with(Ok::<_, MemoryStoreError>(refuse(
+                verb,
+                BAD_ARG,
+                &no.why,
+                "mark once the turn has ended",
+                Some(at),
+            )));
+        }
+        let row = json!({"kind": "mark", "label": label, "note": note, "version": version, "at": at});
+        let (me2, k2) = (me.clone(), Arc::clone(&k));
+        crate::steps::append(&me, &k, &[row], settle, move |settle, ids| async move {
+            let ids = match ids {
+                Ok(i) => i,
+                Err(e) => return settle.with(Err::<Value, _>(e)),
+            };
+            let marked = ids.first().copied().unwrap_or_default();
+            let done = json!({"marked": marked, "at": at, "label": label});
+            // THE LAST N: older marks go in the same step.
+            let mut marks: Vec<i64> = rows
+                .iter()
+                .filter(|r| kind_of(r) == Some("mark"))
+                .filter_map(row_id)
+                .collect();
+            marks.push(marked);
+            if marks.len() <= MAX_MARKS {
+                return settle.with(Ok::<_, MemoryStoreError>(done));
+            }
+            let doomed: Vec<i64> = marks[..marks.len() - MAX_MARKS].to_vec();
+            let (me3, k3) = (me2.clone(), Arc::clone(&k2));
+            let prune = json!({"type": "prune", "ids": doomed});
+            crate::steps::store(&me2, &k2, prune, None, settle, move |settle, r| async move {
+                // The head cache holds what the store just dropped: read it afresh.
+                if r.is_ok() {
+                    crate::memory::forget_head(&me3, &k3);
+                }
+                settle.with(r.map(|_| done));
+            })
+            .await;
+        })
+        .await;
+    })
+    .await;
+    Value::Null
 }
 
 /// `fork_points {filter?}`: THIS agent's marks, `{agent, at, label, note, version,
 /// rows_after, model, warm}` each. `filter` is `{label?, version?}` (a substring of
-/// the label, the exact version). Returns `{points}`.
-///
-/// # Errors
-/// The memory store refused the read.
-pub async fn fork_points(
+/// the label, the exact version). Returns `{points}`. The store read is a step (#795).
+pub(crate) async fn fork_points(
     agent_id: &AgentId,
-    args: &crate::declared::ForkPoints,
+    args: crate::declared::ForkPoints,
     kernel: &Arc<Kernel>,
-) -> MemResult<Value> {
+    settle: crate::steps::Settle,
+) {
+    let (me, k) = (agent_id.clone(), Arc::clone(kernel));
+    crate::steps::rows(agent_id, kernel, json!({"type": "read"}), (args, settle), move |(args, settle), rows| async move {
+        settle.with(rows.map(|rows| points(&me, &k, &args, &rows)));
+    })
+    .await;
+}
+
+/// The `fork_points` reply over the whole store's `rows`.
+fn points(agent_id: &AgentId, kernel: &Kernel, args: &crate::declared::ForkPoints, rows: &[Value]) -> Value {
     let want_label = args.filter.as_ref().and_then(|f| f.label.as_deref());
     let want_version = args.filter.as_ref().and_then(|f| f.version.as_deref());
-    let rows = whole_store(agent_id, kernel).await?;
     let model = agent_meta(agent_id, kernel)
         .get("model")
         .cloned()
@@ -469,5 +495,5 @@ pub async fn fork_points(
             })
         })
         .collect();
-    Ok(json!({"points": points}))
+    json!({"points": points})
 }
