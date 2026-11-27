@@ -57,6 +57,12 @@ _PAYLOAD_HEADER = "X-Fantastic-Payload"
 _BYTES_FIELD_HEADER = "X-Fantastic-Bytes-Field"
 
 
+def is_ack(r) -> bool:
+    """Is a POST's body an ACK (`{pid, status: "accepted"}`) — a call launched whose
+    result is its settle?"""
+    return isinstance(r, dict) and r.get("status") == "accepted" and "error" not in r
+
+
 def _bytes_field(d: dict):
     for k, v in d.items():
         if isinstance(v, (bytes, bytearray)):
@@ -317,6 +323,9 @@ class HostKernel:
     def close(self) -> None:
         """Stop the kernel's whole process group, then dump. Idempotent — it runs
         from the probe's `finally` and again at exit."""
+        f = self.__dict__.pop("_settles", None)
+        if f is not None:
+            f.close()
         if self.proc and self.proc.poll() is None:
             oslayer.stop_group(self.proc.pid)
             try:
@@ -362,9 +371,26 @@ class HostKernel:
                 return False
         return True
 
+    def settles(self):
+        """This kernel's REST settles, followed over its ws face (one socket, made
+        on first use, live before it is returned)."""
+        import threading
+
+        from .ws import SettleFollower
+
+        lock = self.__dict__.setdefault("_settles_lock", threading.Lock())
+        with lock:
+            f = self.__dict__.get("_settles")
+            if f is None:
+                f = self._settles = SettleFollower(self.port)
+        return f
+
     def send(self, target: str, payload: dict, timeout: float = 300,
-             execution_id: str | None = None) -> dict:
-        """One POST per call.
+             execution_id: str | None = None, headers: dict | None = None) -> dict:
+        """One call: the POST answers its ACK, and the result is the leg's `settle`,
+        read off the leg's watch stream (#795). A refusal at launch (or an HTTP
+        error) is the answer at once. `timeout` bounds the whole call — a hang guard
+        that raises, never a pass.
 
         `execution_id` NAMES the execution, so ensure-semantics are reachable from
         the wire: an unknown id dispatches, an in-flight id joins, and a settled
@@ -372,6 +398,16 @@ class HostKernel:
         scenario whose subject is a safe repeat is measurable through HTTP
         because of this header.
         """
+        follow = self.settles()
+        ack = self.post(target, payload, timeout, execution_id, headers)
+        if not is_ack(ack):
+            return ack
+        return follow.wait(ack["pid"], timeout).get("data")
+
+    def post(self, target: str, payload: dict, timeout: float = 300,
+             execution_id: str | None = None, extra: dict | None = None) -> dict:
+        """One POST, its body as it came: the ACK, or a refusal / an HTTP error.
+        `extra`: more request headers (`X-Fantastic-Secret`, …)."""
         field, blob = _bytes_field(payload)
         if field is not None:
             # Binary leg: the bytes ARE the body; the rest of the envelope is JSON
@@ -388,17 +424,13 @@ class HostKernel:
             data = json.dumps(payload).encode()
         if execution_id is not None:
             headers[EXEC_ID_HEADER] = execution_id
+        headers.update(extra or {})
         req = urllib.request.Request(
             f"http://127.0.0.1:{self.port}/rest/{target}", data=data, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
-                raw = r.read()
-                if r.headers.get("content-type", "").startswith(_OCTET):
-                    # A bytes-carrying reply (e.g. read_stream) comes back the same way.
-                    rest = json.loads(r.headers.get(_PAYLOAD_HEADER) or "{}")
-                    rest[r.headers.get(_BYTES_FIELD_HEADER) or "bytes"] = raw
-                    return rest
-                return json.loads(raw or b"null")
+                # a bytes-carrying RESULT rides the settle event, as a binary frame
+                return json.loads(r.read() or b"null")
         except urllib.error.HTTPError as e:
             return {"error": f"HTTP {e.code}", "body": e.read().decode()[:300]}
 

@@ -39,7 +39,7 @@ from pathlib import Path
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
 sys.path.insert(0, str(E2E))
 
-from helpers.host.driver import EXEC_ID_HEADER, HostKernel, ensure_runtime, runtime
+from helpers.host.driver import EXEC_ID_HEADER, HostKernel, ensure_runtime, is_ack, runtime
 from helpers.memory import MEMORY
 from helpers.verdict import verdict
 
@@ -82,9 +82,11 @@ def main() -> int:
         local = threading.local()
 
         def post(target: str, payload: dict, execution_id: str | None = None) -> dict:
-            """`HostKernel.send`'s JSON path on a per-thread KEEP-ALIVE connection.
+            """`HostKernel.send`'s JSON path on a per-thread KEEP-ALIVE connection:
+            the POST's ACK, then the call's result off the leg's settle stream (#795).
             The server closes an idle one, so a phase that follows idle time starts
             on a fresh connection (`fresh()`)."""
+            follow = hk.settles()
             conn = getattr(local, "conn", None)
             if conn is None:
                 conn = local.conn = http.client.HTTPConnection("127.0.0.1", hk.port, timeout=600)
@@ -97,7 +99,10 @@ def main() -> int:
             raw = r.read()
             if r.status != 200:
                 return {"error": f"HTTP {r.status}", "body": raw.decode()[:300]}
-            return json.loads(raw or b"null")
+            ack = json.loads(raw or b"null")
+            if not is_ack(ack):
+                return ack
+            return follow.wait(ack["pid"], 600).get("data")
 
         def fresh() -> None:
             conn = getattr(local, "conn", None)

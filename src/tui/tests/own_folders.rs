@@ -39,6 +39,28 @@ fn meta(k: &Kernel, id: &str, key: &str) -> Option<Value> {
         .and_then(|a| a.record().meta.get(key).cloned())
 }
 
+/// `id`'s record field `key` once it is `want`: the boot's own writes are calls whose
+/// settles land after `boot_kernel` returns (#795), so the test waits on the kernel's
+/// state stream — subscribed before the check, woken by each event, never a clock; the
+/// bound only FAILS a hang.
+async fn until_meta(k: &Arc<Kernel>, id: &str, key: &str, want: Value) {
+    let changed = Arc::new(tokio::sync::Notify::new());
+    let n = Arc::clone(&changed);
+    let token = k.add_state_subscriber(Arc::new(move |_: &Value, _: Option<&fantastic_kernel::Blob>| n.notify_one()));
+    let wait = async {
+        loop {
+            let next = changed.notified();
+            if meta(k, id, key).as_ref() == Some(&want) {
+                return;
+            }
+            next.await;
+        }
+    };
+    let got = tokio::time::timeout(std::time::Duration::from_secs(60), wait).await;
+    k.remove_state_subscriber(token);
+    assert!(got.is_ok(), "{id}.{key} never became {want}: {:?}", meta(k, id, key));
+}
+
 /// The `mcp_config` bridge's own folder: under `user/web/mcp` (the blueprint's).
 fn mcp_config_dir(state: &Path) -> PathBuf {
     state.join("agents/user/agents/web/agents/mcp/agents/mcp_config")
@@ -54,10 +76,8 @@ async fn the_prompt_file_is_a_view_of_the_store() {
     assert_eq!(meta(&k, "prompt_file", "view"), Some(Value::from("file")));
     assert_eq!(meta(&k, "prompt_file", "bridge"), Some(Value::from("store")));
     assert_eq!(meta(&k, "prompt_file", "path"), Some(Value::from("prompt.md")));
-    assert_eq!(
-        meta(&k, "chat", "system_prompt_file"),
-        Some(Value::from("prompt.md"))
-    );
+    // the boot's stamp is a call: its settle lands when it lands
+    until_meta(&k, "chat", "system_prompt_file", Value::from("prompt.md")).await;
     stop_kernel(&k).await;
     std::env::set_current_dir(std::env::temp_dir()).unwrap();
     let _ = std::fs::remove_dir_all(&d);

@@ -21,6 +21,8 @@ use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Value};
 
 use crate::env::ClientCfg;
+use crate::kern::backend::By;
+use crate::kern::cps::{self, Done};
 use crate::kern::host::Host;
 
 /// The `handler_module` this bundle answers to.
@@ -43,41 +45,60 @@ impl SetupBundle {
         Some(Host { kernel: Arc::clone(kernel), cfg: ClientCfg::here(), root })
     }
 
-    async fn run(host: &Host, call: verbs::Call) -> Value {
+    /// One verb, its answer to `done`: the ones that call the kernel (settings with the kept
+    /// dialogs, a configure, a write, the keys, the saved set-ups) answer when their
+    /// last call settled (#795), the rest at once.
+    async fn run(host: &Host, call: verbs::Call, by: &By, done: Done<Value>) {
         use verbs::Call;
+        // a refusal ends the verb at once
+        macro_rules! bail {
+            ($r:expr) => {
+                return done($r).await
+            };
+        }
         match call {
             Call::Reflect(_) => unreachable!("answered before the host is built"),
-            Call::Backends(_) => json!({"backends": crate::kern::setup::backends(host).iter().map(|b| json!({
+            Call::Backends(_) => done(json!({"backends": crate::kern::setup::backends(host).iter().map(|b| json!({
                 "module": b.module,
                 "key": b.key,
                 "fields": b.fields.iter().map(|f| json!({
                     "name": f.name, "type": f.ty, "required": f.required, "enum": f.one_of,
                     "default": f.default, "hint": f.hint,
                 })).collect::<Vec<_>>(),
-            })).collect::<Vec<_>>()}),
+            })).collect::<Vec<_>>()}))
+            .await,
             // the keys stored so far (ref + host, never a value) and where they are kept
-            Call::Keys(_) => match (crate::kern::keys::stored(), crate::kern::keys::mode()) {
+            Call::Keys(_) => done(match (crate::kern::keys::stored(), crate::kern::keys::mode()) {
                 (Ok(refs), Ok((m, w))) => json!({
                     "keys": refs.iter().map(|(r, h)| json!({"ref": r, "host": h})).collect::<Vec<_>>(),
                     "mode": m.map(|m| m.name()),
                     "where": w,
                 }),
                 (Err(e), _) | (_, Err(e)) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
-            },
+            })
+            .await,
             // an AI agent's settings, as the wizard shows them: its handler and
             // every schema field's current value
             Call::AiSettings(a) => match ai_record(host, &a.id) {
                 Ok((handler, meta)) => {
                     let Some(backend) = crate::kern::setup::backends(host).into_iter().find(|b| b.module == handler) else {
-                        return fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("ai_settings: this build links no backend {handler:?}"));
+                        bail!(fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("ai_settings: this build links no backend {handler:?}")));
                     };
                     let fields: serde_json::Map<String, Value> =
                         backend.fields.iter().filter_map(|f| meta.get(&f.name).map(|v| (f.name.clone(), v.clone()))).collect();
                     // the saved set-up it was made from lives on its kept dialog row
-                    let saved = crate::kern::backend::BackendBundle::dialogs_map(host).await.ok().and_then(|d| d.get(&a.id).and_then(|r| r.get("saved").cloned()));
-                    json!({"id": a.id, "handler": handler, "fields": fields, "saved": saved})
+                    let id = a.id;
+                    crate::kern::backend::BackendBundle::dialogs_map(
+                        host,
+                        by,
+                        cps::done(move |r: Result<serde_json::Map<String, Value>, String>| async move {
+                            let saved = r.ok().and_then(|d| d.get(&id).and_then(|r| r.get("saved").cloned()));
+                            done(json!({"id": id, "handler": handler, "fields": fields, "saved": saved})).await;
+                        }),
+                    )
+                    .await;
                 }
-                Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("ai_settings: {e}")),
+                Err(e) => done(fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("ai_settings: {e}"))).await,
             },
             // change a live AI agent's fields (same backend): live on its next
             // turn — the backend reads its record per call. The key for its
@@ -86,11 +107,11 @@ impl SetupBundle {
                 let id = a.id;
                 let (handler, meta) = match ai_record(host, &id) {
                     Ok(r) => r,
-                    Err(e) => return fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("configure_ai: {e}")),
+                    Err(e) => bail!(fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("configure_ai: {e}"))),
                 };
                 let mut upd = match crate::kern::setup::declared_fields(host, "configure_ai", &handler, a.fields) {
                     Ok(m) => m,
-                    Err(refusal) => return refusal,
+                    Err(refusal) => bail!(refusal),
                 };
                 let endpoint = upd.get("endpoint").or_else(|| meta.get("endpoint")).and_then(Value::as_str).unwrap_or("").to_string();
                 if crate::kern::keys::keyed(host, &handler).is_some() {
@@ -108,16 +129,19 @@ impl SetupBundle {
                 upd.insert("id".into(), json!(id));
                 let payload = Value::Object(upd);
                 // the update is the ASKER's (gm rule 7): this handler acts for whoever asked
-                let r = host.asker_send("kernel", payload).await.result;
-                match r.get("error").and_then(Value::as_str) {
-                    Some(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("configure_ai: {e}")),
-                    None => json!({"configured": id, "note": "live on its next turn"}),
-                }
+                by.asker(host, "kernel", payload, move |out| async move {
+                    done(match out.result.get("error").and_then(Value::as_str) {
+                        Some(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("configure_ai: {e}")),
+                        None => json!({"configured": id, "note": "live on its next turn"}),
+                    })
+                    .await;
+                })
+                .await;
             }
             Call::WriteAi(a) => {
                 let fields = match crate::kern::setup::declared_fields(host, "write_ai", &a.handler, a.fields) {
                     Ok(m) => m,
-                    Err(refusal) => return refusal,
+                    Err(refusal) => bail!(refusal),
                 };
                 let rec = crate::kern::setup::Record {
                     id: a.id,
@@ -125,65 +149,135 @@ impl SetupBundle {
                     fields,
                     may_call: a.may_call,
                 };
-                match crate::kern::setup::write(host, &rec).await {
-                    Ok(path) => json!({"written": path, "id": rec.id}),
-                    Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
-                }
+                let id = rec.id.clone();
+                crate::kern::setup::write(
+                    host,
+                    &rec,
+                    cps::done(move |r: Result<String, String>| async move {
+                        done(match r {
+                            Ok(path) => json!({"written": path, "id": id}),
+                            Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
+                        })
+                        .await;
+                    }),
+                )
+                .await;
             }
-            Call::KeyMode(_) => match crate::kern::keys::mode() {
+            Call::KeyMode(_) => done(match crate::kern::keys::mode() {
                 Ok((m, w)) => json!({"mode": m.map(|m| m.name()), "where": w}),
                 Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
-            },
+            })
+            .await,
             Call::SetKeyMode(a) => {
                 let m = match a.mode {
                     verbs::Mode::Plain => fantastic_user_home_store::secrets::Mode::Plain,
                     verbs::Mode::Secure => fantastic_user_home_store::secrets::Mode::Secure,
                 };
-                match crate::kern::keys::set_mode(host, m).await {
-                    Ok(w) => json!({"mode": m.name(), "where": w}),
-                    Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
-                }
+                crate::kern::keys::set_mode(
+                    host,
+                    m,
+                    cps::done(move |r: Result<String, String>| async move {
+                        done(match r {
+                            Ok(w) => json!({"mode": m.name(), "where": w}),
+                            Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
+                        })
+                        .await;
+                    }),
+                )
+                .await;
             }
             // The page's call carries the value unmarked (the page kernel has no
             // secret marks yet): its rows hold it. The onward `set` is marked.
-            Call::StoreKey(a) => match crate::kern::keys::store(host, &a.module, &a.endpoint, &a.secret).await {
-                Ok(r) => json!({"stored": r, "note": "live on the next call — no restart"}),
-                Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
-            },
-            Call::Saved(_) => match crate::kern::saved::shelf(host).await {
-                Ok(sh) => json!({
-                    "saved": sh.saved.iter().map(|t| json!({"name": t.name, "record": t.record})).collect::<Vec<_>>(),
-                    "preferred": sh.preferred,
-                    "dir": sh.dir,
-                }),
-                Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
-            },
+            Call::StoreKey(a) => {
+                crate::kern::keys::store(
+                    host,
+                    &a.module,
+                    &a.endpoint,
+                    &a.secret,
+                    cps::done(move |r: Result<String, String>| async move {
+                        done(match r {
+                            Ok(r) => json!({"stored": r, "note": "live on the next call — no restart"}),
+                            Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
+                        })
+                        .await;
+                    }),
+                )
+                .await;
+            }
+            Call::Saved(_) => {
+                crate::kern::saved::shelf(
+                    host,
+                    cps::done(move |r: Result<crate::kern::saved::Shelf, String>| async move {
+                        done(match r {
+                            Ok(sh) => json!({
+                                "saved": sh.saved.iter().map(|t| json!({"name": t.name, "record": t.record})).collect::<Vec<_>>(),
+                                "preferred": sh.preferred,
+                                "dir": sh.dir,
+                            }),
+                            Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
+                        })
+                        .await;
+                    }),
+                )
+                .await;
+            }
             Call::Save(a) => {
                 let mut record = match crate::kern::setup::declared_fields(host, "save", &a.handler, a.fields) {
                     Ok(m) => m,
-                    Err(refusal) => return refusal,
+                    Err(refusal) => bail!(refusal),
                 };
                 // the backend + every field set — never an id, a key or grants;
                 // the stored key for its endpoint is NAMED (a ref, never the value):
                 // a backend that requires one refuses a saved set-up without it
                 if let Err(e) = crate::kern::keys::attach(host, &a.handler, &mut record) {
-                    return fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("save: {e}"));
+                    bail!(fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("save: {e}")));
                 }
                 record.insert("handler_module".into(), json!(a.handler));
                 let record = Value::Object(record);
-                match crate::kern::saved::save(host, &a.name, record).await {
-                    Ok(path) => json!({"saved": a.name, "path": path}),
-                    Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
-                }
+                let name = a.name;
+                crate::kern::saved::save(
+                    host,
+                    &name.clone(),
+                    record,
+                    cps::done(move |r: Result<String, String>| async move {
+                        done(match r {
+                            Ok(path) => json!({"saved": name, "path": path}),
+                            Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
+                        })
+                        .await;
+                    }),
+                )
+                .await;
             }
-            Call::Forget(a) => match crate::kern::saved::forget(host, &a.name).await {
-                Ok(()) => json!({"forgotten": a.name}),
-                Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::NOT_FOUND, e),
-            },
-            Call::Prefer(a) => match crate::kern::saved::prefer(host, a.name.as_deref()).await {
-                Ok(pr) => json!({"preferred": pr}),
-                Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
-            },
+            Call::Forget(a) => {
+                let name = a.name;
+                crate::kern::saved::forget(
+                    host,
+                    &name.clone(),
+                    cps::done(move |r: Result<(), String>| async move {
+                        done(match r {
+                            Ok(()) => json!({"forgotten": name}),
+                            Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::NOT_FOUND, e),
+                        })
+                        .await;
+                    }),
+                )
+                .await;
+            }
+            Call::Prefer(a) => {
+                crate::kern::saved::prefer(
+                    host,
+                    a.name.as_deref(),
+                    cps::done(move |r: Result<Option<String>, String>| async move {
+                        done(match r {
+                            Ok(pr) => json!({"preferred": pr}),
+                            Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
+                        })
+                        .await;
+                    }),
+                )
+                .await;
+            }
         }
     }
 }
@@ -222,7 +316,10 @@ impl Handler for SetupBundle {
         let Some(host) = Self::host(kernel) else {
             return Ok(Some(fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, "setup: the kernel has no root")));
         };
-        Ok(Some(Self::run(&host, call).await))
+        // the verb answers from its calls: its settle is deferred (#795), the identity of
+        // this dispatch captured once for the chain
+        let by = By::here();
+        Ok(Some(crate::kern::cps::reply_later(kernel, |done| async move { Self::run(&host, call, &by, done).await }).await))
     }
 }
 
@@ -238,7 +335,7 @@ fn ai_record(host: &Host, id: &str) -> Result<(String, serde_json::Map<String, V
 }
 
 /// Delete every `setup` agent a previous run left behind: it lives only while a
-/// page is open, and is never hydrated.
+/// page is open, and is never hydrated. Each delete is a call (#795); a refusal is let go.
 pub async fn sweep(host: &Host) {
     let stale: Vec<String> = host
         .kernel
@@ -249,7 +346,7 @@ pub async fn sweep(host: &Host) {
         .map(|e| e.id.0.clone())
         .collect();
     for id in stale {
-        let _ = host.operator("kernel", json!({"type": "delete_agent", "id": id})).await;
+        host.operator_then("kernel", json!({"type": "delete_agent", "id": id}), |_| async {}).await;
     }
 }
 

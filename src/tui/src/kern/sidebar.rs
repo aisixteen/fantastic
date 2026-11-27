@@ -42,19 +42,23 @@ fn calls(id: &str) -> Value {
 }
 
 /// The root the files agent serves (its own `reflect`, asked by the sidebar agent), "" when
-/// there is no files agent: the view names the project from it.
-async fn files_root(kernel: &Arc<Kernel>) -> String {
+/// there is no files agent: the view names the project from it. The reflect is a call (#795):
+/// `then` gets the root when it settles.
+async fn files_root<F, Fut>(kernel: &Arc<Kernel>, then: F)
+where
+    F: FnOnce(String) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
     let files = AgentId::from(follow::FILES);
     let served = kernel.resolve_target(files.as_str()).is_some_and(|a| a.handler_module.is_some());
     if !served {
-        return String::new();
+        return then(String::new()).await;
     }
-    let r = kernel
-        .send(vec![fantastic_kernel::Item::new(files, json!({"type": "reflect"}))])
-        .await
-        .remove(0)
-        .result;
-    r.get("root").and_then(Value::as_str).unwrap_or_default().to_string()
+    kernel
+        .call_then(fantastic_kernel::Item::new(files, json!({"type": "reflect"})), move |out| async move {
+            then(out.result.get("root").and_then(Value::as_str).unwrap_or_default().to_string()).await;
+        })
+        .await;
 }
 
 /// The bundle.
@@ -95,18 +99,31 @@ impl Handler for SidebarBundle {
                 follow::start(kernel, agent_id);
                 Ok(Some(json!({"following": true})))
             }
+            // the files agent's root comes from its own reflect: this one answers
+            // when that settles (it defers its settle). The kernel's own roster read of
+            // this agent is a bookkeeping run with no settle to defer: it is answered at
+            // once, with no root (it takes the sentence only).
             verbs::Call::Reflect(_) => {
-                let id = agent_id.as_str();
-                Ok(Some(json!({
-                    "id": id,
-                    "handler_module": HANDLER_MODULE,
-                    "sentence": MAN,
-                    "phases": follow::phases(kernel, agent_id),
-                    "line_summaries": follow::lines(kernel, agent_id),
-                    "open": follow::open_questions(kernel),
-                    "files_root": files_root(kernel).await,
-                    "view": {"kind": "html", "bytes": VIEW.replace("{{agent}}", id), "calls": calls(id)},
-                })))
+                let (k, me) = (Arc::clone(kernel), agent_id.clone());
+                let answer = |k: &Arc<Kernel>, me: &AgentId, root: String| {
+                    let id = me.as_str();
+                    json!({
+                        "id": id,
+                        "handler_module": HANDLER_MODULE,
+                        "sentence": MAN,
+                        "phases": follow::phases(k, me),
+                        "line_summaries": follow::lines(k, me),
+                        "open": follow::open_questions(k),
+                        "files_root": root,
+                        "view": {"kind": "html", "bytes": VIEW.replace("{{agent}}", id), "calls": calls(id)},
+                    })
+                };
+                let (k2, me2) = (Arc::clone(&k), me.clone());
+                let reply = crate::kern::cps::reply_later(kernel, |done| async move {
+                    files_root(&k.clone(), move |root| async move { done(answer(&k2, &me2, root)).await }).await;
+                })
+                .await;
+                Ok(Some(if fantastic_kernel::is_refused(&reply) { answer(kernel, agent_id, String::new()) } else { reply }))
             }
         }
     }
@@ -127,14 +144,33 @@ impl Handler for SidebarBundle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kern::host::Host;
+
+    /// A kernel whose agent `sidebar` runs this bundle: its `reflect` defers its settle (#795),
+    /// so it is asked through a dispatch, as the operator, and its settle is the answer.
+    fn world() -> (Arc<Kernel>, Host) {
+        let mut kernel = Kernel::new();
+        kernel.bundles.register(HANDLER_MODULE, SidebarBundle);
+        let kernel = Arc::new(kernel);
+        // a root above it: an agent with no parent is the kernel's own, and its reflect is the kernel's
+        let root = fantastic_kernel::Agent::new(AgentId::from("root"), None, None, Default::default(), std::path::PathBuf::new(), false);
+        fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
+        kernel.set_root(root);
+        let host = Host { kernel: Arc::clone(&kernel), cfg: crate::env::ClientCfg::here(), root: "root".to_string() };
+        (kernel, host)
+    }
+
+    async fn reflect(host: &Host) -> Value {
+        crate::kern::cps::op(host, "sidebar", json!({"type": "reflect"})).await.result
+    }
 
     #[tokio::test]
     async fn the_sidebar_answers_reflect_and_refuses_the_rest_by_declaration() {
-        let kernel = Arc::new(Kernel::new());
+        let (kernel, host) = world();
         fantastic_kernel::test_support::register(&kernel, fantastic_kernel::Agent::new(
             AgentId::from("sidebar"),
-            None,
-            None,
+            Some(HANDLER_MODULE.to_string()),
+            Some(AgentId::from("root")),
             Default::default(),
             std::path::PathBuf::new(),
             false,
@@ -156,35 +192,48 @@ mod tests {
             let r = ask(json!({"type": v, "zzz_unknown": 1})).await.unwrap();
             assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("zzz_unknown")), "{v}: {r}");
         }
-        let r = ask(json!({"type": "reflect"})).await.unwrap();
+        let r = reflect(&host).await;
         assert_eq!(r["view"]["kind"], "html", "{r}");
+    }
+
+    /// The kernel's own roster read of the sidebar (a bookkeeping run, nothing to defer) still
+    /// gets its sentence.
+    #[tokio::test]
+    async fn the_roster_of_the_tree_still_lists_the_sidebars_sentence() {
+        let mut kernel = Kernel::new();
+        kernel.bundles.register(HANDLER_MODULE, SidebarBundle);
+        kernel.bundles.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
+        let kernel = Arc::new(kernel);
+        let root = fantastic_kernel::Agent::new(
+            AgentId::from("kernel"),
+            Some(fantastic_core::HANDLER_MODULE.to_string()),
+            None,
+            Default::default(),
+            std::path::PathBuf::new(),
+            false,
+        );
+        fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
+        kernel.set_root(root);
+        let host = Host { kernel: Arc::clone(&kernel), cfg: crate::env::ClientCfg::here(), root: "kernel".to_string() };
+        let made = crate::kern::cps::op(&host, "kernel", json!({"type": "create_agent", "parent_id": "kernel", "id": "sidebar", "handler_module": HANDLER_MODULE})).await.result;
+        assert!(made.get("error").is_none(), "{made}");
+        let r = crate::kern::cps::op(&host, "kernel", json!({"type": "reflect", "tree": "all"})).await.result;
+        let found = r["tree"]["children"].as_array().and_then(|c| c.iter().find(|n| n["id"] == "sidebar")).cloned();
+        assert_eq!(found.and_then(|n| n["sentence"].as_str().map(str::to_string)).as_deref(), Some(MAN), "{r}");
     }
 
     #[tokio::test]
     async fn reflect_carries_the_html_view_and_exactly_its_calls() {
-        let kernel = Arc::new(Kernel::new());
-        let r = SidebarBundle
-            .handle(
-                &AgentId::from("sidebar"),
-                verbs::Call::Reflect(fantastic_kernel::declared::common::Reflect {
-                    detail: None,
-                    tree: None,
-                    show_subtrees: None,
-                    ignore_subtrees: None,
-                    handler_modules: None,
-                    bundles: None,
-                    bundle_names: None,
-                    limit: None,
-                    after: None,
-                    tier: None,
-                    verb: None,
-                    part: None,
-                }),
-                &kernel,
-            )
-            .await
-            .unwrap()
-            .unwrap();
+        let (kernel, host) = world();
+        fantastic_kernel::test_support::register(&kernel, fantastic_kernel::Agent::new(
+            AgentId::from("sidebar"),
+            Some(HANDLER_MODULE.to_string()),
+            Some(AgentId::from("root")),
+            Default::default(),
+            std::path::PathBuf::new(),
+            false,
+        ));
+        let r = reflect(&host).await;
         let view = &r["view"];
         assert_eq!(view["kind"], "html");
         assert!(
@@ -209,21 +258,38 @@ mod tests {
     }
 
     fn agent(kernel: &Arc<Kernel>, id: &str) {
-        fantastic_kernel::test_support::register(kernel, fantastic_kernel::Agent::new(AgentId::from(id), None, None, Default::default(), std::path::PathBuf::new(), false));
+        let handler = (id == "sidebar").then(|| HANDLER_MODULE.to_string());
+        fantastic_kernel::test_support::register(kernel, fantastic_kernel::Agent::new(AgentId::from(id), handler, Some(AgentId::from("root")), Default::default(), std::path::PathBuf::new(), false));
     }
 
     /// The next event the sidebar published on its own inbox: `(type, the whole event)`.
+    /// The `reflect` calls the test makes arrive on that inbox as messages too: they are not events.
     async fn next(rx: &mut fantastic_kernel::inbox::InboxReceiver) -> Value {
-        tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
-            .await
-            .expect("the sidebar published")
-            .expect("its inbox is open")
-            .payload
+        loop {
+            let p = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .expect("the sidebar published")
+                .expect("its inbox is open")
+                .payload;
+            if p["type"] != "reflect" {
+                return p;
+            }
+        }
+    }
+
+    /// Nothing but the test's own `reflect` calls is waiting on the inbox.
+    fn quiet(rx: &mut fantastic_kernel::inbox::InboxReceiver) -> bool {
+        while let Some(m) = rx.try_recv() {
+            if m.payload["type"] != "reflect" {
+                return false;
+            }
+        }
+        true
     }
 
     #[tokio::test]
     async fn from_its_boot_the_sidebar_publishes_what_its_tree_shows_on_its_own_inbox() {
-        let kernel = Arc::new(Kernel::new());
+        let (kernel, host) = world();
         for id in ["sidebar", "c1", "files", "user", "web"] {
             agent(&kernel, id);
         }
@@ -250,7 +316,7 @@ mod tests {
         // a chat's call moved: its phase, kept for the view's first read
         emit("c1", json!({"type": "status", "source": "c1", "phase": "thinking"})).await;
         assert_eq!(next(&mut rx).await, json!({"type": "status_changed", "agent": "c1", "phase": "thinking"}));
-        assert_eq!(ask(json!({"type": "reflect"})).await["phases"], json!({"c1": "thinking"}));
+        assert_eq!(reflect(&host).await["phases"], json!({"c1": "thinking"}));
 
         // a chat wrote a line: passed on with the tree state, kept for the view's first read
         emit("c1", json!({"type": "line_summary_changed", "source": "c1", "text": "reading the spec", "ts": 12.5})).await;
@@ -259,7 +325,7 @@ mod tests {
             json!({"type": "line_summary_changed", "agent": "c1", "text": "reading the spec", "ts": 12.5})
         );
         assert_eq!(
-            ask(json!({"type": "reflect"})).await["line_summaries"],
+            reflect(&host).await["line_summaries"],
             json!({"c1": {"text": "reading the spec", "ts": 12.5}})
         );
 
@@ -283,21 +349,21 @@ mod tests {
         // the call ended: its end is the chat's last phase, kept until the next call
         emit("c1", json!({"type": "status", "source": "c1", "phase": "failed"})).await;
         assert_eq!(next(&mut rx).await, json!({"type": "status_changed", "agent": "c1", "phase": "failed"}));
-        assert_eq!(ask(json!({"type": "reflect"})).await["phases"], json!({"c1": "failed"}));
+        assert_eq!(reflect(&host).await["phases"], json!({"c1": "failed"}));
         emit("c1", json!({"type": "status", "source": "c1", "phase": "paused"})).await;
         assert_eq!(next(&mut rx).await, json!({"type": "status_changed", "agent": "c1", "phase": "paused"}));
-        assert_eq!(ask(json!({"type": "reflect"})).await["phases"], json!({"c1": "paused"}));
+        assert_eq!(reflect(&host).await["phases"], json!({"c1": "paused"}));
         // resumed with nothing held: the chat is at rest
         emit("c1", json!({"type": "status", "source": "c1", "phase": "idle"})).await;
         assert_eq!(next(&mut rx).await, json!({"type": "status_changed", "agent": "c1", "phase": "idle"}));
-        assert_eq!(ask(json!({"type": "reflect"})).await["phases"], json!({}));
-        assert!(rx.try_recv().is_none(), "nothing else was published");
+        assert_eq!(reflect(&host).await["phases"], json!({}));
+        assert!(quiet(&mut rx), "nothing else was published");
 
         // deleted: it follows no more
         fantastic_kernel::Bundle::on_delete(&SidebarBundle, &me, &kernel).await.unwrap();
         emit("c1", json!({"type": "status", "source": "c1", "phase": "thinking"})).await;
         kernel.publish_state(&json!({"agent_id": "c3", "kind": "added", "parent_id": "kernel"}));
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(rx.try_recv().is_none(), "a deleted sidebar publishes nothing");
+        assert!(quiet(&mut rx), "a deleted sidebar publishes nothing");
     }
 }

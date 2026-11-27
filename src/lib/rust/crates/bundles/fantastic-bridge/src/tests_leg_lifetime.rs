@@ -45,7 +45,7 @@ async fn inbound(peer: &Arc<dyn BridgeTransport>, bid: &str, n: u32) -> Value {
                            "target": format!("notes_{bid}"), "payload": {"type": "reflect"}}))
         .await
         .unwrap();
-    let reply = tokio::time::timeout(std::time::Duration::from_secs(2), peer.recv_frame())
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(30), super::answer(&**peer))
         .await
         .expect("a reply")
         .expect("a frame")
@@ -392,7 +392,7 @@ async fn a_drop_mid_turn_releases_the_called_agent() {
     )
     .await
     .unwrap();
-    let reply = tokio::time::timeout(std::time::Duration::from_secs(10), peer.recv_frame())
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(30), super::answer(&*peer))
         .await
         .expect("the next call is answered")
         .expect("a frame")

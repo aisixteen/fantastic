@@ -72,7 +72,8 @@ pub(super) struct PeerLink {
     leg: Option<String>,
 }
 
-/// What a `call` task of this connection needs to mirror its reply.
+/// What a `call` of this connection needs to mirror its result.
+#[derive(Clone)]
 pub(super) struct Mirror {
     kernel: usize,
     me: String,
@@ -443,6 +444,18 @@ impl PeerLink {
         if self.leg.is_none() {
             return;
         }
+        // A KERNEL'S LEG ANSWERS ASYNC (#795): its `reply` was the ack, and the
+        // result of the host's call is this `settle`, told to the connection (no
+        // `src`) — answered as that call's reply, its body at its slot of `data`.
+        let settle = frame.get("payload").filter(|p| p["type"] == "settle");
+        if let (None, Some(p)) = (frame.get("src"), settle) {
+            let mut reply = json!({"type": "reply", "id": p["re"], "data": p["data"]});
+            if let Some(m) = p.get("secret") {
+                reply["secret"] = m.clone();
+            }
+            self.answer(kernel, &reply, body);
+            return;
+        }
         let Some((guid, _)) = &self.pinned else {
             return;
         };
@@ -513,6 +526,10 @@ impl PeerLink {
         let Some(fid) = frame.get("id").and_then(Value::as_str) else {
             return;
         };
+        // a kernel leg's ACK: the call runs there, and its settle answers it
+        if frame["type"] == "reply" && frame.get("data").is_some_and(fantastic_io_bridge::inbound::is_ack) {
+            return;
+        }
         let waiting = self
             .calls
             .lock()

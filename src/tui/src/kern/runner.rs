@@ -16,8 +16,8 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use crate::ev::{Cmd, Ev, Got};
+use crate::kern::cps::{done, Done};
 use crate::kern::host::Host;
-use crate::kern::model::KernelErr;
 
 pub struct Runner {
     host: Arc<Host>,
@@ -82,24 +82,19 @@ impl Runner {
         }
     }
 
-    /// One typed write; its settle sends the agent's next one.
+    /// One typed write; its settle (or its launch's refusal) sends the agent's next one.
     async fn write(r: Arc<Self>, cmd: Cmd) {
         let Cmd::Typed { target, job_id, data } = &cmd else { return };
         let payload = json!({"type":"write","job_id":job_id,"data":data});
         let (host, tx, what, to) = (Arc::clone(&r.host), r.tx.clone(), cmd.what(), target.clone());
         let next = Arc::clone(&r);
-        let ack = r
-            .host
-            .operator_call(target, payload, move |out| async move {
+        r.host
+            .operator_then(target, payload, move |out| async move {
                 let key = to.to_string();
                 settled(host, tx, what, to, out).await;
                 Runner::typed(&next, &key);
             })
             .await;
-        if ack.status != fantastic_kernel::Status::Accepted {
-            settled(Arc::clone(&r.host), r.tx.clone(), cmd.what(), target.clone(), ack).await;
-            Runner::typed(&r, &target.to_string());
-        }
     }
 
     /// A typed write to `target` settled: its next one goes out, or the agent is idle.
@@ -129,23 +124,6 @@ impl Runner {
         let _ = self.tx.send(Ev::Note(s)).await;
     }
 
-    /// The wizard made an AI agent (or why not): its rows watched, the tree and
-    /// the shelf fresh, then `Created` — the app selects it, its chat opened.
-    async fn made(&self, r: Result<String, String>) {
-        let r = match r {
-            Ok(id) => watch_rows(&self.host, &id).await.map(|()| id),
-            Err(e) => Err(e),
-        };
-        if r.is_ok() {
-            if let Some(t) = self.host.tree() {
-                self.got(Got::Tree(t)).await;
-            }
-        }
-        self.got(Got::Saved(crate::kern::saved::shelf(&self.host).await)).await;
-        self.got(Got::Keys(crate::kern::keys::stored())).await;
-        self.got(Got::Created(r)).await;
-    }
-
     async fn one(&self, cmd: Cmd) {
         match &cmd {
             Cmd::Quit | Cmd::Jump { .. } => {}
@@ -154,22 +132,38 @@ impl Runner {
             Cmd::Unwatch(agent) => self.unwatch(agent).await,
 
             Cmd::Stream { agent, payload } => {
-                if let Err(e) = Host::read(self.host.operator(agent, payload.clone()).await) {
-                    self.refused(&cmd, e).await
-                }
+                let (tx, what) = (self.tx.clone(), cmd.what());
+                self.host
+                    .operator_then(agent, payload.clone(), move |out| async move {
+                        if let Err(err) = Host::read(out) {
+                            let _ = tx.send(Ev::Got(Got::Refused { what, err })).await;
+                        }
+                    })
+                    .await;
             }
 
             Cmd::OpenTerminal { cols, rows } => {
-                match crate::kern::terminal::open(&self.host, *cols, *rows).await {
-                    Ok(a) => {
-                        // The tree first: it is what gives the pane its panel.
-                        if let Some(t) = self.host.tree() {
-                            self.got(Got::Tree(t)).await;
+                let (host, tx) = (Arc::clone(&self.host), self.tx.clone());
+                crate::kern::terminal::open(
+                    &self.host.clone(),
+                    *cols,
+                    *rows,
+                    done(move |r: Result<crate::kern::terminal::Attach, String>| async move {
+                        match r {
+                            Ok(a) => {
+                                // The tree first: it is what gives the pane its panel.
+                                if let Some(t) = host.tree() {
+                                    let _ = tx.send(Ev::Got(Got::Tree(t))).await;
+                                }
+                                let _ = tx.send(Ev::Got(Got::TermAttached { job_id: a.job_id, replay: a.replay })).await;
+                            }
+                            Err(why) => {
+                                let _ = tx.send(Ev::Note(why)).await;
+                            }
                         }
-                        self.got(Got::TermAttached { job_id: a.job_id, replay: a.replay }).await;
-                    }
-                    Err(why) => self.note(why).await,
-                }
+                    }),
+                )
+                .await;
             }
             Cmd::Backends => self.got(Got::Backends(crate::kern::setup::backends(&self.host))).await,
             Cmd::KeyMode => {
@@ -177,41 +171,79 @@ impl Runner {
                 self.got(Got::KeyMode(r)).await
             }
             Cmd::Keys => self.got(Got::Keys(crate::kern::keys::stored())).await,
-            Cmd::Saved => self.got(Got::Saved(crate::kern::saved::shelf(&self.host).await)).await,
+            Cmd::Saved => send_shelf(Arc::clone(&self.host), self.tx.clone(), false).await,
             Cmd::Prefer { name } => {
-                let r = crate::kern::saved::prefer(&self.host, name.as_deref()).await.map(|p| match p {
-                    Some(n) => format!("`{n}` is your default for new AI agents"),
-                    None => "no default AI set-up — new AI agents start from nothing".to_string(),
-                });
-                self.got(Got::Setup(r)).await;
-                self.got(Got::Saved(crate::kern::saved::shelf(&self.host).await)).await;
+                let (host, tx) = (Arc::clone(&self.host), self.tx.clone());
+                crate::kern::saved::prefer(
+                    &self.host.clone(),
+                    name.as_deref(),
+                    done(move |r: Result<Option<String>, String>| async move {
+                        let r = r.map(|p| match p {
+                            Some(n) => format!("`{n}` is your default for new AI agents"),
+                            None => "no default AI set-up — new AI agents start from nothing".to_string(),
+                        });
+                        let _ = tx.send(Ev::Got(Got::Setup(r))).await;
+                        send_shelf(host, tx, false).await;
+                    }),
+                )
+                .await;
             }
             Cmd::WizardCreate { name, module, texts, key } => {
-                let r = crate::kern::wizard::create(&self.host, name, module, texts, key.as_ref()).await;
-                self.made(r).await;
+                let (host, tx) = (Arc::clone(&self.host), self.tx.clone());
+                crate::kern::wizard::create(
+                    &self.host.clone(),
+                    name,
+                    module,
+                    texts,
+                    key.as_ref(),
+                    done(move |r: Result<String, String>| async move { made(host, tx, r).await }),
+                )
+                .await;
             }
             Cmd::WizardFromSaved { name } => {
-                let r = crate::kern::wizard::from_saved(&self.host, name).await;
-                self.made(r).await;
+                let (host, tx) = (Arc::clone(&self.host), self.tx.clone());
+                crate::kern::wizard::from_saved(
+                    &self.host.clone(),
+                    name,
+                    done(move |r: Result<String, String>| async move { made(host, tx, r).await }),
+                )
+                .await;
             }
             Cmd::WizardSaveEdit { name, module, texts, key } => {
-                let r = crate::kern::wizard::save_edit(&self.host, name, module, texts, key.as_ref())
-                    .await
-                    .map(|()| format!("saved `{name}` — agents made from it from now on use these values"));
-                self.got(Got::Setup(r)).await;
-                self.got(Got::Saved(crate::kern::saved::shelf(&self.host).await)).await;
-                self.got(Got::Keys(crate::kern::keys::stored())).await;
+                let (host, tx, name2) = (Arc::clone(&self.host), self.tx.clone(), name.clone());
+                crate::kern::wizard::save_edit(
+                    &self.host.clone(),
+                    name,
+                    module,
+                    texts,
+                    key.as_ref(),
+                    done(move |r: Result<(), String>| async move {
+                        let r = r.map(|()| format!("saved `{name2}` — agents made from it from now on use these values"));
+                        let _ = tx.send(Ev::Got(Got::Setup(r))).await;
+                        send_shelf(host, tx, true).await;
+                    }),
+                )
+                .await;
             }
             Cmd::CloseTerminal => {
                 self.unwatch(&crate::kern::terminal::TERM_ID.into()).await;
-                match crate::kern::terminal::close(&self.host).await {
-                    Ok(()) => {
-                        if let Some(t) = self.host.tree() {
-                            self.got(Got::Tree(t)).await;
+                let (host, tx) = (Arc::clone(&self.host), self.tx.clone());
+                crate::kern::terminal::close(
+                    &self.host.clone(),
+                    done(move |r: Result<(), String>| async move {
+                        match r {
+                            Ok(()) => {
+                                if let Some(t) = host.tree() {
+                                    let _ = tx.send(Ev::Got(Got::Tree(t))).await;
+                                }
+                            }
+                            Err(why) => {
+                                let _ = tx.send(Ev::Note(why)).await;
+                            }
                         }
-                    }
-                    Err(why) => self.note(why).await,
-                }
+                    }),
+                )
+                .await;
             }
 
             // ── reads: no verb, no gate, no cursor ────────────────────────
@@ -249,8 +281,16 @@ impl Runner {
             Cmd::Rows { agent, full, after } => {
                 // `full` re-reads everything and rebuilds the order; otherwise
                 // only what came after the shell's newest row, merged in.
-                let (rows, loaded) = self.host.rows(agent, if *full { None } else { *after }).await;
-                self.got(Got::Rows { agent: agent.clone(), rows, full: *full, loaded }).await
+                let (tx, who, full) = (self.tx.clone(), agent.clone(), *full);
+                self.host
+                    .rows(
+                        agent,
+                        if full { None } else { *after },
+                        done(move |(rows, loaded): (Vec<crate::kern::model::Row>, Option<bool>)| async move {
+                            let _ = tx.send(Ev::Got(Got::Rows { agent: who, rows, full, loaded })).await;
+                        }),
+                    )
+                    .await;
             }
 
             // READING A SELF-DESCRIPTION IS RENDERING: the shell is the operator,
@@ -258,20 +298,17 @@ impl Runner {
             // reflect (`tier`: its verbs' docs), which the pane lists beside the
             // self-description.
             Cmd::Reflect { agent } => {
-                let out = self
-                    .host
-                    .operator(agent, json!({"type":"reflect","tree":"none","tier":"detailed"}))
+                let (tx, what, who) = (self.tx.clone(), cmd.what(), agent.clone());
+                self.host
+                    .operator_then(agent, json!({"type":"reflect","tree":"none","tier":"detailed"}), move |out| async move {
+                        let _ = tx
+                            .send(Ev::Got(match Host::read(out) {
+                                Ok(reply) => Got::Reflect { agent: who, reply },
+                                Err(err) => Got::Refused { what, err },
+                            }))
+                            .await;
+                    })
                     .await;
-                match Host::read(out) {
-                    Ok(reply) => {
-                        self.got(Got::Reflect {
-                            agent: agent.clone(),
-                            reply,
-                        })
-                        .await
-                    }
-                    Err(e) => self.refused(&cmd, e).await,
-                }
             }
 
             Cmd::OpenView {
@@ -281,22 +318,25 @@ impl Runner {
                 path,
             } => {
                 let payload = json!({"type":"open_view","kind":kind,"path":path});
-                match Host::read(self.host.operator(bridge, payload).await) {
-                    Ok(reply) => {
-                        // a view made just now is in the tree only once it is read again
-                        if reply.get("error").is_none() {
-                            if let Some(t) = self.host.tree() {
-                                self.got(Got::Tree(t)).await;
+                let (host, tx, what, from) = (Arc::clone(&self.host), self.tx.clone(), cmd.what(), from.clone());
+                self.host
+                    .operator_then(bridge, payload, move |out| async move {
+                        match Host::read(out) {
+                            Ok(reply) => {
+                                // a view made just now is in the tree only once it is read again
+                                if reply.get("error").is_none() {
+                                    if let Some(t) = host.tree() {
+                                        let _ = tx.send(Ev::Got(Got::Tree(t))).await;
+                                    }
+                                }
+                                let _ = tx.send(Ev::Got(Got::Opened { from, reply })).await;
+                            }
+                            Err(err) => {
+                                let _ = tx.send(Ev::Got(Got::Refused { what, err })).await;
                             }
                         }
-                        self.got(Got::Opened {
-                            from: from.clone(),
-                            reply,
-                        })
-                        .await;
-                    }
-                    Err(e) => self.refused(&cmd, e).await,
-                }
+                    })
+                    .await;
             }
 
             Cmd::Send { target, payload } => self.act_send(&cmd, target, payload.clone()).await,
@@ -306,23 +346,21 @@ impl Runner {
             Cmd::Cancel { task_id } => {
                 // Through the front door, so `on_cancel` hooks run and the subtree
                 // is killed post-order.
-                let out = self
-                    .host
-                    .operator(
-                        &self.host.root.clone(),
-                        json!({"type":"cancel","task_id":task_id}),
-                    )
+                let (host, tx, what) = (Arc::clone(&self.host), self.tx.clone(), cmd.what());
+                self.host
+                    .operator_then(&self.host.root.clone(), json!({"type":"cancel","task_id":task_id}), move |out| async move {
+                        match Host::read(out) {
+                            Ok(v) => {
+                                let killed = serde_json::from_value(v.get("killed").cloned().unwrap_or(json!([]))).unwrap_or_default();
+                                let _ = tx.send(Ev::Got(Got::Cancelled { killed })).await;
+                                let _ = tx.send(Ev::Got(Got::Ps(host.tasks()))).await;
+                            }
+                            Err(err) => {
+                                let _ = tx.send(Ev::Got(Got::Refused { what, err })).await;
+                            }
+                        }
+                    })
                     .await;
-                match Host::read(out) {
-                    Ok(v) => {
-                        let killed =
-                            serde_json::from_value(v.get("killed").cloned().unwrap_or(json!([])))
-                                .unwrap_or_default();
-                        self.got(Got::Cancelled { killed }).await;
-                        self.got(Got::Ps(self.host.tasks())).await;
-                    }
-                    Err(e) => self.refused(&cmd, e).await,
-                }
             }
         }
     }
@@ -375,25 +413,11 @@ impl Runner {
     /// agent's log is re-read then. A refusal at launch is the answer now.
     async fn act_send(&self, cmd: &Cmd, target: &crate::kern::model::AgentId, payload: Value) {
         let (host, tx, what, to) = (Arc::clone(&self.host), self.tx.clone(), cmd.what(), target.clone());
-        let ack = self
-            .host
-            .operator_call(target, payload, move |out| async move {
+        self.host
+            .operator_then(target, payload, move |out| async move {
                 settled(host, tx, what, to, out).await;
             })
             .await;
-        if ack.status != fantastic_kernel::Status::Accepted {
-            settled(Arc::clone(&self.host), self.tx.clone(), cmd.what(), target.clone(), ack).await;
-        }
-    }
-
-    /// A refusal is filed under the command that earned it, so the pane that asked
-    /// is the pane that shows the answer.
-    async fn refused(&self, cmd: &Cmd, err: KernelErr) {
-        self.got(Got::Refused {
-            what: cmd.what(),
-            err,
-        })
-        .await;
     }
 }
 
@@ -414,14 +438,67 @@ async fn settled(
             if failed {
                 let _ = tx.send(Ev::Note(format!("{target}: the call did not complete"))).await;
             }
-            let (rows, loaded) = host.rows(&target, None).await;
-            let _ = tx.send(Ev::Got(Got::Rows { agent: target, rows, full: true, loaded })).await;
-            let _ = tx.send(Ev::Got(Got::Ps(host.tasks()))).await;
+            // the log is read again, then the tasks: the rows' own calls settle first
+            let (h2, tx2) = (Arc::clone(&host), tx.clone());
+            host.rows(
+                &target.clone(),
+                None,
+                done(move |(rows, loaded): (Vec<crate::kern::model::Row>, Option<bool>)| async move {
+                    let _ = tx2.send(Ev::Got(Got::Rows { agent: target, rows, full: true, loaded })).await;
+                    let _ = tx2.send(Ev::Got(Got::Ps(h2.tasks()))).await;
+                }),
+            )
+            .await;
         }
         Err(err) => {
             let _ = tx.send(Ev::Got(Got::Refused { what, err })).await;
         }
     }
+}
+
+/// The wizard made an AI agent (or why not): its rows watched first (#795: the watch call
+/// settles), then the tree and the shelf fresh, then `Created`.
+async fn made(host: Arc<Host>, tx: mpsc::Sender<Ev>, r: Result<String, String>) {
+    match r {
+        Ok(id) => {
+            let (h, tx2, id2) = (Arc::clone(&host), tx.clone(), id.clone());
+            watch_rows(&host, &id, done(move |w: Result<(), String>| async move { made_shelf(h, tx2, w.map(|()| id2)).await })).await;
+        }
+        Err(e) => made_shelf(host, tx, Err(e)).await,
+    }
+}
+
+/// The tree, then the shelf and the keys, then `Created`: what the app needs to select the new agent.
+async fn made_shelf(host: Arc<Host>, tx: mpsc::Sender<Ev>, r: Result<String, String>) {
+    if r.is_ok() {
+        if let Some(t) = host.tree() {
+            let _ = tx.send(Ev::Got(Got::Tree(t))).await;
+        }
+    }
+    let h = Arc::clone(&host);
+    crate::kern::saved::shelf(
+        &h,
+        done(move |s: Result<crate::kern::saved::Shelf, String>| async move {
+            let _ = tx.send(Ev::Got(Got::Saved(s))).await;
+            let _ = tx.send(Ev::Got(Got::Keys(crate::kern::keys::stored()))).await;
+            let _ = tx.send(Ev::Got(Got::Created(r))).await;
+        }),
+    )
+    .await;
+}
+
+/// The shelf, read (a call), then told to the shell; the keys with it when `keys`.
+async fn send_shelf(host: Arc<Host>, tx: mpsc::Sender<Ev>, keys: bool) {
+    crate::kern::saved::shelf(
+        &host,
+        done(move |s: Result<crate::kern::saved::Shelf, String>| async move {
+            let _ = tx.send(Ev::Got(Got::Saved(s))).await;
+            if keys {
+                let _ = tx.send(Ev::Got(Got::Keys(crate::kern::keys::stored()))).await;
+            }
+        }),
+    )
+    .await;
 }
 
 /// PUSH, not poll. The kernel's own row tail says exactly when an agent's
@@ -488,23 +565,32 @@ pub async fn spawn_row_watch(host: Arc<Host>, tx: mpsc::Sender<Ev>) {
             }
         }
     });
-    for ai in host.ai_agents().await {
-        if let Err(why) = watch_rows(&host, &ai).await {
-            tracing::warn!("{why}");
-        }
+    for ai in host.ai_agents() {
+        watch_rows(
+            &host,
+            &ai,
+            done(|r: Result<(), String>| async move {
+                if let Err(why) = r {
+                    tracing::warn!("{why}");
+                }
+            }),
+        )
+        .await;
     }
 }
 
-/// Watch one AI agent's rows (operator-named watcher: the shell's inbox).
-pub async fn watch_rows(host: &Host, ai: &str) -> Result<(), String> {
-    let r = host
-        .operator(ai, json!({"type": "watch", "watcher": row_watcher(host).0}))
-        .await
-        .result;
-    match r.get("error").and_then(Value::as_str) {
-        Some(e) => Err(format!("{ai}: watch refused: {e}")),
-        None => Ok(()),
-    }
+/// Watch one AI agent's rows (operator-named watcher: the shell's inbox); `done` gets the
+/// answer with the watch call's settle.
+pub async fn watch_rows(host: &Host, ai: &str, done: Done<Result<(), String>>) {
+    let ai = ai.to_string();
+    host.operator_then(&ai.clone(), json!({"type": "watch", "watcher": row_watcher(host).0}), move |out| async move {
+        done(match out.result.get("error").and_then(Value::as_str) {
+            Some(e) => Err(format!("{ai}: watch refused: {e}")),
+            None => Ok(()),
+        })
+        .await;
+    })
+    .await;
 }
 
 /// The kernel's state feed. The callback is SYNCHRONOUS and runs inline on the

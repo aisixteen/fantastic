@@ -3,7 +3,8 @@
 //!
 //! ```text
 //! C→S {type:"call",  target, payload, id, secret?}
-//!                                             → kernel.send → reply
+//!                                             → handed to the leg → reply (the ACK)
+//!                                               then the settle event (#795)
 //!                                               (`secret` = the item's marks —
 //!                                               dotted strings and/or arrays
 //!                                               of steps, `fantastic_kernel::secret`)
@@ -19,10 +20,16 @@
 //!                                               leg's agent `src`
 //! C→S {type:"event", src, payload}            → an event of that agent, to the
 //!                                               host's watchers of `<guid>|<src>`
-//! S→C {type:"reply", id, data, secret?} | {type:"error", id, …}
-//!                                             (`secret` = dotted paths into `data`
-//!                                               the reply's bundle marked — absent
-//!                                               when none)
+//! S→C {type:"reply", id, data} | {type:"error", id, …}
+//!                                             (`data` = the call's ACK `{pid, status:
+//!                                               "accepted"}`, or its refusal at launch,
+//!                                               which is the whole answer)
+//! S→C {type:"event", payload:{type:"settle", re, status, data, secret?}}
+//!                                             → the call's SETTLE (#795), after its
+//!                                               ack: `re` = the call frame's id,
+//!                                               `data` its result (`secret` = dotted
+//!                                               paths into `data` the reply's bundle
+//!                                               marked — absent when none)
 //! S→C {type:"event", src, payload}            → an event from a watched agent
 //!                                               (`src` = the name the client watched)
 //! S→C {type:"event", payload}                 → an event emitted to THIS connection
@@ -373,7 +380,6 @@ pub(crate) async fn ws_loop(
     host_agent_id: AgentId,
     leg_agent_id: AgentId,
 ) {
-    use std::collections::HashMap;
     let client_id = AgentId::from(make_client_id().as_str());
 
     let (mut sink, mut stream) = socket.split();
@@ -417,26 +423,32 @@ pub(crate) async fn ws_loop(
         ),
         Decision::Allow
     );
-    // The name the client used → the watch it REALLY registered (see
-    // [`watch_path`]): the resolved agent, that watch's own reader, its drain.
-    let mut watching: HashMap<String, WatchEntry> = HashMap::new();
 
-    // Pending `call` tasks — cancelled on disconnect so long-lived sends
-    // release their locks immediately.
-    let pending_calls: Arc<std::sync::Mutex<Vec<fantastic_kernel::TaskId>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
-
-    // State-stream subscription tokens — removed on disconnect.
-    let state_unsubs: Arc<std::sync::Mutex<Vec<fantastic_kernel::SubscriberToken>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
+    // THE CONNECTION, shared with the steps and the continuations its frames make
+    // (#795): nothing here is a local of the loop, because a settle arrives as a
+    // message after the frame that asked was handled.
+    let conn = Arc::new(Conn {
+        kernel: Arc::clone(&state.kernel),
+        leg: leg_agent_id.clone(),
+        host: host_agent_id.clone(),
+        client_id: client_id.clone(),
+        out: out_tx.downgrade(),
+        readers: Arc::clone(&readers),
+        watching: std::sync::Mutex::new(Watches::default()),
+        pending_calls: std::sync::Mutex::new(Vec::new()),
+        state_subs: std::sync::Mutex::new(StateSubs::default()),
+    });
+    let order = Order::new();
 
     // REGISTERED, under the HOST: python spawns the drain as the kernel task
     // `ws_drain` on `host_agent_id`, so an open socket is visible in `ps` and
-    // its pump is cancellable like any other work.
+    // its pump is cancellable like any other work. A KEEPALIVE loop: the
+    // operator's stop cancels the calls in flight, and their settles still reach
+    // this socket (#795) — the pump ends with the socket, not with the drain.
     let drain_task = state
         .kernel
         .clone()
-        .spawn_task(&host_agent_id, "ws_drain", {
+        .spawn_keepalive_task(&host_agent_id, "ws_drain", {
             let out_tx = out_tx.clone();
             let inbox_rx = Arc::clone(&inbox_rx);
             async move {
@@ -490,20 +502,11 @@ pub(crate) async fn ws_loop(
         .await;
 
     // THE CONNECT-TIME AUTO-WATCH of the endpoint the socket named — through the
-    // one watch path, so a refusal is an `error` frame, never silence.
+    // one watch path, so a refusal is an `error` frame, never silence. The first
+    // step of the connection's order: every frame after it runs once it is live.
     if admits_autowatch {
-        watch_path(
-            &state.kernel,
-            &leg_agent_id,
-            &host_agent_id,
-            &client_id,
-            &mut watching,
-            &readers,
-            &out_tx,
-            &host_agent_id.0,
-            &json!(""),
-        )
-        .await;
+        let (c, src) = (Arc::clone(&conn), host_agent_id.0.clone());
+        order.push(Box::new(move |next| Box::pin(c.watch(src, json!(""), next))));
     }
 
     // THE PEER HALF — the page kernel's address on the host, once it says hello.
@@ -597,94 +600,39 @@ pub(crate) async fn ws_loop(
                 }
                 // python `frame.get("payload", {})`.
                 let payload = env.payload.take().unwrap_or_else(|| json!({}));
-                let body = inbound.body;
-                // REGISTERED UNDER THE HOST: a frame handler DISPATCHES, so it
-                // is real work — a `ps` row, reachable by `cancel`, and its send
-                // parented to it instead of becoming a root.
-                let spawner = Arc::clone(&state.kernel);
-                let flush_readers = Arc::clone(&readers);
-                let mirror = peer.mirror();
-                let handle = spawner.spawn_task(&host_agent_id, "ws_call", async move {
-                    // THE FRAME ID IS THE EXECUTION ID. One id space: the same
-                    // id arriving twice — a double-click, a second tab, a
-                    // reconnect replaying its queue — is ONE intent, deduped
-                    // and joined by the ledger instead of running twice.
-                    let mut item = serde_json::Map::new();
-                    item.insert("target".into(), json!(target.as_str()));
-                    item.insert("payload".into(), payload);
-                    if let Some(s) = fid.as_str().filter(|s| !s.is_empty()) {
-                        item.insert("id".into(), json!(s));
-                    }
-                    // paths into `payload`, shown as `[secret]`
-                    if let Some(m) = secret {
-                        item.insert("secret".into(), m);
-                    }
-                    // ONLY A BINARY FRAME OVERWRITES THE KEY. python's
-                    // `payload[field] = body` runs where a body EXISTS; a TEXT
-                    // frame's `bytes` reaches the target as the JSON value the
-                    // client sent, and `write_stream` answers `missing_arg` for
-                    // it (an ABSENT key stays an empty chunk). Stripping it
-                    // unconditionally wrote 0 bytes and reported success where
-                    // python refused. The decode left `null` in the slot
-                    // python's `set_path` fills — kept, so the call row and the
-                    // watcher frame keep python's key order.
-                    //
-                    // The REPLY needs nothing from the call: any verb whose reply
-                    // carries a body answers a binary frame (`send_envelope`),
-                    // whatever frame asked — python's `encode_frame` finds the
-                    // bytes, no verb list.
-                    // HANDED TO THE LEG: this loop runs outside every dispatch, so
-                    // it never sends onward itself — the leg's `inbound_call`
-                    // does, AS THE LEG (`fantastic_io_bridge::inbound`).
-                    let body = body.map(|b| {
-                        let mut path = vec![fantastic_kernel::Step::Key("item".into())];
-                        path.extend(b.nested_in("payload"));
-                        fantastic_kernel::Blob::new(path, b.bytes)
-                    });
-                    let out_item = fantastic_io_bridge::inbound::hand_in(
-                        &kernel,
-                        &leg,
-                        json!({"type": "inbound_call", "item": Value::Object(item)}),
-                        body,
-                    )
-                    .await;
-                    // Verb-level errors travel inside `data.error` (python's
-                    // wire shape); a `type:"error"` frame is reserved for
-                    // out-of-band failures.
-                    // PYTHON'S ORDER, ENFORCED: the watch events this dispatch
-                    // produced are already on the queue (the kernel fans out
-                    // BEFORE the handler), so flush them here — under the drain's
-                    // own lock, so the drain cannot be mid-forward — and only then
-                    // enqueue the reply. One sink, one order.
-                    let snapshot: Vec<Reader> =
-                        flush_readers.lock().expect("readers poisoned").clone();
-                    let mut held = Vec::with_capacity(snapshot.len());
-                    for (src, rx) in &snapshot {
-                        let mut g = rx.lock().await;
-                        while let Some(item) = g.try_recv() {
-                            forward_event(&out, item, src.as_deref()).await;
-                        }
-                        held.push(g);
-                    }
-                    // the guid's other tabs get it too (`reply_mirror`) — read
-                    // at reply time, so a hello that landed meanwhile counts
-                    let siblings = mirror.siblings();
-                    let mirrored = (!siblings.is_empty())
-                        .then(|| (out_item.result.clone(), out_item.body.clone()));
-                    let mut f = json!({"type": "reply", "id": fid, "data": out_item.result});
-                    // the reply's own secret paths (a credential store's `get`
-                    // fields), so a calling kernel records them as shown; a plain
-                    // reply carries no such key
-                    if !out_item.secret.is_empty() {
-                        f["secret"] = json!(out_item.secret);
-                    }
-                    send_envelope(&out, f, out_item.body, REPLY_KEY).await;
-                    drop(held);
-                    if let Some((data, body)) = mirrored {
-                        peer::mirror_reply(siblings, &fid, &data, body.as_ref()).await;
-                    }
+                // THE FRAME ID IS THE EXECUTION ID. One id space: the same
+                // id arriving twice — a double-click, a second tab, a
+                // reconnect replaying its queue — is ONE intent, deduped
+                // and joined by the ledger instead of running twice.
+                let mut item = serde_json::Map::new();
+                item.insert("target".into(), json!(target.as_str()));
+                item.insert("payload".into(), payload);
+                if let Some(s) = fid.as_str().filter(|s| !s.is_empty()) {
+                    item.insert("id".into(), json!(s));
+                }
+                // paths into `payload`, shown as `[secret]`
+                if let Some(m) = secret {
+                    item.insert("secret".into(), m);
+                }
+                // ONLY A BINARY FRAME OVERWRITES THE KEY. python's
+                // `payload[field] = body` runs where a body EXISTS; a TEXT
+                // frame's `bytes` reaches the target as the JSON value the
+                // client sent, and `write_stream` answers `missing_arg` for
+                // it (an ABSENT key stays an empty chunk). The decode left
+                // `null` in the slot python's `set_path` fills — kept, so the
+                // call row and the watcher frame keep python's key order.
+                //
+                // The SETTLE needs nothing from the call: any verb whose reply
+                // carries a body answers a binary frame (`send_envelope`),
+                // whatever frame asked.
+                let body = inbound.body.map(|b| {
+                    let mut path = vec![fantastic_kernel::Step::Key("item".into())];
+                    path.extend(b.nested_in("payload"));
+                    fantastic_kernel::Blob::new(path, b.bytes)
                 });
-                track_call(&state.kernel, &pending_calls, handle);
+                let (c, mirror) = (Arc::clone(&conn), peer.mirror());
+                let hand = json!({"type": "inbound_call", "item": Value::Object(item)});
+                order.push(Box::new(move |next| Box::pin(c.call(fid, hand, body, mirror, next))));
             }
             "hello" => peer.hello(&kernel, &leg, &out, &frame, &env, &fid).await,
             // An answer to one of the host's calls INTO the page — never gated:
@@ -705,39 +653,22 @@ pub(crate) async fn ws_loop(
                 let body = inbound
                     .body
                     .map(|b| fantastic_kernel::Blob::new(b.nested_in("payload"), b.bytes));
-                let _ = fantastic_io_bridge::inbound::hand_in(
-                    &kernel,
-                    &leg,
-                    json!({"type": "inbound_emit", "target": target.as_str(), "payload": payload}),
-                    body,
-                )
-                .await;
+                let c = Arc::clone(&conn);
+                let hand = json!({"type": "inbound_emit", "target": target.as_str(), "payload": payload});
+                order.push(Box::new(move |next| Box::pin(c.emit(hand, body, next))));
             }
             "watch" => {
                 if !matches!(gate_leg(&kernel, &leg, "watch", &env), Decision::Allow) {
                     continue;
                 }
-                let src = env.src.as_deref().unwrap_or("");
-                watch_path(
-                    &kernel,
-                    &leg,
-                    &host_agent_id,
-                    &client_id,
-                    &mut watching,
-                    &readers,
-                    &out,
-                    src,
-                    &fid,
-                )
-                .await;
+                let (c, src) = (Arc::clone(&conn), env.src.clone().unwrap_or_default());
+                order.push(Box::new(move |next| Box::pin(c.watch(src, fid, next))));
             }
             "unwatch" => {
                 // NO GATE — python gates the four inbound actions and leaves
                 // `unwatch` (a client giving something up) ungated.
-                let src = env.src.as_deref().unwrap_or("");
-                if let Some(entry) = watching.remove(src) {
-                    drop_watch(&kernel, src, entry, &readers).await;
-                }
+                let (c, src) = (Arc::clone(&conn), env.src.clone().unwrap_or_default());
+                order.push(Box::new(move |next| Box::pin(c.unwatch(src, next))));
             }
             "state_subscribe" => {
                 // A SEALED LEG LEAKS NO TELEMETRY, not merely no dispatch.
@@ -747,107 +678,12 @@ pub(crate) async fn ws_loop(
                 ) {
                     continue;
                 }
-                // The state stream is a `watch` on a NODE (`src`): the leg
-                // needs a `watch` line there, and it reads only the events of
-                // that node's subtree it covers. An ingress rule answers "may
-                // this client reach this leg", never "what may it READ".
-                // HANDED TO THE LEG (`inbound_state_subscribe`): the tap is
-                // gated as the leg, on the node.
-                let node = AgentId::from(env.src.as_deref().unwrap_or(""));
-                let asked = fantastic_io_bridge::inbound::hand_in(
-                    &kernel,
-                    &leg,
-                    json!({"type": "inbound_state_subscribe", "node": node.as_str()}),
-                    None,
-                )
-                .await
-                .result;
-                let denial = fantastic_kernel::refusal::error_text(&asked)
-                    .is_some()
-                    .then_some(asked);
-                if let Some(d) = denial {
-                    let _ = out
-                        .send(Out::Text(encode_frame(&error_frame(&fid, &d))))
-                        .await;
-                    continue;
-                }
-                // First a `state_snapshot` carrying the identity of every agent
-                // of the node's subtree the leg covers, so a state-watching view
-                // can bootstrap before the first event, THEN the `state_event`
-                // stream, cut the same way.
-                let snapshot = json!({
-                    "type": "state_snapshot",
-                    "agents": kernel.state_watch_snapshot(&leg, &node),
-                });
-                let _ = out_tx.send(Out::Text(encode_frame(&snapshot))).await;
-                let out_for_cb = out_tx.clone();
-                let kernel_for_cb = Arc::clone(&kernel);
-                let leg_for_cb = leg.clone();
-                // Conversation rows are not on this stream — an AI agent
-                // announces its own rows to its watchers (`watch` on that agent,
-                // gated there).
-                let token = kernel.add_state_subscriber(Arc::new(
-                    move |event: &Value, body: Option<&fantastic_kernel::Blob>| {
-                        // THE PER-WATCHER CUT: only the events of the node's
-                        // subtree the leg covers, a sender it cannot see as
-                        // `null`.
-                        let Some(Value::Object(ev)) =
-                            kernel_for_cb.state_watch_event(&leg_for_cb, &node, event)
-                        else {
-                            return;
-                        };
-                        // `type` FIRST, then the event's own keys — python's
-                        // `{"type": "state_event", **event}`, which is the byte
-                        // order a frame diff reads.
-                        let mut frame = serde_json::Map::new();
-                        frame.insert("type".to_string(), Value::String("state_event".into()));
-                        for (k, v) in ev {
-                            frame.insert(k, v);
-                        }
-                        // Lazy `name` fill — python derives it from the agent
-                        // record when the event lacks one, so the browser always
-                        // renders one shape. An agent already gone falls back to
-                        // its id rather than dropping the key. Python's
-                        // `rec.get("display_name") or agent_id`: the RAW value,
-                        // by truthiness.
-                        if !frame.contains_key("name") {
-                            if let Some(aid) = frame.get("agent_id").and_then(Value::as_str) {
-                                let name = kernel_for_cb.resolve_target(aid)
-                                    .and_then(|a| {
-                                        a.record().meta
-                                            .get("display_name")
-                                            .and_then(Value::as_str)
-                                            .filter(|s| !s.is_empty())
-                                            .map(Value::from)
-                                    })
-                                    .unwrap_or_else(|| Value::String(aid.to_string()));
-                                frame.insert("name".into(), name);
-                            }
-                        }
-                        let frame = Value::Object(frame);
-                        // Best-effort: drop if the drain channel is gone
-                        // (disconnected mid-fanout).
-                        let out = match body {
-                            None => Out::Text(encode_frame(&frame)),
-                            Some(b) => Out::Binary(binary_out(frame, b, INBOUND_PAYLOAD_KEY)),
-                        };
-                        let _ = out_for_cb.try_send(out);
-                    },
-                ));
-                state_unsubs
-                    .lock()
-                    .expect("state_unsubs poisoned")
-                    .push(token);
+                let (c, node) = (Arc::clone(&conn), AgentId::from(env.src.as_deref().unwrap_or("")));
+                order.push(Box::new(move |next| Box::pin(c.state_subscribe(node, fid, next))));
             }
             "state_unsubscribe" => {
-                let tokens: Vec<_> = state_unsubs
-                    .lock()
-                    .expect("state_unsubs poisoned")
-                    .drain(..)
-                    .collect();
-                for t in tokens {
-                    kernel.remove_state_subscriber(t);
-                }
+                let c = Arc::clone(&conn);
+                order.push(Box::new(move |next| Box::pin(c.state_unsubscribe(next))));
             }
             // Unknown frame types are silently dropped (forward-compat).
             _ => {}
@@ -859,10 +695,11 @@ pub(crate) async fn ws_loop(
     //    waiting on it (python does this first, before anything is cancelled).
     let peer_guid = peer.guid();
     peer.close(&state.kernel);
-    // 1. Cancel any in-flight `call` handlers so kernel.send tasks unwind.
+    // 1. Cancel any in-flight `call` so its execution unwinds; its settle then
+    //    finds no socket to tell.
     {
         let ids: Vec<_> = {
-            let mut p = pending_calls.lock().expect("pending poisoned");
+            let mut p = conn.pending_calls.lock().expect("pending poisoned");
             p.drain(..).collect()
         };
         for t in ids {
@@ -870,25 +707,32 @@ pub(crate) async fn ws_loop(
             state.kernel.cancel_task(&t).await;
         }
     }
-    // 2. Unwatch every src this WS subscribed to.
+    // 2. Unwatch every src this WS subscribed to; a watch still on its way finds
+    //    the connection closed and gives itself back.
     {
-        let all: Vec<(String, WatchEntry)> = watching.drain().collect();
+        let all: Vec<(String, WatchEntry)> = {
+            let mut w = conn.watching.lock().expect("watching poisoned");
+            w.closed = true;
+            w.live.drain().collect()
+        };
         for (src, entry) in all {
             drop_watch(&state.kernel, &src, entry, &readers).await;
         }
     }
     // 3. Unregister any state-stream callbacks tied to this WS.
     {
-        let tokens: Vec<_> = state_unsubs
-            .lock()
-            .expect("state_unsubs poisoned")
-            .drain(..)
-            .collect();
+        let tokens: Vec<_> = {
+            let mut s = conn.state_subs.lock().expect("state_subs poisoned");
+            s.closed = true;
+            std::mem::take(&mut s.tokens)
+        };
         for t in tokens {
             state.kernel.remove_state_subscriber(t);
         }
     }
-    // 4. Drop the synthetic inbox, then let the sink drain its queued close.
+    // 4. Drop the synthetic inbox, then let the sink drain its queued close. The
+    //    connection holds only a WEAK sender, so a settle still on its way cannot
+    //    keep the socket open.
     state.kernel.remove_inbox(&client_id);
     state.kernel.cancel_task(&drain_task).await;
     drop(out_tx);
@@ -905,100 +749,465 @@ pub(crate) async fn ws_loop(
         .await;
 }
 
-/// THE ONE WATCH PATH — the connect-time auto-watch and an explicit `watch`
-/// frame both come here. Python `web_ws._proxy._watch`.
-///
-/// FAIL LOUD: a name that resolves to no agent, or a gate refusal, is answered
-/// with an `error` frame and NOT recorded as watched — a name the kernel's
-/// `watch` did not resolve would otherwise mirror nothing, say nothing, and skip
-/// the explicit watch that follows as a duplicate.
-///
-/// The name resolves the way `send` resolves a target (`kernel` or a literal
-/// id), and the watch is HANDED TO THE LEG (`inbound_watch`), whose handler
-/// asks the kernel as the leg — so the two-sided gate judges the leg.
-#[allow(clippy::too_many_arguments)]
-async fn watch_path(
-    kernel: &Arc<fantastic_kernel::Kernel>,
-    leg: &AgentId,
-    host: &AgentId,
-    client_id: &AgentId,
-    watching: &mut std::collections::HashMap<String, WatchEntry>,
-    readers: &Readers,
-    out: &tokio::sync::mpsc::Sender<Out>,
-    src: &str,
-    fid: &Value,
-) {
-    if src.is_empty() || watching.contains_key(src) {
-        return;
+/// One step of a connection's ORDER: it gets the [`Next`] handle, and the next
+/// step starts when that handle is dropped.
+type Step = Box<
+    dyn FnOnce(Next) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send,
+>;
+
+/// THE CONNECTION'S ORDER (#795). The frames of one connection that the leg
+/// handles take effect IN THE ORDER THEY CAME, as when each was handled inline: a
+/// `watch` is live before the frame after it runs, an `emit` is emitted, a `call`
+/// is launched (its ACK; its settle comes whenever it comes). Nothing waits for
+/// it: a step holds the [`Next`] handle until its effect is done — a `call` until
+/// its ack, a `watch`/`emit`/`state_subscribe` until the leg's settle, in the
+/// continuation — and dropping it starts the next step. The read loop never
+/// blocks on a step; the frames queue here.
+#[derive(Clone)]
+struct Order(Arc<std::sync::Mutex<Queue>>);
+
+#[derive(Default)]
+struct Queue {
+    busy: bool,
+    steps: std::collections::VecDeque<Step>,
+}
+
+/// The right to start the next step of an [`Order`]: dropped when this step's
+/// effect is done (or the step ends without one).
+struct Next(Order);
+
+impl Order {
+    fn new() -> Self {
+        Self(Arc::new(std::sync::Mutex::new(Queue::default())))
     }
-    let Some(target) = kernel.resolve_target(src) else {
-        let mut r = fantastic_kernel::refusal(
-            fantastic_kernel::refusal::UNKNOWN_AGENT,
-            format!(
-                "watch: no agent {} (an id, or `kernel`)",
-                fantastic_bundle::py_repr(src)
-            ),
-        );
-        fantastic_kernel::refusal::with(&mut r, "src", json!(src));
-        let _ = out
-            .send(Out::Text(encode_frame(&error_frame(fid, &r))))
-            .await;
-        return;
-    };
-    // THIS WATCH'S OWN READER — registered before the watch asks for one.
-    let reader = AgentId::from(format!("{client_id}>{}", target.id).as_str());
-    let rx = Arc::new(tokio::sync::Mutex::new(kernel.ensure_inbox(&reader)));
-    let ready = kernel.ensure_inbox(&reader);
-    let asked = fantastic_io_bridge::inbound::hand_in(
-        kernel,
-        leg,
-        json!({"type": "inbound_watch", "src": target.id.as_str(), "reader": reader.as_str()}),
-        None,
-    )
-    .await
-    .result;
-    let denial = fantastic_kernel::refusal::error_text(&asked)
-        .is_some()
-        .then_some(asked);
-    if let Some(d) = denial {
-        kernel.remove_inbox(&reader);
-        // python `{"type":"error", "id":…, **denial}` — the denial's keys are
-        // FLATTENED onto the frame, not wrapped in `data`.
-        let _ = out
-            .send(Out::Text(encode_frame(&error_frame(fid, &d))))
-            .await;
-        return;
+
+    /// Queue `step`; it starts at once when nothing runs.
+    fn push(&self, step: Step) {
+        let run = {
+            let mut q = self.0.lock().expect("order poisoned");
+            if q.busy {
+                q.steps.push_back(step);
+                None
+            } else {
+                q.busy = true;
+                Some(step)
+            }
+        };
+        if let Some(s) = run {
+            self.start(s);
+        }
     }
-    let tag = src.to_string();
-    let task = Arc::clone(kernel).spawn_task(host, "ws_drain", {
-        let out = out.clone();
-        let rx = Arc::clone(&rx);
-        async move {
-            loop {
-                {
-                    let mut g = rx.lock().await;
-                    while let Some(item) = g.try_recv() {
-                        if !forward_event(&out, item, Some(&tag)).await {
-                            return;
+
+    /// Run one step as its own task, with this connection's identity (the
+    /// transport's: the operator).
+    fn start(&self, step: Step) {
+        fantastic_kernel::spawn_inherit(step(Next(self.clone())));
+    }
+}
+
+impl Drop for Next {
+    fn drop(&mut self) {
+        let next = {
+            let mut q = self.0 .0.lock().expect("order poisoned");
+            let next = q.steps.pop_front();
+            if next.is_none() {
+                q.busy = false;
+            }
+            next
+        };
+        if let Some(s) = next {
+            self.0.start(s);
+        }
+    }
+}
+
+/// The watches of one connection: the live ones by the name the client used, and
+/// whether the socket closed (a watch that lands after that gives itself back).
+#[derive(Default)]
+struct Watches {
+    closed: bool,
+    live: std::collections::HashMap<String, WatchEntry>,
+}
+
+/// The state-stream subscriptions of one connection, and whether it closed.
+#[derive(Default)]
+struct StateSubs {
+    closed: bool,
+    tokens: Vec<fantastic_kernel::SubscriberToken>,
+}
+
+/// ONE CONNECTION, as its steps and continuations see it.
+struct Conn {
+    kernel: Arc<Kernel>,
+    /// THIS web_ws surface: the identity every frame is handed in as.
+    leg: AgentId,
+    /// The endpoint the socket named; the drains are its tasks.
+    host: AgentId,
+    client_id: AgentId,
+    /// WEAK: a settle that lands after the socket closed has nowhere to go and
+    /// keeps nothing open.
+    out: tokio::sync::mpsc::WeakSender<Out>,
+    readers: Readers,
+    watching: std::sync::Mutex<Watches>,
+    /// The executions of this connection's calls not yet settled (their ack pids)
+    /// — cancelled on disconnect.
+    pending_calls: std::sync::Mutex<Vec<fantastic_kernel::TaskId>>,
+    state_subs: std::sync::Mutex<StateSubs>,
+}
+
+/// Has a `call`'s ACK gone out? A settle that comes first waits here, so the
+/// client always reads the ack before the settle.
+#[derive(Default)]
+struct AckGate {
+    sent: bool,
+    early: Option<fantastic_kernel::Outcome>,
+}
+
+impl Conn {
+    fn out(&self) -> Option<tokio::sync::mpsc::Sender<Out>> {
+        self.out.upgrade()
+    }
+
+    async fn send_text(&self, frame: &Value) {
+        if let Some(o) = self.out() {
+            let _ = o.send(Out::Text(encode_frame(frame))).await;
+        }
+    }
+
+    /// A `call` frame (#795): handed to the leg, which sends it onward AS THE LEG
+    /// (`fantastic_io_bridge::inbound`). The client gets the ACK at once as the
+    /// `reply` frame (`data`: `{pid, status: "accepted"}`, or the refusal), and the
+    /// result later as `{type: "event", payload: {type: "settle", re: <frame id>,
+    /// status, data, secret?}}` on this connection.
+    async fn call(
+        self: Arc<Self>,
+        fid: Value,
+        hand: Value,
+        body: Option<fantastic_kernel::Blob>,
+        mirror: peer::Mirror,
+        next: Next,
+    ) {
+        let gate = Arc::new(std::sync::Mutex::new(AckGate::default()));
+        let (c, g, f, m) = (Arc::clone(&self), Arc::clone(&gate), fid.clone(), mirror.clone());
+        let ack = fantastic_io_bridge::inbound::hand_in(&self.kernel, &self.leg, hand, body, move |out| async move {
+            let early = {
+                let mut g = g.lock().expect("ack gate poisoned");
+                if g.sent {
+                    Some(out)
+                } else {
+                    g.early = Some(out);
+                    None
+                }
+            };
+            if let Some(out) = early {
+                c.settled(&f, out, &m).await;
+            }
+        })
+        .await;
+        let accepted = ack.status == fantastic_kernel::Status::Accepted;
+        if let (true, Some(pid)) = (accepted, ack.pid) {
+            track_call(&self.kernel, &self.pending_calls, pid);
+        }
+        let data = fantastic_io_bridge::inbound::ack_value(&ack);
+        self.send_text(&json!({"type": "reply", "id": fid, "data": data})).await;
+        // the launch is done: the next frame of this connection may run
+        drop(next);
+        if !accepted {
+            // refused at launch: the refusal is the answer, and nothing settles
+            // later; the guid's other tabs see it too
+            peer::mirror_reply(mirror.siblings(), &fid, &data, None).await;
+            return;
+        }
+        let early = {
+            let mut g = gate.lock().expect("ack gate poisoned");
+            g.sent = true;
+            g.early.take()
+        };
+        if let Some(out) = early {
+            self.settled(&fid, out, &mirror).await;
+        }
+    }
+
+    /// A call's SETTLE, told to this connection — after every event the watches
+    /// of this socket already queued (PYTHON'S ORDER: the watch events a dispatch
+    /// produced are flushed under the drains' own locks, so no drain is
+    /// mid-forward, and only then the settle goes out; one sink, one order); then
+    /// the guid's other tabs get the result as `reply_mirror`.
+    async fn settled(&self, fid: &Value, out: fantastic_kernel::Outcome, mirror: &peer::Mirror) {
+        let Some(tx) = self.out() else { return };
+        let snapshot: Vec<Reader> = self.readers.lock().expect("readers poisoned").clone();
+        let mut held = Vec::with_capacity(snapshot.len());
+        for (src, rx) in &snapshot {
+            let mut g = rx.lock().await;
+            while let Some(item) = g.try_recv() {
+                forward_event(&tx, item, src.as_deref()).await;
+            }
+            held.push(g);
+        }
+        let siblings = mirror.siblings();
+        let mirrored = (!siblings.is_empty()).then(|| (out.result.clone(), out.body.clone()));
+        let mut payload = fantastic_io_bridge::inbound::settle_payload(fid.clone(), &out);
+        // the reply's own secret paths (a credential store's `get` fields), so a
+        // calling kernel records them as shown; a plain settle carries no such key
+        if !out.secret.is_empty() {
+            payload["secret"] = json!(out.secret);
+        }
+        let body = out
+            .body
+            .map(|b| fantastic_kernel::Blob::new(b.nested_in("data"), b.bytes));
+        send_envelope(&tx, json!({"type": "event", "payload": payload}), body, INBOUND_PAYLOAD_KEY).await;
+        drop(held);
+        if let Some((data, body)) = mirrored {
+            peer::mirror_reply(siblings, fid, &data, body.as_ref()).await;
+        }
+    }
+
+    /// An `emit` frame: handed to the leg (`inbound_emit`), which emits AS ITSELF.
+    /// The next frame runs once it is emitted.
+    async fn emit(self: Arc<Self>, hand: Value, body: Option<fantastic_kernel::Blob>, next: Next) {
+        let _ = fantastic_io_bridge::inbound::hand_in(&self.kernel, &self.leg, hand, body, move |_| async move {
+            drop(next);
+        })
+        .await;
+    }
+
+    /// THE ONE WATCH PATH — the connect-time auto-watch and an explicit `watch`
+    /// frame both come here. Python `web_ws._proxy._watch`.
+    ///
+    /// FAIL LOUD: a name that resolves to no agent, or a gate refusal, is answered
+    /// with an `error` frame and NOT recorded as watched — a name the kernel's
+    /// `watch` did not resolve would otherwise mirror nothing, say nothing, and skip
+    /// the explicit watch that follows as a duplicate.
+    ///
+    /// The name resolves the way `send` resolves a target (`kernel` or a literal
+    /// id), and the watch is HANDED TO THE LEG (`inbound_watch`), whose handler
+    /// asks the kernel as the leg — so the two-sided gate judges the leg. Its
+    /// settle (a message to this connection) makes the watch live, or answers its
+    /// refusal; the next frame runs after that.
+    async fn watch(self: Arc<Self>, src: String, fid: Value, next: Next) {
+        if src.is_empty() || self.watching.lock().expect("watching poisoned").live.contains_key(&src) {
+            return;
+        }
+        let Some(target) = self.kernel.resolve_target(&src) else {
+            let mut r = fantastic_kernel::refusal(
+                fantastic_kernel::refusal::UNKNOWN_AGENT,
+                format!(
+                    "watch: no agent {} (an id, or `kernel`)",
+                    fantastic_bundle::py_repr(&src)
+                ),
+            );
+            fantastic_kernel::refusal::with(&mut r, "src", json!(src));
+            self.send_text(&error_frame(&fid, &r)).await;
+            return;
+        };
+        // THIS WATCH'S OWN READER — registered before the watch asks for one.
+        let reader = AgentId::from(format!("{}>{}", self.client_id, target.id).as_str());
+        let rx = Arc::new(tokio::sync::Mutex::new(self.kernel.ensure_inbox(&reader)));
+        let ready = self.kernel.ensure_inbox(&reader);
+        let hand = json!({"type": "inbound_watch", "src": target.id.as_str(), "reader": reader.as_str()});
+        let (c, r, s, f, t) = (Arc::clone(&self), reader.clone(), src.clone(), fid.clone(), target.id.clone());
+        let ack = fantastic_io_bridge::inbound::hand_in(&self.kernel, &self.leg, hand, None, move |out| async move {
+            c.watched(s, t, r, rx, ready, &f, &out.result).await;
+            drop(next);
+        })
+        .await;
+        if ack.status != fantastic_kernel::Status::Accepted {
+            self.kernel.remove_inbox(&reader);
+            self.send_text(&error_frame(&fid, &ack.result)).await;
+        }
+    }
+
+    /// A watch's settle: live — its drain registered — or refused (an `error`
+    /// frame, nothing recorded). One that lands after the socket closed is given
+    /// back.
+    #[allow(clippy::too_many_arguments)]
+    async fn watched(
+        &self,
+        src: String,
+        target: AgentId,
+        reader: AgentId,
+        rx: Arc<tokio::sync::Mutex<fantastic_kernel::inbox::InboxReceiver>>,
+        ready: fantastic_kernel::inbox::InboxReceiver,
+        fid: &Value,
+        asked: &Value,
+    ) {
+        if fantastic_kernel::refusal::error_text(asked).is_some() {
+            self.kernel.remove_inbox(&reader);
+            // python `{"type":"error", "id":…, **denial}` — the denial's keys are
+            // FLATTENED onto the frame, not wrapped in `data`.
+            self.send_text(&error_frame(fid, asked)).await;
+            return;
+        }
+        let Some(out) = self.out() else {
+            self.kernel.unwatch(&target, &reader).await;
+            self.kernel.remove_inbox(&reader);
+            return;
+        };
+        let tag = src.clone();
+        // a keepalive loop, as the connection's own drain: it ends with the socket
+        let task = Arc::clone(&self.kernel).spawn_keepalive_task(&self.host, "ws_drain", {
+            let rx = Arc::clone(&rx);
+            async move {
+                loop {
+                    {
+                        let mut g = rx.lock().await;
+                        while let Some(item) = g.try_recv() {
+                            if !forward_event(&out, item, Some(&tag)).await {
+                                return;
+                            }
                         }
                     }
+                    ready.ready().await;
                 }
-                ready.ready().await;
             }
-        }
-    });
-    readers
-        .lock()
-        .expect("readers poisoned")
-        .push((Some(src.to_string()), rx));
-    watching.insert(
-        src.to_string(),
-        WatchEntry {
-            target: target.id.clone(),
+        });
+        let entry = WatchEntry {
+            target,
             reader,
             task,
-        },
-    );
+        };
+        let refused = {
+            let mut w = self.watching.lock().expect("watching poisoned");
+            if w.closed || w.live.contains_key(&src) {
+                Some(entry)
+            } else {
+                self.readers
+                    .lock()
+                    .expect("readers poisoned")
+                    .push((Some(src.clone()), rx));
+                w.live.insert(src.clone(), entry);
+                None
+            }
+        };
+        if let Some(entry) = refused {
+            // closed meanwhile (or a duplicate): given back, its reader with it
+            self.kernel.unwatch(&entry.target, &entry.reader).await;
+            self.kernel.cancel_task(&entry.task).await;
+            self.kernel.remove_inbox(&entry.reader);
+        }
+    }
+
+    /// An `unwatch` frame: the watch the client registered under `src`, given back.
+    async fn unwatch(self: Arc<Self>, src: String, next: Next) {
+        let entry = self.watching.lock().expect("watching poisoned").live.remove(&src);
+        if let Some(entry) = entry {
+            drop_watch(&self.kernel, &src, entry, &self.readers).await;
+        }
+        drop(next);
+    }
+
+    /// A `state_subscribe` frame. The state stream is a `watch` on a NODE (`src`):
+    /// the leg needs a `watch` line there, and it reads only the events of that
+    /// node's subtree it covers. An ingress rule answers "may this client reach
+    /// this leg", never "what may it READ". HANDED TO THE LEG
+    /// (`inbound_state_subscribe`): the tap is gated as the leg, on the node; its
+    /// settle starts the stream, or answers the refusal.
+    async fn state_subscribe(self: Arc<Self>, node: AgentId, fid: Value, next: Next) {
+        let hand = json!({"type": "inbound_state_subscribe", "node": node.as_str()});
+        let (c, n, f) = (Arc::clone(&self), node.clone(), fid.clone());
+        let ack = fantastic_io_bridge::inbound::hand_in(&self.kernel, &self.leg, hand, None, move |out| async move {
+            c.subscribed(n, &f, &out.result).await;
+            drop(next);
+        })
+        .await;
+        if ack.status != fantastic_kernel::Status::Accepted {
+            self.send_text(&error_frame(&fid, &ack.result)).await;
+        }
+    }
+
+    /// A state subscription's settle: the refusal as an `error` frame, or the
+    /// snapshot, then the stream.
+    async fn subscribed(&self, node: AgentId, fid: &Value, asked: &Value) {
+        if fantastic_kernel::refusal::error_text(asked).is_some() {
+            self.send_text(&error_frame(fid, asked)).await;
+            return;
+        }
+        let Some(out_tx) = self.out() else { return };
+        // First a `state_snapshot` carrying the identity of every agent of the
+        // node's subtree the leg covers, so a state-watching view can bootstrap
+        // before the first event, THEN the `state_event` stream, cut the same way.
+        let snapshot = json!({
+            "type": "state_snapshot",
+            "agents": self.kernel.state_watch_snapshot(&self.leg, &node),
+        });
+        let _ = out_tx.send(Out::Text(encode_frame(&snapshot))).await;
+        let out_for_cb = out_tx.clone();
+        let kernel_for_cb = Arc::clone(&self.kernel);
+        let leg_for_cb = self.leg.clone();
+        // Conversation rows are not on this stream — an AI agent
+        // announces its own rows to its watchers (`watch` on that agent,
+        // gated there).
+        let token = self.kernel.add_state_subscriber(Arc::new(
+            move |event: &Value, body: Option<&fantastic_kernel::Blob>| {
+                // THE PER-WATCHER CUT: only the events of the node's
+                // subtree the leg covers, a sender it cannot see as
+                // `null`.
+                let Some(Value::Object(ev)) =
+                    kernel_for_cb.state_watch_event(&leg_for_cb, &node, event)
+                else {
+                    return;
+                };
+                // `type` FIRST, then the event's own keys — python's
+                // `{"type": "state_event", **event}`, which is the byte
+                // order a frame diff reads.
+                let mut frame = serde_json::Map::new();
+                frame.insert("type".to_string(), Value::String("state_event".into()));
+                for (k, v) in ev {
+                    frame.insert(k, v);
+                }
+                // Lazy `name` fill — python derives it from the agent
+                // record when the event lacks one, so the browser always
+                // renders one shape. An agent already gone falls back to
+                // its id rather than dropping the key. Python's
+                // `rec.get("display_name") or agent_id`: the RAW value,
+                // by truthiness.
+                if !frame.contains_key("name") {
+                    if let Some(aid) = frame.get("agent_id").and_then(Value::as_str) {
+                        let name = kernel_for_cb.resolve_target(aid)
+                            .and_then(|a| {
+                                a.record().meta
+                                    .get("display_name")
+                                    .and_then(Value::as_str)
+                                    .filter(|s| !s.is_empty())
+                                    .map(Value::from)
+                            })
+                            .unwrap_or_else(|| Value::String(aid.to_string()));
+                        frame.insert("name".into(), name);
+                    }
+                }
+                let frame = Value::Object(frame);
+                // Best-effort: drop if the drain channel is gone
+                // (disconnected mid-fanout).
+                let out = match body {
+                    None => Out::Text(encode_frame(&frame)),
+                    Some(b) => Out::Binary(binary_out(frame, b, INBOUND_PAYLOAD_KEY)),
+                };
+                let _ = out_for_cb.try_send(out);
+            },
+        ));
+        let refused = {
+            let mut s = self.state_subs.lock().expect("state_subs poisoned");
+            if s.closed {
+                Some(token)
+            } else {
+                s.tokens.push(token);
+                None
+            }
+        };
+        if let Some(t) = refused {
+            // the socket closed meanwhile: nothing reads this stream
+            self.kernel.remove_state_subscriber(t);
+        }
+    }
+
+    /// A `state_unsubscribe` frame: every state subscription of this connection goes.
+    async fn state_unsubscribe(self: Arc<Self>, next: Next) {
+        let tokens = std::mem::take(&mut self.state_subs.lock().expect("state_subs poisoned").tokens);
+        for t in tokens {
+            self.kernel.remove_state_subscriber(t);
+        }
+        drop(next);
+    }
 }
 
 /// One registered watch — python's `watching[src] = (aid, reader, drain)`.

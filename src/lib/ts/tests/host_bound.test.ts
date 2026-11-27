@@ -55,6 +55,11 @@ class FakeSocket implements WebSocketLike {
   deliverRaw(data: string): void {
     this.onmessage?.({ data });
   }
+  /** server→client: a host call's ACK, then its SETTLE event (#795) */
+  settle(id: unknown, data: unknown): void {
+    this.deliver({ type: "reply", id: id as Json, data: { pid: 1, status: "accepted" } });
+    this.deliver({ type: "event", payload: { type: "settle", re: id as Json, status: "completed", data: data as Json } });
+  }
   drop(): void {
     this.onclose?.(undefined);
   }
@@ -121,7 +126,7 @@ test("forwardBinary goes out as ONE binary call frame and resolves its reply; `k
   assert.equal(payload["type"], "paste_image");
   assert.equal(payload["name"], "a.png");
   assert.deepEqual([...(payload["image"] as Uint8Array)], [1, 2, 3]);
-  sock.deliver({ type: "reply", id: call["id"], data: { pasted: true } });
+  sock.settle(call["id"], { pasted: true });
   assert.deepEqual(await p, { pasted: true });
   // `kernel` resolves to THIS kernel's root for forwardBinary, stays literal for callHost
   void k.forwardBinary("kernel", { type: "paste_image", image: new Uint8Array([4]) }).catch(() => undefined);
@@ -224,7 +229,7 @@ test("a dropped socket reconnects to its URL, re-announces, resubscribes the sta
   assert.deepEqual(second.frames("hello"), [{ type: "hello", guid: "g1" }]);
   const call = second.frames("call")[0]!;
   assert.deepEqual(call["payload"], { type: "list", n: 2 });
-  second.deliver({ type: "reply", id: call["id"], data: { entries: [] } });
+  second.settle(call["id"], { entries: [] });
   assert.deepEqual(await later, { entries: [] });
   second.deliver({ type: "state_event", kind: "added", agent_id: "x" });
   assert.deepEqual(state, [{ type: "state_event", kind: "added", agent_id: "x" }]);
@@ -253,7 +258,7 @@ test("a malformed or non-object frame is skipped loudly and the socket kept; rep
   assert.deepEqual(lines.slice(2), ["ws_bridge: skipping non-object frame", "ws_bridge: skipping non-object frame"]);
   assert.equal(sock.closed, false);
   const call = sock.frames("call")[0]!;
-  sock.deliver({ type: "reply", id: call["id"], data: { ok: 1 } });
+  sock.settle(call["id"], { ok: 1 });
   assert.deepEqual(await p, { ok: 1 });
   // an error frame without text rejects with "error"
   const q = bridge.forward("file_x", { type: "list" });
@@ -280,7 +285,7 @@ test("a socket that cannot send: the call rejects with its error and is forgotte
   sock.throwOn = new Set();
   const p = bridge.forward("file_x", { type: "list" });
   await until(() => sock.frames("call").length === 1);
-  sock.deliver({ type: "reply", id: sock.frames("call")[0]!["id"], data: 5 });
+  sock.settle(sock.frames("call")[0]!["id"], 5);
   assert.equal(await p, 5);
   bridge.close();
 });
@@ -416,7 +421,7 @@ test("an error event alone changes nothing (the close that follows does); a sock
   const sock = fk.of(ROOT)[0]!;
   sock.onerror?.(new Error("network blip"));
   assert.deepEqual(life, ["connected"]);
-  sock.deliver({ type: "reply", id: sock.frames("call")[0]!["id"], data: { ok: true } });
+  sock.settle(sock.frames("call")[0]!["id"], { ok: true });
   assert.deepEqual(await p, { ok: true }, "the error event rejected the pending call");
   const q = bridge.forward("file_x", { type: "list" });
   await until(() => sock.frames("call").length === 2);
@@ -451,8 +456,8 @@ test("Host: the view's facade — call, callHost, emit, callBinary, on/unwatch, 
   assert.deepEqual(pty.frames("call").map((f) => (f["payload"] as Payload)["type"]), ["write", "paste_image"]);
   assert.equal(control.frames("call")[0]!["target"], "kernel");
   assert.deepEqual(pty.frames("emit"), [{ type: "emit", target: "pty1", payload: { type: "reload_html" } }]);
-  for (const f of pty.frames("call")) pty.deliver({ type: "reply", id: f["id"], data: { done: (f["payload"] as Payload)["type"] as Json } });
-  control.deliver({ type: "reply", id: control.frames("call")[0]!["id"], data: { id: "host_root" } });
+  for (const f of pty.frames("call")) pty.settle(f["id"], { done: (f["payload"] as Payload)["type"] as Json });
+  control.settle(control.frames("call")[0]!["id"], { id: "host_root" });
   assert.deepEqual(await forwarded, { done: "write" });
   assert.deepEqual(await binary, { done: "paste_image" });
   assert.deepEqual(await literal, { id: "host_root" });

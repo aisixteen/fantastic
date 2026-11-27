@@ -283,11 +283,12 @@ async fn a_reply_is_mirrored_to_the_sibling_tab() {
         json!({"type": "call", "id": "c1", "target": "kernel_state", "payload": {"type": "reflect"}}),
     )
     .await;
-    let reply = next_of(&mut ws, "reply").await;
+    // the call's RESULT (its settle, #795) is what the sibling tab is shown
+    let (settle, _, _) = super::ws_answer(&mut ws, &json!("c1")).await;
     let mirror = next_of(&mut ws2, "reply_mirror").await;
     assert_eq!(
         mirror,
-        json!({"type": "reply_mirror", "id": "c1", "data": reply["data"]})
+        json!({"type": "reply_mirror", "id": "c1", "data": settle["data"]})
     );
     push(
         &mut ws2,

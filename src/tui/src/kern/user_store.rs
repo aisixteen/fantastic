@@ -4,6 +4,7 @@
 
 use serde_json::{json, Value};
 
+use crate::kern::cps::Done;
 use crate::kern::host::Host;
 
 /// The agent's id.
@@ -11,10 +12,13 @@ pub const ID: &str = crate::kern::saved::HOME_ID;
 
 /// The canvas this run serves, told to `home` — written into this fantastic's
 /// home folder while it is registered, for a manager to open.
-pub async fn set_canvas(host: &Host, url: &str) -> Result<(), String> {
-    let r = host.operator(ID, json!({"type": "set_canvas", "url": url})).await.result;
-    match r.get("error").and_then(Value::as_str) {
-        Some(e) => Err(format!("`{ID}` set_canvas: {e}")),
-        None => Ok(()),
-    }
+pub async fn set_canvas(host: &Host, url: &str, done: Done<Result<(), String>>) {
+    host.operator_then(ID, json!({"type": "set_canvas", "url": url}), move |out| async move {
+        done(match out.result.get("error").and_then(Value::as_str) {
+            Some(e) => Err(format!("`{ID}` set_canvas: {e}")),
+            None => Ok(()),
+        })
+        .await;
+    })
+    .await;
 }

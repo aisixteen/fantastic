@@ -239,14 +239,16 @@ struct TaskEntry {
     order: u64,
     handle: TaskHandle,
     /// A loop that is SUPPOSED to outlive a graceful agent shutdown — a
-    /// persister tailing the row store, a scheduler tick. `shutdown_agents`
+    /// persister tailing the row store, a scheduler tick, a socket's `ws_drain`
+    /// (the settles of the calls the stop cancels still reach their clients,
+    /// #795). `shutdown_agents`
     /// neither waits for it (it never ends) nor cancels it (the persister has
     /// to be alive to catch up on what the shutdown verb just wrote); it dies
     /// with the process. Python marks these `_keepalive` for the same reason.
     keepalive: bool,
     /// FORKED work — registered by [`Kernel::spawn_task`], not by a dispatch:
     /// a service loop a bundle runs for as long as its agent lives (a scheduler
-    /// tick, an io_bridge read loop, `ws_drain`, an exec job pump, a
+    /// tick, an io_bridge read loop, an exec job pump, a
     /// `pty_reader`). The QUIET phase of `shutdown_agents` does not wait for it
     /// — it never ends, so waiting would spend one full `QUIET_TIMEOUT` every
     /// stop. It is still CANCELLED with every

@@ -6,7 +6,7 @@ import { WsBridge } from "../src/transport/bridge.ts";
 import type { WebSocketLike } from "../src/transport/bridge.ts";
 import { encodeFrame, decodeFrame } from "../src/transport/frame.ts";
 import type { Envelope } from "../src/transport/frame.ts";
-import type { Payload } from "../src/kernel/json.ts";
+import type { Json, Payload } from "../src/kernel/json.ts";
 import { as, sendAs } from "./kit.ts";
 
 // ─── frame codec ──────────────────────────────────────────────────────────
@@ -120,6 +120,11 @@ class FakeSocket implements WebSocketLike {
     const f = encodeFrame(env);
     this.onmessage?.({ data: f.data });
   }
+  /** server→client: a host call's ACK, then its SETTLE event (#795) */
+  settle(id: unknown, data: unknown): void {
+    this.deliver({ type: "reply", id: id as Json, data: { pid: 1, status: "accepted" } });
+    this.deliver({ type: "event", payload: { type: "settle", re: id as Json, status: "completed", data: data as Json } });
+  }
   /** simulate the socket dropping */
   drop(): void {
     this.onclose?.(undefined);
@@ -159,7 +164,7 @@ function kernelWithRoot(): Kernel {
 
 // ─── WsBridge ───────────────────────────────────────────────────────────────
 
-test("forward sends a call on the control socket and resolves the reply by id", async () => {
+test("forward sends a call on the control socket; the ack holds it, the settle event resolves it by id", async () => {
   const fk = fakeFactory();
   const k = kernelWithRoot();
   const bridge = new WsBridge(k, {
@@ -167,16 +172,52 @@ test("forward sends a call on the control socket and resolves the reply by id", 
     controlEndpoint: "kernel_state",
     makeSocket: fk.factory,
   });
+  const emitted: Payload[] = [];
+  k.onInbox("kernel_state", (pl) => emitted.push(pl));
 
+  let done = false;
   const p = bridge.forward("file_x", { type: "list", path: "." });
+  void p.then(() => { done = true; });
   await until(() => (fk.forEndpoint("kernel_state")[0]?.lastCall() ?? undefined) !== undefined);
   const sock = fk.forEndpoint("kernel_state")[0]!;
   const call = sock.lastCall()!;
   assert.equal(call["target"], "file_x");
   assert.deepEqual(call["payload"], { type: "list", path: "." });
 
-  sock.deliver({ type: "reply", id: call["id"], data: { entries: ["a", "b"] } });
+  // the ACK: launched, nothing resolved yet
+  sock.deliver({ type: "reply", id: call["id"], data: { pid: 7, status: "accepted" } });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(done, false, "an ack does not resolve the call");
+  // the SETTLE resolves it, and is no agent's event
+  sock.deliver({ type: "event", payload: { type: "settle", re: call["id"], status: "completed", data: { entries: ["a", "b"] } } });
   assert.deepEqual(await p, { entries: ["a", "b"] });
+  assert.deepEqual(emitted, [], "a settle is not emitted on the endpoint");
+  bridge.close();
+});
+
+test("a refusal at launch is the reply's data, and resolves the call at once", async () => {
+  const fk = fakeFactory();
+  const k = kernelWithRoot();
+  const bridge = new WsBridge(k, { origin: "ws://host", controlEndpoint: "kernel_state", makeSocket: fk.factory });
+  const p = bridge.forward("nobody", { type: "reflect" });
+  await until(() => (fk.forEndpoint("kernel_state")[0]?.lastCall() ?? undefined) !== undefined);
+  const sock = fk.forEndpoint("kernel_state")[0]!;
+  sock.deliver({ type: "reply", id: sock.lastCall()!["id"], data: { error: "no agent", reason: "unknown_agent" } });
+  assert.deepEqual(await p, { error: "no agent", reason: "unknown_agent" });
+  bridge.close();
+});
+
+test("a settle that comes before its ack resolves the call; the late ack is ignored", async () => {
+  const fk = fakeFactory();
+  const k = kernelWithRoot();
+  const bridge = new WsBridge(k, { origin: "ws://host", controlEndpoint: "kernel_state", makeSocket: fk.factory });
+  const p = bridge.forward("file_x", { type: "list" });
+  await until(() => (fk.forEndpoint("kernel_state")[0]?.lastCall() ?? undefined) !== undefined);
+  const sock = fk.forEndpoint("kernel_state")[0]!;
+  const id = sock.lastCall()!["id"];
+  sock.deliver({ type: "event", payload: { type: "settle", re: id, status: "completed", data: { ok: 1 } } });
+  sock.deliver({ type: "reply", id, data: { pid: 3, status: "accepted" } });
+  assert.deepEqual(await p, { ok: 1 });
   bridge.close();
 });
 
@@ -432,7 +473,7 @@ test("WITH the grant the call is forwarded", async () => {
   const call = sock.lastCall()!;
   assert.equal(call["target"], "pty1");
   assert.equal("caller" in call, false);
-  sock.deliver({ type: "reply", id: call["id"], data: { ok: true } });
+  sock.settle(call["id"], { ok: true });
   const [out] = await p;
   assert.equal(out!.status, "completed");
   // the grant is per VERB: another verb to the same host agent is refused here
@@ -585,7 +626,7 @@ test("a reply_mirror frame lands on the bridge conn's inbox and resolves no pend
   assert.deepEqual(got, [{ type: "reply_mirror", id, data: { other: "tab" } }]);
   await new Promise((r) => setTimeout(r, 5));
   assert.equal(settled, false);
-  sock.deliver({ type: "reply", id, data: { mine: true } });
+  sock.settle(id, { mine: true });
   await call;
   bridge.close();
 });
@@ -638,7 +679,7 @@ test("during a stop, a close cuts off in-flight calls in-band, with no console e
     const ping = bridge.forward("kernel_state", { type: "ping" }); // the page is connected
     await until(() => (fk.forEndpoint("kernel_state")[0]?.lastCall() ?? undefined) !== undefined);
     const sock = fk.forEndpoint("kernel_state")[0]!;
-    sock.deliver({ type: "reply", id: sock.lastCall()!["id"], data: null });
+    sock.settle(sock.lastCall()!["id"], null);
     await ping;
     bridge.beginStop(); // host_stopping
     const a = bridge.forward("user", { type: "forward", target: "agent_x", payload: { type: "go" } });
@@ -669,7 +710,7 @@ test("during a stop, a send on a closing socket settles in-band too", async () =
     const p = bridge.forward("kernel_state", { type: "ping" }); // lets the socket open
     await until(() => (fk.forEndpoint("kernel_state")[0]?.lastCall() ?? undefined) !== undefined);
     const sock = fk.forEndpoint("kernel_state")[0]!;
-    sock.deliver({ type: "reply", id: sock.lastCall()!["id"], data: null });
+    sock.settle(sock.lastCall()!["id"], null);
     await p;
     bridge.beginStop();
     sock.send = () => {
@@ -740,7 +781,7 @@ test("a reconnect ends the stop grace: a later close is loud again", async () =>
     const ping = bridge.forward("kernel_state", { type: "ping" }); // the page is connected
     await until(() => (fk.forEndpoint("kernel_state")[0]?.lastCall() ?? undefined) !== undefined);
     const first = fk.forEndpoint("kernel_state")[0]!;
-    first.deliver({ type: "reply", id: first.lastCall()!["id"], data: null });
+    first.settle(first.lastCall()!["id"], null);
     await ping;
     bridge.beginStop();
     const a = bridge.forward("kernel_state", { type: "slow" });

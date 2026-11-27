@@ -319,15 +319,15 @@ async fn status_drops_an_inquiry_from_inquiry_from_once_it_is_answered() {
     let open = status_reply(&kernel, &backend, json!({"type": "status"})).await;
     assert_eq!(open["inquiry_from"], json!(["operator"]), "{open}");
     assert!(until_passes(&s, 1).await);
-    let probe = (kernel.clone(), backend.clone());
-    for _ in 0..100 {
-        let now = status_reply(&probe.0, &probe.1, json!({"type": "status"})).await;
-        if now["inquiry_from"] == json!([]) {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("the answered inquiry is still named in inquiry_from");
+    // EVENT-DRIVEN: the answer is routed before the agent is quiet (the route is owed
+    // work until its calls are out), so its quiet — woken by its life's changes, never a
+    // clock; the bound only FAILS a hang — is when the inquiry must be gone
+    assert!(
+        crate::state::until_quiet(&backend, Duration::from_secs(60)).await,
+        "the agent never went quiet after answering"
+    );
+    let now = status_reply(&kernel, &backend, json!({"type": "status"})).await;
+    assert_eq!(now["inquiry_from"], json!([]), "the answered inquiry is still named: {now}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

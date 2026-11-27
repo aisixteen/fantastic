@@ -42,14 +42,19 @@
 //!                                        — the far kernel judges it as the leg
 //!                                        that serves it there
 //! outbound  {type:"watch", src:target}  / {type:"unwatch", src:target}
-//! inbound   {type:"reply", id, data, secret?} — read loop settles the pending forward
-//!                                        (`secret`: dotted paths into `data`, noted
-//!                                        as the forward's reply marks)
+//! inbound   {type:"reply", id, data}     — the far side's ACK (`{pid, status:
+//!                                        "accepted"}`): the forward stays pending; a
+//!                                        refusal at launch settles it
+//! inbound   {type:"event", payload:{type:"settle", re, status, data, secret?}}
+//!                                        — the forward's result (#795): settles the
+//!                                        pending forward `re` (`secret`: dotted
+//!                                        paths into `data`, noted as its reply marks)
 //! inbound   {type:"error", id, error}    — read loop settles the pending forward with it
 //! inbound   {type:"event", src, payload} — re-emitted (payload + `src`) on this bridge's
 //!                                        inbox ONLY for a subscribed `src`, else dropped
 //! inbound   {type:"call", id, target, payload} — served AS THE LEG, answered
-//!                                        `{type:"reply", id, data, secret?}`
+//!                                        with the ack `{type:"reply", id, data}`,
+//!                                        then the settle event, as `web_ws` answers
 //! inbound   {type:"watch"|"unwatch", src} — the remote watching a local agent: the
 //!                                        leg's ingress rule, then the leg's own
 //!                                        `watch` grant on `src`; each event of
@@ -1352,46 +1357,75 @@ async fn serve_inbound_call(
             item = item.with_binary(b.path, b.bytes);
         }
         open.lock().expect("open calls poisoned").insert(corr_id.clone());
-        let (st, id, gone) = (Arc::clone(&state), corr_id.clone(), Arc::clone(&open));
+        // ACK THEN SETTLE (#795), as `web_ws` answers a call frame: the `reply`
+        // frame carries the ack, the settle follows as an event. A settle that
+        // lands before the ack went out waits in the gate, never on the wire first.
+        let gate: Arc<Mutex<(bool, Option<fantastic_kernel::Outcome>)>> = Arc::default();
+        let (st, id, gone, g) = (Arc::clone(&state), corr_id.clone(), Arc::clone(&open), Arc::clone(&gate));
         let ack = kernel
             .call(item, move |out| async move {
-                ship_reply(&st, &id, out).await;
-                gone.lock().expect("open calls poisoned").remove(&id);
+                let now = {
+                    let mut g = g.lock().expect("ack gate poisoned");
+                    if g.0 {
+                        Some(out)
+                    } else {
+                        g.1 = Some(out);
+                        None
+                    }
+                };
+                if let Some(out) = now {
+                    ship_settle(&st, &id, out).await;
+                    gone.lock().expect("open calls poisoned").remove(&id);
+                }
             })
             .await;
+        let data = fantastic_io_bridge::inbound::ack_value(&ack);
+        let _ = state
+            .transport
+            .send_frame(json!({"type": "reply", "id": corr_id, "data": data}))
+            .await;
         if ack.status != fantastic_kernel::Status::Accepted {
-            // refused at launch: the refusal is the reply, now
-            ship_reply(&state, &corr_id, ack).await;
+            // refused at launch: the refusal is the whole answer
+            open.lock().expect("open calls poisoned").remove(&corr_id);
+            return;
+        }
+        let early = {
+            let mut g = gate.lock().expect("ack gate poisoned");
+            g.0 = true;
+            g.1.take()
+        };
+        if let Some(out) = early {
+            ship_settle(&state, &corr_id, out).await;
             open.lock().expect("open calls poisoned").remove(&corr_id);
         }
     }
 }
 
-/// Ship one served call's reply frame — after every event the far side watches
+/// Ship one served call's SETTLE — `{type: "event", payload: {type: "settle", re:
+/// <frame id>, status, data, secret?}}` — after every event the far side watches
 /// through this leg that is already queued.
-async fn ship_reply(state: &Arc<BridgeState>, corr_id: &str, out: fantastic_kernel::Outcome) {
+async fn ship_settle(state: &Arc<BridgeState>, corr_id: &str, out: fantastic_kernel::Outcome) {
     let _held = flush_served(state).await;
-    // the reply's own secret paths ride the frame (absent when none), as
+    let mut payload = fantastic_io_bridge::inbound::settle_payload(json!(corr_id), &out);
+    // the reply's own secret paths ride the settle (absent when none), as
     // `web_ws` sends them
-    let marks = out.secret.clone();
+    if !out.secret.is_empty() {
+        payload["secret"] = json!(out.secret);
+    }
+    let mut env = json!({"type": "event", "payload": payload});
     match out.body {
         None => {
-            let mut env = json!({"type":"reply","id":corr_id,"data":out.result});
-            if !marks.is_empty() {
-                env["secret"] = json!(marks);
-            }
             let _ = state.transport.send_frame(env).await;
         }
         Some(reply_body) => {
-            // Binary reply frame — the body rides raw at `["data", …its slot]`
-            // (`["data", "bytes"]` for a `read_stream` chunk), `null` there on
-            // the head in python's position (appended when the reply did not
-            // name the slot).
-            let mut env = json!({"type":"reply","id":corr_id,"data":out.result});
-            if !marks.is_empty() {
-                env["secret"] = json!(marks);
-            }
-            let at = Blob::new(reply_body.nested_in("data"), reply_body.bytes);
+            // Binary settle frame — the body rides raw at `["payload", "data", …its
+            // slot]` (`…, "bytes"]` for a `read_stream` chunk), `null` there on the
+            // head in python's position (appended when the reply did not name the
+            // slot).
+            let at = Blob::new(
+                Blob::new(reply_body.nested_in("data"), Vec::new()).nested_in("payload"),
+                reply_body.bytes,
+            );
             let _ = fantastic_bundle::path::place(&mut env, &at.path, Value::Null);
             let _ = state.transport.send_binary(env, at).await;
         }
@@ -1568,6 +1602,17 @@ async fn drop_served(state: &Arc<BridgeState>, kernel: &Arc<Kernel>) {
     }
 }
 
+/// A `settle` told to this connection (`{type: "settle", re, status, data,
+/// secret?}`): the result of the forward whose frame id is `re`.
+#[derive(Deserialize)]
+struct SettleFrame {
+    #[serde(rename = "type")]
+    ty: String,
+    re: String,
+    data: Option<Value>,
+    secret: Option<Value>,
+}
+
 /// The kinds of frame a bridge's read loop serves, decoded from the frame's `type`.
 /// A frame of any other kind, or one that lacks a field its kind needs, does not
 /// decode and is dropped, so the loop stays robust.
@@ -1576,8 +1621,9 @@ async fn drop_served(state: &Arc<BridgeState>, kernel: &Arc<Kernel>) {
 enum Wire {
     /// A call for this leg to serve (its frame is typed when it is served).
     Call,
-    /// An event for an agent this leg watches on the far side.
-    Event { src: String, payload: Map<String, Value> },
+    /// An event for an agent this leg watches on the far side (`src`), or — with
+    /// no `src` — one told to this connection: a forwarded call's `settle`.
+    Event { src: Option<String>, payload: Map<String, Value> },
     /// The reply to a call this leg forwarded.
     Reply { id: String, data: Option<Value>, secret: Option<Value> },
     /// The far side's refusal of a call this leg forwarded.
@@ -1635,7 +1681,29 @@ async fn read_loop(
                     Arc::clone(&open),
                 )));
             }
-            Wire::Event { src, payload } => {
+            Wire::Event { src: None, payload } => {
+                // A FORWARD'S SETTLE (#795): the far side acked the call frame, and
+                // its result comes as `{type: settle, re: <frame id>, status, data,
+                // secret?}` on this connection; it settles the pending forward.
+                let Ok(settle) = serde_json::from_value::<SettleFrame>(Value::Object(payload)) else {
+                    continue;
+                };
+                if settle.ty != "settle" {
+                    continue;
+                }
+                let marks = settle
+                    .secret
+                    .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
+                    .and_then(|m| fantastic_kernel::secret::check(&m).ok())
+                    .unwrap_or_default();
+                let d = state.pending.lock().expect("pending poisoned").remove(&settle.re);
+                if let Some(d) = d {
+                    // the result's body rides at `["payload", "data", …p]`: `p` in `data`
+                    let at = body.and_then(|b| b.under("payload")).and_then(|b| b.under("data"));
+                    settle_forward(&kernel, d, settle.data.unwrap_or(Value::Null), at, marks);
+                }
+            }
+            Wire::Event { src: Some(src), payload } => {
                 // The `watch_remote` RETURN half: re-emitted on the bridge's OWN
                 // inbox for local watchers ONLY when its `src` is a remote agent
                 // this leg subscribed to. An event nobody asked for is dropped.
@@ -1661,6 +1729,11 @@ async fn read_loop(
             }
             Wire::Reply { id, data, secret } => {
                 let data = data.unwrap_or(Value::Null);
+                // THE ACK (#795): the far side launched the call; its settle comes
+                // later as an event. Only a refusal at launch answers here.
+                if fantastic_io_bridge::inbound::is_ack(&data) {
+                    continue;
+                }
                 // optional `secret`: dotted paths into `data` the far reply's
                 // bundle marked. Malformed ⇒ none (the reply is still delivered).
                 let marks = secret

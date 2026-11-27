@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Map, Value};
 
+use crate::kern::cps::Done;
 use crate::kern::host::Host;
 
 /// Where a new agent goes: under the one user.
@@ -248,15 +249,16 @@ pub fn declared_fields(host: &Host, verb: &str, handler: &str, fields: Map<Strin
     Ok(checked)
 }
 
-/// Create, grant and boot. Returns where the record was written.
-pub async fn write(host: &Host, rec: &Record) -> Result<String, String> {
+/// Create, grant and boot; `done` gets where the record was written. The pair is made, then
+/// each agent that declares `boot` is sent it when the one before settled (#795).
+pub async fn write(host: &Host, rec: &Record, done: Done<Result<String, String>>) {
     let id = rec.id.as_str();
     if host.kernel.exists(id) {
-        return Err(format!("`{id}` already exists"));
+        return done(Err(format!("`{id}` already exists"))).await;
     }
     for t in &rec.may_call {
         if !host.kernel.exists(t.as_str()) {
-            return Err(format!("may call: no agent `{t}`"));
+            return done(Err(format!("may call: no agent `{t}`"))).await;
         }
     }
     // the pair: the provider (the backend, its fields and key) and the chat `id` naming it, on the
@@ -265,18 +267,44 @@ pub async fn write(host: &Host, rec: &Record) -> Result<String, String> {
     let peer: Map<String, Value> = rec.may_call.iter().map(|t| (t.clone(), json!({"call": ["*"]}))).collect();
     let mut spec = rec.fields.clone();
     spec.insert("handler_module".into(), json!(rec.handler));
-    crate::kern::backend::BackendBundle::make_ai(host, crate::kern::backend::By::Operator, &fantastic_kernel::AgentId::from(PARENT), id, spec, peer).await?;
-    for agent in [crate::kern::backend::provider_id(id), id.to_string()] {
+    let (h, id) = (host.clone(), id.to_string());
+    crate::kern::backend::BackendBundle::make_ai(
+        host,
+        &crate::kern::backend::By::Operator,
+        &fantastic_kernel::AgentId::from(PARENT),
+        &id.clone(),
+        spec,
+        peer,
+        crate::kern::cps::done(move |r: Result<(), String>| async move {
+            if let Err(e) = r {
+                return done(Err(e)).await;
+            }
+            let agents = [crate::kern::backend::provider_id(&id), id.clone()];
+            boot_each(h, id, agents.into_iter().collect(), done).await;
+        }),
+    )
+    .await;
+}
+
+/// Boot the written agents in order, each when the one before settled; then the record's path.
+fn boot_each(host: Host, id: String, mut agents: std::collections::VecDeque<String>, done: Done<Result<String, String>>) -> futures_util::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        let Some(agent) = agents.pop_front() else {
+            return done(host.kernel.state_dir().map(|s| s.join("agents").join(PARENT).join("agents").join(&id).join("agent.yaml").display().to_string()).map_err(|e| e.to_string())).await;
+        };
         // only an agent whose bundle declares `boot` is sent it
         if !host.kernel.advertises(&fantastic_kernel::AgentId::from(agent.as_str()), "boot").await {
-            continue;
+            return boot_each(host, id, agents, done).await;
         }
-        let r = host.operator(&agent, json!({"type": "boot"})).await;
-        if let Some(e) = err_of(&r) {
-            return Err(format!("`{agent}` was written but did not boot: {e}"));
-        }
-    }
-    Ok(host.kernel.state_dir()?.join("agents").join(PARENT).join("agents").join(id).join("agent.yaml").display().to_string())
+        let h = host.clone();
+        host.operator_then(&agent.clone(), json!({"type": "boot"}), move |r| async move {
+            if let Some(e) = err_of(&r) {
+                return done(Err(format!("`{agent}` was written but did not boot: {e}"))).await;
+            }
+            boot_each(h, id, agents, done).await;
+        })
+        .await;
+    })
 }
 
 #[cfg(test)]
@@ -373,7 +401,7 @@ mod tests {
             fields,
             may_call: vec![],
         };
-        let at = write(&h, &rec).await.unwrap();
+        let at = crate::kern::cps::run(|d| write(&h, &rec, d)).await.unwrap();
         assert!(std::path::Path::new(&at).ends_with("agents/mine/agent.yaml"), "{at}");
         assert!(at.starts_with(&h.kernel.state_dir().unwrap().display().to_string()), "{at}");
         for id in ["mine", "mine_provider"] {

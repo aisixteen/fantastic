@@ -279,6 +279,42 @@ async fn a_chat_without_the_grant_is_refused_by_name() {
     assert!(r.contains("cannot watch provider `p`"), "{r}");
 }
 
+/// A CHAT'S WATCH IS ITS OWN KERNEL'S: two kernels in one process with the same chat
+/// and provider ids share nothing. While kernel A's chat (granted) holds its live
+/// watch, kernel B's chat (not granted) is still refused by name — the watch made
+/// through A's grant never serves B (the cause of the flaky
+/// `a_chat_without_the_grant_is_refused_by_name` beside
+/// `a_chat_completes_through_its_provider_agent_by_id`).
+#[tokio::test]
+async fn a_chats_watch_is_its_own_kernels() {
+    let boot = |tmp: &tempfile::TempDir, granted: bool| {
+        let mut k = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+            state_dir: tmp.path().join(".fantastic"),
+            work_dir: tmp.path().to_path_buf(),
+        });
+        k.bundles.register("echo.tools", Echo);
+        let k = Arc::new(k);
+        let root = fantastic_kernel::Agent::new(AgentId::from("kernel_state"), None, None, Map::new(), tmp.path().join(".fantastic"), false);
+        fantastic_kernel::test_support::register(&k, Arc::clone(&root));
+        k.set_root(Arc::clone(&root));
+        agent(&k, &root, "p", json!({}), tmp.path());
+        let can = if granted { json!({"can": {"p": {"call": ["complete", "watch"]}}}) } else { json!({}) };
+        agent(&k, &root, "twin_chat", can, tmp.path());
+        k
+    };
+    let (ta, tb) = (tempfile::TempDir::new().unwrap(), tempfile::TempDir::new().unwrap());
+    let (a, b) = (boot(&ta, true), boot(&tb, false));
+    let chat = AgentId::from("twin_chat");
+    let (_, whole) = request(&RemoteProvider::new(&a, &chat, "p"), "twin_chat").await;
+    assert_eq!(whole.unwrap(), "hello", "A's chat streams through A's grant");
+    let r = match request(&RemoteProvider::new(&b, &chat, "p"), "twin_chat").await.1 {
+        Err(e) => e.message,
+        Ok(t) => format!("answered {t:?}"),
+    };
+    assert!(r.contains("cannot watch provider `p`"), "B's chat is refused, A's watch is not B's: {r}");
+    forget_watch(&chat, &a).await;
+}
+
 /// A kernel with a `ram_store` and a provider `p` (`with_store`: granted it).
 async fn kernel_with_provider(tmp: &tempfile::TempDir, with_store: bool) -> Arc<Kernel> {
     let mut k = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
@@ -585,7 +621,7 @@ async fn the_chat_keeps_one_watch_on_its_provider_across_requests() {
         assert_eq!(whole, "hello", "round {round}");
         assert_eq!(live.0.lock().unwrap().as_str(), "hello", "round {round}: its own tokens");
         assert!(k.has_watchers(&provider).await, "round {round}: the chat still watches");
-        let reader = chat_watches().lock().unwrap().get(&chat).map(|w| w.reader.clone());
+        let reader = chat_watches().lock().unwrap().get(&watch_key(&k, &chat)).map(|w| w.reader.clone());
         assert!(reader.is_some(), "round {round}: the watch is the chat's");
         match &first {
             None => first = reader,

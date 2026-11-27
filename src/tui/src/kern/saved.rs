@@ -17,6 +17,7 @@
 
 use serde_json::{json, Map, Value};
 
+use crate::kern::cps::Done;
 use crate::kern::host::Host;
 
 /// The home store's agent id (the blueprint's).
@@ -67,10 +68,17 @@ fn err_of(v: &Value) -> Option<String> {
     })
 }
 
-/// What is saved.
-pub async fn shelf(host: &Host) -> Result<Shelf, String> {
-    let r = host.operator(HOME_ID, json!({"type": "load_tree"})).await.result;
-    if let Some(e) = err_of(&r) {
+/// What is saved: the home's `load_tree`, a call (#795) — `done` gets the shelf with its settle.
+pub async fn shelf(host: &Host, done: Done<Result<Shelf, String>>) {
+    host.operator_then(HOME_ID, json!({"type": "load_tree"}), move |out| async move {
+        done(shelf_of(&out.result)).await;
+    })
+    .await;
+}
+
+/// The shelf a `load_tree` reply holds.
+fn shelf_of(r: &Value) -> Result<Shelf, String> {
+    if let Some(e) = err_of(r) {
         return Err(e);
     }
     let saved = r["saved"]
@@ -104,62 +112,103 @@ pub async fn shelf(host: &Host) -> Result<Shelf, String> {
     })
 }
 
-/// Save `record` as saved set-up `name`. Returns where it was written. An AI set-up (a
-/// backend's) is written as its two records; a set-up with no chat share leaves none.
-pub async fn save(host: &Host, name: &str, record: Value) -> Result<String, String> {
+/// Save `record` as saved set-up `name`; `done` gets where it was written. An AI set-up (a
+/// backend's) is written as its two records, the second when the first settled; a set-up
+/// with no chat share leaves none.
+pub async fn save(host: &Host, name: &str, record: Value, done: Done<Result<String, String>>) {
     if name.ends_with(CHAT_SUFFIX) {
-        return Err(format!("a set-up name may not end in {CHAT_SUFFIX:?}"));
+        return done(Err(format!("a set-up name may not end in {CHAT_SUFFIX:?}"))).await;
     }
     let Value::Object(mut record) = record else {
-        return persist(host, name, record).await;
+        return persist(host, name, record, done).await;
     };
     let handler = record.get("handler_module").and_then(Value::as_str).unwrap_or("").to_string();
     let is_ai = host.kernel.bundles.catalog().any(|(m, b)| m == handler && crate::kern::setup::is_backend(b));
     if !is_ai {
-        return persist(host, name, Value::Object(record)).await;
+        return persist(host, name, Value::Object(record), done).await;
     }
     record.remove("handler_module");
     let (mut provider, mut chat) = crate::kern::backend::split(&record);
     let has_chat = chat.keys().any(|k| !provider.contains_key(k));
     provider.insert("handler_module".into(), json!(handler));
-    let path = persist(host, name, Value::Object(provider)).await?;
-    if has_chat {
-        chat.insert("handler_module".into(), json!(fantastic_ai_core::chat_bundle::HANDLER_MODULE));
-        persist(host, &chat_name(name), Value::Object(chat)).await?;
-    } else {
-        forget_one(host, &chat_name(name), true).await?;
-    }
-    Ok(path)
+    let (h, chat_name) = (host.clone(), chat_name(name));
+    persist(
+        host,
+        name,
+        Value::Object(provider),
+        crate::kern::cps::done(move |r: Result<String, String>| async move {
+            let path = match r {
+                Ok(p) => p,
+                Err(e) => return done(Err(e)).await,
+            };
+            if has_chat {
+                chat.insert("handler_module".into(), json!(fantastic_ai_core::chat_bundle::HANDLER_MODULE));
+                persist(&h, &chat_name, Value::Object(chat), crate::kern::cps::done(move |r: Result<String, String>| async move {
+                    done(r.map(|_| path)).await;
+                }))
+                .await;
+            } else {
+                forget_one(&h, &chat_name, true, crate::kern::cps::done(move |r: Result<(), String>| async move {
+                    done(r.map(|()| path)).await;
+                }))
+                .await;
+            }
+        }),
+    )
+    .await;
 }
 
-async fn persist(host: &Host, name: &str, record: Value) -> Result<String, String> {
-    let r = host.operator(HOME_ID, json!({"type": "persist_record", "name": name, "record": record})).await.result;
-    match err_of(&r) {
-        Some(e) => Err(e),
-        None => Ok(r["path"].as_str().unwrap_or("").to_string()),
-    }
+async fn persist(host: &Host, name: &str, record: Value, done: Done<Result<String, String>>) {
+    host.operator_then(HOME_ID, json!({"type": "persist_record", "name": name, "record": record}), move |out| async move {
+        let r = out.result;
+        done(match err_of(&r) {
+            Some(e) => Err(e),
+            None => Ok(r["path"].as_str().unwrap_or("").to_string()),
+        })
+        .await;
+    })
+    .await;
 }
 
-/// Forget saved set-up `name`, its chat share with it.
-pub async fn forget(host: &Host, name: &str) -> Result<(), String> {
-    forget_one(host, name, false).await?;
-    forget_one(host, &chat_name(name), true).await
+/// Forget saved set-up `name`, its chat share with it (the chat's forgotten when the set-up's was).
+pub async fn forget(host: &Host, name: &str, done: Done<Result<(), String>>) {
+    let (h, chat) = (host.clone(), chat_name(name));
+    forget_one(
+        host,
+        name,
+        false,
+        crate::kern::cps::done(move |r: Result<(), String>| async move {
+            match r {
+                Ok(()) => forget_one(&h, &chat, true, done).await,
+                Err(e) => done(Err(e)).await,
+            }
+        }),
+    )
+    .await;
 }
 
-async fn forget_one(host: &Host, name: &str, if_any: bool) -> Result<(), String> {
-    let r = host.operator(HOME_ID, json!({"type": "forget_record", "name": name})).await.result;
-    match err_of(&r) {
-        Some(_) if if_any && r.get("reason").and_then(Value::as_str) == Some(fantastic_kernel::refusal::NOT_FOUND) => Ok(()),
-        Some(e) => Err(e),
-        None => Ok(()),
-    }
+async fn forget_one(host: &Host, name: &str, if_any: bool, done: Done<Result<(), String>>) {
+    host.operator_then(HOME_ID, json!({"type": "forget_record", "name": name}), move |out| async move {
+        let r = out.result;
+        done(match err_of(&r) {
+            Some(_) if if_any && r.get("reason").and_then(Value::as_str) == Some(fantastic_kernel::refusal::NOT_FOUND) => Ok(()),
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+        .await;
+    })
+    .await;
 }
 
 /// Make saved set-up `name` the default for new AI agents; `None` clears it.
-pub async fn prefer(host: &Host, name: Option<&str>) -> Result<Option<String>, String> {
-    let r = host.operator(HOME_ID, json!({"type": "prefer", "name": name})).await.result;
-    match err_of(&r) {
-        Some(e) => Err(e),
-        None => Ok(r["preferred"].as_str().map(str::to_string)),
-    }
+pub async fn prefer(host: &Host, name: Option<&str>, done: Done<Result<Option<String>, String>>) {
+    host.operator_then(HOME_ID, json!({"type": "prefer", "name": name}), move |out| async move {
+        let r = out.result;
+        done(match err_of(&r) {
+            Some(e) => Err(e),
+            None => Ok(r["preferred"].as_str().map(str::to_string)),
+        })
+        .await;
+    })
+    .await;
 }

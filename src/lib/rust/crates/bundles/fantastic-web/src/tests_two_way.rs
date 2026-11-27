@@ -661,7 +661,8 @@ async fn hello_makes_a_kernel_leg_and_a_plain_client_stays_a_client() {
         ))
         .await
         .unwrap();
-        let reply = next_of(&mut page, "reply").await;
+        // its ack, then its settle (#795)
+        let (reply, _, _) = super::ws_answer(&mut page, &json!("c1")).await;
         assert_eq!(reply["data"], json!({"echo": "page"}), "{wire:?}");
         assert_eq!(p.kb.peer_rows().as_array().unwrap().len(), 1, "{wire:?}");
         // and B reaches A's agent through the leg

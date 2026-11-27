@@ -106,7 +106,6 @@ async fn ring(tag: &str, n: usize) {
         let next = &ids[(i + 1) % n];
         *s.responder.lock().unwrap() = Some(ring_model(ids[i].as_str(), next.as_str()));
     }
-    let started = std::time::Instant::now();
     for id in &ids {
         let ack = kernel
             .operator_send(vec![Item::new(id.clone(), json!({"type": "send", "text": "KICK", "client_id": "ring"}))])
@@ -115,8 +114,27 @@ async fn ring(tag: &str, n: usize) {
             .result;
         assert_eq!(ack["accepted"], json!(true), "{ack}");
     }
+    // EVENT-DRIVEN: quiet is woken by the agents' lives, never a clock; its bound only
+    // FAILS a hang (a peer waiting on a peer would never go quiet before its ceiling)
     assert!(settle(&kernel).await, "the ring never went quiet: a peer waited on a peer");
-    assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+    // NO CEILING HIT: no call of the ring ended a dead letter (a wait that ran into a
+    // deadline settles `timed_out`), read from each peer's own ledger
+    for id in &ids {
+        let l = fantastic_kernel::test_support::as_agent(
+            id.clone(),
+            kernel.send(vec![Item::new(AgentId::from("kernel"), json!({"type": "ledger"}))]),
+        )
+        .await
+        .remove(0)
+        .result;
+        let dead: Vec<&Value> = l["executions"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{id}: the ledger: {l}"))
+            .iter()
+            .filter(|e| matches!(e["status"].as_str(), Some("failed" | "timed_out" | "cancelled")))
+            .collect();
+        assert!(dead.is_empty(), "{id}: a call of the ring ended a dead letter: {dead:#?}");
+    }
     for (i, me) in ids.iter().enumerate() {
         let next = &ids[(i + 1) % n];
         let asked = answer_with(&kernel, me, "QUESTION from").await.expect("the question");

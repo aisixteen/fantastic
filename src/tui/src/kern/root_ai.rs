@@ -16,6 +16,7 @@
 
 use serde_json::{json, Map, Value};
 
+use crate::kern::cps::Done;
 use crate::kern::host::Host;
 
 /// The root AI's id.
@@ -112,18 +113,20 @@ fn record_of(h: &Host, id: &str) -> Option<Map<String, Value>> {
     Some(rec)
 }
 
-/// Make, re-point or remake the root AI on `b`; says what it did. The root AI is a chat (`ai`)
+/// Make, re-point or remake the root AI on `b`; `done` gets what it did. The root AI is a chat (`ai`)
 /// and its provider (the chat's `provider_id`, a backend): a re-point changes the provider's
-/// record, a remake deletes and makes both.
-pub async fn run(h: &Host, b: &Backend) -> Result<String, String> {
+/// record, a remake deletes and makes both. Every call is sent when the one before settled (#795).
+pub async fn run(h: &Host, b: &Backend, done: Done<Result<String, String>>) {
     // a build without the backend would skip the record at the next boot
     if h.kernel.bundles.get(b.handler()).is_none() {
-        return Err(format!("this build has no {} backend — build with `--features {}`", b.handler(), b.feature()));
+        return done(Err(format!("this build has no {} backend — build with `--features {}`", b.handler(), b.feature()))).await;
     }
     let had_chat = handler_of(h, ROOT_AI);
     let provider = crate::kern::backend::provider_of(h, ROOT_AI);
     let had = provider.as_deref().and_then(|p| handler_of(h, p));
-    let did = if let (Some(p), true) = (&provider, had.as_deref() == Some(b.handler())) {
+    let (handler, endpoint) = (b.handler(), b.endpoint());
+    let said = move |did: &str| format!("the root AI `{ROOT_AI}` ({did}, {handler}) speaks to {endpoint}");
+    if let (Some(p), true) = (&provider, had.as_deref() == Some(b.handler())) {
         let mut up = b.fields();
         for f in b.server_fields() {
             up.entry(f.to_string()).or_insert(Value::Null);
@@ -133,82 +136,166 @@ pub async fn run(h: &Host, b: &Backend) -> Result<String, String> {
         let chat_up = crate::kern::backend::chat_part(&up);
         up.insert("type".into(), json!("update_agent"));
         up.insert("id".into(), json!(p));
-        let r = h.operator("kernel", Value::Object(up)).await.result;
-        if let Some(e) = err_of(&r) {
-            return Err(format!("re-pointing `{p}`: {e}"));
-        }
-        if !chat_up.is_empty() {
+        let (host, p) = (h.clone(), p.clone());
+        h.operator_then("kernel", Value::Object(up), move |out| async move {
+            if let Some(e) = err_of(&out.result) {
+                return done(Err(format!("re-pointing `{p}`: {e}"))).await;
+            }
+            if chat_up.is_empty() {
+                return done(Ok(said("re-pointed"))).await;
+            }
             let mut up = chat_up;
             up.insert("type".into(), json!("update_agent"));
             up.insert("id".into(), json!(ROOT_AI));
-            let r = h.operator("kernel", Value::Object(up)).await.result;
-            if let Some(e) = err_of(&r) {
-                return Err(format!("re-pointing `{ROOT_AI}`: {e}"));
-            }
-        }
-        "re-pointed"
-    } else {
-        // the OLD records (chat and provider), to put back if the new ones are refused (a missing
-        // key, a field the new backend requires): a failed switch never loses the AI
-        let old_provider = provider.as_deref().and_then(|p| record_of(h, p));
-        let old_chat = record_of(h, ROOT_AI);
-        if had_chat.is_some() {
-            let r = h.operator("kernel", json!({"type": "delete_agent", "id": ROOT_AI})).await.result;
-            if let Some(e) = err_of(&r) {
-                return Err(format!("removing the old `{ROOT_AI}`: {e}"));
-            }
-        }
-        if let (Some(p), Some(_)) = (&provider, &old_provider) {
-            let r = h.operator("kernel", json!({"type": "delete_agent", "id": p})).await.result;
-            if let Some(e) = err_of(&r) {
-                return Err(format!("removing the old `{p}`: {e}"));
-            }
-        }
-        let mut spec = b.fields();
-        spec.insert("handler_module".into(), json!(b.handler()));
-        let user = fantastic_kernel::AgentId::from(h.cfg.user.as_str());
-        if let Err(e) = crate::kern::backend::BackendBundle::make_ai(h, crate::kern::backend::By::Operator, &user, ROOT_AI, spec, Map::new()).await {
-            // whatever the failed make left is removed, then the old pair is put back (provider first)
-            for id in [ROOT_AI.to_string(), crate::kern::backend::provider_id(ROOT_AI)] {
-                if h.kernel.exists(&id) {
-                    let _ = h.operator("kernel", json!({"type": "delete_agent", "id": id})).await;
-                }
-            }
-            if let Some(chat) = old_chat {
-                let mut failed = None;
-                for rec in old_provider.into_iter().chain([chat]) {
-                    let back = h.operator("kernel", Value::Object(rec)).await.result;
-                    failed = failed.or_else(|| err_of(&back));
-                }
-                return Err(match failed {
-                    None => format!("{e} — `{ROOT_AI}` is left on {}", had.unwrap_or_else(|| had_chat.unwrap_or_default())),
-                    Some(b2) => format!("{e} — and the old `{ROOT_AI}` could not be restored: {b2}"),
-                });
-            }
-            return Err(e);
-        }
-        if had_chat.is_some() { "remade" } else { "made" }
-    };
-    Ok(format!("the root AI `{ROOT_AI}` ({did}, {}) speaks to {}", b.handler(), b.endpoint()))
-}
-
-async fn page_records(h: &Host) -> Result<Vec<Map<String, Value>>, String> {
-    let r = h.operator(crate::kern::web::CANVAS_LOADER_ID, json!({"type": "load_tree"})).await.result;
-    if let Some(e) = err_of(&r) {
-        return Err(format!("the page's records: {e}"));
+            host.operator_then("kernel", Value::Object(up), move |out| async move {
+                done(match err_of(&out.result) {
+                    Some(e) => Err(format!("re-pointing `{ROOT_AI}`: {e}")),
+                    None => Ok(said("re-pointed")),
+                })
+                .await;
+            })
+            .await;
+        })
+        .await;
+        return;
     }
-    Ok(r.get("records").and_then(Value::as_array).into_iter().flatten().filter_map(|v| v.as_object().cloned()).collect())
+    // the OLD records (chat and provider), to put back if the new ones are refused (a missing
+    // key, a field the new backend requires): a failed switch never loses the AI
+    let old_provider = provider.as_deref().and_then(|p| record_of(h, p));
+    let old_chat = record_of(h, ROOT_AI);
+    // the deletes of the old pair, the chat first, then the provider
+    let mut deletes: Vec<(Value, String)> = Vec::new();
+    if had_chat.is_some() {
+        deletes.push((json!({"type": "delete_agent", "id": ROOT_AI}), format!("removing the old `{ROOT_AI}`")));
+    }
+    if let (Some(p), Some(_)) = (&provider, &old_provider) {
+        deletes.push((json!({"type": "delete_agent", "id": p}), format!("removing the old `{p}`")));
+    }
+    let remake = Remake { h: h.clone(), b: b.clone(), old_provider, old_chat, had, had_chat: had_chat.clone() };
+    let made = if had_chat.is_some() { "remade" } else { "made" };
+    remake.delete_then_make(deletes.into_iter().collect(), Box::new(move || said(made)), done).await;
 }
 
-pub(crate) async fn persist(h: &Host, rec: Map<String, Value>) -> Result<(), String> {
+/// A switch of the root AI to another backend, in flight.
+struct Remake {
+    h: Host,
+    b: Backend,
+    old_provider: Option<Map<String, Value>>,
+    old_chat: Option<Map<String, Value>>,
+    had: Option<String>,
+    had_chat: Option<String>,
+}
+
+impl Remake {
+    /// The old pair's deletes, each when the one before settled; then the new pair.
+    fn delete_then_make(
+        self,
+        mut deletes: std::collections::VecDeque<(Value, String)>,
+        said: Box<dyn FnOnce() -> String + Send>,
+        done: Done<Result<String, String>>,
+    ) -> futures_util::future::BoxFuture<'static, ()> {
+        Box::pin(async move {
+            let Some((call, what)) = deletes.pop_front() else {
+                return self.make(said, done).await;
+            };
+            let h = self.h.clone();
+            h.operator_then("kernel", call, move |out| async move {
+                if let Some(e) = err_of(&out.result) {
+                    return done(Err(format!("{what}: {e}"))).await;
+                }
+                self.delete_then_make(deletes, said, done).await;
+            })
+            .await;
+        })
+    }
+
+    /// The new pair; a refusal removes what the failed make left and puts the old pair back.
+    async fn make(self, said: Box<dyn FnOnce() -> String + Send>, done: Done<Result<String, String>>) {
+        let mut spec = self.b.fields();
+        spec.insert("handler_module".into(), json!(self.b.handler()));
+        let user = fantastic_kernel::AgentId::from(self.h.cfg.user.as_str());
+        let h = self.h.clone();
+        crate::kern::backend::BackendBundle::make_ai(
+            &h,
+            &crate::kern::backend::By::Operator,
+            &user,
+            ROOT_AI,
+            spec,
+            Map::new(),
+            crate::kern::cps::done(move |r: Result<(), String>| async move {
+                match r {
+                    Ok(()) => done(Ok(said())).await,
+                    Err(e) => self.restore(e, done).await,
+                }
+            }),
+        )
+        .await;
+    }
+
+    /// Whatever the failed make left is removed, then the old pair is put back (provider first).
+    async fn restore(self, e: String, done: Done<Result<String, String>>) {
+        let mut calls: Vec<Value> = Vec::new();
+        for id in [ROOT_AI.to_string(), crate::kern::backend::provider_id(ROOT_AI)] {
+            if self.h.kernel.exists(&id) {
+                calls.push(json!({"type": "delete_agent", "id": id}));
+            }
+        }
+        let cleaned = calls.len();
+        let Some(chat) = self.old_chat else {
+            // no old AI to put back: the cleanup, then the refusal
+            return crate::kern::cps::chain(&self.h, calls, crate::kern::cps::done(move |_| async move { done(Err(e)).await })).await;
+        };
+        for rec in self.old_provider.into_iter().chain([chat]) {
+            calls.push(Value::Object(rec));
+        }
+        let left = self.had.unwrap_or_else(|| self.had_chat.unwrap_or_default());
+        crate::kern::cps::chain(
+            &self.h,
+            calls,
+            crate::kern::cps::done(move |replies: Vec<Value>| async move {
+                // the cleanup's own answers are let go; the put-back's first failure is said
+                let failed = replies.iter().skip(cleaned).find_map(err_of);
+                done(Err(match failed {
+                    None => format!("{e} — `{ROOT_AI}` is left on {left}"),
+                    Some(b2) => format!("{e} — and the old `{ROOT_AI}` could not be restored: {b2}"),
+                }))
+                .await;
+            }),
+        )
+        .await;
+    }
+}
+
+/// The page's records (`load_tree` on its loader), through `done`.
+async fn page_records(h: &Host, done: Done<Result<Vec<Map<String, Value>>, String>>) {
+    h.operator_then(crate::kern::web::CANVAS_LOADER_ID, json!({"type": "load_tree"}), move |out| async move {
+        let r = out.result;
+        done(match err_of(&r) {
+            Some(e) => Err(format!("the page's records: {e}")),
+            None => Ok(r.get("records").and_then(Value::as_array).into_iter().flatten().filter_map(|v| v.as_object().cloned()).collect()),
+        })
+        .await;
+    })
+    .await;
+}
+
+pub(crate) async fn persist(h: &Host, rec: Map<String, Value>, done: Done<Result<(), String>>) {
     let id = rec.get("id").and_then(Value::as_str).unwrap_or("").to_string();
-    let r = h.operator(crate::kern::web::CANVAS_LOADER_ID, json!({"type": "persist_record", "record": rec})).await.result;
-    err_of(&r).map_or(Ok(()), |e| Err(format!("writing the page record `{id}`: {e}")))
+    h.operator_then(crate::kern::web::CANVAS_LOADER_ID, json!({"type": "persist_record", "record": rec}), move |out| async move {
+        done(err_of(&out.result).map_or(Ok(()), |e| Err(format!("writing the page record `{id}`: {e}")))).await;
+    })
+    .await;
 }
 
 /// Whether the page has its view yet (it is made at the page's first load).
-pub(crate) async fn has_view(h: &Host) -> Result<bool, String> {
-    Ok(page_records(h).await?.iter().any(|r| r.get("id").and_then(Value::as_str) == Some(VIEW)))
+pub(crate) async fn has_view(h: &Host, done: Done<Result<bool, String>>) {
+    page_records(
+        h,
+        crate::kern::cps::done(move |r: Result<Vec<Map<String, Value>>, String>| async move {
+            done(r.map(|recs| recs.iter().any(|r| r.get("id").and_then(Value::as_str) == Some(VIEW)))).await;
+        }),
+    )
+    .await;
 }
 
 #[cfg(test)]
@@ -228,11 +315,15 @@ mod tests {
     async fn a_repoint_updates_the_provider_and_a_failed_remake_puts_both_records_back() {
         let (h, dir) = host("root-ai").await;
         assert_eq!(
-            run(&h, &vllm(8000)).await.unwrap(),
+            {
+                let b = vllm(8000);
+                crate::kern::cps::run(|d| run(&h, &b, d)).await.unwrap()
+            },
             "the root AI `ai` (made, vllm_backend.tools) speaks to http://box.example:8000/v1"
         );
         // the same backend: the provider found through the chat is re-pointed, the chat keeps its provider
-        let out = run(&h, &vllm(8001)).await.unwrap();
+        let b = vllm(8001);
+        let out = crate::kern::cps::run(|d| run(&h, &b, d)).await.unwrap();
         assert!(out.contains("re-pointed"), "{out}");
         let (chat, prov) = (record_of(&h, ROOT_AI), record_of(&h, "ai_provider"));
         assert_eq!(prov["endpoint"], json!("http://box.example:8001/v1"));
@@ -242,15 +333,11 @@ mod tests {
             "the endpoint is the provider's alone"
         );
         // another backend whose record is refused: the old chat AND provider are put back
-        let err = run(
-            &h,
-            &Backend::Ollama {
-                host: "box.example".into(),
-                port: 11434,
-            },
-        )
-        .await
-        .unwrap_err();
+        let ollama = Backend::Ollama {
+            host: "box.example".into(),
+            port: 11434,
+        };
+        let err = crate::kern::cps::run(|d| run(&h, &ollama, d)).await.unwrap_err();
         assert!(err.contains("is left on vllm_backend.tools"), "{err}");
         assert_eq!(
             record_of(&h, "ai_provider")["endpoint"],

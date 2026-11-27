@@ -653,6 +653,9 @@ enum Ctl {
 
 /// A chat's one watch on its provider.
 struct ChatWatch {
+    /// The kernel the watch lives in. Held weak so its address is never reused by
+    /// another kernel while the entry exists: the key names ONE kernel.
+    _kernel: std::sync::Weak<Kernel>,
     provider: AgentId,
     reader: AgentId,
     ctl: tokio::sync::mpsc::UnboundedSender<Ctl>,
@@ -666,16 +669,26 @@ impl ChatWatch {
     }
 }
 
-/// Every chat's watch on its provider, by chat.
-fn chat_watches() -> &'static Mutex<std::collections::HashMap<AgentId, ChatWatch>> {
-    static W: std::sync::OnceLock<Mutex<std::collections::HashMap<AgentId, ChatWatch>>> =
+/// A chat's key in [`chat_watches`]: its KERNEL and its id. A chat id names an agent
+/// of one kernel; keyed by the id alone, two kernels of one process (every test
+/// binary) shared a chat's watch, and a chat could stream through another kernel's
+/// grant.
+type WatchKey = (usize, AgentId);
+
+fn watch_key(kernel: &Kernel, chat: &AgentId) -> WatchKey {
+    (std::ptr::from_ref(kernel) as usize, chat.clone())
+}
+
+/// Every chat's watch on its provider, by kernel and chat.
+fn chat_watches() -> &'static Mutex<std::collections::HashMap<WatchKey, ChatWatch>> {
+    static W: std::sync::OnceLock<Mutex<std::collections::HashMap<WatchKey, ChatWatch>>> =
         std::sync::OnceLock::new();
     W.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
 /// The chat is gone: its watch on its provider ends ([`crate::verbs::on_delete`]).
 pub(crate) async fn forget_watch(chat: &AgentId, kernel: &Kernel) {
-    let w = chat_watches().lock().expect("watches poisoned").remove(chat);
+    let w = chat_watches().lock().expect("watches poisoned").remove(&watch_key(kernel, chat));
     if let Some(w) = w {
         w.release(kernel).await;
     }
@@ -736,15 +749,16 @@ impl RemoteProvider {
     /// Its feeder hands each `provider_token` to the live view of the request its `rid`
     /// names; it holds no lock and wakes nothing. The feeder's control channel.
     async fn chat_watch(&self) -> Result<tokio::sync::mpsc::UnboundedSender<Ctl>, ProviderError> {
+        let key = watch_key(&self.kernel, &self.chat);
         if let Some(w) = chat_watches()
             .lock()
             .expect("watches poisoned")
-            .get(&self.chat)
+            .get(&key)
             .filter(|w| w.provider == self.provider && !w.ctl.is_closed())
         {
             return Ok(w.ctl.clone());
         }
-        let old = chat_watches().lock().expect("watches poisoned").remove(&self.chat);
+        let old = chat_watches().lock().expect("watches poisoned").remove(&key);
         if let Some(old) = old {
             old.release(&self.kernel).await;
         }
@@ -780,8 +794,9 @@ impl RemoteProvider {
             }
         });
         chat_watches().lock().expect("watches poisoned").insert(
-            self.chat.clone(),
+            key,
             ChatWatch {
+                _kernel: Arc::downgrade(&self.kernel),
                 provider: self.provider.clone(),
                 reader,
                 ctl: ctl.clone(),
@@ -887,7 +902,7 @@ impl RemoteProvider {
             }
             return;
         }
-        if let Some(w) = chat_watches().lock().expect("watches poisoned").get(&self.chat) {
+        if let Some(w) = chat_watches().lock().expect("watches poisoned").get(&watch_key(&self.kernel, &self.chat)) {
             let (tx, _) = tokio::sync::oneshot::channel();
             let _ = w.ctl.send(Ctl::Close(rid.clone(), tx));
         }

@@ -198,11 +198,14 @@ async def host_call(port: int, target: str, payload: dict) -> dict:
     async with websockets.connect(f"ws://127.0.0.1:{port}/user/ws", origin=f"http://127.0.0.1:{port}") as ws:
         await ws.send(json.dumps(frame))
         # only the answer to THIS frame: a connect-time frame (the socket's
-        # refused auto-watch of `user`) is not it
+        # refused auto-watch of `user`) is not it. The `reply` is the ACK (#795);
+        # the answer is the `settle` event after it, or a refusal at launch.
+        from helpers.host.ws import call_answer
+
         while True:
-            m = json.loads(await asyncio.wait_for(ws.recv(), 10))
-            if m.get("type") in ("reply", "error") and m.get("id") == frame["id"]:
-                return m.get("data", m)
+            done, answer = call_answer(json.loads(await asyncio.wait_for(ws.recv(), 10)), frame["id"])
+            if done:
+                return answer
 
 
 # ── the browser ───────────────────────────────────────────────────────────────

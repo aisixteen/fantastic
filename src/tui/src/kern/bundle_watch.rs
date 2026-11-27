@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use crate::kern::cps::Done;
 use crate::kern::host::Host;
 
 /// The host's bundle folders, under the store's root (the state folder).
@@ -51,9 +52,21 @@ pub fn view_file(dir: &Path) -> Option<PathBuf> {
 /// fields over the instance's own, and the view file's text as `bytes`
 /// (`{{agent}}` replaced by the instance id). `bytes_rev` (the file's content
 /// hash) makes the write a change; the change is the cells' signal to draw again.
-pub async fn refresh_views(h: &Host, name: &str, dir: &Path) -> Result<(), String> {
+///
+/// Each instance's `update_agent` is sent when the one before settled (#795); `done`
+/// gets the first refusal, or `Ok` when every instance was written.
+pub async fn refresh_views(h: &Host, name: &str, dir: &Path, done: Done<Result<(), String>>) {
+    match view_updates(h, name, dir) {
+        Ok(updates) => update_views(h.clone(), updates.into_iter().collect(), done).await,
+        Err(e) => done(Err(e)).await,
+    }
+}
+
+/// The `update_agent` of every instance of bundle `name`, with its id: nothing is sent
+/// when the declaration is refused.
+fn view_updates(h: &Host, name: &str, dir: &Path) -> Result<Vec<(String, Value)>, String> {
     let Some(declared) = bundle_view(dir) else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     // the TUI part is checked BEFORE any instance is touched: a bad declaration
     // is refused with its sentence and every instance keeps the view it has
@@ -81,6 +94,7 @@ pub async fn refresh_views(h: &Host, name: &str, dir: &Path) -> Result<(), Strin
         .filter(|a| a.record().handler_module.as_deref() == Some(name))
         .map(|a| a.id.0.clone())
         .collect();
+    let mut updates = Vec::new();
     for id in instances {
         // the instance's view, with the BUNDLE's declared fields (kind, calls,
         // bytes_file, tui) over it: an edit of bundle.yaml must reach every
@@ -99,18 +113,26 @@ pub async fn refresh_views(h: &Host, name: &str, dir: &Path) -> Result<(), Strin
             .unwrap_or_default();
         let bytes = text.as_ref().map(|t| t.replace("{{agent}}", &id));
         let view = merged_view(own, declared.clone(), rev.clone(), bytes);
-        let r = h
-            .operator(
-                "kernel",
-                json!({"type": "update_agent", "id": id, "view": view}),
-            )
-            .await
-            .result;
-        if let Some(e) = r.get("error").and_then(Value::as_str) {
-            return Err(format!("{id}: its view: {e}"));
-        }
+        updates.push((id.clone(), json!({"type": "update_agent", "id": id, "view": view})));
     }
-    Ok(())
+    Ok(updates)
+}
+
+/// The instances' view writes, in order: the next goes out when the one before settled.
+fn update_views(h: Host, mut updates: std::collections::VecDeque<(String, Value)>, done: Done<Result<(), String>>) -> futures_util::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        let Some((id, payload)) = updates.pop_front() else {
+            return done(Ok(())).await;
+        };
+        let host = h.clone();
+        h.operator_then("kernel", payload, move |out| async move {
+            if let Some(e) = out.result.get("error").and_then(Value::as_str) {
+                return done(Err(format!("{id}: its view: {e}"))).await;
+            }
+            update_views(host, updates, done).await;
+        })
+        .await;
+    })
 }
 
 /// The view an instance gets: the bundle's declared fields over the instance's
@@ -150,14 +172,16 @@ static ARMED: std::sync::Mutex<BTreeSet<String>> = std::sync::Mutex::new(BTreeSe
 
 /// Watch new bundle folder `name`'s files before it is loaded: an edit from now
 /// on is an event, and the folder's own `added` event reloads nothing.
-pub async fn arm(h: &Host, name: &str) {
+/// `done` runs when the watch call settled: the folder is loaded after that.
+pub async fn arm(h: &Host, name: &str, done: Done<()>) {
     // marked first: the folder's event may be handled while the watch is armed
     ARMED
         .lock()
         .expect("armed folders")
         .insert(name.to_string());
-    if let Some(store) = store_of(h) {
-        watch_path(h, &store, &format!("{BUNDLES}/{name}")).await;
+    match store_of(h) {
+        Some(store) => watch_path(h, &store, &format!("{BUNDLES}/{name}"), done).await,
+        None => done(()).await,
     }
 }
 
@@ -166,14 +190,21 @@ fn store_of(h: &Host) -> Option<fantastic_kernel::AgentId> {
     fantastic_kernel::persistence::find_store(&h.kernel)
 }
 
-async fn watch_path(h: &Host, store: &fantastic_kernel::AgentId, path: &str) {
-    let r = h
-        .operator(&store.0, json!({"type": "watch_path", "path": path}))
-        .await
-        .result;
-    if let Some(e) = err_of(&r) {
-        tracing::warn!("bundle watch {path}: {e}");
-    }
+/// Watch `path` on the store; a refusal is logged when the call settles, then `done` runs.
+async fn watch_path(h: &Host, store: &fantastic_kernel::AgentId, path: &str, done: Done<()>) {
+    let path = path.to_string();
+    h.operator_then(&store.0, json!({"type": "watch_path", "path": path}), move |out| async move {
+        if let Some(e) = err_of(&out.result) {
+            tracing::warn!("bundle watch {path}: {e}");
+        }
+        done(()).await;
+    })
+    .await;
+}
+
+/// [`watch_path`] with nothing to do after it.
+async fn watch_only(h: &Host, store: &fantastic_kernel::AgentId, path: &str) {
+    watch_path(h, store, path, crate::kern::cps::done(|()| async {})).await;
 }
 
 /// The bundle a changed path belongs to, and whether it is the bundle's folder
@@ -202,25 +233,44 @@ pub fn spawn(h: Arc<Host>, store_dir: PathBuf) {
             return;
         };
         let inbox = fantastic_kernel::AgentId::from(INBOX);
-        let mut rx = h.kernel.ensure_inbox(&inbox);
+        let rx = h.kernel.ensure_inbox(&inbox);
         // the shell is the in-process operator
         if let Some(denial) = fantastic_kernel::send::as_operator(h.kernel.watch(&store, inbox.clone())).await {
             tracing::warn!("bundle watch: {denial}");
             return;
         }
-        watch_path(&h, &store, BUNDLES).await;
+        watch_only(&h, &store, BUNDLES).await;
         for e in std::fs::read_dir(&root).into_iter().flatten().flatten() {
             if e.path().is_dir() {
                 if let Some(n) = e.file_name().to_str() {
-                    watch_path(&h, &store, &format!("{BUNDLES}/{n}")).await;
+                    watch_only(&h, &store, &format!("{BUNDLES}/{n}")).await;
                 }
             }
         }
-        while let Some(first) = rx.recv().await {
+        Pump { h: (*h).clone(), root, store, rx }.run().await;
+    });
+}
+
+/// The watcher's loop, one burst at a time: the next burst is waited for (an inbox
+/// event) only after this one's reloads and view writes settled, so two saves never
+/// reorder. Nothing waits for a settle: each step is the continuation of the one before.
+struct Pump {
+    h: Host,
+    root: PathBuf,
+    store: fantastic_kernel::AgentId,
+    rx: fantastic_kernel::inbox::InboxReceiver,
+}
+
+impl Pump {
+    fn run(self) -> futures_util::future::BoxFuture<'static, ()> {
+        Box::pin(async move {
+            let mut me = self;
+            let Some(first) = me.rx.recv().await else { return };
+            let (h, root, store) = (me.h.clone(), me.root.clone(), me.store.clone());
             // the burst: this event and every one within SETTLE
             let mut items = vec![first];
             tokio::time::sleep(SETTLE).await;
-            while let Some(more) = rx.try_recv() {
+            while let Some(more) = me.rx.try_recv() {
                 items.push(more);
             }
             let mut code: BTreeSet<String> = BTreeSet::new();
@@ -247,7 +297,7 @@ pub fn spawn(h: Arc<Host>, store_dir: PathBuf) {
                     // a NEW bundle: watch its files too, and load it — unless it
                     // was armed before its load (`arm`)
                     if !ARMED.lock().expect("armed folders").contains(&name) {
-                        watch_path(&h, &store, &format!("{BUNDLES}/{name}")).await;
+                        watch_only(&h, &store, &format!("{BUNDLES}/{name}")).await;
                         code.insert(name);
                     }
                     continue;
@@ -274,26 +324,53 @@ pub fn spawn(h: Arc<Host>, store_dir: PathBuf) {
             // bundle: nothing to load (its `bundle.yaml` arriving is the event)
             code.retain(|name| root.join(name).join("bundle.yaml").is_file());
             views.retain(|name| root.join(name).join("bundle.yaml").is_file());
-            for name in &code {
-                let r = h
-                    .operator("kernel", json!({"type": "reload_bundle", "name": name}))
-                    .await
-                    .result;
-                if let Some(e) = err_of(&r) {
+            let reloads: std::collections::VecDeque<String> = code.iter().cloned().collect();
+            let redraws: std::collections::VecDeque<String> = code.union(&views).cloned().collect();
+            me.reload(reloads, redraws).await;
+        })
+    }
+
+    /// Every changed bundle is reloaded, then — a save that touches the code AND the panel at
+    /// once (an agent rewriting the bundle) reloads the code and THEN redraws the panel;
+    /// skipping the panel there left the starter's old panel calling verbs that were gone —
+    /// each one's instances get its view again.
+    fn reload(self, mut names: std::collections::VecDeque<String>, redraws: std::collections::VecDeque<String>) -> futures_util::future::BoxFuture<'static, ()> {
+        Box::pin(async move {
+            let Some(name) = names.pop_front() else {
+                return self.redraw(redraws).await;
+            };
+            let h = self.h.clone();
+            h.operator_then("kernel", json!({"type": "reload_bundle", "name": name}), move |out| async move {
+                if let Some(e) = err_of(&out.result) {
                     tracing::warn!("bundle {name}: reload: {e}");
                 }
-            }
-            // every changed bundle's instances get its view again — a save that
-            // touches the code AND the panel at once (an agent rewriting the
-            // bundle) reloads the code and THEN redraws the panel; skipping the
-            // panel there left the starter's old panel calling verbs that were gone
-            for name in code.union(&views) {
-                if let Err(e) = refresh_views(&h, name, &root.join(name)).await {
-                    tracing::warn!("bundle {name}: {e}");
-                }
-            }
-        }
-    });
+                self.reload(names, redraws).await;
+            })
+            .await;
+        })
+    }
+
+    fn redraw(self, mut names: std::collections::VecDeque<String>) -> futures_util::future::BoxFuture<'static, ()> {
+        Box::pin(async move {
+            let Some(name) = names.pop_front() else {
+                return self.run().await;
+            };
+            let h = self.h.clone();
+            let dir = self.root.join(&name);
+            refresh_views(
+                &h,
+                &name.clone(),
+                &dir,
+                crate::kern::cps::done(move |r: Result<(), String>| async move {
+                    if let Err(e) = r {
+                        tracing::warn!("bundle {name}: {e}");
+                    }
+                    self.redraw(names).await;
+                }),
+            )
+            .await;
+        })
+    }
 }
 
 /// The starter bundles the CLI ships (the double-click's "python agent"): files
@@ -438,7 +515,7 @@ mod tests {
         if let Some(v) = own {
             spec["view"] = v;
         }
-        let r = h.operator("kernel", spec).await.result;
+        let r = crate::kern::cps::op(&h, "kernel", spec).await.result;
         assert!(r.get("error").is_none(), "{r}");
         (h, bundle)
     }
@@ -465,7 +542,7 @@ mod tests {
     #[tokio::test]
     async fn a_bundle_declaration_with_only_tui_reaches_its_instances() {
         let (h, dir) = world("only-tui", &json!({"tui": tui("status")}), None).await;
-        refresh_views(&h, "board", &dir).await.unwrap();
+        crate::kern::cps::run(|d| refresh_views(&h, "board", &dir, d)).await.unwrap();
         let v = view_of(&h);
         assert_eq!(v["tui"], tui("status"));
         assert!(
@@ -477,9 +554,9 @@ mod tests {
     #[tokio::test]
     async fn editing_tui_in_bundle_yaml_reaches_a_live_instance() {
         let (h, dir) = world("edit", &json!({"tui": tui("status")}), None).await;
-        refresh_views(&h, "board", &dir).await.unwrap();
+        crate::kern::cps::run(|d| refresh_views(&h, "board", &dir, d)).await.unwrap();
         write_bundle(&dir, &json!({"tui": tui("other")}));
-        refresh_views(&h, "board", &dir).await.unwrap();
+        crate::kern::cps::run(|d| refresh_views(&h, "board", &dir, d)).await.unwrap();
         assert_eq!(view_of(&h)["tui"], tui("other"));
     }
 
@@ -487,7 +564,7 @@ mod tests {
     async fn a_web_and_tui_declaration_in_one_view_reach_the_instance_together() {
         let view = json!({"kind": "html", "bytes_file": "panel.html", "calls": ["status"], "tui": tui("status")});
         let (h, dir) = world("both", &view, None).await;
-        refresh_views(&h, "board", &dir).await.unwrap();
+        crate::kern::cps::run(|d| refresh_views(&h, "board", &dir, d)).await.unwrap();
         let v = view_of(&h);
         assert_eq!(v["kind"], "html");
         assert_eq!(v["bytes_file"], "panel.html");
@@ -505,7 +582,7 @@ mod tests {
         let view = json!({"kind": "html", "bytes_file": "panel.html"});
         let (h, dir) = world("agent", &view, None).await;
         std::fs::write(dir.join("panel.html"), "<p>{{agent}}</p>").unwrap();
-        refresh_views(&h, "board", &dir).await.unwrap();
+        crate::kern::cps::run(|d| refresh_views(&h, "board", &dir, d)).await.unwrap();
         assert_eq!(view_of(&h)["bytes"], "<p>board_1</p>");
     }
 
@@ -542,7 +619,7 @@ mod tests {
             Some(own.clone()),
         )
         .await;
-        let e = refresh_views(&h, "board", &dir).await.expect_err("refused");
+        let e = crate::kern::cps::run(|d| refresh_views(&h, "board", &dir, d)).await.expect_err("refused");
         assert!(e.contains("view.tui[0]") && e.contains("show"), "{e}");
         assert_eq!(view_of(&h), own, "the instance keeps its view");
     }
