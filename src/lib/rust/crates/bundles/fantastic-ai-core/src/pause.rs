@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 
 use crate::events::emit_status;
 use crate::helpers::now_secs;
-use crate::memory::{store_call, MemResult};
+use crate::memory::MemResult;
 use crate::state::state_for;
 
 const PAUSE: &str = "pause";
@@ -83,33 +83,40 @@ async fn announce(agent_id: &AgentId, kernel: &Arc<Kernel>, phase: &str) {
     .await;
 }
 
-/// AT BOOT: a chat whose store says it is paused says `paused`. Reads only the last
-/// `pause`/`resume` row since the last clear, straight from the store — the head is
-/// not loaded, so the boot stays lazy for the conversation.
-pub async fn announce_at_boot(agent_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<()> {
-    let res = store_call(
-        agent_id,
-        kernel,
-        json!({
-            "type": "read",
-            "from_last_kind": "clear",
-            "kinds": [PAUSE, RESUME],
-            "order": "desc",
-            "limit": 1,
-        }),
-    )
-    .await?;
-    let last = crate::memory::rows_of(&res, agent_id);
-    let paused = last
-        .first()
-        .and_then(|r| r.get("kind"))
-        .and_then(Value::as_str)
-        == Some(PAUSE);
-    crate::life::set_paused(agent_id, paused);
-    if paused {
-        announce(agent_id, kernel, "paused").await;
-    }
-    Ok(())
+/// AT BOOT, as a step (#795): a chat whose store says it is paused says `paused`. Reads
+/// only the last `pause`/`resume` row since the last clear, straight from the store —
+/// the head is not loaded, so the boot stays lazy for the conversation. The next step
+/// gets whether the store says paused; the boot sets it once its reads ran.
+pub(crate) async fn announce_at_boot<R, F, Fut>(agent_id: &AgentId, kernel: &Arc<Kernel>, rec: R, next: F)
+where
+    R: Send + 'static,
+    F: FnOnce(R, MemResult<bool>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let ask = json!({
+        "type": "read",
+        "from_last_kind": "clear",
+        "kinds": [PAUSE, RESUME],
+        "order": "desc",
+        "limit": 1,
+    });
+    let (me, k) = (agent_id.clone(), Arc::clone(kernel));
+    crate::steps::rows(agent_id, kernel, ask, rec, move |rec, last| async move {
+        let last = match last {
+            Ok(l) => l,
+            Err(e) => return next(rec, Err(e)).await,
+        };
+        let paused = last
+            .first()
+            .and_then(|r| r.get("kind"))
+            .and_then(Value::as_str)
+            == Some(PAUSE);
+        if paused {
+            announce(&me, &k, "paused").await;
+        }
+        next(rec, Ok(paused)).await;
+    })
+    .await;
 }
 
 /// `pause` — stop the in-flight generation and hold incoming messages. Already

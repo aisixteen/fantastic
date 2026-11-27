@@ -269,7 +269,8 @@ async def states(pg, r: dict, info: dict) -> None:
         info[key] = x
         return x
 
-    # Working: thinking while the model has not answered; a second message meanwhile is queued
+    # Working: thinking while the model has not answered; a second message meanwhile is stored
+    # and read by the next pass
     slow = asyncio.create_task(fire(port, A, {"type": "send", "text": "S_SLOW"}))
     r["8b Working: the spinner, the word thinking"] = await state("!!b && b.classList.contains('active') && s && s.textContent==='thinking'")
     x = await now("thinking")
@@ -278,13 +279,13 @@ async def states(pg, r: dict, info: dict) -> None:
         and x["ol_anim"] == "ray" and x["ol_img"].startswith("conic-gradient") and x["tok"]["accent"] in x["ol_img"]
     await shot(pg, "1-working-thinking", info, light=True)
     second = asyncio.create_task(fire(port, A, {"type": "send", "text": "S_AGAIN"}))
-    r["8c Working: a message that waits for its call, the word queued"] = await state("!!b && b.classList.contains('active') && s && s.textContent==='queued'")
-    await shot(pg, "2-working-queued", info)
+    r["8c Working: a message sent while a pass runs leaves the tile Working (read by the next pass)"] = await state("!!b && b.classList.contains('active')")
+    await shot(pg, "2-working-again", info)
     info["slow"] = await slow
     info["again"] = await second
 
     # Done: a call that completed keeps the check until the next call
-    r["8d Done: a call that completed, the check on ok"] = await ends(0, "active:thinking", "active:queued", "done:done")
+    r["8d Done: a call that completed, the check on ok"] = await ends(0, "active:thinking", "done:done")
     await asyncio.sleep(1)
     r["8d2 kept after the call: the check on ok, the word done"] = look(await now("done"), "done", "\u2713", "ok", "ok_on", "done")
     await shot(pg, "3-done", info, light=True)

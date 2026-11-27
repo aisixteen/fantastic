@@ -56,13 +56,6 @@ pub enum VmIn {
     Gone(ViewId),
 }
 
-/// THE SIZE POLICY, tmux's `latest`: the screen is the size of the View that
-/// most recently resized or typed; with that one gone, any remaining View
-/// (the owner's own first). None until some View has said how big it is.
-pub fn effective(sizes: &std::collections::BTreeMap<ViewId, (u16, u16)>, latest: Option<ViewId>) -> Option<(u16, u16)> {
-    latest.and_then(|v| sizes.get(&v).copied()).or_else(|| sizes.values().next().copied())
-}
-
 /// Every View's frame: the same state, laid out for each View.
 #[derive(Debug, Clone, Default)]
 pub struct Frames {
@@ -294,7 +287,7 @@ async fn run(
                 }
                 Err(e) => {
                     boot.say(&format!("fantastic: {e}"));
-                    app.note(format!("{e}"));
+                    app.note(e.to_string());
                     failed();
                     app.quit = true;
                 }

@@ -230,6 +230,11 @@ pub fn list(who: &AgentId, a: &Inquiries, kernel: &Arc<Kernel>) -> Value {
 
 /// `answer_inquiry`: the answer to the asker under the inquiry's pid; closed. The
 /// answer goes as `[reply to <re> · <agent id> inquiry]`, the shape every asker settles by.
+///
+/// ASYNC (#795): the answer is a `send` to the asker, a call; `answer_inquiry` DEFERS
+/// and that call's settle settles it — `{answered, asker}`, or, when the answer did not
+/// reach the asker, the question open again and the refusal saying so. Nothing waits.
+/// Returns `Value::Null` once deferred, or the refusal of an answer that cannot go.
 pub async fn answer(who: &AgentId, a: AnswerInquiry, kernel: &Arc<Kernel>) -> Value {
     let re = a.re;
     let text = a.answer.text();
@@ -256,28 +261,63 @@ pub async fn answer(who: &AgentId, a: AnswerInquiry, kernel: &Arc<Kernel>) -> Va
         "[reply to {re} · {} inquiry]\n<answer>{text}</answer>\n<request_id>{rid}</request_id>",
         who.as_str()
     );
-    let out = Arc::clone(kernel)
-        .send(vec![Item::new(
-            AgentId::from(asker.as_str()),
-            json!({"type": "send", "text": body, "client_id": q.reply_client_id}),
-        )])
-        .await
-        .remove(0);
-    match out.result.get("error").and_then(Value::as_str) {
-        // the answer did not reach the asker: the question stays open
-        Some(e) => {
-            let _g = HELD.lock().expect("inquiries poisoned");
-            let mut list = match open(kernel, who) {
-                Ok(l) => l,
-                Err(e) => return e,
-            };
-            list.insert(at.min(list.len()), q.clone());
-            store(kernel, who, &list);
-            refusal(refusal::TRANSPORT_ERROR, format!("{who}: answer_inquiry: the answer did not reach {asker}: {e}"))
+    let d = match kernel.defer() {
+        Ok(d) => d,
+        Err(refused) => {
+            reopen(kernel, who, at, q);
+            return refused;
         }
-        None => {
-            publish(kernel, who, "inquiry_closed", re, Some(asker.as_str())).await;
-            json!({"answered": re, "asker": asker})
+    };
+    let item = Item::new(
+        AgentId::from(asker.as_str()),
+        json!({"type": "send", "text": body, "client_id": q.reply_client_id}),
+    );
+    let (k, me) = (Arc::clone(kernel), who.clone());
+    let slot = Arc::new(std::sync::Mutex::new(Some((k, me, at, q))));
+    let held = Arc::clone(&slot);
+    let settled = move |out: crate::outcome::Outcome, k: Arc<Kernel>, me: AgentId, at: usize, q: Held| async move {
+        let asker = q.asker.clone().unwrap_or_default();
+        let reply = match out.result.get("error").and_then(Value::as_str) {
+            // the answer did not reach the asker: the question stays open
+            Some(e) => {
+                let e = e.to_string();
+                reopen(&k, &me, at, q);
+                refusal(refusal::TRANSPORT_ERROR, format!("{me}: answer_inquiry: the answer did not reach {asker}: {e}"))
+            }
+            None => {
+                publish(&k, &me, "inquiry_closed", re, Some(asker.as_str())).await;
+                json!({"answered": re, "asker": asker})
+            }
+        };
+        let status = if crate::refusal::is_refused(&reply) {
+            crate::outcome::Status::Errored
+        } else {
+            crate::outcome::Status::Completed
+        };
+        k.settle_deferred(d.pid(), crate::outcome::Outcome::new(Some(d.pid()), status, reply));
+    };
+    let ack = Arc::clone(kernel)
+        .call(item, move |out| async move {
+            let taken = held.lock().expect("inquiry answer poisoned").take();
+            if let Some((k, me, at, q)) = taken {
+                settled(out, k, me, at, q).await;
+            }
+        })
+        .await;
+    if ack.status != crate::outcome::Status::Accepted {
+        let taken = slot.lock().expect("inquiry answer poisoned").take();
+        if let Some((k, me, at, q)) = taken {
+            settled(ack, k, me, at, q).await;
         }
+    }
+    Value::Null
+}
+
+/// An answer that did not reach its asker: the question back where it was, open.
+fn reopen(kernel: &Arc<Kernel>, who: &AgentId, at: usize, q: Held) {
+    let _g = HELD.lock().expect("inquiries poisoned");
+    if let Ok(mut list) = open(kernel, who) {
+        list.insert(at.min(list.len()), q);
+        store(kernel, who, &list);
     }
 }

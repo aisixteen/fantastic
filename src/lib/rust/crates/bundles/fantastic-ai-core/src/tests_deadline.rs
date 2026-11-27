@@ -146,10 +146,10 @@ async fn a_slow_call_past_its_deadline_tells_the_sender_its_dead_letter_and_can_
     assert_eq!(resent["slept"], json!(true), "{resent}");
 }
 
-/// `status` answers at once while a pass runs, counts the messages stored and not read
-/// yet as pending and names their senders.
+/// `status` answers at once while a pass runs; a message stored meanwhile is read by
+/// exactly one next pass (the queue fields are gone, #795 Q8).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn status_counts_unread_messages_and_names_their_senders() {
+async fn status_answers_at_once_and_an_unread_message_gets_one_next_pass() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "dl_status").await;
     let peer = add_peer(&kernel, &tmp, &backend).await;
@@ -175,19 +175,8 @@ async fn status_counts_unread_messages_and_names_their_senders() {
         .result;
     assert!(t.elapsed() < Duration::from_millis(200), "{:?}", t.elapsed());
     assert_eq!(bare["generating"], json!(true), "{bare}");
-    assert_eq!(bare["others_pending"], json!(1), "{bare}");
-    assert_eq!(bare["pending_from"], json!([peer.as_str()]), "{bare}");
-    let mine = kernel.operator_send(vec![Item::new(
-            backend.clone(),
-            json!({"type": "status", "client_id": "pc"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert!(mine["mine_pending"][0]["text"].as_str().unwrap().contains("two"), "{mine}");
-    assert_eq!(mine["others_pending"], json!(0), "{mine}");
-    assert_eq!(mine["pending_from"], json!([peer.as_str()]), "{mine}");
     gate.notify_one();
+    assert!(until_passes(&s, 2).await, "the stored message woke no next pass");
     assert!(settle(&kernel).await);
 }
 

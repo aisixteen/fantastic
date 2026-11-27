@@ -191,7 +191,7 @@ pub trait Panel {
     fn put_view(&mut self, _view: Box<dyn std::any::Any>) {}
     /// Whether this panel's state HAS a size of its own (a terminal: its PTY and
     /// its screen are one size). Such a panel is laid out only for the
-    /// AUTHORITATIVE View (the latest, `vm::effective`); every other View draws
+    /// AUTHORITATIVE View (the latest to resize or type); every other View draws
     /// it as it is. Default: no — the panel reflows to any size.
     fn sized(&self) -> bool {
         false

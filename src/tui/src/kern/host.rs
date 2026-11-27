@@ -78,7 +78,7 @@ fn registry_with(state: &std::path::Path, extras: &[crate::Extra]) -> BundleRegi
     reg.register(fantastic_scheduler::HANDLER_MODULE, fantastic_scheduler::SchedulerBundle);
     reg.register(
         fantastic_sqlite_store::HANDLER_MODULE,
-        fantastic_sqlite_store::SqliteStoreBundle::default(),
+        fantastic_sqlite_store::SqliteStoreBundle,
     );
     // The shell. `allowed` is a list of regexes fullmatched against the joined
     // command line.
@@ -437,6 +437,19 @@ impl Host {
         let k = Arc::clone(&self.kernel);
         let item = Item::new(AgentId::from(target), payload);
         k.operator_send(vec![item]).await.remove(0)
+    }
+
+    /// THE OPERATOR'S CALL (#795): [`Host::operator`]'s call made async — the ack at once
+    /// (`accepted` with the pid, or the launch's refusal, for which `then` never runs),
+    /// and `then` runs with the settle when it comes, as a message to the shell. Nothing
+    /// waits for it.
+    pub async fn operator_call<F, Fut>(&self, target: &str, payload: Value, then: F) -> Outcome
+    where
+        F: FnOnce(Outcome) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let item = Item::new(AgentId::from(target), payload);
+        fantastic_kernel::send::as_operator(self.kernel.call(item, then)).await
     }
 
     /// THE SEND OF THE AGENT WHOSE CODE RUNS HERE: inside a bundle's handler (or a task it

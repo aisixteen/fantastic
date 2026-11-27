@@ -772,12 +772,12 @@ async fn drain(rx: &mut fantastic_kernel::inbox::InboxReceiver) -> Vec<Value> {
             out.push(v.payload);
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
-        // a status that ENDS the call: done, failed, stalled or awaiting
+        // a status that ENDS the call: done, failed or stalled
         if out.iter().any(|v| {
             v.get("type").and_then(Value::as_str) == Some("status")
                 && v.get("phase")
                     .and_then(Value::as_str)
-                    .is_some_and(|p| ["done", "failed", "stalled", "awaiting"].contains(&p))
+                    .is_some_and(|p| ["done", "failed", "stalled"].contains(&p))
         }) {
             while let Some(v) = rx.try_recv() {
                 out.push(v.payload);
@@ -1155,7 +1155,6 @@ async fn status_current_shape_matches_python() {
         );
         assert_eq!(bare["current"]["is_mine"], json!(false));
         assert!(bare["current"]["queued_at"].as_f64().unwrap_or(0.0) > 0.0);
-        assert_eq!(bare["mine_pending"], json!([]));
     }
     let _ = join.await.unwrap();
 }

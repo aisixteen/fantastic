@@ -338,14 +338,10 @@ impl McpCore {
         let method = msg.get("method").and_then(Value::as_str);
         let params = msg.get("params").cloned().unwrap_or(json!({}));
 
-        let Some(method) = method else {
-            // A response from the client, or garbage. Neither is answered.
-            return None;
-        };
+        // A response from the client, or garbage. Neither is answered.
+        let method = method?;
         // Notifications get no reply, ever. Cancellation is the carrier's.
-        let Some(id) = id else {
-            return None;
-        };
+        let id = id?;
 
         let result = match method {
             "initialize" => Ok(self.initialize()),

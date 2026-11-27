@@ -157,14 +157,10 @@ fn status_handler_renders_phase_markers() {
             .unwrap(),
         "  ← v(t)  "
     );
-    // queued / thinking.
+    // thinking, with and without its source.
     assert_eq!(
-        status(json!({"phase": "queued", "detail": {"ahead": 3}})).unwrap(),
-        "  queued (3 ahead)"
-    );
-    assert_eq!(
-        status(json!({"phase": "queued", "source": "ai"})).unwrap(),
-        "  [ai] queued (0 ahead)"
+        status(json!({"phase": "thinking", "source": "ai"})).unwrap(),
+        "  [ai] thinking…"
     );
     assert_eq!(status(json!({"phase": "thinking"})).unwrap(), "  thinking…");
     // `streaming` and every phase that ends a call or is outside one are silent.
@@ -173,7 +169,6 @@ fn status_handler_renders_phase_markers() {
         "done",
         "failed",
         "stalled",
-        "awaiting",
         "paused",
         "idle",
     ] {
@@ -186,12 +181,14 @@ fn status_handler_renders_phase_markers() {
 #[test]
 fn status_values_render_as_text() {
     assert_eq!(
-        status(json!({"phase": "queued", "detail": {"ahead": null}})).unwrap(),
-        "  queued (0 ahead)"
+        status(json!({"phase": "tool_calling", "detail": {"tool": {"verb": null, "target": "t", "reply_preview": null}}}))
+            .unwrap(),
+        "  ← (t)  "
     );
     assert_eq!(
-        status(json!({"phase": "queued", "source": "ai", "detail": {"ahead": [1, "a"]}})).unwrap(),
-        "  [ai] queued ([1,\"a\"] ahead)"
+        status(json!({"phase": "tool_calling", "source": "ai", "detail": {"tool": {"verb": [1, "a"], "target": "t", "reply_preview": null}}}))
+            .unwrap(),
+        "  [ai] ← [1,\"a\"](t)  "
     );
     assert_eq!(
         status(json!({"phase": "thinking", "source": null})).unwrap(),
@@ -241,7 +238,7 @@ async fn an_unknown_phase_is_refused_by_name() {
 #[tokio::test]
 async fn a_detail_that_is_not_an_object_is_refused_by_name() {
     for detail in [json!("x"), json!(5), json!(true), json!([1])] {
-        let reply = dispatch(json!({"type": "status", "phase": "queued", "detail": detail})).await;
+        let reply = dispatch(json!({"type": "status", "phase": "thinking", "detail": detail})).await;
         assert_eq!(reply["arg"], json!("detail"), "{reply}");
     }
 }

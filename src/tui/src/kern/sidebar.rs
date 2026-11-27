@@ -209,7 +209,7 @@ mod tests {
     }
 
     fn agent(kernel: &Arc<Kernel>, id: &str) {
-        fantastic_kernel::test_support::register(&kernel, fantastic_kernel::Agent::new(AgentId::from(id), None, None, Default::default(), std::path::PathBuf::new(), false));
+        fantastic_kernel::test_support::register(kernel, fantastic_kernel::Agent::new(AgentId::from(id), None, None, Default::default(), std::path::PathBuf::new(), false));
     }
 
     /// The next event the sidebar published on its own inbox: `(type, the whole event)`.

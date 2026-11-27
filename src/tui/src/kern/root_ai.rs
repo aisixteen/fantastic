@@ -84,7 +84,7 @@ impl Backend {
     }
 
     /// What the server decides — cleared on a re-point, so the new server is read.
-    fn from_server(&self) -> &'static [&'static str] {
+    fn server_fields(&self) -> &'static [&'static str] {
         match self {
             Backend::Vllm { .. } => &["model", "context_window", "kv_slots", "metrics_url"],
             // only the model: ollama's loaded window is not in its API
@@ -125,7 +125,7 @@ pub async fn run(h: &Host, b: &Backend) -> Result<String, String> {
     let had = provider.as_deref().and_then(|p| handler_of(h, p));
     let did = if let (Some(p), true) = (&provider, had.as_deref() == Some(b.handler())) {
         let mut up = b.fields();
-        for f in b.from_server() {
+        for f in b.server_fields() {
             up.entry(f.to_string()).or_insert(Value::Null);
         }
         // the model and the window are on the chat too: cleared with the provider's, the new

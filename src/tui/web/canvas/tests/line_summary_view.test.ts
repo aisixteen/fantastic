@@ -94,7 +94,7 @@ function chat(line: unknown): Harness {
     if (target === "user") return { inquiries: [] };
     if (p["type"] === "reflect") return { id: "chat1", display_name: "Chat", provider_id: "prov", line_summary: line };
     if (p["type"] === "history") return { rows: [] };
-    if (p["type"] === "status") return { current: running.phase ? { phase: running.phase, is_mine: false } : null, others_pending: 0, mine_pending: [] };
+    if (p["type"] === "status") return { current: running.phase ? { phase: running.phase, is_mine: false } : null };
     return {};
   });
 }

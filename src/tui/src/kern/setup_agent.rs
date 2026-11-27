@@ -213,14 +213,11 @@ impl Handler for SetupBundle {
     }
 
     async fn handle(&self, _agent_id: &AgentId, call: Self::Call, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
-        match call {
-            verbs::Call::Reflect(_) => {
-                return Ok(Some(json!({
-                    "handler_module": HANDLER_MODULE,
-                    "sentence": MAN,
-                })))
-            }
-            _ => {}
+        if let verbs::Call::Reflect(_) = call {
+            return Ok(Some(json!({
+                "handler_module": HANDLER_MODULE,
+                "sentence": MAN,
+            })));
         }
         let Some(host) = Self::host(kernel) else {
             return Ok(Some(fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, "setup: the kernel has no root")));

@@ -276,10 +276,8 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     // and the latest outcomes; HOW IT IS DRAWN is an html view, compiled in
     let allow = request::allow_list(&rec);
     out.insert("request_allow".into(), json!(allow));
-    out.insert(
-        "request_credentials".into(),
-        request::bound_refs(kernel, &allow).await,
-    );
+    // its place in the reply; the store reads fill it (steps, #795)
+    out.insert("request_credentials".into(), json!({}));
     out.insert("recent_requests".into(), request::recent(agent_id));
     out.insert(
         "view".into(),
@@ -289,7 +287,45 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
             "calls": {agent_id.as_str(): VIEW_CALLS},
         }),
     );
-    Value::Object(out)
+    if !request::looks_up(kernel, &allow) {
+        // no store to read: the steps answer here and now
+        let slot = Arc::new(std::sync::Mutex::new(Value::Null));
+        let put = Arc::clone(&slot);
+        request::bound_refs(
+            Arc::clone(kernel),
+            allow,
+            Box::new(move |refs| {
+                Box::pin(async move {
+                    *put.lock().expect("refs poisoned") = refs;
+                })
+            }),
+        )
+        .await;
+        let refs = std::mem::take(&mut *slot.lock().expect("refs poisoned"));
+        out.insert("request_credentials".into(), refs);
+        return Value::Object(out);
+    }
+    // THE CREDENTIAL REFS ARE STORE READS: the reflect defers, and its steps settle it
+    let d = match kernel.defer() {
+        Ok(d) => d,
+        Err(refused) => return refused,
+    };
+    let k = Arc::clone(kernel);
+    request::bound_refs(
+        Arc::clone(kernel),
+        allow,
+        Box::new(move |refs| {
+            Box::pin(async move {
+                out.insert("request_credentials".into(), refs);
+                k.settle_deferred(
+                    d.pid(),
+                    fantastic_kernel::Outcome::new(Some(d.pid()), fantastic_kernel::Status::Completed, Value::Object(out)),
+                );
+            })
+        }),
+    )
+    .await;
+    Value::Null
 }
 
 /// The agent's own view (html, plain JS): the outbound allowlist, the credential ref per

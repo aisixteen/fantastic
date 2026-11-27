@@ -82,10 +82,11 @@ fn route(via: &str, calls: &Calls, reply: Option<Value>) -> Arc<PeerRoute> {
     let calls = Arc::clone(calls);
     PeerRoute::new(
         via,
-        move |agent_id, payload, _body| {
+        move |agent_id, payload, _body, answer: fantastic_kernel::PeerAnswer| {
             calls.lock().unwrap().push((agent_id.clone(), payload));
             let r = reply.clone().unwrap_or_else(|| json!({"ok": agent_id}));
-            Box::pin(async move { (r, None) })
+            answer.answer((r, None), Vec::new());
+            Box::pin(async {})
         },
         |_, _, _| Box::pin(async {}),
     )
@@ -240,41 +241,37 @@ async fn one_guid_holds_a_set_of_live_routes() {
     assert_eq!(k.peer_rows(), json!([]));
 }
 
-/// Set when the future it lives in is dropped — completed or abandoned.
-struct DropFlag(Arc<AtomicBool>);
-
-impl Drop for DropFlag {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::SeqCst);
-    }
-}
-
-/// One TAB of the identity PAGE: records the call as `<name>:<agent>`, answers
-/// when `answer` does, and flags `dropped` when its call future goes away.
+/// One TAB of the identity PAGE: records the call as `<name>:<agent>`, answers it
+/// when `answer` does (#795: the route's future ends once the frame is out), and sets
+/// `late` when its answer came after another tab's had settled the call.
 fn tab(
     k: &Arc<Kernel>,
     name: &str,
     calls: &Calls,
     answer: oneshot::Receiver<Value>,
-    dropped: &Arc<AtomicBool>,
+    late: &Arc<AtomicBool>,
 ) -> Arc<PeerRoute> {
     let calls = Arc::clone(calls);
     let answer = Arc::new(Mutex::new(Some(answer)));
-    let dropped = Arc::clone(dropped);
+    let late = Arc::clone(late);
     let name = name.to_string();
     let r = PeerRoute::new(
         format!("leg_{name}"),
-        move |agent_id, payload, _b| {
+        move |agent_id, payload, _b, peer_answer: fantastic_kernel::PeerAnswer| {
             calls
                 .lock()
                 .unwrap()
                 .push((format!("{name}:{agent_id}"), payload));
             let rx = answer.lock().unwrap().take().expect("one call per tab");
-            let flag = DropFlag(Arc::clone(&dropped));
-            Box::pin(async move {
-                let _flag = flag;
-                (rx.await.unwrap_or(Value::Null), None)
-            })
+            let late = Arc::clone(&late);
+            tokio::spawn(async move {
+                if let Ok(v) = rx.await {
+                    if !peer_answer.answer((v, None), Vec::new()) {
+                        late.store(true, Ordering::SeqCst);
+                    }
+                }
+            });
+            Box::pin(async {})
         },
         |_, _, _| Box::pin(async {}),
     );
@@ -324,9 +321,16 @@ async fn a_call_reaches_every_tab_and_settles_with_the_first_reply() {
         .unwrap();
     assert_eq!(out.status.as_str(), "completed", "{:?}", out.result);
     assert_eq!(out.result, json!({"from": "b"}));
-    // the slower tab's call is dropped, not left waiting
-    assert!(a_gone.load(Ordering::SeqCst));
-    drop(a_tx);
+    // the slower tab's answer is late: it settles nothing
+    a_tx.send(json!({"from": "a"})).unwrap();
+    for _ in 0..200 {
+        if a_gone.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(a_gone.load(Ordering::SeqCst), "the second answer was taken");
+    assert!(!b_gone.load(Ordering::SeqCst), "the first answer was late");
 }
 
 #[tokio::test]
@@ -581,4 +585,46 @@ async fn a_call_to_a_peer_agent_is_typed_by_the_peers_schema() {
         .await
         .unwrap_err();
     assert_eq!(refused["arg"], json!("x"), "{refused}");
+}
+
+/// A PEER CALL IS ASYNC (#795): the route's future ends once the frame is out, the
+/// execution stays open (its `ps` row) with no handler running, and the peer's answer —
+/// whenever it comes — settles it, with the reply's own secret marks; a second answer
+/// is late and settles nothing.
+#[tokio::test]
+async fn a_peer_call_settles_from_its_later_answer() {
+    let tmp = TempDir::new().unwrap();
+    let k = kernel(&tmp, Some(HOST));
+    let held: Arc<Mutex<Option<fantastic_kernel::PeerAnswer>>> = Arc::default();
+    let slot = Arc::clone(&held);
+    let r = PeerRoute::new(
+        "leg",
+        move |_agent, _payload, _body, answer: fantastic_kernel::PeerAnswer| {
+            *slot.lock().unwrap() = Some(answer);
+            Box::pin(async {})
+        },
+        |_, _, _| Box::pin(async {}),
+    );
+    k.register_peer(PAGE, &r);
+    let k2 = Arc::clone(&k);
+    let call = tokio::spawn(async move {
+        send(&k2, &format!("{PAGE}|canvas"), json!({"type": "around"}), None).await
+    });
+    let answer = loop {
+        if let Some(a) = held.lock().unwrap().clone() {
+            break a;
+        }
+        tokio::task::yield_now().await;
+    };
+    assert!(!call.is_finished(), "the call settled before the peer answered");
+    assert!(answer.is_open());
+    assert!(answer.answer((json!({"key": "v", "ok": 1}), None), vec!["key".to_string()]));
+    let out = tokio::time::timeout(std::time::Duration::from_secs(3), call)
+        .await
+        .expect("settles")
+        .unwrap();
+    assert_eq!(out.status.as_str(), "completed", "{:?}", out.result);
+    assert_eq!(out.result, json!({"key": "v", "ok": 1}));
+    assert_eq!(out.secret, vec!["key".to_string()], "the reply's marks ride the settle");
+    assert!(!answer.answer((json!({"late": true}), None), Vec::new()), "a second answer was taken");
 }

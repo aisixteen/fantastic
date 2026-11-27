@@ -173,6 +173,9 @@ pub(crate) struct Life {
     pub(crate) open: usize,
     /// Paused (#219): arrivals are stored and unread, and no pass starts.
     pub(crate) paused: bool,
+    /// The boot's store reads have not all run yet (#795): arrivals are stored, and
+    /// no pass starts until the boot wakes the agent.
+    pub(crate) booting: bool,
     /// How many times a `stop`, a pause or a boot ended the agent's work: a reply its
     /// earlier answers routed, landing after, is recorded `late` and wakes nothing.
     pub(crate) stops: u64,
@@ -201,7 +204,7 @@ impl BackendState {
     /// owed a reply.
     pub(crate) fn is_quiet(&self) -> bool {
         let life = self.life.lock().expect("life poisoned");
-        !life.running && life.unread.is_empty() && life.open == 0
+        !life.running && !life.booting && life.unread.is_empty() && life.open == 0
     }
 
     fn new() -> Arc<Self> {
@@ -424,34 +427,11 @@ pub fn status_snapshot(agent_id: &AgentId, client_id: Option<&str>) -> Value {
     };
     let state = state_for(agent_id);
     let cur = state.current_meta.lock().expect("current poisoned").clone();
-    // THE MESSAGES NOT READ YET: stored, and read by the next pass.
-    let unread: Vec<Arrival> = state.life.lock().expect("life poisoned").unread.clone();
-    let pending_from: Vec<String> = unread.iter().map(|a| a.origin.clone()).collect();
 
     let current = cur
         .as_ref()
         .map(|c| current_out(c, requesting.as_deref()))
         .unwrap_or(Value::Null);
-
-    let (mine_pending, others_pending) = match &requesting {
-        Some(req) => {
-            let mut mine = Vec::new();
-            let mut others = 0u64;
-            for a in &unread {
-                if a.client_id == *req {
-                    mine.push(json!({
-                        "send_id": a.send_id,
-                        "text": a.text,
-                        "queued_at": a.at,
-                    }));
-                } else {
-                    others += 1;
-                }
-            }
-            (Value::Array(mine), others)
-        }
-        None => (Value::Array(Vec::new()), unread.len() as u64),
-    };
 
     json!({
         "source": agent_id.as_str(),
@@ -459,9 +439,6 @@ pub fn status_snapshot(agent_id: &AgentId, client_id: Option<&str>) -> Value {
         // A PASS IN FLIGHT, from its first step (#795): its reads, its request, its row
         "generating": state.life.lock().expect("life poisoned").running,
         "current": current,
-        "mine_pending": mine_pending,
-        "others_pending": others_pending,
-        "pending_from": pending_from,
         "inquiry_from": crate::route::inquiry_askers(agent_id.as_str()),
     })
 }

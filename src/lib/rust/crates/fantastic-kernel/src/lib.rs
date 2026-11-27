@@ -72,7 +72,7 @@ pub use kernel::{
 };
 pub use outcome::{body_at, Blob, Item, Outcome, ReplyTo, Status, Step};
 pub use paging::page;
-pub use peers::{PeerCallFuture, PeerEmitFuture, PeerReply, PeerRoute};
+pub use peers::{PeerAnswer, PeerEmitFuture, PeerReply, PeerRoute};
 pub use refusal::{error_text, is_refused, not_here, refusal, refusal_hint, unknown_agent};
 pub use rows::{Row, RowStore, RowTail};
 pub use secret::{current_secret, note_reply_secret};

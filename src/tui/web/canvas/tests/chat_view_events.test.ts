@@ -9,7 +9,7 @@ test("the AI chat view follows every call of its agent, whoever made it", async 
     if (target === "user") return { inquiries: [] };
     if (p["type"] === "reflect") return { id: "chat1", display_name: "Chat", provider_id: "prov" };
     if (p["type"] === "history") return { rows: [] };
-    if (p["type"] === "status") return { current, others_pending: 0, mine_pending: [] };
+    if (p["type"] === "status") return { current };
     return {};
   });
   await h.settle();
@@ -35,7 +35,7 @@ test("the AI chat view follows every call of its agent, whoever made it", async 
   assert.equal(stop["hidden"], true, "nothing runs: no Stop");
 
   // every phase that ends a call (or comes outside one) ends it like `done`: Stop goes, the rows are read
-  for (const end of ["failed", "stalled", "awaiting", "paused", "idle"]) {
+  for (const end of ["failed", "stalled", "paused", "idle"]) {
     current = { phase: "thinking", is_mine: false };
     await h.publish("chat1", { type: "status", phase: "thinking", client_id: "cli", source: "chat1", detail: { send_id: "s2" } });
     assert.equal(stop["hidden"], false, `${end}: the call runs`);
@@ -58,7 +58,7 @@ test("the AI chat view never reads again on a copy of a call — its own reads, 
     if (target === "user") return { inquiries: [] };
     if (p["type"] === "reflect") return { id: "chat1", display_name: "Chat", provider_id: "prov" };
     if (p["type"] === "history") return { rows: [] };
-    if (p["type"] === "status") return { current: null, others_pending: 0, mine_pending: [] };
+    if (p["type"] === "status") return { current: null };
     return {};
   });
   await h.settle();

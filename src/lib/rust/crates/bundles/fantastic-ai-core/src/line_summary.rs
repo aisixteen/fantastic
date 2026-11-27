@@ -21,7 +21,7 @@ use std::sync::Arc;
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Map, Value};
 
-use crate::memory::{rows_of, store_call, MemResult};
+use crate::memory::MemResult;
 use crate::state::state_for;
 use crate::tool_parse::{extract_tool_calls, ToolCall};
 
@@ -142,24 +142,41 @@ pub async fn take(kernel: &Arc<Kernel>, agent_id: &AgentId, call: &ToolCall) -> 
     None
 }
 
-/// AT BOOT: the chat's current line is the last `line_summary` its history holds,
-/// with that row's time; published like a new one so a follower that missed the
-/// restart has it. Read newest first, a page at a time, from the store — the head is
-/// not loaded, so the boot stays lazy for the conversation. A record that does not
-/// offer the call keeps no line.
-///
-/// # Errors
-/// The memory store refused a read.
-pub async fn restore(agent_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<()> {
+/// AT BOOT, as steps (#795): the chat's current line is the last `line_summary` its
+/// history holds, with that row's time; published like a new one so a follower that
+/// missed the restart has it. Read newest first, a page at a time, from the store —
+/// the head is not loaded, so the boot stays lazy for the conversation. A record that
+/// does not offer the call keeps no line. The next step gets the store's refusal of
+/// a read, if any.
+pub(crate) async fn restore<R, F, Fut>(agent_id: &AgentId, kernel: &Arc<Kernel>, rec: R, next: F)
+where
+    R: Send + 'static,
+    F: FnOnce(R, MemResult<()>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
     *state_for(agent_id)
         .line_summary
         .lock()
         .expect("line_summary poisoned") = None;
     if !offered(&crate::helpers::agent_meta(agent_id, kernel)) {
-        return Ok(());
+        return next(rec, Ok(())).await;
     }
-    let mut before: Option<i64> = None;
-    loop {
+    let done: Done<R> = Box::new(move |rec, r| -> Boxed { Box::pin(next(rec, r)) });
+    page(agent_id.clone(), Arc::clone(kernel), None, rec, done).await;
+}
+
+type Boxed = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+type Done<R> = Box<dyn FnOnce(R, MemResult<()>) -> Boxed + Send>;
+
+/// One page of the restore (the rows before `before`, newest first), then the next.
+fn page<R: Send + 'static>(
+    agent_id: AgentId,
+    kernel: Arc<Kernel>,
+    before: Option<i64>,
+    rec: R,
+    done: Done<R>,
+) -> Boxed {
+    Box::pin(async move {
         let mut ask = json!({
             "type": "read",
             "match": {"role": "assistant"},
@@ -169,27 +186,31 @@ pub async fn restore(agent_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<()> 
         if let Some(b) = before {
             ask["before"] = json!(b);
         }
-        let rows = rows_of(&store_call(agent_id, kernel, ask).await?, agent_id);
-        for r in &rows {
-            if let Some(text) = last_in(crate::folds::row_content(r)) {
-                // every stored row carries its `ts` (the store stamps it)
-                let ts = r
-                    .get("attributes")
-                    .and_then(|a| a.get("ts"))
-                    .and_then(Value::as_f64)
-                    .ok_or_else(|| {
-                        crate::memory::MemoryStoreError(format!(
+        let (me, k) = (agent_id.clone(), Arc::clone(&kernel));
+        crate::steps::rows(&agent_id, &kernel, ask, rec, move |rec, rows| async move {
+            let rows = match rows {
+                Ok(r) => r,
+                Err(e) => return done(rec, Err(e)).await,
+            };
+            for r in &rows {
+                if let Some(text) = last_in(crate::folds::row_content(r)) {
+                    // every stored row carries its `ts` (the store stamps it)
+                    let Some(ts) = r.get("attributes").and_then(|a| a.get("ts")).and_then(Value::as_f64) else {
+                        let e = crate::memory::MemoryStoreError(format!(
                             "row {:?} holds a line_summary but no attributes.ts",
                             crate::folds::row_id(r)
-                        ))
-                    })?;
-                set(agent_id, kernel, text, ts).await;
-                return Ok(());
+                        ));
+                        return done(rec, Err(e)).await;
+                    };
+                    set(&me, &k, text, ts).await;
+                    return done(rec, Ok(())).await;
+                }
             }
-        }
-        match rows.last().and_then(crate::folds::row_id) {
-            Some(oldest) if rows.len() as u64 == PAGE => before = Some(oldest),
-            _ => return Ok(()),
-        }
-    }
+            match rows.last().and_then(crate::folds::row_id) {
+                Some(oldest) if rows.len() as u64 == PAGE => page(me, k, Some(oldest), rec, done).await,
+                _ => done(rec, Ok(())).await,
+            }
+        })
+        .await;
+    })
 }

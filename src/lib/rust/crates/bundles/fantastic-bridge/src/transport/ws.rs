@@ -8,8 +8,9 @@
 //! kernel hosting a web agent.
 //!
 //! The connect helper does NOT spawn the read loop — the bridge
-//! state owns that, since it needs the inbound frames routed to its
-//! `kernel.send` dispatcher + pending oneshot map.
+//! state owns that, since it routes the inbound frames: a `call` launches
+//! the call (`Kernel::call`, its settle ships the reply), a `reply` settles
+//! the pending forward it answers (#795).
 //!
 //! PYTHON'S CLIENT, ON THE WIRE. `websockets.connect` offers
 //! `permessage-deflate; client_max_window_bits` and deflates every message once

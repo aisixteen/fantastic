@@ -127,7 +127,7 @@ test("state: asks > the last phase > idle, each phase the design's badge", () =>
   // asks you: ? whatever the phase
   for (const p of ["thinking", "done", "failed", "paused", undefined]) assert.deepEqual(plain(raw.stateOf(S(p), true)), { kind: "ask", label: "asks you", glyph: "?" }, String(p));
   // Working: the spinner, no glyph, the phase's word
-  const working: [string, string][] = [["queued", "queued"], ["thinking", "thinking"], ["streaming", "writing"], ["retrying", "retrying"], ["awaiting", "waiting"]];
+  const working: [string, string][] = [["thinking", "thinking"], ["streaming", "writing"], ["retrying", "retrying"]];
   for (const [p, label] of working) assert.deepEqual(plain(raw.stateOf(S(p), false)), { kind: "active", label, glyph: "" }, p);
   // a call's end and a pause keep their badge
   assert.deepEqual(plain(raw.stateOf(S("stalled"), false)), { kind: "stalled", label: "stalled", glyph: "!" });
@@ -142,7 +142,7 @@ test("state: asks > the last phase > idle, each phase the design's badge", () =>
 
 test("outline: every state's ring round the tile, Working's a ray, Stalled's dashed, none at rest", () => {
   const of = (phase: string | undefined, asks = false): string => raw.outlineOf(raw.stateOf(phase, asks).kind);
-  for (const p of ["queued", "thinking", "streaming", "retrying", "awaiting"]) assert.equal(of(p), "ol ray", p);
+  for (const p of ["thinking", "streaming", "retrying"]) assert.equal(of(p), "ol ray", p);
   assert.equal(of("done", true), "ol", "asks you");
   assert.equal(of("stalled"), "ol dash");
   for (const p of ["failed", "paused", "done"]) assert.equal(of(p), "ol", p);
@@ -253,8 +253,8 @@ test("the view acts only on what its sidebar agent publishes; a copy of a call i
 
 test("a chat's phase follows its status_changed; its last phase stays, idle is at rest", () => {
   assert.deepEqual(plain(raw.withPhase({}, "c1", "thinking")), { c1: "thinking" });
-  assert.deepEqual(plain(raw.withPhase({ c1: "thinking", c2: "queued" }, "c1", "streaming")), { c1: "streaming", c2: "queued" });
-  for (const end of ["done", "failed", "stalled", "awaiting", "paused"])
+  assert.deepEqual(plain(raw.withPhase({ c1: "thinking", c2: "retrying" }, "c1", "streaming")), { c1: "streaming", c2: "retrying" });
+  for (const end of ["done", "failed", "stalled", "paused"])
     assert.deepEqual(plain(raw.withPhase({ c1: "thinking", c2: "done" }, "c1", end)), { c1: end, c2: "done" }, end);
   assert.deepEqual(plain(raw.withPhase({ c1: "paused", c2: "done" }, "c1", "idle")), { c2: "done" });
 });

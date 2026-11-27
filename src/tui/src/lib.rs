@@ -55,6 +55,8 @@ mod store;
 mod sys;
 mod tags;
 mod theme;
+// a GENERATED palette (design/sync.py): every token is emitted, not every one is drawn
+#[allow(dead_code)]
 mod theme_gen;
 mod thread;
 mod tty;

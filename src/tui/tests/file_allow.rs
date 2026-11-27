@@ -20,7 +20,7 @@ fn registry() -> BundleRegistry {
     reg.register("file_bridge.tools", fantastic_file::FileBundle::default());
     reg.register(
         fantastic_sqlite_store::HANDLER_MODULE,
-        fantastic_sqlite_store::SqliteStoreBundle::default(),
+        fantastic_sqlite_store::SqliteStoreBundle,
     );
     reg.register(
         fantastic_exec_bridge::HANDLER_MODULE,

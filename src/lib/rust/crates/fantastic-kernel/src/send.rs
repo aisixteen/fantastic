@@ -1564,12 +1564,12 @@ impl Kernel {
                                                     v = async {
                                                         // ANOTHER KERNEL'S AGENT: the call
                                                         // goes to its peer's route, bytes
-                                                        // and all; no handler runs here.
-                                                        // Its reply is that kernel's answer,
-                                                        // relayed verbatim: never a raise here.
+                                                        // and all; no handler runs here. The
+                                                        // execution defers: that kernel's
+                                                        // answer settles it, verbatim (#795).
                                                         if let Some(remote) = tgt.remote.as_ref() {
                                                             return Ok(crate::peers::call_peer(
-                                                                remote, payload, binary,
+                                                                &kernel, remote, payload, binary,
                                                             )
                                                             .await);
                                                         }

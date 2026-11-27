@@ -154,11 +154,10 @@ test("thoughtsOf of readHead pages the rows verb from the head and stops on a nu
 
 test("the agent's state: asks you beats working; a failure reason is failed; ok is done", () => {
   assert.equal(P.stateOf("thinking", "", 1), "asks");
-  for (const ph of ["queued", "thinking", "streaming", "tool_calling"]) assert.equal(P.stateOf(ph, "", 0), "working");
+  for (const ph of ["thinking", "streaming", "tool_calling"]) assert.equal(P.stateOf(ph, "", 0), "working");
   assert.equal(P.stateOf("idle", "ok", 0), "done");
   assert.equal(P.stateOf("idle", "", 0), "idle");
   for (const why of ["error", "dead_turn", "gave_up"]) assert.equal(P.stateOf("idle", why, 0), "failed", why);
-  for (const why of ["awaiting", "nothing_to_await"]) assert.equal(P.stateOf("idle", why, 0), "idle", why);
 });
 
 test("the inquiry's age: minutes from its ts in seconds, just now under a minute", () => {
@@ -185,13 +184,13 @@ test("`code` spans split out of a text, the text stays whole", () => {
   assert.deepEqual(P.codeSpans(""), []);
 });
 
-test("a call ends on done, failed, stalled or awaiting; paused and idle are outside a call", () => {
-  for (const ph of ["done", "failed", "stalled", "awaiting", "paused", "idle"]) assert.equal(P.endsCall(ph), true, ph);
-  for (const ph of ["queued", "thinking", "streaming", "retrying", "tool_calling", ""]) assert.equal(P.endsCall(ph), false, ph);
+test("a call ends on done, failed or stalled; paused and idle are outside a call", () => {
+  for (const ph of ["done", "failed", "stalled", "paused", "idle"]) assert.equal(P.endsCall(ph), true, ph);
+  for (const ph of ["thinking", "streaming", "retrying", "tool_calling", ""]) assert.equal(P.endsCall(ph), false, ph);
 });
 
 test("the running turn's word is the one the tree shows", () => {
-  assert.deepEqual(["thinking", "streaming", "tool_calling", "queued", "idle", ""].map((p) => P.phaseWord(p)), ["thinking", "writing", "using tools", "queued", "", ""]);
+  assert.deepEqual(["thinking", "streaming", "tool_calling", "idle", ""].map((p) => P.phaseWord(p)), ["thinking", "writing", "using tools", "", ""]);
 });
 
 test("a message longer than the digest's 120 is shown whole from the loaded head; a short one keeps its head", () => {

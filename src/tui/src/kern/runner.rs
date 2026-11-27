@@ -24,6 +24,15 @@ pub struct Runner {
     tx: mpsc::Sender<Ev>,
     /// One forwarding task per watched agent, so `Unwatch` can stop it.
     watches: std::sync::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>,
+    /// The typed writes waiting per agent ([`Runner::type_in`]).
+    typing: std::sync::Mutex<std::collections::HashMap<String, Typist>>,
+}
+
+/// One agent's typed writes: the ones waiting, and whether one is out.
+#[derive(Default)]
+struct Typist {
+    queue: std::collections::VecDeque<Cmd>,
+    busy: bool,
 }
 
 /// Spawn the runner. Returns the sender a key handler pushes into.
@@ -31,29 +40,14 @@ pub fn spawn(host: Arc<Host>, tx: mpsc::Sender<Ev>) -> mpsc::Sender<Cmd> {
     // Deep enough that a burst of keys never blocks the render loop; bounded so a
     // wedged handler applies backpressure instead of growing without limit.
     let (ctx, mut crx) = mpsc::channel::<Cmd>(256);
-    let r = Arc::new(Runner { host, tx, watches: Default::default() });
+    let r = Arc::new(Runner { host, tx, watches: Default::default(), typing: Default::default() });
     tokio::spawn(async move {
-        // KEYSTROKES ARE ORDERED. Every other command runs in its own task, but
-        // `write`s to one agent go through that agent's own queue, one at a
-        // time, or typed text arrives shuffled (measured: `echo` → `eh ci7h`).
-        let mut writers: std::collections::HashMap<String, mpsc::UnboundedSender<Cmd>> =
-            std::collections::HashMap::new();
         while let Some(cmd) = crx.recv().await {
             if matches!(cmd, Cmd::Quit) {
                 break;
             }
-            if let Cmd::Typed { target, .. } = &cmd {
-                let w = writers.entry(target.to_string()).or_insert_with(|| {
-                    let (wtx, mut wrx) = mpsc::unbounded_channel::<Cmd>();
-                    let r = Arc::clone(&r);
-                    tokio::spawn(async move {
-                        while let Some(c) = wrx.recv().await {
-                            r.one(c).await;
-                        }
-                    });
-                    wtx
-                });
-                let _ = w.send(cmd);
+            if matches!(cmd, Cmd::Typed { .. }) {
+                Runner::type_in(&r, cmd);
                 continue;
             }
             let r = Arc::clone(&r);
@@ -64,6 +58,67 @@ pub fn spawn(host: Arc<Host>, tx: mpsc::Sender<Ev>) -> mpsc::Sender<Cmd> {
 }
 
 impl Runner {
+    /// KEYSTROKES ARE ORDERED. Every other command runs in its own task, but the
+    /// `write`s to one agent go one at a time, or typed text arrives shuffled
+    /// (measured: `echo` → `eh ci7h`). The kernel orders no calls (#795), so each
+    /// write is sent when the previous one SETTLED: chained on its settle, nothing
+    /// waits for it.
+    fn type_in(r: &Arc<Self>, cmd: Cmd) {
+        let Cmd::Typed { target, .. } = &cmd else { return };
+        let first = {
+            let mut typing = r.typing.lock().expect("typing poisoned");
+            let t = typing.entry(target.to_string()).or_default();
+            if t.busy {
+                t.queue.push_back(cmd);
+                None
+            } else {
+                t.busy = true;
+                Some(cmd)
+            }
+        };
+        if let Some(cmd) = first {
+            let r = Arc::clone(r);
+            tokio::spawn(async move { Runner::write(r, cmd).await });
+        }
+    }
+
+    /// One typed write; its settle sends the agent's next one.
+    async fn write(r: Arc<Self>, cmd: Cmd) {
+        let Cmd::Typed { target, job_id, data } = &cmd else { return };
+        let payload = json!({"type":"write","job_id":job_id,"data":data});
+        let (host, tx, what, to) = (Arc::clone(&r.host), r.tx.clone(), cmd.what(), target.clone());
+        let next = Arc::clone(&r);
+        let ack = r
+            .host
+            .operator_call(target, payload, move |out| async move {
+                let key = to.to_string();
+                settled(host, tx, what, to, out).await;
+                Runner::typed(&next, &key);
+            })
+            .await;
+        if ack.status != fantastic_kernel::Status::Accepted {
+            settled(Arc::clone(&r.host), r.tx.clone(), cmd.what(), target.clone(), ack).await;
+            Runner::typed(&r, &target.to_string());
+        }
+    }
+
+    /// A typed write to `target` settled: its next one goes out, or the agent is idle.
+    fn typed(r: &Arc<Self>, target: &str) {
+        let next = {
+            let mut typing = r.typing.lock().expect("typing poisoned");
+            let Some(t) = typing.get_mut(target) else { return };
+            let next = t.queue.pop_front();
+            if next.is_none() {
+                t.busy = false;
+            }
+            next
+        };
+        if let Some(cmd) = next {
+            let r = Arc::clone(r);
+            tokio::spawn(async move { Runner::write(r, cmd).await });
+        }
+    }
+
     async fn got(&self, g: Got) {
         // A closed channel means the shell is already exiting; there is nobody
         // left to tell.
@@ -245,10 +300,8 @@ impl Runner {
             }
 
             Cmd::Send { target, payload } => self.act_send(&cmd, target, payload.clone()).await,
-            Cmd::Typed { target, job_id, data } => {
-                let payload = json!({"type":"write","job_id":job_id,"data":data});
-                self.act_send(&cmd, target, payload).await
-            }
+            // typed writes are chained per agent ([`Runner::type_in`]), never run here
+            Cmd::Typed { .. } => {}
 
             Cmd::Cancel { task_id } => {
                 // Through the front door, so `on_cancel` hooks run and the subtree
@@ -317,28 +370,19 @@ impl Runner {
         self.host.kernel.remove_inbox(&w);
     }
 
-    /// One act: the call goes out from the shell, the operator, and the agent's log is
-    /// re-read after it.
+    /// One act (#795): the call goes out from the shell, the operator, and is ACKED at
+    /// once; its settle comes later as a message to the shell ([`settled`]), and the
+    /// agent's log is re-read then. A refusal at launch is the answer now.
     async fn act_send(&self, cmd: &Cmd, target: &crate::kern::model::AgentId, payload: Value) {
-        let out = self.host.operator(target, payload).await;
-        let failed = out.status != fantastic_kernel::Status::Completed;
-        match Host::read(out) {
-            Ok(reply) => {
-                self.got(Got::Sent {
-                    target: target.clone(),
-                    reply,
-                })
-                .await;
-                if failed {
-                    self.note(format!("{target}: the call did not complete")).await;
-                }
-                // The act moved the kernel. Re-read rather than guessing
-                // from the reply: the log is the truth.
-                let (rows, loaded) = self.host.rows(target, None).await;
-                self.got(Got::Rows { agent: target.clone(), rows, full: true, loaded }).await;
-                self.got(Got::Ps(self.host.tasks())).await;
-            }
-            Err(e) => self.refused(cmd, e).await,
+        let (host, tx, what, to) = (Arc::clone(&self.host), self.tx.clone(), cmd.what(), target.clone());
+        let ack = self
+            .host
+            .operator_call(target, payload, move |out| async move {
+                settled(host, tx, what, to, out).await;
+            })
+            .await;
+        if ack.status != fantastic_kernel::Status::Accepted {
+            settled(Arc::clone(&self.host), self.tx.clone(), cmd.what(), target.clone(), ack).await;
         }
     }
 
@@ -350,6 +394,33 @@ impl Runner {
             err,
         })
         .await;
+    }
+}
+
+/// AN ACT'S SETTLE, delivered to the shell (#795): the reply to the pane that asked,
+/// and — the act moved the kernel — the agent's log re-read rather than guessed from
+/// the reply (the log is the truth), and `ps`.
+async fn settled(
+    host: Arc<Host>,
+    tx: mpsc::Sender<Ev>,
+    what: crate::ev::What,
+    target: crate::kern::model::AgentId,
+    out: fantastic_kernel::Outcome,
+) {
+    let failed = out.status != fantastic_kernel::Status::Completed;
+    match Host::read(out) {
+        Ok(reply) => {
+            let _ = tx.send(Ev::Got(Got::Sent { target: target.clone(), reply })).await;
+            if failed {
+                let _ = tx.send(Ev::Note(format!("{target}: the call did not complete"))).await;
+            }
+            let (rows, loaded) = host.rows(&target, None).await;
+            let _ = tx.send(Ev::Got(Got::Rows { agent: target, rows, full: true, loaded })).await;
+            let _ = tx.send(Ev::Got(Got::Ps(host.tasks()))).await;
+        }
+        Err(err) => {
+            let _ = tx.send(Ev::Got(Got::Refused { what, err })).await;
+        }
     }
 }
 

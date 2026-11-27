@@ -50,6 +50,10 @@ use fantastic_ai_core::chat_bundle::HANDLER_MODULE as CHAT_HANDLER;
 use fantastic_ai_core::remote_provider::PROVIDER_FIELD;
 
 use crate::env::ClientCfg;
+
+/// What [`BackendBundle::pair_specs`] makes of a spec: the provider's spec (none for a spec
+/// that is already a chat), the chat's, and the lines the asker supplied.
+type PairSpecs = (Option<Map<String, Value>>, Map<String, Value>, Map<String, Value>);
 use crate::kern::host::Host;
 
 /// The `handler_module` this bundle answers to.
@@ -382,7 +386,7 @@ impl BackendBundle {
         let dir = state.join("bundles").join(name);
         if !dir.join("bundle.yaml").is_file() || !host.kernel.bundles.is_folder(name) {
             let have: Vec<String> = Self::project_bundles(host).iter().filter_map(|b| b["name"].as_str().map(str::to_string)).collect();
-            return fantastic_kernel::refusal_hint(fantastic_kernel::refusal::NOT_FOUND, format!("spawn: no project bundle `{name}`"), &format!("the project's bundles: {}", have.join(", ")));
+            return fantastic_kernel::refusal_hint(fantastic_kernel::refusal::NOT_FOUND, format!("spawn: no project bundle `{name}`"), format!("the project's bundles: {}", have.join(", ")));
         }
         let id = (1..)
             .map(|n| format!("{name}_{n}"))
@@ -471,7 +475,7 @@ impl BackendBundle {
     /// own lines MERGED over them (the caller's win on a clash). A spec that is already a chat has
     /// no provider (`None`): its `provider_id` is its own. The third part is the lines the ASKER
     /// supplied (the peer's and the caller's): the asker's check holds the asker to them.
-    fn pair_specs(me: &AgentId, ai: &str, store: &str, prompt: Option<&str>, mut spec: Map<String, Value>, peer: Map<String, Value>) -> (Option<Map<String, Value>>, Map<String, Value>, Map<String, Value>) {
+    fn pair_specs(me: &AgentId, ai: &str, store: &str, prompt: Option<&str>, mut spec: Map<String, Value>, peer: Map<String, Value>) -> PairSpecs {
         let taken = |spec: &mut Map<String, Value>, f: &str| match spec.remove(f) {
             Some(Value::Object(m)) => m,
             _ => Map::new(),
@@ -856,14 +860,11 @@ impl Handler for BackendBundle {
     }
 
     async fn handle(&self, agent_id: &AgentId, call: Self::Call, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
-        match call {
-            verbs::Call::Reflect(_) => {
-                return Ok(Some(json!({
-                    "handler_module": HANDLER_MODULE,
-                    "sentence": MAN,
-                })))
-            }
-            _ => {}
+        if let verbs::Call::Reflect(_) = call {
+            return Ok(Some(json!({
+                "handler_module": HANDLER_MODULE,
+                "sentence": MAN,
+            })));
         }
         let Some(host) = Self::host(kernel) else {
             return Ok(Some(fantastic_kernel::refusal(fantastic_kernel::refusal::NOT_FOUND, "canvas: the kernel has no root")));
