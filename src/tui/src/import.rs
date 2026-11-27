@@ -157,9 +157,10 @@ fn die(code: i32, msg: impl std::fmt::Display) -> ! {
     std::process::exit(code);
 }
 
-/// Send one item, the verb's reply back (an error text when the call itself failed).
+/// Send one item, the verb's reply back (an error text when the call itself failed):
+/// the call acks, and its row is read from the session's settle notification.
 fn send(rt: &tokio::runtime::Runtime, cli: &std::path::Path, item: Value) -> Result<Value, String> {
-    reply_of(&rt.block_on(crate::send::call(item, cli))?)
+    reply_of(&rt.block_on(crate::send::call_settled(item, cli))?)
 }
 
 /// The verb's reply in a `send` row. A refusal (`{error, reason}`) comes back in a row marked

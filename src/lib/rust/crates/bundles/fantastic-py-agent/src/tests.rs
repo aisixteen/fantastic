@@ -79,7 +79,7 @@ fn load(kernel: &Arc<Kernel>, tmp: &TempDir) {
 }
 
 async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    kernel.operator_send(vec![
+    fantastic_kernel::test_support::send_settled(kernel, vec![
             Item::new(AgentId::from(target), payload).with_timeout(20.0)
         ])
         .await

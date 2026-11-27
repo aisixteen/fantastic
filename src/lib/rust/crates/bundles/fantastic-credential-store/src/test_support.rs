@@ -40,8 +40,7 @@ pub async fn ensure_store(kernel: &Arc<Kernel>, dir: &Path, reader: &str) -> Age
     let store = AgentId::from(STORE);
     if !kernel.exists(store.as_str()) {
         let root = kernel.root().expect("ensure_store: the kernel has no root");
-        let r = kernel
-            .operator_send(vec![Item::new(
+        let r = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
                 root.id.clone(),
                 json!({
                     "type": "create_agent",
@@ -80,8 +79,7 @@ pub async fn set_key(
     let store = ensure_store(kernel, dir, reader).await;
     let mut refs = meta_map(kernel, &store, "refs");
     refs.insert(ref_.to_string(), json!({"host": endpoint}));
-    let declared = kernel
-        .operator_send(vec![Item::new(
+    let declared = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "update_agent", "id": store.0, "refs": refs}),
         )])
@@ -89,8 +87,7 @@ pub async fn set_key(
         .remove(0)
         .result;
     assert_eq!(declared["updated"], json!(true), "set_key: {declared}");
-    let out = kernel
-        .operator_send(vec![Item::new(
+    let out = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             store.clone(),
             json!({"type": "set", "ref": ref_, "fields": {"api_key": key}}),
         )])

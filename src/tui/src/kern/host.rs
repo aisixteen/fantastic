@@ -24,8 +24,9 @@
 //! made inside a bundle's handler is that agent's ([`Host::agent_then`]) or its
 //! asker's ([`Host::asker_then`]). THE ONE EXCEPTION is the kernel's own lifecycle: the
 //! boot's fields set before the listeners boot (`set_web_field`, the root's fields) and
-//! the shutdown's page stop (`stop_pages`) run directly through `Kernel::operator_send`,
-//! because the boot and the drain are sequences the kernel itself runs in order.
+//! the shutdown's page stop (`stop_pages`) go through `Kernel::lifecycle_call` (Q2, the
+//! lifecycle boundary): calls like any, whose settle the shell's boot or drain — a
+//! sequence it runs in order, no agent — knows before it goes on.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -283,7 +284,8 @@ async fn set_web_field(kernel: &Arc<Kernel>, id: &AgentId, key: &str, flag: &str
     }
     let mut update = json!({"type": "update_agent", "id": id.0});
     update[key] = value.clone();
-    let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel"), update)]).await.remove(0).result;
+    // THE SHELL'S BOOT (Q2, the lifecycle boundary): the listener boots on the value set here
+    let r = kernel.lifecycle_call(Item::new(AgentId::from("kernel"), update)).await.result;
     if let Some(err) = r.get("error").and_then(Value::as_str) {
         notes.push(format!("{id}: {flag} {value} not set: {err}"));
     }
@@ -423,11 +425,8 @@ impl Host {
             for (k, v) in patch {
                 p[k] = v;
             }
-            let r = kernel
-                .operator_send(vec![Item::new(AgentId::from("kernel"), p)])
-                .await
-                .remove(0)
-                .result;
+            // THE SHELL'S BOOT (Q2, the lifecycle boundary): the start below reads these
+            let r = kernel.lifecycle_call(Item::new(AgentId::from("kernel"), p)).await.result;
             if let Some(e) = r.get("error").and_then(Value::as_str) {
                 return Err(KernelErr::Boot(format!("could not set the root's fields: {e}")));
             }
@@ -733,10 +732,12 @@ async fn stop_pages(kernel: &Arc<Kernel>) {
         let k = Arc::clone(kernel);
         async move {
             let item = Item::new(AgentId::from(format!("{g}|canvas").as_str()), json!({"type": "host_stopping"}));
-            match tokio::time::timeout(PAGE_STOP_GRACE, k.operator_send(vec![item])).await {
+            // THE SHELL'S SHUTDOWN (Q2, the lifecycle boundary): the drain waits for the
+            // pages' answers, or the grace
+            match tokio::time::timeout(PAGE_STOP_GRACE, k.lifecycle_call(item)).await {
                 Err(_) => tracing::warn!("shutdown: page {g} did not stop within {PAGE_STOP_GRACE:?}"),
-                Ok(mut out) => {
-                    if let Some(e) = out.remove(0).result.get("error").and_then(Value::as_str) {
+                Ok(out) => {
+                    if let Some(e) = out.result.get("error").and_then(Value::as_str) {
                         tracing::warn!("shutdown: page {g}: {e}");
                     }
                 }
@@ -1036,7 +1037,7 @@ mod tests {
     }
 
     async fn send(k: &Arc<Kernel>, to: &str, payload: Value) -> Value {
-        k.operator_send(vec![Item::new(AgentId::from(to), payload)]).await.remove(0).result
+        fantastic_kernel::test_support::send_settled(k, vec![Item::new(AgentId::from(to), payload)]).await.remove(0).result
     }
 
     fn free_port() -> u16 {
@@ -1531,7 +1532,7 @@ mod tests {
         assert_eq!(made["id"], "hang562", "{made}");
         let k2 = k.clone();
         tokio::spawn(async move {
-            k2.operator_send(vec![Item::new("hang562", json!({"type": "hang"}))])
+            fantastic_kernel::test_support::send_settled(&k2, vec![Item::new("hang562", json!({"type": "hang"}))])
                 .await;
         });
         for _ in 0..250 {

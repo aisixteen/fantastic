@@ -313,8 +313,7 @@ impl Handler for Refusing {
 
 /// One kernel call as the operator; its result.
 pub(super) async fn operator(kernel: &Arc<Kernel>, to: &str, payload: Value) -> Value {
-    kernel
-        .operator_send(vec![Item::new(AgentId::from(to), payload)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from(to), payload)])
         .await
         .remove(0)
         .result

@@ -26,7 +26,7 @@ async fn arrive(kernel: &Arc<Kernel>, ai: &AgentId, text: &str) {
 }
 
 async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    kernel.operator_send(vec![Item::new(AgentId::from(target), payload)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -35,7 +35,7 @@ async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
 async fn call_as(kernel: &Arc<Kernel>, sender: &AgentId, target: &str, payload: Value) -> Value {
     as_agent(
         sender.clone(),
-        kernel.operator_send(vec![Item::new(AgentId::from(target), payload)]),
+        fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from(target), payload)]),
     )
     .await
     .remove(0)
@@ -344,7 +344,7 @@ async fn an_agent_without_a_memory_store_fails_loud() {
     let boot = call(&kernel, ai.as_str(), json!({"type": "boot"})).await;
     assert_eq!(boot["reason"], json!("missing_arg"), "{boot}");
     assert_eq!(boot["arg"], json!("memory_store_id"), "{boot}");
-    let out = kernel.operator_send(vec![Item::new(ai.clone(), json!({"type": "history"}))])
+    let out = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(ai.clone(), json!({"type": "history"}))])
         .await
         .remove(0);
     assert!(

@@ -20,7 +20,7 @@ fn system_of(s: &Arc<MockScript>, n: usize) -> String {
 async fn update(kernel: &Arc<Kernel>, backend: &AgentId, field: &str, v: Value) -> Value {
     let mut p = json!({"type": "update_agent", "id": backend.as_str()});
     p[field] = v;
-    kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), p)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from("kernel_state"), p)])
         .await
         .remove(0)
         .result
@@ -37,7 +37,7 @@ async fn turn(
     for (k, v) in extra.as_object().cloned().unwrap_or_default() {
         p[k] = v;
     }
-    let _ = crate::tests::settled(kernel, kernel.operator_send(vec![Item::new(backend.clone(), p)]))
+    let _ = crate::tests::settled(kernel, fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(backend.clone(), p)]))
         .await
         .remove(0)
         .result;
@@ -51,7 +51,7 @@ async fn turn(
 async fn failed_turn(kernel: &Arc<Kernel>, backend: &AgentId, s: &Arc<MockScript>) -> Value {
     let mut rx = rebind_backend_inbox(kernel, backend);
     let before = s.passes_served();
-    let r = crate::tests::settled(kernel, kernel.operator_send(vec![Item::new(
+    let r = crate::tests::settled(kernel, fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
         )]))
@@ -88,8 +88,7 @@ fn watch_inbox(backend: &AgentId) -> AgentId {
 
 /// The view's own `reflect`: is its change relay on?
 async fn view_watching(kernel: &Arc<Kernel>, view: &str) -> Value {
-    kernel
-        .operator_send(vec![Item::new(
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             AgentId::from(view),
             json!({"type": "reflect"}),
         )])
@@ -239,7 +238,7 @@ async fn a_missing_file_fails_the_turn_until_it_appears() {
     for _ in 1..=10 {
         tokio::time::sleep(Duration::from_millis(200)).await;
         let before = s.passes_served();
-        let _ = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(
+        let _ = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 backend.clone(),
                 json!({"type": "send", "text": "go"}),
             )]))

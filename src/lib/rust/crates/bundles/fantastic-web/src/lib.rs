@@ -418,29 +418,96 @@ Set port on create_agent or via update_agent."
     let children: Vec<AgentId> = kernel.resolve_target(agent_id.as_str())
         .map(|e| e.child_ids())
         .unwrap_or_default();
-    for cid in children {
-        if let Err(reason) = mount_surface(&table, kernel, &cid).await {
-            // Refuse BEFORE the listener binds: no shadowed route ever serves.
-            return Err(format!("RuntimeError: {reason}").into());
+    // A BOOT THAT IS A CALL defers: its settle comes once every child is mounted and
+    // the listener serves. A boot the kernel runs directly (`kernel_start`, the
+    // web's create) answers `{running: true}` at once, and the mounts go on as calls
+    // (#795) — the listener still binds only after the last of them.
+    let deferred = kernel.defer().ok();
+    let direct = deferred.is_none();
+    mount_all(Booting {
+        agent_id: agent_id.clone(),
+        kernel: Arc::clone(kernel),
+        state,
+        table,
+        host,
+        port,
+        todo: children.into(),
+        deferred,
+    })
+    .await;
+    Ok(if direct { json!({"running": true}) } else { Value::Null })
+}
+
+/// A boot on its way to serving: the children still to mount, and where its answer goes.
+struct Booting {
+    agent_id: AgentId,
+    kernel: Arc<Kernel>,
+    state: AppState,
+    table: Arc<AsyncRwLock<RouteTable>>,
+    host: String,
+    port: u16,
+    todo: std::collections::VecDeque<AgentId>,
+    /// The boot's own call, when the boot was one.
+    deferred: Option<fantastic_kernel::Deferred>,
+}
+
+impl Booting {
+    /// The boot is over: `Ok` serves, `Err` is the refusal a conflicting route raises.
+    fn end(self, r: Result<Value, String>) {
+        match (self.deferred, r) {
+            (Some(d), Ok(reply)) => {
+                self.kernel
+                    .settle_deferred(d.pid(), fantastic_kernel::Outcome::of_reply(Some(d.pid()), reply));
+            }
+            (Some(d), Err(reason)) => {
+                let raised = json!({"error": format!("RuntimeError: {reason}"), "raised": true});
+                self.kernel.settle_deferred(
+                    d.pid(),
+                    fantastic_kernel::Outcome::new(Some(d.pid()), fantastic_kernel::Status::Failed, raised),
+                );
+            }
+            (None, Ok(_)) => {}
+            (None, Err(reason)) => eprintln!("webapp {} boot: RuntimeError: {reason}", self.agent_id),
         }
     }
-    start_serving(agent_id, &state, &table, &host, port).await;
-    // Announce OURSELVES to the cli renderer (the boot-event convention): the
-    // web host owns its port, so it tells the terminal where to attach — the
-    // renderer never reaches in for it. No cli (non-tty) ⇒ nobody is told; the
-    // bound port is on this agent's reflect. The URL names the BOUND host — a
-    // host bound to a LAN address does not answer at 127.0.0.1.
-    let line = format!(
-        "listening on http://{host}:{port}/ · rest/ws are children (reflect kernel for ids)"
-    );
-    kernel
-        .send(vec![Item::new(
-            AgentId::from("cli"),
-            json!({"type": "say", "source": "web", "text": line}),
-        )])
+}
+
+/// Mount each child's surface, ONE AFTER THE OTHER (each `get_routes` is a call whose
+/// settle mounts it), THEN start serving, then announce the URL to `cli`.
+fn mount_all(mut b: Booting) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async move {
+        let Some(child) = b.todo.pop_front() else {
+            start_serving(&b.agent_id, &b.state, &b.table, &b.host, b.port).await;
+            // Announce OURSELVES to the cli renderer (the boot-event convention): the
+            // web host owns its port, so it tells the terminal where to attach — the
+            // renderer never reaches in for it. No cli (non-tty) ⇒ nobody is told; the
+            // bound port is on this agent's reflect. The URL names the BOUND host — a
+            // host bound to a LAN address does not answer at 127.0.0.1.
+            let line = format!(
+                "listening on http://{}:{}/ · rest/ws are children (reflect kernel for ids)",
+                b.host, b.port
+            );
+            let _ack = b
+                .kernel
+                .send(vec![Item::new(
+                    AgentId::from("cli"),
+                    json!({"type": "say", "source": "web", "text": line}),
+                )
+                .with_reply_to(fantastic_kernel::ReplyTo::Row)])
+                .await;
+            let surfaces = b.table.read().await.child_ids();
+            return b.end(Ok(json!({"running": true, "surfaces": surfaces})));
+        };
+        let (kernel, table) = (Arc::clone(&b.kernel), Arc::clone(&b.table));
+        mount_surface(table, &kernel, child, move |r| async move {
+            match r {
+                // Refuse BEFORE the listener binds: no shadowed route ever serves.
+                Err(reason) => b.end(Err(reason)),
+                Ok(()) => mount_all(b).await,
+            }
+        })
         .await;
-    let surfaces = table.read().await.child_ids();
-    Ok(json!({"running": true, "surfaces": surfaces}))
+    })
 }
 
 /// python `_start_serving` — schedule the serve loop for an already-built,
@@ -506,7 +573,6 @@ async fn stop_reply(agent_id: &AgentId) -> Value {
     }
 }
 
-/// python `_mount` — pull `get_routes` from the named child and (re)mount it.
 /// python `_fetch_file` — one `read_stream` chunk of `path` on `agent_id`, sent
 /// from this host's own dispatch, so the read is THE HOST's: the served agent's
 /// `web`'s own lines and the served agent's io leg judge it. The reply comes back whole, its raw
@@ -552,16 +618,29 @@ fn as_own_reply(out: fantastic_kernel::Outcome) -> fantastic_kernel::Outcome {
     fantastic_kernel::Outcome::new(out.pid, status, out.result).with_body(out.body)
 }
 
+/// python `_mount` — pull `get_routes` from the named child and (re)mount it. The
+/// `get_routes` is a call (#795): the verb defers, and its settle mounts the child.
 async fn mount_reply(agent_id: &AgentId, child_id: &str, kernel: &Arc<Kernel>) -> Value {
     let child = AgentId::from(child_id);
     let Some(table) = SERVERS.lock().get(agent_id).map(|h| Arc::clone(&h.table)) else {
         return json!({"error": "web.mount: not running"});
     };
+    let d = match kernel.defer() {
+        Ok(d) => d,
+        Err(refused) => return refused,
+    };
     table.write().await.unmount(&child);
-    if let Err(reason) = mount_surface(&table, kernel, &child).await {
-        return json!({"error": reason});
-    }
-    json!({"mounted": table.read().await.paths_for(&child)})
+    let k = Arc::clone(kernel);
+    let t = Arc::clone(&table);
+    mount_surface(table, kernel, child.clone(), move |r| async move {
+        let reply = match r {
+            Err(reason) => json!({"error": reason}),
+            Ok(()) => json!({"mounted": t.read().await.paths_for(&child)}),
+        };
+        k.settle_deferred(d.pid(), fantastic_kernel::Outcome::of_reply(Some(d.pid()), reply));
+    })
+    .await;
+    Value::Null
 }
 
 /// python `_unmount` — remove every route belonging to the named child.
@@ -575,30 +654,37 @@ async fn unmount_reply(agent_id: &AgentId, child_id: &str) -> Value {
 }
 
 /// python `_mount_surface` — ask one child for its routes and mount them. A
-/// child that does not answer with a route list mounts nothing.
-async fn mount_surface(
-    table: &Arc<AsyncRwLock<RouteTable>>,
+/// child that does not answer with a route list mounts nothing. The ask is a call
+/// (#795): `then` gets the mount's result once it settled.
+async fn mount_surface<F, Fut>(
+    table: Arc<AsyncRwLock<RouteTable>>,
     kernel: &Arc<Kernel>,
-    child: &AgentId,
-) -> Result<(), String> {
-    let reply = kernel
-        .send(vec![Item::new(
-            child.clone(),
-            json!({"type": "get_routes"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let mounted = routes::routes_from_spec(child, &reply);
-    if mounted.is_empty() {
-        return Ok(());
-    }
-    let mut table = table.write().await;
-    if let Some(reason) = table.conflict(child, &mounted) {
-        return Err(reason);
-    }
-    table.mount(child.clone(), mounted);
-    Ok(())
+    child: AgentId,
+    then: F,
+) where
+    F: FnOnce(Result<(), String>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let item = Item::new(child.clone(), json!({"type": "get_routes"}));
+    kernel
+        .call_then(item, move |out| async move {
+            let mounted = routes::routes_from_spec(&child, &out.result);
+            if mounted.is_empty() {
+                return then(Ok(())).await;
+            }
+            let r = {
+                let mut table = table.write().await;
+                match table.conflict(&child, &mounted) {
+                    Some(reason) => Err(reason),
+                    None => {
+                        table.mount(child.clone(), mounted);
+                        Ok(())
+                    }
+                }
+            };
+            then(r).await;
+        })
+        .await;
 }
 
 /// The record's `port` (declared `u16`, at least 1); absent means not set.

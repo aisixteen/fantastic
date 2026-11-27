@@ -20,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _lib.canvas_live import Rig, verdict  # noqa: E402
+from _lib.mcp_session import result_of  # noqa: E402
 from canvas import free_port  # noqa: E402
 from helpers import oslayer  # noqa: E402
 
@@ -108,13 +109,18 @@ def main() -> bool:
         r["c1 the stock tree and the embedder's record are in the state folder; the kernel runs on it"] = up
         listed: list = []
         if up:
+            # `send --statedir` acks (#795): its exit code says the call was accepted
             q = subprocess.run([str(rig.example), "send", "--statedir", str(state),
                                 json.dumps({"target": "kernel_state", "payload": {"type": "list_agents"}})],
                                cwd=cwd, env=rig.env(), capture_output=True, text=True, timeout=60)
+            info["send ack"] = (q.stdout + q.stderr)[-400:]
+            r["c2a send --statedir is accepted by the embedder's kernel"] = q.returncode == 0
+            # the result: the session's settle notification
+            got = result_of(state, "kernel_state", {"type": "list_agents"})
             try:
-                listed = sorted(a["id"] for a in json.loads(q.stdout)["result"]["agents"])
-            except (ValueError, KeyError, TypeError):
-                info["send"] = (q.stdout + q.stderr)[-400:]
+                listed = sorted(a["id"] for a in got["agents"])
+            except (KeyError, TypeError):
+                info["send"] = got
         info["agents"] = listed
         r["c2 the live list_agents holds the stock agents and the embedder's"] = {"files", "exec", "store", "memory", "embedder_store"} <= set(listed)
     finally:

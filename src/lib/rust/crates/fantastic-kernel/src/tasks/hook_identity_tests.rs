@@ -123,8 +123,7 @@ fn mk(log: &Log) -> Arc<Kernel> {
 }
 
 async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> crate::outcome::Outcome {
-    kernel
-        .operator_send(vec![Item::new(AgentId::from(target), payload)])
+    crate::test_support::send_settled(kernel, vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
 }
@@ -204,8 +203,7 @@ async fn on_cancel_runs_as_the_agent_on_the_deadline_path() {
     let kernel = mk(&log);
     let gc = grandchild(&kernel).await;
     let mut inbox = kernel.ensure_inbox(&gc);
-    let out = kernel
-        .operator_send(vec![
+    let out = crate::test_support::send_settled(&kernel, vec![
             Item::new(gc.clone(), json!({"type": "slow"})).with_timeout(0.2)
         ])
         .await

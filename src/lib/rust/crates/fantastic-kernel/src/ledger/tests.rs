@@ -81,7 +81,7 @@ fn an_unknown_id_opens_fresh_and_a_settled_one_returns_its_outcome() {
     let l = Ledger::default();
     assert!(matches!(open(&l, "job-1", "desk", 0).1, Opened::Fresh));
     l.attempt(id_of(&l, "job-1"));
-    l.settle(id_of(&l, "job-1"), done("first"));
+    let _ = l.settle(id_of(&l, "job-1"), done("first"));
 
     // The recorded outcome comes back and NOTHING runs again.
     match open(&l, "job-1", "desk", 0).1 {
@@ -93,27 +93,35 @@ fn an_unknown_id_opens_fresh_and_a_settled_one_returns_its_outcome() {
     }
 }
 
-#[tokio::test]
-async fn a_second_caller_joins_instead_of_running_twice() {
-    // Once-only under concurrency. The joiner waits on the OWNER's
-    // outcome; it never gets a dispatch of its own.
-    let l = Arc::new(Ledger::default());
+#[test]
+fn a_second_caller_joins_instead_of_running_twice() {
+    // Once-only under concurrency. The joiner is DELIVERED the owner's outcome
+    // when it settles; it never gets a dispatch of its own, and nothing waits.
+    let l = Ledger::default();
     assert!(matches!(open(&l, "job-2", "desk", 0).1, Opened::Fresh));
     l.attempt(id_of(&l, "job-2"));
-
-    let Opened::Join(mut rx, ..) = open(&l, "job-2", "desk", 0).1 else {
-        panic!("an in-flight id must be joinable");
+    assert!(
+        matches!(open(&l, "job-2", "desk", 0).1, Opened::Join(..)),
+        "an in-flight id must be joinable"
+    );
+    let got: Arc<std::sync::Mutex<Option<Outcome>>> = Arc::default();
+    let slot = Arc::clone(&got);
+    let token = l
+        .join(id_of(&l, "job-2"), Box::new(move |o| *slot.lock().unwrap() = Some(o)))
+        .unwrap_or_else(|_| panic!("in flight: the joiner is registered"));
+    assert!(got.lock().unwrap().is_none(), "not settled yet");
+    let (_, joiners) = l.settle(id_of(&l, "job-2"), done("owner"));
+    assert_eq!(joiners.len(), 1, "the settle hands the joiner back to its settler");
+    for j in joiners {
+        j(done("owner"));
+    }
+    assert_eq!(got.lock().unwrap().clone().expect("delivered").result["v"], "owner");
+    assert!(l.unjoin(id_of(&l, "job-2"), token).is_none(), "delivered once, then gone");
+    // joining a settled execution hands the recorded outcome back
+    let Err((_, Some(o))) = l.join(id_of(&l, "job-2"), Box::new(|_| {})) else {
+        panic!("a settled execution is not joined");
     };
-    assert!(rx.borrow_and_update().is_none(), "not settled yet");
-
-    let l2 = Arc::clone(&l);
-    tokio::spawn(async move {
-        l2.settle(id_of(&l2, "job-2"), done("owner"));
-    });
-
-    rx.changed().await.expect("the settle must wake the joiner");
-    let got = rx.borrow().clone().expect("an outcome");
-    assert_eq!(got.result["v"], "owner");
+    assert_eq!(o.result["v"], "owner");
 }
 
 #[test]
@@ -255,14 +263,14 @@ fn the_ring_evicts_settled_unnamed_before_named_and_never_in_flight() {
             None,
         );
         l.attempt(id);
-        l.settle(id, done("u"));
+        let _ = l.settle(id, done("u"));
         unnamed.push(id);
     }
     let mut named = Vec::new();
     for i in 0..3 {
         let (id, _) = open(&l, &format!("named-{i}"), "d", 0);
         l.attempt(id);
-        l.settle(id, done("n"));
+        let _ = l.settle(id, done("n"));
         named.push(id);
     }
     let ids: Vec<i64> = ids_for(&l, None);
@@ -291,7 +299,7 @@ fn an_unbounded_ledger_keeps_everything() {
     for i in 0..50 {
         let (id, _) = open(&l, &format!("j{i}"), "d", 0);
         l.attempt(id);
-        l.settle(id, done("x"));
+        let _ = l.settle(id, done("x"));
     }
     assert_eq!(ids_for(&l, None).len(), 50);
 }
@@ -390,7 +398,7 @@ fn a_parked_dead_letter_stays_dead_across_a_restart() {
     let _ = open(&l, "dead-1", "desk", 1).1;
     l.attempt(id_of(&l, "dead-1"));
     l.attempt(id_of(&l, "dead-1"));
-    l.settle(
+    let _ = l.settle(
         id_of(&l, "dead-1"),
         Outcome::new(None, Status::Failed, json!({"error": "kaput"})),
     );
@@ -418,7 +426,7 @@ fn forget_drops_the_entry_and_its_name() {
     let l = Ledger::default();
     let (id, _) = open(&l, "gone-1", "desk", 0);
     l.attempt(id);
-    l.settle(id, done("x"));
+    let _ = l.settle(id, done("x"));
     assert!(l.is_done(id));
     l.forget(id);
     assert!(!l.has(id));
@@ -488,7 +496,7 @@ fn a_reply_with_a_binary_body_stays_whole_in_the_ledger() {
     let l = Ledger::default();
     let (streamed, _) = open(&l, "read-1", "store", 0);
     l.attempt(streamed);
-    l.settle(
+    let _ = l.settle(
         streamed,
         Outcome::new(
             None,

@@ -66,8 +66,7 @@ fn mk() -> (TempDir, Arc<Kernel>) {
 }
 
 async fn call(kernel: &Arc<Kernel>, payload: Value) -> Value {
-    kernel
-        .operator_send(vec![Item::new(AgentId::from("kernel"), payload)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from("kernel"), payload)])
         .await
         .remove(0)
         .result

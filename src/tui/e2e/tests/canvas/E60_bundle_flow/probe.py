@@ -16,6 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _lib.canvas_live import Rig, verdict, ask, say, wait_quiet, saved_dir  # noqa: E402
+from _lib.mcp_session import result_of  # noqa: E402
 
 RELEASE = "release_agent"
 
@@ -33,13 +34,9 @@ def main() -> bool:
     bundles = rig.proj / ".fantastic" / "bundles"
 
     def send(target: str, payload: dict) -> dict:
-        """One call into the running kernel from the shell (`fantastic send`)."""
-        r = subprocess.run([str(rig.binary), "send", json.dumps({"target": target, "payload": payload})],
-                           cwd=rig.proj, env=rig.env(), capture_output=True, text=True, timeout=60)
-        try:
-            return json.loads(r.stdout).get("result") or {}
-        except ValueError:
-            return {"error": (r.stdout + r.stderr)[-300:]}
+        """One call into the running kernel through its MCP channel: the ack, then the
+        result from the session's settle notification (#795)."""
+        return result_of(rig.proj / ".fantastic", target, payload)
 
     replies: dict = {}  # diagnostics: each agent's last raw `hello` reply
 

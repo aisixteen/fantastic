@@ -88,12 +88,13 @@ pub fn recorded_port(kernel: &Kernel) -> Option<u16> {
         .and_then(|p| u16::try_from(p).ok())
 }
 
-/// One operator send; its reply, or the refusal's text.
+/// One call of the home's boot, as the operator (Q2, the lifecycle boundary:
+/// [`Kernel::lifecycle_call`] — the boot goes on once it settled); its reply, or the
+/// refusal's text.
 pub async fn operator(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Result<Value, String> {
-    let out = Arc::clone(kernel)
-        .send(vec![Item::new(AgentId::from(target), payload)])
-        .await
-        .remove(0);
+    let out = kernel
+        .lifecycle_call(Item::new(AgentId::from(target), payload))
+        .await;
     match out.result.get("error").and_then(Value::as_str) {
         Some(e) => Err(sys::with_hint(e, &out.result)),
         None => Ok(out.result),

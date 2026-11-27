@@ -43,14 +43,14 @@ async fn host(
                "handler_module": HANDLER_MODULE, "id": web_id, "port": port}),
         rest,
     ] {
-        let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), item)])
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), item)])
             .await
             .remove(0)
             .result;
         assert!(r.get("error").is_none(), "stage: {r}");
     }
     super::host_holds_legs_lines(&kernel, web_id);
-    let boot = kernel.operator_send(vec![Item::new(
+    let boot = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "boot"}),
         )])

@@ -55,8 +55,7 @@ impl Handler for Asker {
         match call {
             asker_verbs::Call::Ask(a) => {
                 let ask = json!({"type": "inquiry", "text": a.text, "request_id": "r1"});
-                let out = Arc::clone(k)
-                    .operator_send(vec![Item::new(AgentId::from("mcp"), ask)])
+                let out = fantastic_kernel::test_support::send_settled(&Arc::clone(k), vec![Item::new(AgentId::from("mcp"), ask)])
                     .await
                     .remove(0);
                 Ok(Some(out.result))
@@ -73,8 +72,7 @@ impl Handler for Asker {
 
 async fn op(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
     // a send outside every dispatch is the operator's
-    Arc::clone(k)
-        .operator_send(vec![Item::new(AgentId::from(target), payload)])
+    fantastic_kernel::test_support::send_settled(&Arc::clone(k), vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result

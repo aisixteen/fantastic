@@ -70,7 +70,7 @@ async fn mk(kernel: &Arc<Kernel>, tmp: &TempDir, id: &str, extra: Value) -> Valu
 }
 
 async fn call(kernel: &Arc<Kernel>, id: &str, p: Value) -> Value {
-    kernel.operator_send(vec![Item::new(AgentId::from(id), p)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from(id), p)])
         .await
         .remove(0)
         .result

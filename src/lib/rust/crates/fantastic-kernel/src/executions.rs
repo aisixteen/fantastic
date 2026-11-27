@@ -342,9 +342,6 @@ impl Kernel {
         // WHAT THE PREVIOUS PROCESS LEFT IN FLIGHT becomes a dead letter now, before
         // anyone boots: the agents read what concerns them while they boot.
         self.settle_cut().await;
-        // OPEN `await_set` WAITS come back from the store before anyone boots; the
-        // ones already due are completed once the agents are up (below).
-        let due_waits = crate::await_set::restore(self).await;
         if boot_all {
             for id in self.agent_ids() {
                 if id == root.id || id == store.id {
@@ -370,7 +367,6 @@ impl Kernel {
         // process flushed before its delivery ran — go to their receivers once,
         // now that the receivers are up.
         self.redeliver().await;
-        crate::await_set::resume(self, due_waits);
         json!({"started": true, "store": store.id.0, "booted": booted})
     }
 

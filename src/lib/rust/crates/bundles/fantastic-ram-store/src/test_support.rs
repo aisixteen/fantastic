@@ -31,8 +31,7 @@ pub async fn ensure_memory(kernel: &Arc<Kernel>) -> AgentId {
         .and_then(Value::as_str)
         .is_some_and(|g| !g.is_empty());
     if !has_guid {
-        let r = kernel
-            .operator_send(vec![Item::new(
+        let r = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
                 AgentId::from("kernel"),
                 json!({"type": "update_agent", "id": root.id.0, "guid": "test-guid"}),
             )])
@@ -43,8 +42,7 @@ pub async fn ensure_memory(kernel: &Arc<Kernel>) -> AgentId {
     }
     let store = AgentId::from(MEMORY);
     if !kernel.exists(store.as_str()) {
-        let r = kernel
-            .operator_send(vec![Item::new(
+        let r = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
                 root.id.clone(),
                 json!({
                     "type": "create_agent",

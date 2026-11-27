@@ -13,8 +13,7 @@ use fantastic_web_mcp::{verbs, WebMcpBundle, HANDLER_MODULE};
 use serde_json::{json, Value};
 
 async fn op(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    Arc::clone(k)
-        .operator_send(vec![Item::new(AgentId::from(target), payload)])
+    fantastic_kernel::test_support::send_settled(&Arc::clone(k), vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result

@@ -17,8 +17,7 @@ use std::time::Duration;
 type K = Arc<crate::kernel::Kernel>;
 
 async fn ledger_rows(kernel: &K) -> Vec<serde_json::Value> {
-    kernel
-        .operator_send(vec![Item::new(
+    crate::test_support::send_settled(kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "ledger"}),
         )])
@@ -38,8 +37,7 @@ async fn a_named_id_runs_the_handler_exactly_once() {
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "l_once").await;
 
-    let first = kernel
-        .operator_send(vec![
+    let first = crate::test_support::send_settled(&kernel, vec![
             Item::new(a.clone(), json!({"type": "count"})).with_id("job-1")
         ])
         .await
@@ -49,8 +47,7 @@ async fn a_named_id_runs_the_handler_exactly_once() {
     assert_eq!(sh.run_count(), 1);
 
     for _ in 0..4 {
-        let again = kernel
-            .operator_send(vec![
+        let again = crate::test_support::send_settled(&kernel, vec![
                 Item::new(a.clone(), json!({"type": "count"})).with_id("job-1")
             ])
             .await
@@ -70,10 +67,10 @@ async fn concurrent_sends_of_one_id_join_and_run_the_body_once() {
     let a = mk_agent(&kernel, "l_conc").await;
 
     let (l, r) = tokio::join!(
-        kernel.operator_send(vec![
+        crate::test_support::send_settled(&kernel, vec![
             Item::new(a.clone(), json!({"type": "count"})).with_id("click-7")
         ]),
-        kernel.operator_send(vec![
+        crate::test_support::send_settled(&kernel, vec![
             Item::new(a.clone(), json!({"type": "count"})).with_id("click-7")
         ]),
     );
@@ -89,8 +86,7 @@ async fn an_unnamed_execution_is_ledgered_under_its_pid() {
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "l_unnamed").await;
 
-    let out = kernel
-        .operator_send(vec![Item::new(a.clone(), json!({"type": "count"}))])
+    let out = crate::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "count"}))])
         .await
         .remove(0);
     let pid = out.pid.expect("a dispatched item has a pid");
@@ -120,8 +116,7 @@ async fn ledger_row_key_order_matches_python() {
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "l_key_order").await;
 
-    let _ = kernel
-        .operator_send(vec![Item::new(a.clone(), json!({"type": "count"}))])
+    let _ = crate::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "count"}))])
         .await
         .remove(0);
     // `mk_agent` itself issues a `create_agent` (+ its `boot` side effect),
@@ -142,8 +137,7 @@ async fn ledger_row_key_order_matches_python() {
         "unnamed rows must OMIT `name`, not carry it as null: {unnamed}"
     );
 
-    let _ = kernel
-        .operator_send(vec![
+    let _ = crate::test_support::send_settled(&kernel, vec![
             Item::new(a.clone(), json!({"type": "count"})).with_id("named-1")
         ])
         .await
@@ -169,8 +163,7 @@ async fn a_retry_budget_re_dispatches_under_the_same_id() {
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "l_retry").await;
 
-    let out = kernel
-        .operator_send(vec![Item::new(
+    let out = crate::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             json!({"type": "flaky", "succeed_on": 3}),
         )
@@ -193,8 +186,7 @@ async fn a_spent_budget_parks_a_dead_letter_that_never_re_arms() {
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "l_dead").await;
 
-    let out = kernel
-        .operator_send(vec![Item::new(
+    let out = crate::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             json!({"type": "flaky", "succeed_on": 99}),
         )
@@ -217,8 +209,7 @@ async fn a_spent_budget_parks_a_dead_letter_that_never_re_arms() {
 
     // Re-sending the same id — even with a bigger budget — returns the recorded
     // failure. Nothing is retried silently.
-    let again = kernel
-        .operator_send(vec![Item::new(
+    let again = crate::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             json!({"type": "flaky", "succeed_on": 1}),
         )
@@ -241,15 +232,14 @@ async fn a_joiner_timeout_bounds_only_its_own_wait() {
     let k = Arc::clone(&kernel);
     let peer = a.clone();
     let owner = tokio::spawn(async move {
-        k.operator_send(vec![
+        crate::test_support::send_settled(&k, vec![
             Item::new(peer, json!({"type": "slow"})).with_id("long-1")
         ])
         .await
     });
     tokio::time::sleep(Duration::from_millis(120)).await;
 
-    let joined = kernel
-        .operator_send(vec![Item::new(a.clone(), json!({"type": "slow"}))
+    let joined = crate::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "slow"}))
             .with_id("long-1")
             .with_timeout(0.2)])
         .await
@@ -287,8 +277,7 @@ async fn the_ledger_verb_is_scoped_to_what_you_originated() {
     let a = crate::tasks::tests::mk_agent(&kernel, "l_scope").await;
 
     // An OPERATOR execution (no origin).
-    let _ = kernel
-        .operator_send(vec![
+    let _ = crate::test_support::send_settled(&kernel, vec![
             Item::new(a.clone(), json!({"type": "count"})).with_id("operator-job")
         ])
         .await;
@@ -304,8 +293,7 @@ async fn the_ledger_verb_is_scoped_to_what_you_originated() {
 
     // An AGENT reading the ledger sees only its own origins — not this one.
     let seen = crate::test_support::as_agent(AgentId::from("l_scope"), async {
-        kernel
-            .operator_send(vec![Item::new(
+        crate::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel"),
                 json!({"type": "ledger"}),
             )])
@@ -332,14 +320,12 @@ async fn the_ledger_verb_is_paged_like_every_other_listing() {
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "l_page").await;
     for i in 0..4 {
-        let _ = kernel
-            .operator_send(vec![
+        let _ = crate::test_support::send_settled(&kernel, vec![
                 Item::new(a.clone(), json!({"type": "count"})).with_id(format!("p{i}"))
             ])
             .await;
     }
-    let page = kernel
-        .operator_send(vec![Item::new(
+    let page = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "ledger", "limit": 2}),
         )])
@@ -361,7 +347,7 @@ async fn a_cancelled_execution_stays_cancelled() {
     let k = Arc::clone(&kernel);
     let peer = a.clone();
     let batch = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(peer, json!({"type": "slow"}))
+        crate::test_support::send_settled(&k, vec![Item::new(peer, json!({"type": "slow"}))
             .with_id("kill-1")
             .with_retries(5)])
             .await
@@ -370,8 +356,7 @@ async fn a_cancelled_execution_stays_cancelled() {
     let mut victim = None;
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(20)).await;
-        let ps = kernel
-            .operator_send(vec![Item::new(
+        let ps = crate::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel"),
                 json!({"type": "ps"}),
             )])
@@ -389,8 +374,7 @@ async fn a_cancelled_execution_stays_cancelled() {
         }
     }
     let victim = victim.expect("the slow row never appeared");
-    let _ = kernel
-        .operator_send(vec![Item::new(
+    let _ = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "cancel", "task_id": victim}),
         )])
@@ -410,8 +394,7 @@ async fn only_the_originator_joins_its_execution() {
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
     for (who, verb) in [("alice", "work"), ("bob", "ping")] {
-        let _ = kernel
-            .operator_send(vec![Item::new(
+        let _ = crate::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({
                     "type": "create_agent", "parent_id": "kernel",
@@ -421,8 +404,7 @@ async fn only_the_originator_joins_its_execution() {
             )])
             .await;
     }
-    let _ = kernel
-        .operator_send(vec![Item::new(
+    let _ = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -433,7 +415,7 @@ async fn only_the_originator_joins_its_execution() {
 
     let k = Arc::clone(&kernel);
     let a = as_agent(AgentId::from("alice"), async move {
-        k.operator_send(vec![Item {
+        crate::test_support::send_settled(&k, vec![Item {
             target: AgentId::from("vault"),
             payload: json!({"type": "work"}),
             id: Some("job1".into()),
@@ -454,7 +436,7 @@ async fn only_the_originator_joins_its_execution() {
 
     let k = Arc::clone(&kernel);
     let b = as_agent(AgentId::from("bob"), async move {
-        k.operator_send(vec![Item {
+        crate::test_support::send_settled(&k, vec![Item {
             target: AgentId::from("vault"),
             payload: json!({"type": "ping"}),
             id: Some("job1".into()),
@@ -477,7 +459,7 @@ async fn only_the_originator_joins_its_execution() {
     // An AUTHORIZED re-sender still dedups — the fix must not cost ensure-semantics.
     let k = Arc::clone(&kernel);
     let again = as_agent(AgentId::from("alice"), async move {
-        k.operator_send(vec![Item {
+        crate::test_support::send_settled(&k, vec![Item {
             target: AgentId::from("vault"),
             payload: json!({"type": "work"}),
             id: Some("job1".into()),
@@ -506,8 +488,7 @@ async fn an_errored_execution_is_visible_in_the_ledger() {
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "l_err").await;
-    let out = kernel
-        .operator_send(vec![Item::new(a.clone(), json!({"type": "nope_unknown"}))])
+    let out = crate::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "nope_unknown"}))])
         .await
         .remove(0);
     assert_eq!(out.status, Status::Errored, "{out:?}");
@@ -540,7 +521,7 @@ async fn a_send_issued_from_a_spawned_fork_is_in_the_operators_ledger() {
     let peer = b.clone();
     let tid = as_agent(a.clone(), async {
         kernel.spawn_task(&a, "route_reply", async move {
-            let _ = k.operator_send(vec![Item::new(peer, json!({"type": "fast"}))]).await;
+            let _ = crate::test_support::send_settled(&k, vec![Item::new(peer, json!({"type": "fast"}))]).await;
         })
     })
     .await;
@@ -576,7 +557,7 @@ async fn the_ledger_view_is_caller_scoped() {
     let k = Arc::clone(&kernel);
     let peer = b.clone();
     as_agent(a.clone(), async move {
-        let _ = k.operator_send(vec![Item::new(peer, json!({"type": "fast"}))]).await;
+        let _ = crate::test_support::send_settled(&k, vec![Item::new(peer, json!({"type": "fast"}))]).await;
     })
     .await;
 
@@ -628,7 +609,7 @@ async fn a_joiner_other_than_the_originator_gets_the_unknown_answer() {
     let k = Arc::clone(&kernel);
     let p = payload.clone();
     let made = as_agent(AgentId::from("alice"), async move {
-        k.operator_send(vec![Item {
+        crate::test_support::send_settled(&k, vec![Item {
             target: AgentId::from("kernel_state"),
             payload: p,
             id: Some("plant-1".into()),
@@ -648,7 +629,7 @@ async fn a_joiner_other_than_the_originator_gets_the_unknown_answer() {
     // call he would be handed — alice's `create_agent` — and refuses.
     let k = Arc::clone(&kernel);
     let joined = as_agent(AgentId::from("bob"), async move {
-        k.operator_send(vec![Item {
+        crate::test_support::send_settled(&k, vec![Item {
             target: AgentId::from("kernel_state"),
             payload: json!({"type": "ps"}),
             id: Some("plant-1".into()),
@@ -682,7 +663,7 @@ async fn ledger_and_ack_deadletter_need_no_line_and_see_own_only() {
     let k = Arc::clone(&kernel);
     let m = mine.clone();
     let failed = as_agent(mine.clone(), async move {
-        k.operator_send(vec![Item::new(m, json!({"type": "boom"})).with_id("boom-1")])
+        crate::test_support::send_settled(&k, vec![Item::new(m, json!({"type": "boom"})).with_id("boom-1")])
             .await
             .remove(0)
     })
@@ -692,7 +673,7 @@ async fn ledger_and_ack_deadletter_need_no_line_and_see_own_only() {
         let k = Arc::clone(&kernel);
         async move {
             as_agent(who, async move {
-                k.operator_send(vec![Item::new(AgentId::from("kernel"), payload)])
+                crate::test_support::send_settled(&k, vec![Item::new(AgentId::from("kernel"), payload)])
                     .await
                     .remove(0)
                     .result

@@ -27,7 +27,7 @@ fn asker_passes(target: &AgentId) -> Vec<Vec<ScriptEvent>> {
 
 /// Start the asker's run: its first pass sends the inquiry.
 async fn start(kernel: &Arc<Kernel>, asker: &AgentId) {
-    let _ = crate::tests::settled(kernel, kernel.operator_send(vec![Item::new(
+    let _ = crate::tests::settled(kernel, fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             asker.clone(),
             json!({"type": "send", "text": "ask", "client_id": "probe"}),
         )]))
@@ -93,7 +93,7 @@ async fn an_unusable_prompt_file_tells_the_asker() {
     let (kernel, a) = mk_kernel(&tmp, "iq_pf").await;
     let fb = asker(&kernel, &tmp, &a).await;
     // a path with no file_bridge_id: the block cannot be read
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": a.as_str(), "system_prompt_file": "prompt.md"}),
         )])
@@ -160,7 +160,7 @@ async fn a_provider_failure_that_gives_up_tells_the_asker() {
 /// A fold-strategy agent over a small window with a goal and six closed chains:
 /// its next turn folds.
 async fn over_budget(kernel: &Arc<Kernel>, a: &AgentId) {
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": a.as_str(),
                    "context_strategy": "fold", "context_window": 4000, "output_reserve": 0}),
@@ -275,7 +275,7 @@ async fn wire(kernel: &Arc<Kernel>, holder: &AgentId, others: &[&AgentId]) {
     for o in others {
         can[o.as_str()] = all.clone();
     }
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": holder.as_str(), "can": can}),
         )])

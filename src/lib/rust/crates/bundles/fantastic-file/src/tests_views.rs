@@ -29,7 +29,7 @@ async fn kernel(tmp: &tempfile::TempDir) -> Arc<Kernel> {
     );
     fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(root);
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE,
                    "id": "fb", "root": tmp.path().join("served").display().to_string(), "allow": ["."]}),
@@ -42,7 +42,7 @@ async fn kernel(tmp: &tempfile::TempDir) -> Arc<Kernel> {
 }
 
 async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    kernel.operator_send(vec![Item::new(AgentId::from(target), payload)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -217,7 +217,7 @@ async fn events_for(rx: &mut fantastic_kernel::inbox::InboxReceiver, secs: u64) 
 
 /// The verbs the verb docs of `of`'s reflect name, sorted.
 async fn docs_verbs(k: &Arc<Kernel>, of: &str) -> Vec<String> {
-    let r = k.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(k, vec![Item::new(
             AgentId::from(of),
             json!({"type": "reflect", "tier": "oneliners"}),
         )])
@@ -333,7 +333,7 @@ async fn deleting_a_view_ends_its_relay() {
         before.iter().any(|e| e["type"] == "changed"),
         "the bridge sees the change while the view watches: {before:?}"
     );
-    let del = k.operator_send(vec![Item::new(
+    let del = fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "delete_agent", "id": v}),
         )])
@@ -341,6 +341,28 @@ async fn deleting_a_view_ends_its_relay() {
         .remove(0)
         .result;
     assert_eq!(del["deleted"], true, "{del}");
+    // the view's `unwatch_path` to the bridge is a call (#795): its settle comes after
+    // the delete's, so the write below waits until nothing is in flight but the read
+    let mut quiet = false;
+    for _ in 0..500 {
+        let l = fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "ledger"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+        quiet = l["executions"].as_array().is_some_and(|rows| {
+            !rows
+                .iter()
+                .any(|e| e["status"] == "in_flight" && e["target"] != "kernel_state")
+        });
+        if quiet {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(quiet, "the bridge's unwatch never settled");
     std::fs::write(served(&tmp).join("gone.txt"), "i\n").unwrap();
     // the relay let go of the bridge's watch: no `changed` reaches the bridge's watchers
     // (they also hear the calls made to it, so only `changed` is judged)
@@ -360,7 +382,7 @@ async fn open_view_refuses_a_path_the_bridge_does_not_expose() {
     std::fs::create_dir_all(served(&tmp).join("secret")).unwrap();
     std::fs::write(served(&tmp).join("secret/s.txt"), "s").unwrap();
     // a second bridge exposing only `docs`
-    let made = k.operator_send(vec![Item::new(
+    let made = fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE,
                    "id": "fb_docs", "root": served(&tmp).display().to_string(), "allow": ["docs"]}),
@@ -554,7 +576,7 @@ async fn binary_as(
 ) -> (Value, Option<Vec<u8>>) {
     let out = fantastic_kernel::test_support::as_agent(
         caller.clone(),
-        k.operator_send(vec![
+        fantastic_kernel::test_support::send_settled(k, vec![
             Item::new(AgentId::from("fb"), header).with_binary_key("bytes", blob.to_vec())
         ]),
     )

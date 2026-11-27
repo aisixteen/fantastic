@@ -24,11 +24,15 @@
 //! stateless envelope is the HTTP carrier's, later; the tool semantics below do
 //! not change between the two.
 //!
-//! NO WAIT BOUND (owner, 2026-10-01: "do not add wait"). Every tool call runs as
-//! a kernel task owned by the leg (`Kernel::spawn_task`), so its id exists from
-//! the first instant: it shows in `ps`, and `cancel` on it (or the client's
-//! `notifications/cancelled`) kills the whole subtree. The reply is the call's
-//! outcome, whenever the task ends; an item `timeout` cancels that item.
+//! EVERYTHING ASYNC (#795, owner 2026-11-27). A tool call is a CALL: the batch is
+//! handed to the leg's own `inbound_send` as one kernel call, and the tool answers
+//! its ACK at once — `{pid, status: accepted}`, or the launch's refusal. The leg's
+//! settle — `{outcomes}`, one row per item, once every item settled — is PUSHED
+//! later as a server notification on the client's session ([`SETTLE_METHOD`],
+//! params `{type: settle, re, status, data}`, `re` the ack's pid), the payload every
+//! wire leg tells its client. Until then the call is in flight: it shows in `ps`,
+//! and `cancel` on its pid (or the client's `notifications/cancelled` naming the
+//! request) kills its subtree; an item `timeout` cancels that item.
 
 pub mod record;
 pub mod verbs;
@@ -47,6 +51,9 @@ pub const HANDLER_MODULE: &str = "web_mcp.tools";
 
 /// The one protocol version the stdio carrier speaks (see the module header).
 pub const PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// The server notification that carries a tool call's settle to the client's session.
+pub const SETTLE_METHOD: &str = "notifications/settle";
 
 // ── the agent ───────────────────────────────────────────────────────────────
 
@@ -90,10 +97,25 @@ impl Handler for WebMcpBundle {
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         Ok(Some(match call {
-            verbs::Call::Boot(_) => match sync_config(agent_id, kernel).await {
-                Ok(()) => Value::Null,
-                Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::INVALID_META, e),
-            },
+            // the config is read and written by calls (#795): a boot that is a call
+            // defers until they settled; a boot the kernel runs directly answers at
+            // once, and the outcome is on reflect when they have
+            verbs::Call::Boot(_) => {
+                let d = kernel.defer().ok();
+                let k = Arc::clone(kernel);
+                sync_config(agent_id, kernel, Box::new(move |r| {
+                    Box::pin(async move {
+                        let Some(d) = d else { return };
+                        let reply = match r {
+                            Ok(()) => Value::Null,
+                            Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::INVALID_META, e),
+                        };
+                        k.settle_deferred(d.pid(), Outcome::of_reply(Some(d.pid()), reply));
+                    })
+                }))
+                .await;
+                Value::Null
+            }
             verbs::Call::SendBatch(a) => inbound_send(a, kernel).await,
             // THE PERSON'S INQUIRIES (#307): held on the record, listed, answered.
             verbs::Call::Inquiry(a) => fantastic_kernel::inquiry::ask(agent_id, a, kernel).await,
@@ -199,75 +221,110 @@ pub fn with_entry(doc: &str, entry: &Value) -> Result<Option<String>, String> {
     Ok(Some(text + "\n"))
 }
 
-/// Make the config right, as the leg. Records the outcome for reflect.
-async fn sync_config(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), String> {
+/// What a step of the config sync hands on when it is done.
+type Then<T> = Box<dyn FnOnce(T) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send>;
+
+/// Make the config right, as the leg, by calls (#795): `done` gets the outcome once
+/// the last of them settled, and reflect carries it from then on.
+async fn sync_config(agent_id: &AgentId, kernel: &Arc<Kernel>, done: Then<Result<(), String>>) {
     let Some(meta) = kernel.resolve_target(agent_id.as_str()).map(|e| e.record().meta.clone()) else {
-        return Err(format!("{agent_id}: no such agent"));
+        return done(Err(format!("{agent_id}: no such agent"))).await;
     };
     let name = |k: &str| meta.get(k).and_then(Value::as_str).map(str::to_string);
-    let result = match (name(CONFIG_BRIDGE_FIELD), name(CONFIG_FILE_FIELD)) {
-        (None, _) => Ok(()),
-        (Some(bridge), None) => Err(format!(
-            "{agent_id}: file_bridge_id {bridge:?} is set but {CONFIG_FILE_FIELD} is not — name the \
-             config's path on that bridge (e.g. .mcp.json)"
-        )),
-        (Some(bridge), Some(path)) => write_config(kernel, &bridge, &path).await,
-    };
-    let mut errors = config_errors().lock().expect("config errors");
-    match &result {
-        Ok(()) => errors.remove(&error_key(kernel, agent_id)),
-        Err(e) => errors.insert(error_key(kernel, agent_id), e.clone()),
-    };
-    result
+    let key = error_key(kernel, agent_id);
+    let recorded: Then<Result<(), String>> = Box::new(move |result| {
+        Box::pin(async move {
+            {
+                let mut errors = config_errors().lock().expect("config errors");
+                match &result {
+                    Ok(()) => errors.remove(&key),
+                    Err(e) => errors.insert(key, e.clone()),
+                };
+            }
+            done(result).await;
+        })
+    });
+    match (name(CONFIG_BRIDGE_FIELD), name(CONFIG_FILE_FIELD)) {
+        (None, _) => recorded(Ok(())).await,
+        (Some(bridge), None) => {
+            recorded(Err(format!(
+                "{agent_id}: file_bridge_id {bridge:?} is set but {CONFIG_FILE_FIELD} is not — name the \
+                 config's path on that bridge (e.g. .mcp.json)"
+            )))
+            .await;
+        }
+        (Some(bridge), Some(path)) => write_config(Arc::clone(kernel), bridge, path, recorded).await,
+    }
 }
 
-async fn write_config(kernel: &Arc<Kernel>, bridge: &str, path: &str) -> Result<(), String> {
-    let entry = server_entry()?;
-    let current = read_all(kernel, bridge, path).await?;
-    let Some(text) = with_entry(&current, &entry).map_err(|e| format!("{bridge} {path}: {e}"))? else {
-        return Ok(());
+async fn write_config(kernel: Arc<Kernel>, bridge: String, path: String, done: Then<Result<(), String>>) {
+    let entry = match server_entry() {
+        Ok(e) => e,
+        Err(e) => return done(Err(e)).await,
     };
-    let out = Arc::clone(kernel)
-        .send(vec![Item::new(AgentId::from(bridge), json!({"type": "write", "path": path, "bytes": text}))])
-        .await
-        .remove(0);
-    if out.status != Status::Completed || out.result.get("error").is_some_and(|e| !e.is_null()) {
-        return Err(format!("{bridge} write {path}: {}", why(&out)));
-    }
-    Ok(())
+    let k = Arc::clone(&kernel);
+    read_from(kernel, bridge.clone(), path.clone(), 0, Vec::new(), Box::new(move |current| {
+        Box::pin(async move {
+            let current = match current {
+                Ok(c) => c,
+                Err(e) => return done(Err(e)).await,
+            };
+            let text = match with_entry(&current, &entry) {
+                Err(e) => return done(Err(format!("{bridge} {path}: {e}"))).await,
+                Ok(None) => return done(Ok(())).await,
+                Ok(Some(t)) => t,
+            };
+            let item = Item::new(AgentId::from(bridge.as_str()), json!({"type": "write", "path": path, "bytes": text}));
+            k.call_then(item, move |out| async move {
+                if out.status != Status::Completed || out.result.get("error").is_some_and(|e| !e.is_null()) {
+                    return done(Err(format!("{bridge} write {path}: {}", why(&out)))).await;
+                }
+                done(Ok(())).await;
+            })
+            .await;
+        })
+    }))
+    .await;
 }
 
-/// The whole file through `read_stream`; a missing file is empty.
-async fn read_all(kernel: &Arc<Kernel>, bridge: &str, path: &str) -> Result<String, String> {
-    let mut bytes: Vec<u8> = Vec::new();
-    let mut offset: u64 = 0;
-    loop {
-        let out = Arc::clone(kernel)
-            .send(vec![Item::new(
-                AgentId::from(bridge),
-                json!({"type": "read_stream", "path": path, "offset": offset}),
-            )])
-            .await
-            .remove(0);
-        if out.result.get("reason").and_then(Value::as_str) == Some("not_found") && offset == 0 {
-            return Ok(String::new());
-        }
-        if out.status != Status::Completed || out.result.get("error").is_some_and(|e| !e.is_null()) {
-            return Err(format!("{bridge} read_stream {path}: {}", why(&out)));
-        }
-        if let Some(b) = out.body.as_ref().and_then(|b| b.at("bytes")) {
-            bytes.extend_from_slice(b);
-        }
-        if out.result.get("eof").and_then(Value::as_bool) == Some(true) {
-            break;
-        }
-        offset = out
-            .result
-            .get("next_offset")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| format!("{bridge} read_stream {path}: the reply names no next_offset"))?;
-    }
-    String::from_utf8(bytes).map_err(|e| format!("{bridge} {path}: not utf-8 ({e})"))
+/// The whole file through `read_stream`, one chunk call after the other from
+/// `offset`; a missing file is empty.
+fn read_from(
+    kernel: Arc<Kernel>,
+    bridge: String,
+    path: String,
+    offset: u64,
+    mut bytes: Vec<u8>,
+    done: Then<Result<String, String>>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async move {
+        let item = Item::new(
+            AgentId::from(bridge.as_str()),
+            json!({"type": "read_stream", "path": path, "offset": offset}),
+        );
+        let k = Arc::clone(&kernel);
+        kernel
+            .call_then(item, move |out| async move {
+                if out.result.get("reason").and_then(Value::as_str) == Some("not_found") && offset == 0 {
+                    return done(Ok(String::new())).await;
+                }
+                if out.status != Status::Completed || out.result.get("error").is_some_and(|e| !e.is_null()) {
+                    return done(Err(format!("{bridge} read_stream {path}: {}", why(&out)))).await;
+                }
+                if let Some(b) = out.body.as_ref().and_then(|b| b.at("bytes")) {
+                    bytes.extend_from_slice(b);
+                }
+                if out.result.get("eof").and_then(Value::as_bool) == Some(true) {
+                    let text = String::from_utf8(bytes).map_err(|e| format!("{bridge} {path}: not utf-8 ({e})"));
+                    return done(text).await;
+                }
+                let Some(next) = out.result.get("next_offset").and_then(Value::as_u64) else {
+                    return done(Err(format!("{bridge} read_stream {path}: the reply names no next_offset"))).await;
+                };
+                read_from(k, bridge, path, next, bytes, done).await;
+            })
+            .await;
+    })
 }
 
 fn why(o: &Outcome) -> String {
@@ -278,11 +335,37 @@ fn why(o: &Outcome) -> String {
     }
 }
 
-/// `inbound_send {items}`: the batch, sent from inside the leg's own dispatch —
-/// so every item is the leg's call.
+/// `inbound_send {items}`: the batch, called from inside the leg's own dispatch — so
+/// every item is the leg's call. The verb DEFERS: its settle is `{outcomes}`, one row
+/// per item in item order, once every item settled (a launch refusal is its row at
+/// once). Nothing waits: each item's settle fills its row.
 async fn inbound_send(a: verbs::SendBatch, kernel: &Arc<Kernel>) -> Value {
-    let outs = Arc::clone(kernel).send(a.into_items()).await;
-    json!({"outcomes": outs.iter().map(row).collect::<Vec<_>>()})
+    let d = match kernel.defer() {
+        Ok(d) => d,
+        Err(refused) => return refused,
+    };
+    let items = a.into_items();
+    let rows: Arc<Mutex<Vec<Option<Value>>>> = Arc::new(Mutex::new(vec![None; items.len()]));
+    if items.is_empty() {
+        kernel.settle_deferred(d.pid(), Outcome::of_reply(Some(d.pid()), json!({"outcomes": []})));
+        return Value::Null;
+    }
+    for (i, item) in items.into_iter().enumerate() {
+        let (rows, k) = (Arc::clone(&rows), Arc::clone(kernel));
+        kernel
+            .call_then(item, move |out| async move {
+                let all = {
+                    let mut g = rows.lock().expect("rows poisoned");
+                    g[i] = Some(row(&out));
+                    g.iter().all(Option::is_some).then(|| g.iter().flatten().cloned().collect::<Vec<_>>())
+                };
+                if let Some(all) = all {
+                    k.settle_deferred(d.pid(), Outcome::of_reply(Some(d.pid()), json!({"outcomes": all})));
+                }
+            })
+            .await;
+    }
+    Value::Null
 }
 
 /// One settled item, as the send contract states it.
@@ -328,11 +411,16 @@ impl McpCore {
         Self { kernel, leg, server_version: server_version.to_string() }
     }
 
-    /// One message in. `on_task` receives the task id of a tool call the moment
-    /// it exists, so the carrier can map a request to it for cancellation.
-    pub async fn handle<F>(&self, msg: &Value, on_task: F) -> Answer
+    /// One message in. A tool call answers its ACK; `on_task` receives the call's pid
+    /// the moment it exists (so the carrier can map a request to it for
+    /// cancellation), and `on_settle` the server notification that carries its
+    /// settle ([`SETTLE_METHOD`]) when it comes — the carrier writes it on the
+    /// client's session.
+    pub async fn handle<F, S, Fut>(&self, msg: &Value, on_task: F, on_settle: S) -> Answer
     where
         F: FnOnce(TaskId) + Send,
+        S: FnOnce(Value) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         let id = msg.get("id").cloned();
         let method = msg.get("method").and_then(Value::as_str);
@@ -347,7 +435,7 @@ impl McpCore {
             "initialize" => Ok(self.initialize()),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": tools() })),
-            "tools/call" => Ok(self.call(&params, on_task).await),
+            "tools/call" => Ok(self.call(&params, on_task, on_settle).await),
             other => Err((-32601, format!("Method not found: {other}"))),
         };
         Some(match result {
@@ -358,8 +446,8 @@ impl McpCore {
         })
     }
 
-    /// Cancel a tool call by its task id — subtree-wide, as the operator would,
-    /// because the client that asked for it has gone.
+    /// Cancel a tool call by its pid — subtree-wide, as the operator would, because
+    /// the client that asked for it has gone.
     pub async fn cancel(&self, task: &TaskId) -> Value {
         Arc::clone(&self.kernel).cancel_task(task).await
     }
@@ -373,9 +461,11 @@ impl McpCore {
         })
     }
 
-    async fn call<F>(&self, params: &Value, on_task: F) -> Value
+    async fn call<F, S, Fut>(&self, params: &Value, on_task: F, on_settle: S) -> Value
     where
         F: FnOnce(TaskId) + Send,
+        S: FnOnce(Value) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         let name = params.get("name").and_then(Value::as_str).unwrap_or("");
         let args = params.get("arguments").cloned().unwrap_or(json!({}));
@@ -388,37 +478,53 @@ impl McpCore {
             Ok(i) => i,
             Err(e) => return tool_error(&e),
         };
-        self.run(name, items, on_task).await
+        self.run(items, on_task, on_settle).await
     }
 
-    /// Run a batch as one kernel task owned by the leg, and answer its outcome
-    /// when it ends. The batch is handed to the leg's own `inbound_send`.
-    async fn run<F>(&self, tool: &str, items: Vec<Item>, on_task: F) -> Value
+    /// Hand the batch to the leg's own `inbound_send` as ONE call — the carrier is the
+    /// in-process shell (the operator) handing it in; the leg sends each item as
+    /// itself — and answer its ACK. Its settle goes to `on_settle` as the
+    /// notification. Nothing waits for it.
+    async fn run<F, S, Fut>(&self, items: Vec<Item>, on_task: F, on_settle: S) -> Value
     where
         F: FnOnce(TaskId) + Send,
+        S: FnOnce(Value) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
     {
-        let (tx, rx) = tokio::sync::oneshot::channel::<Outcome>();
-        let k = Arc::clone(&self.kernel);
         let batch: Vec<Value> = items
             .iter()
             .map(|i| json!({"target": i.target.as_str(), "payload": i.payload, "timeout": i.timeout}))
             .collect();
         let hand_in = Item::new(self.leg.clone(), json!({"type": "inbound_send", "items": batch}));
-        let task = self.kernel.spawn_task(&self.leg, tool, async move {
-            // the carrier is the in-process shell (the operator) handing the batch
-            // to the leg; the leg's `inbound_send` sends each item as the leg
-            let _ = tx.send(k.operator_send(vec![hand_in]).await.remove(0));
-        });
-        on_task(task);
-
-        match rx.await {
-            Ok(o) => match o.result.get("outcomes").and_then(Value::as_array) {
-                Some(rows) => settled(tool, rows),
-                None => tool_error(&format!("the leg did not take the batch: {}", o.result)),
-            },
-            Err(_) => tool_error(&format!("task {} ended without an answer (cancelled)", task.get())),
+        let ack = fantastic_kernel::send::as_operator(self.kernel.call(hand_in, move |out| async move {
+            on_settle(settle_notification(&out)).await;
+        }))
+        .await;
+        match (ack.status, ack.pid) {
+            (Status::Accepted, Some(pid)) => {
+                on_task(pid);
+                text_result(&json!({"pid": pid.get(), "status": Status::Accepted.as_str()}), false)
+            }
+            _ => tool_error(&format!("the leg did not take the batch: {}", ack.result)),
         }
     }
+}
+
+/// The server notification carrying a tool call's settle: `{type: settle, re, status,
+/// data}` — `re` the call's pid (its ack's), `data` the leg's `{outcomes}` (a row per
+/// item, in item order: `{pid, status, result}`).
+#[must_use]
+pub fn settle_notification(out: &Outcome) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": SETTLE_METHOD,
+        "params": {
+            "type": "settle",
+            "re": out.pid.map(|p| p.get()),
+            "status": out.status.as_str(),
+            "data": out.result,
+        },
+    })
 }
 
 /// The two tools, in a deterministic order; each one's input schema is its declared struct.
@@ -459,16 +565,6 @@ fn reflect_items(args: &Value) -> Result<Vec<Item>, String> {
 fn send_items(args: &Value) -> Result<Vec<Item>, String> {
     let a: verbs::SendBatch = tool_args(&verbs::SEND_TOOL, args)?;
     Ok(a.into_items())
-}
-
-/// The settled batch, as the send contract states it. `isError` only when
-/// NOTHING in the batch completed: a mixed batch is data, not a tool failure.
-fn settled(tool: &str, rows: &[Value]) -> Value {
-    let done = Status::Completed.as_str();
-    let all_failed = !rows.is_empty() && rows.iter().all(|r| r["status"].as_str() != Some(done));
-    // reflect is one item: hand back its result bare, which is what a client reads.
-    let body = if tool == "reflect" && rows.len() == 1 { rows[0]["result"].clone() } else { Value::Array(rows.to_vec()) };
-    text_result(&body, all_failed)
 }
 
 /// The result a client reads: a raw reply body (any verb may answer one) decoded

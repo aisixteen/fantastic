@@ -9,8 +9,11 @@
 //!   payload, is replaced by THIS shell's `NAME` — the only place one is ever
 //!   resolved (the kernel never reads its own env for it). A missing variable
 //!   fails before anything is sent.
-//! - It prints the item's `{pid, status, result}`; the exit code is 0 when the
-//!   item completed, 1 otherwise.
+//! - EVERYTHING ASYNC (#795, owner Q4): it prints the call's ACK —
+//!   `{pid, status: accepted}`, or the refusal — and the exit code is 0 when the call
+//!   was accepted, 1 otherwise. The result is a row: `ledger {id: <pid>}` reads it,
+//!   and the session's settle notification carries it (`fantastic import` reads it
+//!   there, [`call_settled`]).
 
 use std::io::Write as _;
 
@@ -66,9 +69,9 @@ pub fn main(argv: &[String]) -> ! {
         }
     };
     let code = match rt.block_on(call(item, &state.join("cli"))) {
-        Ok(row) => {
-            let _ = writeln!(std::io::stdout(), "{}", serde_json::to_string_pretty(&row).unwrap_or_else(|_| row.to_string()));
-            i32::from(row.get("status").and_then(Value::as_str) != Some("completed"))
+        Ok(ack) => {
+            let _ = writeln!(std::io::stdout(), "{}", serde_json::to_string_pretty(&ack).unwrap_or_else(|_| ack.to_string()));
+            i32::from(ack.get("status").and_then(Value::as_str) != Some("accepted"))
         }
         Err(e) => {
             eprintln!("fantastic send: {e}");
@@ -116,45 +119,111 @@ fn resolve(v: &mut Value, env: &impl Fn(&str) -> Option<String>) -> Result<(), S
     Ok(())
 }
 
-/// One MCP session over the kernel's channel in `cli`: initialize, the `send`
-/// tool with the one item, its row back.
+/// One MCP session over the kernel's channel in `cli`: initialize, then the `send`
+/// tool with the one item. Its ACK back (`{pid, status: accepted}`); the session
+/// closes.
 pub(crate) async fn call(item: Value, cli: &Path) -> Result<Value, String> {
-    let sock = crate::local::connect(cli, MCP)
-        .await
-        .map_err(|e| format!("the kernel's MCP channel `{}` does not answer: {e}", cli.join(MCP).display()))?;
-    let (r, mut w) = sock.into_split();
-    let mut lines = BufReader::new(r).lines();
-    let msgs = [
-        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+    let mut s = Session::open(cli).await?;
+    let ack = s.send(item).await?;
+    s.close().await;
+    Ok(ack)
+}
+
+/// [`call`], then the call's SETTLE as the session's notification carries it: the
+/// item's row `{pid, status, result}`. The shell reads it as a client of the
+/// kernel's MCP channel; nothing in the kernel waits for it.
+pub(crate) async fn call_settled(item: Value, cli: &Path) -> Result<Value, String> {
+    let mut s = Session::open(cli).await?;
+    let ack = s.send(item).await?;
+    let re = ack.get("pid").cloned().ok_or_else(|| format!("the call was not accepted: {ack}"))?;
+    let settle = s.settle(&re).await;
+    s.close().await;
+    let data = settle?;
+    match data.pointer("/outcomes/0") {
+        Some(row) => Ok(row.clone()),
+        None => Err(format!("the settle carries no row: {data}")),
+    }
+}
+
+/// One MCP client session on the kernel's channel.
+struct Session {
+    lines: tokio::io::Lines<BufReader<tokio::net::tcp::OwnedReadHalf>>,
+    w: tokio::net::tcp::OwnedWriteHalf,
+    /// Settle notifications read before they were asked for: a call that settles at
+    /// once may have its settle written before its ack.
+    early: Vec<Value>,
+}
+
+impl Session {
+    async fn open(cli: &Path) -> Result<Self, String> {
+        let sock = crate::local::connect(cli, MCP)
+            .await
+            .map_err(|e| format!("the kernel's MCP channel `{}` does not answer: {e}", cli.join(MCP).display()))?;
+        let (r, w) = sock.into_split();
+        let mut s = Self { lines: BufReader::new(r).lines(), w, early: Vec::new() };
+        s.write(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
                "params": {"protocolVersion": "2025-11-25", "capabilities": {},
-                          "clientInfo": {"name": "fantastic send", "version": env!("CARGO_PKG_VERSION")}}}),
-        json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
-        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-               "params": {"name": "send", "arguments": {"items": [item]}}}),
-    ];
-    for m in msgs {
+                          "clientInfo": {"name": "fantastic send", "version": env!("CARGO_PKG_VERSION")}}}))
+            .await?;
+        s.write(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).await?;
+        Ok(s)
+    }
+
+    async fn write(&mut self, m: &Value) -> Result<(), String> {
         let mut line = m.to_string();
         line.push('\n');
-        w.write_all(line.as_bytes()).await.map_err(|e| format!("write: {e}"))?;
+        self.w.write_all(line.as_bytes()).await.map_err(|e| format!("write: {e}"))?;
+        self.w.flush().await.map_err(|e| format!("write: {e}"))
     }
-    w.flush().await.map_err(|e| format!("write: {e}"))?;
-    while let Some(line) = lines.next_line().await.map_err(|e| format!("read: {e}"))? {
-        let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
-        if msg.get("id") != Some(&json!(2)) {
-            continue;
+
+    /// The `send` tool with one item: its ack.
+    async fn send(&mut self, item: Value) -> Result<Value, String> {
+        self.write(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+               "params": {"name": "send", "arguments": {"items": [item]}}}))
+            .await?;
+        while let Some(line) = self.lines.next_line().await.map_err(|e| format!("read: {e}"))? {
+            let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
+            if msg.get("method").and_then(Value::as_str) == Some(fantastic_web_mcp::SETTLE_METHOD) {
+                self.early.push(msg);
+                continue;
+            }
+            if msg.get("id") != Some(&json!(2)) {
+                continue;
+            }
+            if let Some(e) = msg.get("error") {
+                return Err(format!("the kernel refused the call: {e}"));
+            }
+            let text = msg.pointer("/result/content/0/text").and_then(Value::as_str).unwrap_or("");
+            return match serde_json::from_str::<Value>(text) {
+                Ok(ack @ Value::Object(_)) => Ok(ack),
+                // a shape error on the item, or the leg's refusal: the tool's message, said as it is
+                _ => Err(text.to_string()),
+            };
         }
-        let _ = w.shutdown().await;
-        if let Some(e) = msg.get("error") {
-            return Err(format!("the kernel refused the call: {e}"));
-        }
-        let text = msg.pointer("/result/content/0/text").and_then(Value::as_str).unwrap_or("");
-        return match serde_json::from_str::<Value>(text) {
-            Ok(Value::Array(mut rows)) if rows.len() == 1 => Ok(rows.remove(0)),
-            // a shape error on the item: the tool's message, said as it is
-            _ => Err(text.to_string()),
-        };
+        Err("the kernel closed the channel without an answer".into())
     }
-    Err("the kernel closed the channel without an answer".into())
+
+    /// The settle notification naming `re`: its `data`.
+    async fn settle(&mut self, re: &Value) -> Result<Value, String> {
+        if let Some(at) = self.early.iter().position(|m| m.pointer("/params/re") == Some(re)) {
+            let msg = self.early.remove(at);
+            return Ok(msg.pointer("/params/data").cloned().unwrap_or(Value::Null));
+        }
+        while let Some(line) = self.lines.next_line().await.map_err(|e| format!("read: {e}"))? {
+            let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
+            if msg.get("method").and_then(Value::as_str) != Some(fantastic_web_mcp::SETTLE_METHOD) {
+                continue;
+            }
+            if msg.pointer("/params/re") == Some(re) {
+                return Ok(msg.pointer("/params/data").cloned().unwrap_or(Value::Null));
+            }
+        }
+        Err("the kernel closed the channel before the call settled".into())
+    }
+
+    async fn close(mut self) {
+        let _ = self.w.shutdown().await;
+    }
 }
 
 #[cfg(test)]
@@ -186,6 +255,70 @@ mod tests {
     fn only_a_whole_value_is_resolved() {
         let item = prepare(r#"{"target":"t","payload":{"type":"v","k":"x $env:KEY"}}"#, env).unwrap();
         assert_eq!(item["payload"]["k"], "x $env:KEY");
+    }
+
+    /// A fake kernel channel in `cli`: it takes the token, answers the `send` tool with
+    /// its ack and pushes the settle — BEFORE the ack when `early` (a call that settles
+    /// at once may be written in that order).
+    async fn fake_channel(cli: &Path, early: bool) {
+        let l = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        std::fs::create_dir_all(cli).unwrap();
+        std::fs::write(
+            cli.join(MCP),
+            format!("pid: {}\nport: {port}\ntoken: tok\n", std::process::id()),
+        )
+        .unwrap();
+        tokio::spawn(async move {
+            let (s, _) = l.accept().await.unwrap();
+            let (r, mut w) = s.into_split();
+            let mut r = BufReader::new(r);
+            let mut tok = [0u8; 3];
+            tokio::io::AsyncReadExt::read_exact(&mut r, &mut tok).await.unwrap();
+            let mut lines = r.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let m: Value = serde_json::from_str(&line).unwrap();
+                if m["method"] != "tools/call" {
+                    continue;
+                }
+                let ack = json!({"jsonrpc": "2.0", "id": m["id"], "result": {"content": [{"type": "text",
+                    "text": json!({"pid": 7, "status": "accepted"}).to_string()}], "isError": false}});
+                let note = json!({"jsonrpc": "2.0", "method": fantastic_web_mcp::SETTLE_METHOD,
+                    "params": {"type": "settle", "re": 7, "status": "completed",
+                               "data": {"outcomes": [{"pid": 8, "status": "completed", "result": {"ok": true}}]}}});
+                let order = if early { [note, ack] } else { [ack, note] };
+                for v in order {
+                    w.write_all(format!("{v}\n").as_bytes()).await.unwrap();
+                }
+            }
+        });
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("fc-send-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d.join("cli")
+    }
+
+    /// `fantastic send` prints the ACK alone (#795, Q4).
+    #[tokio::test]
+    async fn send_answers_only_the_ack() {
+        let cli = scratch("ack");
+        fake_channel(&cli, false).await;
+        let ack = call(json!({"target": "t", "payload": {"type": "v"}}), &cli).await.unwrap();
+        assert_eq!(ack, json!({"pid": 7, "status": "accepted"}));
+    }
+
+    /// The settle is read from the session's notification — also when it was written
+    /// before the ack.
+    #[tokio::test]
+    async fn the_settle_is_read_from_the_notification_in_either_order() {
+        for early in [false, true] {
+            let cli = scratch(if early { "early" } else { "late" });
+            fake_channel(&cli, early).await;
+            let row = call_settled(json!({"target": "t", "payload": {"type": "v"}}), &cli).await.unwrap();
+            assert_eq!(row, json!({"pid": 8, "status": "completed", "result": {"ok": true}}), "early={early}");
+        }
     }
 
     #[test]

@@ -60,7 +60,7 @@ async fn make(kernel: &Arc<Kernel>, rec: Value) {
     for (k, v) in rec.as_object().unwrap() {
         p[k] = v.clone();
     }
-    let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel"), p)])
+    let r = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from("kernel"), p)])
         .await
         .remove(0)
         .result;
@@ -113,7 +113,7 @@ async fn host_with(
 }
 
 async fn give_port(kernel: &Arc<Kernel>, web_id: &str, port: u16) {
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "update_agent", "id": web_id, "port": port}),
         )])
@@ -124,7 +124,7 @@ async fn give_port(kernel: &Arc<Kernel>, web_id: &str, port: u16) {
 }
 
 async fn verb(kernel: &Arc<Kernel>, web_id: &str, payload: Value) -> Value {
-    kernel.operator_send(vec![Item::new(AgentId::from(web_id), payload)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from(web_id), payload)])
         .await
         .remove(0)
         .result

@@ -94,7 +94,7 @@ async fn web_alone_has_no_ws_endpoint() {
     let web_id = "web_alone";
 
     // create + boot web
-    let create_reply = kernel.operator_send(vec![Item::new(
+    let create_reply = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -111,7 +111,7 @@ async fn web_alone_has_no_ws_endpoint() {
         "create: {create_reply}"
     );
     host_holds_legs_lines(&kernel, web_id);
-    let boot_reply = kernel.operator_send(vec![Item::new(
+    let boot_reply = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "boot"}),
         )])
@@ -135,7 +135,7 @@ async fn web_alone_has_no_ws_endpoint() {
     );
 
     // cleanup
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "stop"}),
         )])
@@ -155,7 +155,7 @@ async fn web_with_ws_child_serves_ws() {
     let port = free_port();
     let web_id = "web_with_ws";
 
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -167,7 +167,7 @@ async fn web_with_ws_child_serves_ws() {
         .await
         .remove(0)
         .result;
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent", "parent_id": web_id,
@@ -185,7 +185,7 @@ async fn web_with_ws_child_serves_ws() {
         .remove(0)
         .result;
     host_holds_legs_lines(&kernel, web_id);
-    let boot_reply = kernel.operator_send(vec![Item::new(
+    let boot_reply = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "boot"}),
         )])
@@ -211,7 +211,7 @@ async fn web_with_ws_child_serves_ws() {
     assert_eq!(v["id"], "x1");
     assert!(v["data"]["tree"].is_array(), "{v}");
 
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "stop"}),
         )])
@@ -229,7 +229,7 @@ async fn web_with_rest_child_serves_rest() {
     let web_id = "web_with_rest";
     let rest_id = "wr_child";
 
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -241,7 +241,7 @@ async fn web_with_rest_child_serves_rest() {
         .await
         .remove(0)
         .result;
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent",
@@ -261,7 +261,7 @@ async fn web_with_rest_child_serves_rest() {
         .remove(0)
         .result;
     host_holds_legs_lines(&kernel, web_id);
-    let boot_reply = kernel.operator_send(vec![Item::new(
+    let boot_reply = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "boot"}),
         )])
@@ -311,7 +311,7 @@ async fn web_with_rest_child_serves_rest() {
         "the settle's shape"
     );
 
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "stop"}),
         )])
@@ -343,7 +343,7 @@ async fn stage_web_with_ws_leg(
     open_leg: bool,
 ) -> Arc<Kernel> {
     let kernel = mk_kernel(tmp, true, false);
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -369,12 +369,12 @@ async fn stage_web_with_ws_leg(
         // never `"*"`.
         ws_rec["can"] = json!({"kernel_state": {"call": ["*"]}, "$parent": {"call": ["*"]}});
     }
-    let _ = kernel.operator_send(vec![Item::new(AgentId::from("kernel"), ws_rec)])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel"), ws_rec)])
         .await
         .remove(0)
         .result;
     host_holds_legs_lines(&kernel, web_id);
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "boot"}),
         )])
@@ -562,7 +562,7 @@ async fn round_trip(
 /// the WS leg its line on it — the leg is the sender of every frame now, so its
 /// own line is what makes a browser fetch reach disk at all.
 async fn make_file_bridge(kernel: &Arc<Kernel>, id: &str, root: &std::path::Path, leg: &str) {
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent",
@@ -576,7 +576,7 @@ async fn make_file_bridge(kernel: &Arc<Kernel>, id: &str, root: &std::path::Path
         .remove(0)
         .result;
     assert!(r.get("error").is_none(), "create file_bridge: {r}");
-    let g = kernel.operator_send(vec![Item::new(
+    let g = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "update_agent", "id": leg, "can": {"kernel_state": {"call": ["*"]}, id: {"call": ["*"]}}}),
         )])
@@ -864,7 +864,7 @@ async fn open_leg_autowatches_and_calls_run_as_the_leg() {
     let kernel = stage_web_with_ws(&tmp, port, web_id).await;
     // The leg holds its host only: a line on the root would reach every agent of
     // the tree, the private one included.
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "update_agent", "id": format!("{web_id}_ws"),
                    "can": {"$parent": {"call": ["*"]}}}),
@@ -874,7 +874,7 @@ async fn open_leg_autowatches_and_calls_run_as_the_leg() {
         .result;
     assert!(r.get("error").is_none(), "{r}");
     // A private agent: nothing may call it.
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -1071,7 +1071,7 @@ async fn web_rest_octet_leg_edit_and_read_stream() {
     let fb_id = "fb_octet";
 
     // web host.
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -1083,7 +1083,7 @@ async fn web_rest_octet_leg_edit_and_read_stream() {
         .result;
     // file_bridge — OPEN (its own io-bridge gate) + accept the REST surface as a
     // caller (two-sided call gate: ingress side).
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel_state",
@@ -1095,7 +1095,7 @@ async fn web_rest_octet_leg_edit_and_read_stream() {
         .remove(0)
         .result;
     // web_rest child — may reach the file_bridge (egress side).
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent", "parent_id": web_id,
@@ -1108,7 +1108,7 @@ async fn web_rest_octet_leg_edit_and_read_stream() {
         .remove(0)
         .result;
     host_holds_legs_lines(&kernel, web_id);
-    let boot_reply = kernel.operator_send(vec![Item::new(
+    let boot_reply = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "boot"}),
         )])
@@ -1177,7 +1177,7 @@ async fn web_rest_octet_leg_edit_and_read_stream() {
     // The body is the raw file bytes — reflects the applied patch, never base64.
     assert_eq!(&body.bytes[..], b"goodbye world\n", "read_stream body");
 
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "stop"}),
         )])
@@ -1201,7 +1201,7 @@ async fn sealed_rest_leg_answers_403_and_names_the_seal() {
     let web_id = "web_sealed_rest";
     let rest_id = "wr_sealed";
 
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
                    "handler_module": HANDLER_MODULE, "id": web_id, "port": port}),
@@ -1211,7 +1211,7 @@ async fn sealed_rest_leg_answers_403_and_names_the_seal() {
         .result;
     // NO ingress_rule — the sealed-by-default leg. Its `can` is wide open, so a
     // 200 here could only mean the ingress gate never ran.
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "create_agent", "parent_id": web_id,
                    "handler_module": "web_rest.tools", "id": rest_id,
@@ -1221,7 +1221,7 @@ async fn sealed_rest_leg_answers_403_and_names_the_seal() {
         .remove(0)
         .result;
     host_holds_legs_lines(&kernel, web_id);
-    let boot_reply = kernel.operator_send(vec![Item::new(
+    let boot_reply = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "boot"}),
         )])
@@ -1260,7 +1260,7 @@ async fn sealed_rest_leg_answers_403_and_names_the_seal() {
         assert_eq!(b["reason"], "unauthorized", "{path}: {b}");
     }
 
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "stop"}),
         )])
@@ -1279,7 +1279,7 @@ async fn open_rest_leg_dispatches_including_the_reflect_routes() {
     let web_id = "web_open_rest";
     let rest_id = "wr_open";
 
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
                    "handler_module": HANDLER_MODULE, "id": web_id, "port": port}),
@@ -1287,7 +1287,7 @@ async fn open_rest_leg_dispatches_including_the_reflect_routes() {
         .await
         .remove(0)
         .result;
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "create_agent", "parent_id": web_id,
                    "handler_module": "web_rest.tools", "id": rest_id,
@@ -1298,7 +1298,7 @@ async fn open_rest_leg_dispatches_including_the_reflect_routes() {
         .remove(0)
         .result;
     host_holds_legs_lines(&kernel, web_id);
-    let boot_reply = kernel.operator_send(vec![Item::new(
+    let boot_reply = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "boot"}),
         )])
@@ -1331,7 +1331,7 @@ async fn open_rest_leg_dispatches_including_the_reflect_routes() {
         .expect("http get");
     assert_eq!(resp.status().as_u16(), 200);
 
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "stop"}),
         )])
@@ -1431,14 +1431,14 @@ async fn stage_host(
                "can": {"kernel_state": {"call": ["*"]}, "kernel": {"call": ["*"]}, fb_id: {"call": ["*"]}}}),
         json!({"type": "update_agent", "id": web_id, "can": {"$parent": {"call": ["*"]}, fb_id: {"call": ["*"]}}}),
     ] {
-        let reply = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), item)])
+        let reply = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), item)])
             .await
             .remove(0)
             .result;
         assert!(reply.get("error").is_none(), "stage: {reply}");
     }
     host_holds_legs_lines(&kernel, web_id);
-    let boot = kernel.operator_send(vec![Item::new(
+    let boot = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "boot"}),
         )])
@@ -1722,7 +1722,7 @@ async fn rest_post_accepts_bodies_over_2mb() {
 
 /// Shared teardown.
 async fn stop(kernel: &Arc<Kernel>, web_id: &str) {
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "stop"}),
         )])
@@ -2012,7 +2012,7 @@ async fn reflect_sentence_and_verbs_match_python() {
     let tmp = TempDir::new().unwrap();
     let port = free_port();
     let kernel = stage_host(&tmp, port, "web_r", "rest", "fb_r").await;
-    let reply = kernel.operator_send(vec![Item::new(
+    let reply = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("web_r"),
             json!({"type": "reflect"}),
         )])
@@ -2119,7 +2119,7 @@ async fn a_reflect_flag_value_that_is_not_listed_is_refused_by_the_target() {
     let port = free_port();
     let kernel = stage_host(&tmp, port, "web_qr", "rest", "fb_qr").await;
     for q in ["tree=deep", "bundles=none"] {
-        let r = kernel.operator_send(vec![Item::new(
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("web_qr"),
                 routes::reflect_payload(q),
             )])
@@ -2140,7 +2140,7 @@ async fn boot_and_stop_replies_match_python() {
     let port = free_port();
     let kernel = stage_host(&tmp, port, "web_b", "rest", "fb_b").await;
     host_holds_legs_lines(&kernel, "web_b");
-    let boot = kernel.operator_send(vec![Item::new(
+    let boot = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("web_b"),
             json!({"type": "boot"}),
         )])
@@ -2148,7 +2148,7 @@ async fn boot_and_stop_replies_match_python() {
         .remove(0)
         .result;
     assert_eq!(boot, json!({"running": true, "surfaces": ["rest"]}));
-    let stopped = kernel.operator_send(vec![Item::new(
+    let stopped = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("web_b"),
             json!({"type": "stop"}),
         )])
@@ -2156,7 +2156,7 @@ async fn boot_and_stop_replies_match_python() {
         .remove(0)
         .result;
     assert_eq!(stopped, json!({"stopped": true}));
-    let again = kernel.operator_send(vec![Item::new(
+    let again = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("web_b"),
             json!({"type": "stop"}),
         )])
@@ -2166,7 +2166,7 @@ async fn boot_and_stop_replies_match_python() {
     assert_eq!(again, json!({"stopped": false}));
 
     // A record with no `port` RAISES — no default, no fallback.
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
                    "handler_module": HANDLER_MODULE, "id": "web_noport"}),
@@ -2175,7 +2175,7 @@ async fn boot_and_stop_replies_match_python() {
         .remove(0)
         .result;
     host_holds_legs_lines(&kernel, "web_noport");
-    let boot = kernel.operator_send(vec![Item::new(
+    let boot = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("web_noport"),
             json!({"type": "boot"}),
         )])
@@ -2199,7 +2199,7 @@ async fn mount_unmount_and_unknown_verb_match_python() {
     let call = |payload: Value| {
         let kernel = Arc::clone(&kernel);
         async move {
-            kernel.operator_send(vec![Item::new(AgentId::from("web_m"), payload)])
+            fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("web_m"), payload)])
                 .await
                 .remove(0)
                 .result
@@ -2270,7 +2270,7 @@ async fn a_reboot_replaces_a_legs_routes_and_unmount_removes_them_all() {
         "{first:?}"
     );
     host_holds_legs_lines(&kernel, "web_rb");
-    let again = kernel.operator_send(vec![Item::new(
+    let again = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("web_rb"),
             json!({"type": "boot"}),
         )])
@@ -2279,7 +2279,7 @@ async fn a_reboot_replaces_a_legs_routes_and_unmount_removes_them_all() {
         .result;
     assert_eq!(again["running"], json!(true), "{again}");
     assert_eq!(paths(&*table.read().await), first, "the re-boot body");
-    let out = kernel.operator_send(vec![Item::new(
+    let out = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("web_rb"),
             json!({"type": "unmount", "child_id": "rest_rb"}),
         )])
@@ -2306,13 +2306,13 @@ async fn a_child_created_after_boot_mounts_only_through_mount() {
     for item in [json!({"type": "create_agent", "parent_id": "kernel",
                "handler_module": HANDLER_MODULE, "id": web_id, "port": port})]
     {
-        let _ = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), item)])
+        let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), item)])
             .await
             .remove(0)
             .result;
     }
     // Unmount before boot is refused, not silently ignored.
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "stop"}),
         )])
@@ -2320,7 +2320,7 @@ async fn a_child_created_after_boot_mounts_only_through_mount() {
         .remove(0)
         .result;
     assert_eq!(
-        kernel.operator_send(vec![Item::new(
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from(web_id),
                 json!({"type": "unmount", "child_id": "ws_hot"}),
             )])
@@ -2330,7 +2330,7 @@ async fn a_child_created_after_boot_mounts_only_through_mount() {
         json!({"error": "web.unmount: not running"})
     );
     host_holds_legs_lines(&kernel, web_id);
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "boot"}),
         )])
@@ -2340,7 +2340,7 @@ async fn a_child_created_after_boot_mounts_only_through_mount() {
     wait_until_port_accepts(port).await;
 
     // A child created AFTER boot is not routed until it is mounted.
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": web_id,
                    "handler_module": "web_ws.tools", "can": {"$parent": {"call": ["watch"]}}, "id": "ws_hot",
@@ -2359,7 +2359,7 @@ async fn a_child_created_after_boot_mounts_only_through_mount() {
     assert_eq!(resp.status().as_u16(), 404, "no auto-remount");
 
     assert_eq!(
-        kernel.operator_send(vec![Item::new(
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from(web_id),
                 json!({"type": "mount", "child_id": "ws_hot"}),
             )])
@@ -2374,7 +2374,7 @@ async fn a_child_created_after_boot_mounts_only_through_mount() {
     drop(sock);
 
     assert_eq!(
-        kernel.operator_send(vec![Item::new(
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from(web_id),
                 json!({"type": "unmount", "child_id": "ws_hot"}),
             )])
@@ -2426,14 +2426,14 @@ async fn boot_announces_say_to_cli() {
                "handler_module": HANDLER_MODULE, "id": "web_say", "port": port,
                "can": {"$parent": {"call": ["*"]}, "cli": {"call": ["*"]}}}),
     ] {
-        let reply = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), item)])
+        let reply = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), item)])
             .await
             .remove(0)
             .result;
         assert!(reply.get("error").is_none(), "stage: {reply}");
     }
     host_holds_legs_lines(&kernel, "web_say");
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("web_say"),
             json!({"type": "boot"}),
         )])
@@ -2483,14 +2483,14 @@ async fn boot_announces_the_bound_host() {
                "host": "localhost",
                "can": {"$parent": {"call": ["*"]}, "cli": {"call": ["*"]}}}),
     ] {
-        let reply = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), item)])
+        let reply = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), item)])
             .await
             .remove(0)
             .result;
         assert!(reply.get("error").is_none(), "stage: {reply}");
     }
     host_holds_legs_lines(&kernel, "web_host");
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("web_host"),
             json!({"type": "boot"}),
         )])
@@ -2568,13 +2568,13 @@ async fn client_close_is_echoed_with_its_code() {
                "handler_module": "web_ws.tools", "can": {"$parent": {"call": ["watch"]}}, "id": "ws_close",
                "ingress_rule": "allow_all_ingress"}),
     ] {
-        let _ = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), item)])
+        let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), item)])
             .await
             .remove(0)
             .result;
     }
     host_holds_legs_lines(&kernel, web_id);
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "boot"}),
         )])
@@ -2658,7 +2658,7 @@ async fn ws_watcher_gets_a_binary_frame_for_a_bytes_payload() {
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let blob: Vec<u8> = vec![0xCA, 0xFE, 0xBA, 0xBE, 0x01];
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "write_stream", "path": "x.bin"}),
         )
@@ -2893,7 +2893,7 @@ async fn a_missing_or_refused_file_is_a_bare_404() {
     // reads each chunk AS ITSELF, so the kernel now answers it the unknown answer,
     // and the browser gets the same bare 404 as a missing file — a refused read
     // leaks no existence.
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "update_agent", "id": "web_fp", "can": {}}),
         )])
@@ -2926,7 +2926,7 @@ async fn the_web_serves_only_what_the_list_exposes() {
     std::fs::write(served.join("docs/a.pdf"), b"%PDF-a").unwrap();
     std::fs::write(served.join("docs/b.pdf"), b"%PDF-b").unwrap();
     std::fs::write(served.join("secret.txt"), b"private\n").unwrap();
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "update_agent", "id": "fb_al", "allow": ["docs/a.pdf"]}),
         )])
@@ -3235,7 +3235,7 @@ async fn foreign_post_is_403_own_and_originless_pass_get_is_not_gated() {
         .unwrap();
     assert_eq!(r.status(), 200);
     // Loopback by default, and reflect names it.
-    let reflect = kernel.operator_send(vec![Item::new(
+    let reflect = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("web_og"),
             json!({"type": "reflect"}),
         )])
@@ -3263,7 +3263,7 @@ async fn foreign_websocket_upgrade_is_refused_listed_origin_passes() {
     let tmp = TempDir::new().unwrap();
     let port = free_port();
     let kernel = stage_web_with_ws(&tmp, port, "web_ow").await;
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": "web_ow",
                    "allowed_origins": ["https://ui.example"]}),
@@ -3449,14 +3449,14 @@ async fn the_file_proxy_reads_on_until_a_truthy_eof() {
         json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "odd_source.tools",
                "id": "broken"}),
     ] {
-        let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), item)])
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), item)])
             .await
             .remove(0)
             .result;
         assert!(r.get("error").is_none(), "stage: {r}");
     }
     host_holds_legs_lines(&kernel, "web_odd");
-    let boot = kernel.operator_send(vec![Item::new(
+    let boot = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("web_odd"),
             json!({"type": "boot"}),
         )])
@@ -3549,7 +3549,7 @@ async fn deleting_one_web_agent_frees_only_its_own_listener() {
     let tmp = TempDir::new().unwrap();
     let (pa, pb) = (free_port(), free_port());
     let kernel = stage_host(&tmp, pa, "web_s4a", "rest_s4a", "fb_s4a").await;
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
                    "handler_module": HANDLER_MODULE, "id": "web_s4b", "port": pb}),
@@ -3562,7 +3562,7 @@ async fn deleting_one_web_agent_frees_only_its_own_listener() {
     let reflect = |id: &'static str| {
         let kernel = Arc::clone(&kernel);
         async move {
-            kernel.operator_send(vec![Item::new(
+            fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                     AgentId::from(id),
                     json!({"type": "reflect"}),
                 )])
@@ -3573,7 +3573,7 @@ async fn deleting_one_web_agent_frees_only_its_own_listener() {
     };
     assert_eq!(reflect("web_s4a").await["running"], json!(true));
     assert_eq!(reflect("web_s4b").await["running"], json!(true));
-    let gone = kernel.operator_send(vec![Item::new(
+    let gone = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "delete_agent", "id": "web_s4b"}),
         )])
@@ -3662,7 +3662,7 @@ async fn the_hosts_record_is_checked_by_its_declaration() {
         let mut create = json!({"type": "create_agent", "parent_id": "kernel",
                                 "handler_module": HANDLER_MODULE, "id": "web_rec"});
         create[field] = value.clone();
-        let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), create)])
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), create)])
             .await
             .remove(0)
             .result;
@@ -3676,7 +3676,7 @@ async fn the_hosts_record_is_checked_by_its_declaration() {
 async fn fetch_file_is_checked_by_its_declaration() {
     let tmp = TempDir::new().unwrap();
     let kernel = mk_kernel(&tmp, false, false);
-    let made = kernel.operator_send(vec![Item::new(
+    let made = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
                    "handler_module": HANDLER_MODULE, "id": "web_ff"}),
@@ -3709,7 +3709,7 @@ async fn fetch_file_is_checked_by_its_declaration() {
     ] {
         let mut payload = args;
         payload["type"] = json!("fetch_file");
-        let r = kernel.operator_send(vec![Item::new(AgentId::from("web_ff"), payload.clone())])
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("web_ff"), payload.clone())])
             .await
             .remove(0)
             .result;

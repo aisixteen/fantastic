@@ -74,7 +74,8 @@ fn a_far_state_folder_is_served_found_and_kept_apart_from_the_work_folder() {
         "{said}{}",
         String::from_utf8_lossy(&sent.stderr)
     );
-    assert!(said.contains("completed"), "{said}");
+    // `send` prints the ACK (#795, Q4): the far kernel took the call
+    assert!(said.contains("\"accepted\""), "{said}");
 
     // a second start naming another work folder cannot change the running kernel
     let again = Command::new(bin())

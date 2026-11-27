@@ -72,8 +72,8 @@ async fn replay(handler: &str, scenario: &Value) -> Vec<Value> {
     for (n, step) in scenario["steps"].as_array().unwrap().iter().enumerate() {
         let item = Item::new(AgentId::from("mem"), step["send"].clone());
         let reply = match step["as"].as_str() {
-            None => k.operator_send(vec![item]).await.remove(0).result,
-            Some(who) => as_agent(AgentId::from(who), k.operator_send(vec![item])).await.remove(0).result,
+            None => fantastic_kernel::test_support::send_settled(&k, vec![item]).await.remove(0).result,
+            Some(who) => as_agent(AgentId::from(who), fantastic_kernel::test_support::send_settled(&k, vec![item])).await.remove(0).result,
         };
         for (key, want) in step["expect"].as_object().unwrap() {
             assert_eq!(

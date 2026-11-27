@@ -89,7 +89,7 @@ async fn a_literal_route_beats_a_catch_all_mounted_before_it() {
         for (k, v) in rec.as_object().unwrap() {
             p[k] = v.clone();
         }
-        let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel"), p)])
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel"), p)])
             .await
             .remove(0)
             .result;
@@ -97,7 +97,7 @@ async fn a_literal_route_beats_a_catch_all_mounted_before_it() {
     }
     // THE BOOT MOUNT WALK.
     super::host_holds_legs_lines(&kernel, web_id);
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "boot"}),
         )])
@@ -130,7 +130,7 @@ async fn a_literal_route_beats_a_catch_all_mounted_before_it() {
     // RE-ORDERED ON EVERY MOUNT AND UNMOUNT: the catch-all re-mounted LAST is
     // still behind the literal, and with the literal unmounted the catch-all
     // takes the path.
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "mount", "child_id": "a_ws"}),
         )])
@@ -142,7 +142,7 @@ async fn a_literal_route_beats_a_catch_all_mounted_before_it() {
         first_ws_match(&*table.read().await, "/z_literal/ws").map(|(p, _)| p),
         Some("/z_literal/ws".to_string())
     );
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "unmount", "child_id": "z_literal"}),
         )])
@@ -193,14 +193,14 @@ async fn a_web_ws_route_leg_beside_a_catch_all_leg_gets_its_own_url() {
         for (k, v) in rec.as_object().unwrap() {
             p[k] = v.clone();
         }
-        let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel"), p)])
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel"), p)])
             .await
             .remove(0)
             .result;
         assert_eq!(r["id"], rec["id"], "{r}");
     }
     super::host_holds_legs_lines(&kernel, web_id);
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "boot"}),
         )])

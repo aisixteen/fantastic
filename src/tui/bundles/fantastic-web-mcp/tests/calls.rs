@@ -55,7 +55,7 @@ impl Handler for Sleeper {
 async fn op(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
     // a send outside every dispatch is the operator's
     let item = Item::new(AgentId::from(target), payload);
-    Arc::clone(k).operator_send(vec![item]).await.remove(0).result
+    fantastic_kernel::test_support::send_settled(&Arc::clone(k), vec![item]).await.remove(0).result
 }
 
 /// A kernel with a leg `mcp` and a `sleeper` it may call.
@@ -87,38 +87,82 @@ fn body(reply: &Value) -> Value {
     serde_json::from_str(text).unwrap_or(Value::Null)
 }
 
+/// Writing one notification on the session.
+type Push = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+/// The settle notifications a tool call pushes on the session, as the carrier gets them.
+fn session() -> (impl FnOnce(Value) -> Push + Send + 'static, tokio::sync::mpsc::UnboundedReceiver<Value>) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let push = move |note: Value| -> Push {
+        Box::pin(async move {
+            let _ = tx.send(note);
+        })
+    };
+    (push, rx)
+}
+
+/// The ack a tool call answered: `{pid, status}`.
+fn ack(reply: &Value) -> Value {
+    body(reply)
+}
+
+/// EVERYTHING ASYNC (#795): a tool call answers its ACK at once — while the work
+/// still runs — and its settle comes later as the session's notification, naming the
+/// ack's pid; the item's row carries the result. No wait bound either way.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_call_answers_its_outcome_when_it_ends_with_no_wait_bound() {
+async fn a_call_answers_its_ack_then_its_settle_as_a_notification() {
     let (_k, core) = setup().await;
-    let reply = core.handle(&call(1_500), |_| {}).await.expect("a reply");
-    let b = body(&reply);
-    assert_eq!(b[0]["status"], "completed", "{reply}");
-    assert_eq!(b[0]["result"]["slept_ms"], 1_500);
+    let (push, mut notes) = session();
+    let started = std::time::Instant::now();
+    let reply = core.handle(&call(1_500), |_| {}, push).await.expect("a reply");
+    assert!(started.elapsed() < std::time::Duration::from_millis(1_000), "the ack does not wait for the work");
+    let a = ack(&reply);
+    assert_eq!(a["status"], "accepted", "{reply}");
     assert_eq!(reply["result"]["isError"], false);
+    let pid = a["pid"].as_i64().expect("the ack names the call");
+    assert!(notes.try_recv().is_err(), "nothing settled yet");
+    let note = notes.recv().await.expect("the settle notification");
+    assert_eq!(note["method"], fantastic_web_mcp::SETTLE_METHOD, "{note}");
+    assert!(note.get("id").is_none(), "a notification, not a reply: {note}");
+    let p = &note["params"];
+    assert_eq!(p["type"], "settle");
+    assert_eq!(p["re"], pid, "{note}");
+    assert_eq!(p["status"], "completed", "{note}");
+    let row = &p["data"]["outcomes"][0];
+    assert_eq!(row["status"], "completed", "{note}");
+    assert_eq!(row["result"]["slept_ms"], 1_500);
+    assert!(started.elapsed() >= std::time::Duration::from_millis(1_500));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cancel_kills_a_call_still_running() {
     let (k, core) = setup().await;
+    let (push, mut notes) = session();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let c = Arc::clone(&core);
-    let pending = tokio::spawn(async move { c.handle(&call(10_000), move |t| { let _ = tx.send(t); }).await });
+    let reply = core.handle(&call(10_000), move |t| { let _ = tx.send(t); }, push).await.expect("a reply");
     let task = rx.await.expect("a task id");
+    assert_eq!(ack(&reply)["pid"], task.get(), "the ack names the task");
     assert!(k.tasks.contains(&task));
     let r = core.cancel(&task).await;
     assert_eq!(r["cancelled"], true, "{r}");
     assert!(!k.tasks.contains(&task), "gone from the task table");
-    let reply = pending.await.expect("joined").expect("a reply");
-    assert_eq!(reply["result"]["isError"], true, "a cancelled call answers as an error: {reply}");
+    let note = notes.recv().await.expect("the settle notification");
+    assert_eq!(note["params"]["re"], task.get(), "{note}");
+    assert_eq!(note["params"]["status"], "cancelled", "a cancelled call settles cancelled: {note}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_call_the_leg_was_not_granted_is_refused_as_is_error() {
+async fn a_call_the_leg_was_not_granted_settles_its_refusal() {
     let (k, core) = setup().await;
     let root = k.root().expect("root").id.0.clone();
     let msg = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "send",
         "arguments": {"items": [{"target": root, "payload": {"type": "delete_agent", "id": "sleeper"}}]}}});
-    let reply = core.handle(&msg, |_| {}).await.expect("a reply");
-    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    let (push, mut notes) = session();
+    let reply = core.handle(&msg, |_| {}, push).await.expect("a reply");
+    assert_eq!(ack(&reply)["status"], "accepted", "the hand-in is accepted: {reply}");
+    let note = notes.recv().await.expect("the settle notification");
+    let row = &note["params"]["data"]["outcomes"][0];
+    assert_ne!(row["status"], "completed", "the item is refused: {note}");
+    assert!(row["result"]["error"].is_string(), "{note}");
     assert!(k.exists("sleeper"), "nothing was deleted");
 }

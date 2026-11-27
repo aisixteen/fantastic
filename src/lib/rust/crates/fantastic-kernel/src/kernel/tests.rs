@@ -438,8 +438,7 @@ async fn state_events_are_python_shape() {
     let _t = kernel.add_state_subscriber(Arc::new(move |ev: &Value, _b| {
         sink.lock().expect("sink poisoned").push(ev.clone());
     }));
-    let _ = kernel
-        .operator_send(vec![crate::outcome::Item::new(
+    let _ = crate::test_support::send_settled(&kernel, vec![crate::outcome::Item::new(
             a.id.clone(),
             json!({"type": "nope"}),
         )])
@@ -599,8 +598,7 @@ async fn hooked_tree(log: &Arc<HookLog>, raises: bool) -> Arc<Kernel> {
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     for (id, parent) in [("mid", "kernel"), ("leaf", "mid")] {
-        let _ = kernel
-            .operator_send(vec![crate::Item::new(
+        let _ = crate::test_support::send_settled(&kernel, vec![crate::Item::new(
                 AgentId::from("kernel"),
                 json!({"type":"create_agent","parent_id":parent,"handler_module":"hooked.tools","id":id}),
             )])
@@ -675,8 +673,7 @@ async fn shutdown_never_falls_back_to_on_delete() {
     );
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
-    let _ = kernel
-        .operator_send(vec![crate::Item::new(
+    let _ = crate::test_support::send_settled(&kernel, vec![crate::Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent","parent_id":"kernel","handler_module":"only_delete.tools","id":"od"}),
         )])
@@ -841,8 +838,7 @@ async fn declaring_tree(shutdown: bool, calls: &Arc<AtomicUsize>) -> Arc<Kernel>
     );
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
-    let _ = kernel
-        .operator_send(vec![crate::Item::new(
+    let _ = crate::test_support::send_settled(&kernel, vec![crate::Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent","parent_id":"kernel",
                    "handler_module":"declares.tools","id":"node"}),

@@ -81,7 +81,7 @@ fn seed(dir: &std::path::Path) {
 async fn act(kernel: &std::sync::Arc<Kernel>, target: &str, payload: Value) -> Value {
     let k = std::sync::Arc::clone(kernel);
     let item = Item::new(AgentId::from(target), payload);
-    fantastic_kernel::test_support::as_agent(AgentId::from("user"), k.send(vec![item])).await.remove(0).result
+    fantastic_kernel::test_support::as_agent(AgentId::from("user"), fantastic_kernel::test_support::settled(&k, vec![item])).await.remove(0).result
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -101,7 +101,7 @@ async fn the_human_drives_the_specified_set_in_process() {
     let kernel = std::sync::Arc::clone(&booted.kernel);
     // The shell's start: the root names the store, the KERNEL starts (root,
     // store, flusher), then everyone else boots.
-    kernel.operator_send(vec![Item::new(
+    fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"update_agent","id":bootstrap::DEFAULT_ROOT_ID,"memory_store_id":"memory"}),
         )])
@@ -112,7 +112,7 @@ async fn the_human_drives_the_specified_set_in_process() {
         if out["booted"].as_array().unwrap().contains(&json!(id.0)) {
             continue;
         }
-        kernel.operator_send(vec![Item::new(id.clone(), json!({"type":"boot"}))])
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(id.clone(), json!({"type":"boot"}))])
             .await;
     }
 
@@ -184,7 +184,7 @@ async fn the_human_drives_the_specified_set_in_process() {
 
     // ── the execution rows land in the memory store's file ───────────────
     kernel.flush_executions().await;
-    let settles = kernel.operator_send(vec![Item::new(
+    let settles = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("memory"),
             json!({"type":"read","kinds":["settle"]}),
         )])

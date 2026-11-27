@@ -22,8 +22,7 @@ pub async fn started(kernel: &Arc<Kernel>, a: &AgentId, payload: Value) -> Value
         Ok(ann) => ann,
         Err(settled) => return settled,
     };
-    let st = kernel
-        .operator_send(vec![Item::new(a.clone(), json!({"type": "status", "job_id": ann["job_id"]}))])
+    let st = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(a.clone(), json!({"type": "status", "job_id": ann["job_id"]}))])
         .await
         .remove(0)
         .result;

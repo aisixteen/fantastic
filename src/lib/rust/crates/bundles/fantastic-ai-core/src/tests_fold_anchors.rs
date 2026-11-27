@@ -214,8 +214,7 @@ async fn closed(kernel: &Arc<Kernel>, agent: &AgentId, tag: &str, big: usize) ->
 }
 
 async fn call(kernel: &Arc<Kernel>, target: &AgentId, payload: Value) -> Value {
-    let out = crate::tests::settled(kernel, kernel
-        .operator_send(vec![Item::new(target.clone(), payload)]))
+    let out = crate::tests::settled(kernel, fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(target.clone(), payload)]))
         .await
         .remove(0);
     assert_eq!(out.status.as_str(), "completed", "{:?}", out.result);
@@ -227,8 +226,7 @@ async fn set(kernel: &Arc<Kernel>, agent: &AgentId, fields: Value) {
     for (k, v) in fields.as_object().unwrap() {
         p[k] = v.clone();
     }
-    let _ = kernel
-        .operator_send(vec![Item::new(AgentId::from("kernel_state"), p)])
+    let _ = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from("kernel_state"), p)])
         .await;
 }
 
@@ -616,8 +614,7 @@ async fn context_forget_include_cleared() {
     assert!(new.iter().all(|r| left.contains(r)));
     assert_eq!(out["pruned"], old.len(), "{out}");
     assert_eq!(kept["pruned"], 0, "{kept}");
-    let bad = kernel
-        .operator_send(vec![Item::new(
+    let bad = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             backend.clone(),
             json!({"type": "context_forget", "include_cleared": "yes"}),
         )])
@@ -635,8 +632,7 @@ async fn context_forget_waits_for_a_running_turn() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "fw").await;
     let s = script(&backend, vec![pass(DONE)], Duration::from_millis(400));
-    let _ = kernel
-        .operator_send(vec![Item::new(backend.clone(), json!({"type": "send", "text": "go"}))])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(backend.clone(), json!({"type": "send", "text": "go"}))])
         .await;
     for _ in 0..250 {
         if !s.requests.lock().unwrap().is_empty() {
@@ -648,15 +644,13 @@ async fn context_forget_waits_for_a_running_turn() {
         !s.requests.lock().unwrap().is_empty(),
         "the turn reached the model"
     );
-    let busy = kernel
-        .operator_send(vec![Item::new(backend.clone(), json!({"type": "context_forget"}))])
+    let busy = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(backend.clone(), json!({"type": "context_forget"}))])
         .await
         .remove(0)
         .result;
     assert_eq!(busy["reason"], json!("locked"), "{busy}");
     assert!(crate::tests::settle(&kernel).await);
-    let out = kernel
-        .operator_send(vec![Item::new(backend.clone(), json!({"type": "context_forget"}))])
+    let out = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(backend.clone(), json!({"type": "context_forget"}))])
         .await
         .remove(0);
     assert_eq!(out.status.as_str(), "completed", "{:?}", out.result);
@@ -771,8 +765,7 @@ async fn folds_at_a_small_window_and_every_turn_answers() {
             // to be quiet before each message, so every message has its own pass.
             crate::tests::settle(&kernel).await;
             s.passes.lock().unwrap().push_back(pass(reply));
-            let _ = crate::tests::settled(&kernel, kernel
-                .operator_send(vec![Item::new(
+            let _ = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                     backend,
                     json!({"type": "send", "text": text, "client_id": "cell"}),
                 )]))

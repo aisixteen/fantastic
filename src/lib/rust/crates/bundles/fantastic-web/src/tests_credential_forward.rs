@@ -143,8 +143,7 @@ async fn forward_get_to_a_connected_credential_store_is_recorded_as_secret() {
     assert_eq!(set.result["stored"], json!(true), "{}", set.result);
     let (ka, leg, events) = connected_caller(port, &web).await;
 
-    let out = ka
-        .operator_send(vec![Item::new(
+    let out = fantastic_kernel::test_support::send_settled(&ka, vec![Item::new(
             AgentId::from(leg.as_str()),
             json!({"type": "forward", "target": "creds",
                    "payload": {"type": "get", "ref": REF}}),
@@ -175,8 +174,7 @@ async fn forward_set_to_a_connected_credential_store_never_records_the_value_on_
     let (port, web, _ws) = serve_store(&kb).await;
     let (ka, leg, events) = connected_caller(port, &web).await;
 
-    let out = ka
-        .operator_send(vec![Item::new(
+    let out = fantastic_kernel::test_support::send_settled(&ka, vec![Item::new(
             AgentId::from(leg.as_str()),
             json!({"type": "forward", "target": "creds",
                    "payload": {"type": "set", "ref": REF, "fields": {"api_key": VALUE}}}),

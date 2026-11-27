@@ -87,7 +87,7 @@ async fn mk(meta: Value) -> Fixture {
     for (key, v) in meta.as_object().cloned().unwrap_or_default() {
         create[key] = v;
     }
-    let rec = k.operator_send(vec![Item::new(AgentId::from("kernel"), create)])
+    let rec = fantastic_kernel::test_support::send_settled(&k, vec![Item::new(AgentId::from("kernel"), create)])
         .await
         .remove(0)
         .result;
@@ -99,8 +99,8 @@ async fn mk(meta: Value) -> Fixture {
 async fn call(k: &Arc<Kernel>, payload: Value, as_: Option<&str>) -> Outcome {
     let item = Item::new(AgentId::from("creds"), payload);
     match as_ {
-        None => k.operator_send(vec![item]).await.remove(0),
-        Some(who) => as_agent(AgentId::from(who), k.operator_send(vec![item]))
+        None => fantastic_kernel::test_support::send_settled(k, vec![item]).await.remove(0),
+        Some(who) => as_agent(AgentId::from(who), fantastic_kernel::test_support::send_settled(k, vec![item]))
             .await
             .remove(0),
     }
@@ -115,7 +115,7 @@ fn store_meta(k: &Kernel, key: &str) -> Value {
 
 /// The kernel's own answer to an operator call.
 async fn op(k: &Arc<Kernel>, payload: Value) -> Value {
-    k.operator_send(vec![Item::new(AgentId::from("kernel"), payload)])
+    fantastic_kernel::test_support::send_settled(k, vec![Item::new(AgentId::from("kernel"), payload)])
         .await
         .remove(0)
         .result
@@ -773,7 +773,7 @@ async fn another_store_sharing_the_file_reads_nothing_for_its_host() {
     .await;
     assert_eq!(made["id"], json!("other"), "{made}");
     let out =
-        f.k.operator_send(vec![Item::new(
+        fantastic_kernel::test_support::send_settled(&f.k, vec![Item::new(
             AgentId::from("other"),
             json!({"type": "get", "ref": "openai/main", "host": "blocked.invalid"}),
         )])
@@ -852,7 +852,7 @@ async fn a_bad_record_is_refused_at_the_write() {
     let f = mk(json!({})).await;
     let root = f.k.root().unwrap().id.clone();
     let r =
-        f.k.operator_send(vec![Item::new(
+        fantastic_kernel::test_support::send_settled(&f.k, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "create_agent", "parent_id": root.0,
                    "handler_module": HANDLER_MODULE, "id": "bad", "backend": "vault"}),
@@ -968,7 +968,7 @@ async fn concurrent_sets_lose_no_ref() {
             )
         })
         .collect();
-    for out in f.k.operator_send(items).await {
+    for out in fantastic_kernel::test_support::send_settled(&f.k, items).await {
         assert_eq!(out.result["stored"], json!(true), "{}", out.result);
     }
     assert_eq!(store_meta(&f.k, "refs").as_object().unwrap().len(), 16);
@@ -1007,7 +1007,7 @@ async fn a_set_and_a_get_leave_the_value_in_no_row_event_or_store() {
     // reply's secret mark decide whether the value reaches a row.
     let got = as_agent(
         AgentId::from("alice"),
-        f.k.operator_send(vec![Item::new(
+        fantastic_kernel::test_support::send_settled(&f.k, vec![Item::new(
             AgentId::from("creds"),
             json!({"type": "get", "ref": "openai/main"}),
         )
@@ -1020,8 +1020,8 @@ async fn a_set_and_a_get_leave_the_value_in_no_row_event_or_store() {
     f.k.flush_executions().await;
 
     // the memory store holds no value: its whole dump is free of KEY
-    let dumped = f
-        .k.operator_send(vec![Item::new(AgentId::from("memory"), json!({"type": "dump"}))])
+    let dumped = fantastic_kernel::test_support::send_settled(&f
+        .k, vec![Item::new(AgentId::from("memory"), json!({"type": "dump"}))])
         .await
         .remove(0)
         .result
@@ -1034,8 +1034,8 @@ async fn a_set_and_a_get_leave_the_value_in_no_row_event_or_store() {
 
     // the `ledger` verb — the kernel's own read of those rows — shows the get's
     // outcome with the mark, never the value
-    let ledger = f
-        .k.operator_send(vec![Item::new(AgentId::from("kernel"), json!({"type": "ledger"}))])
+    let ledger = fantastic_kernel::test_support::send_settled(&f
+        .k, vec![Item::new(AgentId::from("kernel"), json!({"type": "ledger"}))])
         .await
         .remove(0)
         .result

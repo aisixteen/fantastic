@@ -119,7 +119,7 @@ async fn mk_kernel_with(tmp: &TempDir, extra: Map<String, Value>) -> (Arc<Kernel
     for (k, v) in extra {
         obj.insert(k, v);
     }
-    let _ = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), create)])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), create)])
         .await
         .remove(0)
         .result;
@@ -195,7 +195,7 @@ async fn the_record_declaration_shapes_the_fields() {
         ("inherit_env", json!([""]), "inherit_env[0]"),
         ("inherit_env", json!("PATH"), "inherit_env"),
     ] {
-        let r = kernel.operator_send(vec![Item::new(
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({"type": "update_agent", "id": a.as_str(), field: value.clone()}),
             )])
@@ -213,7 +213,7 @@ async fn reflect_advertises_the_allowlist_not_interpreters() {
     let mut meta = Map::new();
     meta.insert("allowed".to_string(), json!(["ls( .*)?"]));
     let (kernel, a) = mk_kernel_with(&tmp, meta).await;
-    let r = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "reflect"}))])
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "reflect"}))])
         .await
         .remove(0)
         .result;
@@ -253,7 +253,7 @@ async fn every_start_refusal_carries_a_code() {
     let ask = |p: Value| {
         let kernel = Arc::clone(&kernel);
         let a = a.clone();
-        async move { kernel.operator_send(vec![Item::new(a, p)]).await.remove(0).result }
+        async move { fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a, p)]).await.remove(0).result }
     };
 
     let r = ask(json!({"type": "start"})).await;
@@ -292,7 +292,7 @@ async fn an_unknown_job_id_is_not_found_on_every_verb() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     for verb in ["status", "stop", "interrupt"] {
-        let r = kernel.operator_send(vec![Item::new(
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 a.clone(),
                 json!({"type": verb, "job_id": 999_999}),
             )])
@@ -320,7 +320,7 @@ async fn a_job_id_is_the_jobs_task_id_and_nothing_else_names_it() {
     let jid = r["job_id"]
         .as_i64()
         .unwrap_or_else(|| panic!("an int job_id: {r}"));
-    let ps = kernel.operator_send(vec![Item::new(
+    let ps = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "ps"}),
         )])
@@ -336,7 +336,7 @@ async fn a_job_id_is_the_jobs_task_id_and_nothing_else_names_it() {
         "the job's id must be a row of `ps`: {ps}"
     );
     for verb in ["status", "stop", "interrupt", "clear", "write", "output"] {
-        let bad_arg = kernel.operator_send(vec![Item::new(
+        let bad_arg = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 a.clone(),
                 json!({"type": verb, "job_id": jid.to_string()}),
             )])
@@ -349,7 +349,7 @@ async fn a_job_id_is_the_jobs_task_id_and_nothing_else_names_it() {
             "{verb}: {bad_arg}"
         );
     }
-    let snap = kernel.operator_send(vec![Item::new(
+    let snap = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             json!({"type": "status", "job_id": jid}),
         )])
@@ -362,7 +362,7 @@ async fn a_job_id_is_the_jobs_task_id_and_nothing_else_names_it() {
         snap.get("task_id").is_none(),
         "no second copy of the id: {snap}"
     );
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             json!({"type": "stop", "job_id": jid}),
         )])
@@ -383,7 +383,7 @@ async fn start_refuses_unlisted_command() {
         "an unlisted command must refuse naming the patterns: {r}"
     );
     assert!(r["job_id"].is_null(), "nothing may be spawned: {r}");
-    let st = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "status"}))])
+    let st = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "status"}))])
         .await
         .remove(0)
         .result;
@@ -419,7 +419,7 @@ fn callers(kernel: &Arc<Kernel>, a: &AgentId) {
 async fn send_as(kernel: &Arc<Kernel>, who: &str, a: &AgentId, payload: Value) -> Value {
     fantastic_kernel::test_support::as_agent(
         AgentId::from(who),
-        kernel.operator_send(vec![Item::new(a.clone(), payload)]),
+        fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(a.clone(), payload)]),
     )
     .await
     .remove(0)
@@ -478,7 +478,7 @@ for _ in range(300):
     // the handler is in once the job says so: an interrupt before it kills python
     ready(&mut rx).await;
 
-    let n = kernel.operator_send(vec![Item::new(pid.clone(), json!({"type": "interrupt"}))])
+    let n = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(pid.clone(), json!({"type": "interrupt"}))])
         .await
         .remove(0)
         .result;
@@ -512,7 +512,7 @@ async fn stop_sigkills_the_job() {
     assert!(r["job_id"].is_i64(), "start failed: {r}");
     ready(&mut rx).await;
 
-    let n = kernel.operator_send(vec![Item::new(pid.clone(), json!({"type": "stop"}))])
+    let n = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(pid.clone(), json!({"type": "stop"}))])
         .await
         .remove(0)
         .result;
@@ -521,7 +521,7 @@ async fn stop_sigkills_the_job() {
     until(&mut rx, |v| v["type"] == "job_done", 20)
         .await
         .expect("no job_done after stop");
-    let st = kernel.operator_send(vec![Item::new(pid.clone(), json!({"type": "status"}))])
+    let st = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(pid.clone(), json!({"type": "status"}))])
         .await
         .remove(0)
         .result;
@@ -784,13 +784,13 @@ async fn a_start_announces_its_job_at_once_and_records_the_invocation() {
     assert!(r["job_id"].is_i64(), "no job_id: {r}");
     assert_eq!(r["status"], "running");
     assert!(t0.elapsed() < Duration::from_secs(5), "start blocked");
-    let st = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "status"}))])
+    let st = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "status"}))])
         .await
         .remove(0)
         .result;
     assert_eq!(st["jobs"][0]["command"], json!(py.to_string_lossy()));
     assert_eq!(st["jobs"][0]["args"][0], json!("-u"));
-    let _ = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "stop"}))])
         .await
         .remove(0)
         .result;
@@ -877,7 +877,7 @@ threading.Event().wait()
 "#;
     let _ = started(&kernel, &a.clone(), py_start(&py, code, true)).await;
     wait_drains(&kernel, &a, &["inbox_drain"], 30).await;
-    let ack = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "ping"}))])
+    let ack = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "ping"}))])
         .await
         .remove(0)
         .result;
@@ -886,7 +886,7 @@ threading.Event().wait()
         .await
         .expect("program never received the message");
     assert_eq!(pong["count"], 1, "delivered more than once: {pong}");
-    let _ = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "stop"}))])
         .await
         .remove(0)
         .result;
@@ -921,7 +921,7 @@ threading.Event().wait()
     let _ = started(&kernel, &a.clone(), py_start(&py, code, true)).await;
     // Sent as soon as the program declared `ping`: it is still in its 2.5 s startup sleep.
     wait_declared(&a, 30).await;
-    let ack = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "ping"}))])
+    let ack = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "ping"}))])
         .await
         .remove(0)
         .result;
@@ -935,7 +935,7 @@ threading.Event().wait()
         until(&mut rx, |v| v["type"] == "pong", 1).await.is_none(),
         "a ping sent before on_message was delivered"
     );
-    let _ = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "stop"}))])
         .await
         .remove(0)
         .result;
@@ -947,7 +947,7 @@ threading.Event().wait()
 async fn an_undeclared_verb_is_refused_by_name() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let r = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "ping"}))])
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "ping"}))])
         .await
         .remove(0)
         .result;
@@ -964,7 +964,7 @@ async fn an_undeclared_verb_is_refused_by_name() {
 async fn declare_verbs_needs_a_running_job_and_a_free_name() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             json!({"type": "declare_verbs", "verbs": [{"name": "ping", "description": "a ping", "inputSchema": {"type": "object"}}]}),
         )])
@@ -993,7 +993,7 @@ async fn the_program_is_gated_as_its_runner_not_as_the_operator() {
     // two SIBLING runners under the root: `a` holds a line on `ok_sib` only (a line
     // on the root would reach both — a line reaches the target's whole tree)
     for id in ["sib", "ok_sib"] {
-        let _ = kernel.operator_send(vec![Item::new(
+        let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({"type": "create_agent", "parent_id": "kernel_state", "id": id,
                        "handler_module": "exec_bridge.tools"}),
@@ -1031,7 +1031,7 @@ async fn the_program_is_gated_as_its_runner_not_as_the_operator() {
 async fn the_connector_verb_hands_over_the_reference_client() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let r = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "connector"}))])
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "connector"}))])
         .await
         .remove(0)
         .result;
@@ -1139,7 +1139,7 @@ async fn a_stream_chunk_crosses_the_wire_raw() {
     fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let a = AgentId::from(agent_id_for(&tmp).as_str());
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel", "id": a.as_str(),
                    "handler_module": HANDLER_MODULE, "allowed": [".*"],
@@ -1149,7 +1149,7 @@ async fn a_stream_chunk_crosses_the_wire_raw() {
         .await
         .remove(0)
         .result;
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel_state", "id": "blob",
                    "handler_module": "blob.tools"}),
@@ -1213,7 +1213,7 @@ async fn a_text_sends_bytes_reply_comes_back_raw() {
         json!({"type": "create_agent", "parent_id": "kernel_state", "id": "blob",
                "handler_module": "blob.tools"}),
     ] {
-        let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), rec)])
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), rec)])
             .await
             .remove(0)
             .result;
@@ -1288,7 +1288,7 @@ async fn a_text_read_stream_is_answered_by_one_binary_frame() {
             "fb",
         ),
     ] {
-        let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), rec)])
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), rec)])
             .await
             .remove(0)
             .result;
@@ -1399,7 +1399,7 @@ async fn a_denied_watch_reaches_the_program_and_registers_nothing() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     // A sibling the runner holds no edge to: watch must refuse.
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel", "id": "secret",
                    "handler_module": HANDLER_MODULE}),
@@ -1528,7 +1528,7 @@ fn manual_owner_inbox(
 }
 
 async fn send_to(kernel: &Arc<Kernel>, owner: &AgentId, p: Value) -> Value {
-    kernel.operator_send(vec![Item::new(owner.clone(), p)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(owner.clone(), p)])
         .await
         .remove(0)
         .result
@@ -1606,7 +1606,7 @@ async fn the_inbox_hands_the_program_only_its_declared_mail() {
         json!({"type": "write", "job_id": 9008, "data": "own"}),
         json!({"type": "mail", "n": 1}),
     ] {
-        kernel.operator_send(vec![Item::new(a.clone(), p)]).await;
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), p)]).await;
     }
     // the one frame down the fd: the declared mail
     for want in [json!({"type": "mail", "n": 1})] {
@@ -1694,7 +1694,7 @@ async fn a_cancelled_job_finalises_to_stopped_and_clear_removes_it() {
     // The job's id IS its task id: `cancel` takes it as it is.
     let job_id = TaskId(r["job_id"].as_i64().expect("job_id"));
     let task_id = job_id.get();
-    let c = kernel.operator_send(vec![Item::new(
+    let c = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "cancel", "task_id": task_id}),
         )])
@@ -1714,12 +1714,12 @@ async fn a_cancelled_job_finalises_to_stopped_and_clear_removes_it() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let cleared = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "clear"}))])
+    let cleared = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "clear"}))])
         .await
         .remove(0)
         .result;
     assert!(cleared["cleared"].as_u64().unwrap_or(0) >= 1, "{cleared}");
-    let st = kernel.operator_send(vec![Item::new(a, json!({"type": "status"}))])
+    let st = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a, json!({"type": "status"}))])
         .await
         .remove(0)
         .result;
@@ -1792,12 +1792,12 @@ async fn job_started_comes_before_the_jobs_first_output() {
                 json!({"type": "start", "command": sh.to_string_lossy(), "pty": {"cols": 80, "rows": 24}}),
             ),
         );
-        let settle = tokio::spawn(async move { k.operator_send(vec![item]).await });
+        let settle = tokio::spawn(async move { fantastic_kernel::test_support::send_settled(&k, vec![item]).await });
         let first = until(&mut rx, of_a_job, 20).await.expect("an event of the job");
         assert_eq!(first["type"], "job_started", "{first}");
         let jid = first["job_id"].clone();
         let w = json!({"type": "write", "job_id": jid, "data": format!("x{}", crate::sys::ENTER)});
-        kernel.operator_send(vec![Item::new(a.clone(), w)]).await;
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), w)]).await;
         until(&mut rx, |v| v["type"] == "job_done" && v["job_id"] == jid, 20)
             .await
             .expect("its job_done");
@@ -1841,7 +1841,7 @@ async fn stop_releases_the_proxies_a_real_job_held() {
         assert!(kernel.inboxes.contains_key(p), "{p} was never registered");
     }
 
-    let _ = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "stop"}))])
         .await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while tokio::time::Instant::now() < deadline
@@ -1890,7 +1890,7 @@ async fn reflect_reports_the_record_as_written() {
 async fn shutdown_is_answered_by_the_shared_entry() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let r = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "shutdown"}))])
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "shutdown"}))])
         .await
         .remove(0)
         .result;
@@ -1907,7 +1907,7 @@ async fn refusal_texts_use_python_repr() {
     assert_eq!(r["reason"], "unhandled", "{r}");
     assert_eq!(r["verb"], Value::Null, "{r}");
     // `no job {jid!r}`.
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             json!({"type": "status", "job_id": 424_242}),
         )])
@@ -1978,7 +1978,7 @@ fn allowed_accepts_python_regex_syntax() {
 async fn job_id_is_an_int_or_absent() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             json!({"type": "status", "job_id": null}),
         )])
@@ -1987,7 +1987,7 @@ async fn job_id_is_an_int_or_absent() {
         .result;
     assert_eq!(r["jobs"], json!([]), "null job_id means ALL: {r}");
     for not_int in [json!(""), json!([]), json!("7"), json!(7.5), json!(true)] {
-        let r = kernel.operator_send(vec![Item::new(
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 a.clone(),
                 json!({"type": "status", "job_id": not_int}),
             )])
@@ -2008,12 +2008,12 @@ async fn job_id_is_an_int_or_absent() {
         "job_id".to_string(),
         fantastic_kernel::test_support::non_finite("Infinity"),
     );
-    let r = kernel.operator_send(vec![Item::new(a.clone(), Value::Object(inf))])
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), Value::Object(inf))])
         .await
         .remove(0)
         .result;
     assert_eq!(r["reason"], json!("bad_arg"), "{r}");
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             json!({"type": "status", "job_id": 0}),
         )])
@@ -2021,7 +2021,7 @@ async fn job_id_is_an_int_or_absent() {
         .remove(0)
         .result;
     assert_eq!(r["reason"], "not_found", "0 is an id, not ALL: {r}");
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             json!({"type": "stop", "job_id": 7}),
         )])
@@ -2040,7 +2040,7 @@ async fn start_checks_its_arguments_and_coerces_none() {
     let call = |p: Value| {
         let kernel = Arc::clone(&kernel);
         let a = a.clone();
-        async move { kernel.operator_send(vec![Item::new(a, p)]).await.remove(0).result }
+        async move { fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a, p)]).await.remove(0).result }
     };
     // A command of nothing but whitespace does not match the declared pattern: refused,
     // not a spawn of "".
@@ -2108,7 +2108,7 @@ async fn status_lists_jobs_in_start_order() {
         let r = started(&kernel, &a.clone(), py_start(&py, "import time; time.sleep(30)", false)).await;
         ids.push(r["job_id"].as_i64().expect("job_id"));
     }
-    let st = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "status"}))])
+    let st = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "status"}))])
         .await
         .remove(0)
         .result;
@@ -2119,7 +2119,7 @@ async fn status_lists_jobs_in_start_order() {
         .filter_map(|j| j["job_id"].as_i64())
         .collect();
     assert_eq!(listed, ids, "status must list jobs in start order");
-    let _ = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "stop"}))])
         .await
         .remove(0)
         .result;
@@ -2135,7 +2135,7 @@ async fn status_job_id_is_the_integer_task_id() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let _ = started(&kernel, &a.clone(), py_start(&py, "import time; time.sleep(30)", false)).await;
-    let st = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "status"}))])
+    let st = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "status"}))])
         .await
         .remove(0)
         .result;
@@ -2143,7 +2143,7 @@ async fn status_job_id_is_the_integer_task_id() {
         st["jobs"][0]["job_id"].is_i64(),
         "job_id must be an int: {st}"
     );
-    let _ = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "stop"}))])
         .await
         .remove(0)
         .result;
@@ -2163,7 +2163,7 @@ async fn a_named_clear_refuses_a_running_job() {
     let r = started(&kernel, &a.clone(), py_start(&py, "import time; time.sleep(30)", false)).await;
     let jid = r["job_id"].as_i64().expect("job_id");
     let clear = || async {
-        kernel.operator_send(vec![Item::new(
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 a.clone(),
                 json!({"type": "clear", "job_id": jid}),
             )])
@@ -2172,7 +2172,7 @@ async fn a_named_clear_refuses_a_running_job() {
             .result
     };
     // A BARE clear leaves it — it is running.
-    let bare = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "clear"}))])
+    let bare = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "clear"}))])
         .await
         .remove(0)
         .result;
@@ -2189,7 +2189,7 @@ async fn a_named_clear_refuses_a_running_job() {
         jobs::jobs().contains_key(&(a.clone(), TaskId(jid))),
         "the row stays"
     );
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             json!({"type": "stop", "job_id": jid}),
         )])
@@ -2206,7 +2206,7 @@ async fn a_named_clear_refuses_a_running_job() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert_eq!(clear().await, json!({"cleared": 1}));
-    let st = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "status"}))])
+    let st = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "status"}))])
         .await
         .remove(0)
         .result;
@@ -2281,7 +2281,7 @@ async fn a_killed_job_reports_negative_signal_exit_code() {
     let mut rx = inbox(&kernel, &a);
     let _ = started(&kernel, &a.clone(), py_start(&py, SAY_READY_THEN_SLEEP, false)).await;
     ready(&mut rx).await;
-    let _ = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "stop"}))])
         .await
         .remove(0)
         .result;
@@ -2315,17 +2315,17 @@ async fn liveness_is_process_exit_not_pipe_eof() {
         "reflect counts a live process whose pipes are closed"
     );
     crate::mail::declare_for_test(&a, &["ping"]);
-    let mail = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "ping"}))])
+    let mail = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "ping"}))])
         .await
         .remove(0)
         .result;
     assert_eq!(mail["queued"], true, "mail must reach a live job: {mail}");
-    let st = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "status"}))])
+    let st = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "status"}))])
         .await
         .remove(0)
         .result;
     assert_eq!(st["jobs"][0]["exit_code"], json!(null), "{st}");
-    let _ = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "stop"}))])
         .await
         .remove(0)
         .result;
@@ -2543,7 +2543,7 @@ fn paste_names_are_pythons_token_hex_4_and_random() {
 }
 
 /// python `_serve_ctrl` relays a program's `send` UNTOUCHED — one
-/// `kernel.operator_send([{target, payload}])`: no `_call_stack` tag, no cycle/depth
+/// `kernel.call({target, payload})`: no `_call_stack` tag, no cycle/depth
 /// refusal of its own. A kind-B frame is the SAME batch item carrying its body:
 /// a pid and a call row like any other execution.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2609,7 +2609,7 @@ async fn the_relay_forwards_a_send_untouched_and_a_binary_one_through_the_batch(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn arg_refusals_are_byte_exact_in_key_order() {
     let ask = |k: Arc<Kernel>, a: AgentId, p: Value| async move {
-        let r = k.operator_send(vec![Item::new(a, p)]).await.remove(0).result;
+        let r = fantastic_kernel::test_support::send_settled(&k, vec![Item::new(a, p)]).await.remove(0).result;
         serde_json::to_string(&r).unwrap()
     };
     let open = || {
@@ -2701,7 +2701,7 @@ async fn tail_and_grep_read_a_running_job() {
     let ask = |p: Value| {
         let k = Arc::clone(&kernel);
         let a = a.clone();
-        async move { k.operator_send(vec![Item::new(a, p)]).await.remove(0).result }
+        async move { fantastic_kernel::test_support::send_settled(&k, vec![Item::new(a, p)]).await.remove(0).result }
     };
     let t = ask(json!({"type": "tail", "job_id": jid, "lines": 2, "stream": "stdout"})).await;
     assert_eq!(t["status"], "running", "{t}");
@@ -2741,7 +2741,7 @@ async fn start_settles_when_its_job_exits() {
         Arc::clone(&kernel),
         Item::new(a.clone(), json!({"type": "start", "command": py.to_string_lossy(), "args": ["-u", "-c", program]})),
     );
-    let settle = tokio::spawn(async move { k.operator_send(vec![item]).await.remove(0).result });
+    let settle = tokio::spawn(async move { fantastic_kernel::test_support::send_settled(&k, vec![item]).await.remove(0).result });
     let ann = until(&mut rx, |v| v["type"] == "job_started", 10).await.expect("no job_started");
     assert!(!settle.is_finished(), "the start settled before its job ended");
     let r = tokio::time::timeout(Duration::from_secs(20), settle)
@@ -2765,15 +2765,13 @@ async fn status_is_a_snapshot_of_a_running_job() {
     let job = started(&kernel, &a, py_start(&py, "import time; time.sleep(30)", false)).await;
     let jid = job["job_id"].as_i64().expect("job_id");
     let t0 = std::time::Instant::now();
-    let st = kernel
-        .operator_send(vec![Item::new(a.clone(), json!({"type": "status", "job_id": jid}))])
+    let st = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "status", "job_id": jid}))])
         .await
         .remove(0)
         .result;
     assert_eq!(st["jobs"][0]["status"], "running", "{st}");
     assert!(t0.elapsed() < Duration::from_secs(1), "took {:?}", t0.elapsed());
-    let _ = kernel
-        .operator_send(vec![Item::new(a.clone(), json!({"type": "stop", "job_id": jid}))])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "stop", "job_id": jid}))])
         .await;
 }
 
@@ -2783,7 +2781,7 @@ async fn status_of_an_unknown_job_answers_at_once() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let t0 = std::time::Instant::now();
-    let st = kernel.operator_send(vec![Item::new(
+    let st = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             json!({"type": "status", "job_id": 999_999}),
         )])
@@ -2806,10 +2804,9 @@ async fn a_stopped_job_settles_its_start() {
     let (kernel, a) = mk_kernel(&tmp).await;
     let mut rx = inbox(&kernel, &a);
     let (k, item) = (Arc::clone(&kernel), Item::new(a.clone(), py_start(&py, "import time; time.sleep(30)", false)));
-    let settle = tokio::spawn(async move { k.operator_send(vec![item]).await.remove(0).result });
+    let settle = tokio::spawn(async move { fantastic_kernel::test_support::send_settled(&k, vec![item]).await.remove(0).result });
     let ann = until(&mut rx, |v| v["type"] == "job_started", 10).await.expect("no job_started");
-    let _ = kernel
-        .operator_send(vec![Item::new(a.clone(), json!({"type": "stop", "job_id": ann["job_id"]}))])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "stop", "job_id": ann["job_id"]}))])
         .await;
     let r = tokio::time::timeout(Duration::from_secs(10), settle)
         .await
@@ -2837,7 +2834,7 @@ async fn run_returns_the_output_in_one_reply() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let program = format!("{LF_STDIO}import sys; print(\"hello\"); sys.exit(3)");
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             json!({
                 "type": "run",
@@ -2860,7 +2857,7 @@ async fn run_returns_the_output_in_one_reply() {
             .unwrap_or(false),
         "{r}"
     );
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             json!({"type": "clear", "job_id": jid}),
         )])
@@ -2922,8 +2919,7 @@ async fn a_run_past_its_deadline_times_out_and_its_job_dies() {
     let (kernel, a) = mk_kernel(&tmp).await;
     let program = format!("{LF_STDIO}import time; time.sleep(30)");
     let t0 = std::time::Instant::now();
-    let o = kernel
-        .operator_send(vec![Item::new(
+    let o = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             json!({"type": "run", "command": py.to_string_lossy(), "args": ["-u", "-c", program]}),
         )
@@ -2958,7 +2954,7 @@ async fn run_refuses_bad_arguments() {
     });
     let mut payload = base.clone();
     payload.as_object_mut().unwrap().insert("tail".to_string(), json!(0));
-    let r = kernel.operator_send(vec![Item::new(a.clone(), payload)])
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), payload)])
         .await
         .remove(0)
         .result;

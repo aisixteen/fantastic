@@ -1020,15 +1020,17 @@ pub async fn pair_chat(kernel: &Arc<Kernel>, provider: &AgentId) -> AgentId {
     }
     if create.get("context_window").is_none() {
         // the model's own window, as the provider reports it
-        let r = kernel
-            .operator_send(vec![Item::new(provider.clone(), json!({"type": "reflect"}))])
-            .await;
+        let r = fantastic_kernel::test_support::send_settled(
+            kernel,
+            vec![Item::new(provider.clone(), json!({"type": "reflect"}))],
+        )
+        .await;
         if let Some(w) = r.first().and_then(|o| o.result.get("context_window")).filter(|w| w.is_number()) {
             create["context_window"] = w.clone();
         }
     }
     let root = kernel.root().map_or_else(|| AgentId::from("kernel"), |r| r.id.clone());
-    let _ = kernel.operator_send(vec![Item::new(root, create)]).await;
+    let _ = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(root, create)]).await;
     chat
 }
 

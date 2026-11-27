@@ -449,17 +449,8 @@ mod tests {
         assert_eq!(p["limit"], json!(7));
         let p = operator_payload(&kernel, "kernel", "reflect", &pairs(&[("verb", "7")])).unwrap();
         assert_eq!(p["verb"], json!("7"));
-        // a list only where the verb declares one
-        let p = operator_payload(
-            &kernel,
-            "kernel",
-            "await_set",
-            &pairs(&[("ids", r#"["a","b"]"#), ("timeout_s", "2.5")]),
-        )
-        .unwrap();
-        assert_eq!(p["ids"], json!(["a", "b"]));
-        assert_eq!(p["timeout_s"], json!(2.5));
-        // the fields of the record a create or update concerns are typed by ITS declaration
+        // a list only where the declaration names one: the fields of the record a create
+        // or update concerns are typed by ITS declaration
         let p = operator_payload(
             &kernel,
             "kernel",

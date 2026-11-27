@@ -99,7 +99,7 @@ fn id_for(prefix: &str, tmp: &TempDir) -> String {
 async fn create_bridge(kernel: &Arc<Kernel>, id: &str, peer_id: &str, transport: &str) {
     // io legs SEAL by default; these functional round-trip helpers open the leg so the
     // receiver dispatches inbound frames (mirrors py's _wire_memory_pair allow_all).
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -121,7 +121,7 @@ async fn create_bridge(kernel: &Arc<Kernel>, id: &str, peer_id: &str, transport:
 /// leg's own `boot` spawned, so its sends are the leg's. A bridge serving calls
 /// onto another agent holds its own line on it; the target keeps no list.
 async fn grant_edge(kernel: &Arc<Kernel>, from: &str, to: &str) {
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": from,
                    "can": {"$parent": {"call": ["*"]}, to: {"call": ["*"]}}}),
@@ -166,7 +166,7 @@ pub(super) async fn relay_password(
         .split_once("://")
         .map_or(relay_url, |(_, rest)| rest)
         .trim_end_matches('/');
-    let made = k.operator_send(vec![Item::new(
+    let made = fantastic_kernel::test_support::send_settled(k, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "create_agent", "parent_id": root,
                    "handler_module": fantastic_credential_store::HANDLER_MODULE, "id": store,
@@ -183,7 +183,7 @@ pub(super) async fn relay_password(
 
 /// Store (or rotate) the relay password in `store`, marked secret.
 pub(super) async fn set_relay_password(k: &Arc<Kernel>, store: &str, pw: &str) {
-    let put = k.operator_send(vec![Item::new(
+    let put = fantastic_kernel::test_support::send_settled(k, vec![Item::new(
             AgentId::from(store),
             json!({"type": "set", "ref": RELAY_REF, "fields": {"password": pw}}),
         )])
@@ -258,7 +258,7 @@ async fn reflect_shape_for_memory_transport() {
     let kernel = mk_kernel(&tmp).await;
     let bid = id_for("brg_reflect", &tmp);
     create_bridge(&kernel, &bid, "peer_x", "memory").await;
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "reflect"}),
         )])
@@ -271,7 +271,7 @@ async fn reflect_shape_for_memory_transport() {
     assert_eq!(r["peer_id"], "peer_x");
     assert_eq!(r["pending_count"], 0);
     assert!(r["verbs"]["forward"].is_string(), "{r}");
-    let d = kernel.operator_send(vec![Item::new(
+    let d = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "reflect", "tier": "detailed"}),
         )])
@@ -290,14 +290,14 @@ async fn boot_pairs_succeed_via_memory() {
     create_bridge(&kernel, &a_id, &b_id, "memory").await;
     create_bridge(&kernel, &b_id, &a_id, "memory").await;
     inject_pair(&AgentId::from(a_id.as_str()), &AgentId::from(b_id.as_str()));
-    let ra = kernel.operator_send(vec![Item::new(
+    let ra = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(a_id.as_str()),
             json!({"type": "boot"}),
         )])
         .await
         .remove(0)
         .result;
-    let rb = kernel.operator_send(vec![Item::new(
+    let rb = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(b_id.as_str()),
             json!({"type": "boot"}),
         )])
@@ -308,7 +308,7 @@ async fn boot_pairs_succeed_via_memory() {
     assert_eq!(ra["transport"], "memory");
     assert_eq!(rb["booted"], true);
 
-    let ref_a = kernel.operator_send(vec![Item::new(
+    let ref_a = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(a_id.as_str()),
             json!({"type": "reflect"}),
         )])
@@ -318,14 +318,14 @@ async fn boot_pairs_succeed_via_memory() {
     assert_eq!(ref_a["connected"], true);
 
     // Cleanup so global BRIDGES doesn't carry into other tests.
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(a_id.as_str()),
             json!({"type": "shutdown"}),
         )])
         .await
         .remove(0)
         .result;
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(b_id.as_str()),
             json!({"type": "shutdown"}),
         )])
@@ -347,7 +347,7 @@ async fn forward_round_trip_over_memory() {
     // On B's kernel side we also create a local "target" file agent
     // that the forward will dispatch against.
     let file_id = id_for("ff_fwd", &tmp);
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -365,15 +365,14 @@ async fn forward_round_trip_over_memory() {
     // egress is explicit, and the file agent accepts A's agents BY NAME.
     grant_edge(&kernel, &b_id, &file_id).await;
     inject_pair(&AgentId::from(a_id.as_str()), &AgentId::from(b_id.as_str()));
-    let _ = ka
-        .operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&ka, vec![Item::new(
             AgentId::from(a_id.as_str()),
             json!({"type": "boot"}),
         )])
         .await
         .remove(0)
         .result;
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(b_id.as_str()),
             json!({"type": "boot"}),
         )])
@@ -384,8 +383,7 @@ async fn forward_round_trip_over_memory() {
     // A.forward(target=<file_id>, payload={type:"reflect"}) ships a
     // raw call frame → B's read loop dispatches kernel.send(vec![Item::new(<file_id>, // {reflect})]) → file_agent's reflect reply gets shipped back as the
     // forward's return value (asymmetric; no forward envelope).
-    let reply = ka
-        .operator_send(vec![Item::new(
+    let reply = fantastic_kernel::test_support::send_settled(&ka, vec![Item::new(
             AgentId::from(a_id.as_str()),
             json!({
                 "type": "forward",
@@ -399,15 +397,14 @@ async fn forward_round_trip_over_memory() {
     // the leg holds call level on the agent: its reflect shows no field values
     assert_eq!(reply["id"], file_id, "forward reply: {reply}");
 
-    let _ = ka
-        .operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&ka, vec![Item::new(
             AgentId::from(a_id.as_str()),
             json!({"type": "shutdown"}),
         )])
         .await
         .remove(0)
         .result;
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(b_id.as_str()),
             json!({"type": "shutdown"}),
         )])
@@ -429,7 +426,7 @@ async fn pending_futures_rejected_on_close() {
     // it — A's send_frame puts the call frame on B's inbox queue
     // and nothing answers. A's pending oneshot is parked, waiting
     // for a `reply` frame that will never arrive.
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(a_id.as_str()),
             json!({"type": "boot"}),
         )])
@@ -440,7 +437,7 @@ async fn pending_futures_rejected_on_close() {
     let k = Arc::clone(&kernel);
     let a_id_clone = a_id.clone();
     let forward = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(
+        fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             AgentId::from(a_id_clone.as_str()),
             json!({
                 "type": "forward",
@@ -459,7 +456,7 @@ async fn pending_futures_rejected_on_close() {
     // forward fails with a close-flavoured reply. Through DELETE, not a
     // `shutdown` verb: as in python, `shutdown` is a lifecycle no-op a caller
     // may send and nothing tears down behind it.
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "delete_agent", "id": a_id.as_str()}),
         )])
@@ -480,7 +477,7 @@ async fn watch_remote_before_boot_errors() {
     let kernel = mk_kernel(&tmp).await;
     let bid = id_for("brg_watch_nb", &tmp);
     create_bridge(&kernel, &bid, "peer_x", "memory").await;
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "watch_remote", "target": "kernel_state"}),
         )])
@@ -504,7 +501,7 @@ async fn watch_remote_sends_watch_frame() {
     create_bridge(&kernel, &bid, "stand_in", "memory").await;
     // Inject A's half; keep the peer half to read what A ships.
     let peer = inject_one(&AgentId::from(bid.as_str()));
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "boot"}),
         )])
@@ -512,7 +509,7 @@ async fn watch_remote_sends_watch_frame() {
         .remove(0)
         .result;
 
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "watch_remote", "target": "remote_core"}),
         )])
@@ -530,7 +527,7 @@ async fn watch_remote_sends_watch_frame() {
     assert_eq!(frame["type"], "watch");
     assert_eq!(frame["src"], "remote_core");
 
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "shutdown"}),
         )])
@@ -548,14 +545,14 @@ async fn reconnect_calls_shutdown_then_boot() {
     create_bridge(&kernel, &a_id, &b_id, "memory").await;
     create_bridge(&kernel, &b_id, &a_id, "memory").await;
     inject_pair(&AgentId::from(a_id.as_str()), &AgentId::from(b_id.as_str()));
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(a_id.as_str()),
             json!({"type": "boot"}),
         )])
         .await
         .remove(0)
         .result;
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(b_id.as_str()),
             json!({"type": "boot"}),
         )])
@@ -566,7 +563,7 @@ async fn reconnect_calls_shutdown_then_boot() {
     // Re-inject a fresh pair so reconnect's boot has something to
     // attach to (the original pair has been consumed at first boot).
     inject_pair(&AgentId::from(a_id.as_str()), &AgentId::from(b_id.as_str()));
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(a_id.as_str()),
             json!({"type": "reconnect"}),
         )])
@@ -574,7 +571,7 @@ async fn reconnect_calls_shutdown_then_boot() {
         .remove(0)
         .result;
     assert_eq!(r["booted"], true, "reconnect: {r}");
-    let reflect = kernel.operator_send(vec![Item::new(
+    let reflect = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(a_id.as_str()),
             json!({"type": "reflect"}),
         )])
@@ -583,14 +580,14 @@ async fn reconnect_calls_shutdown_then_boot() {
         .result;
     assert_eq!(reflect["connected"], true);
 
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(a_id.as_str()),
             json!({"type": "shutdown"}),
         )])
         .await
         .remove(0)
         .result;
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(b_id.as_str()),
             json!({"type": "shutdown"}),
         )])
@@ -607,7 +604,7 @@ async fn ws_boot_fails_cleanly_on_unreachable_host() {
     // TEST-NET-1 (RFC 5737) — guaranteed unreachable. We give a
     // WS uses tokio-tungstenite. The OS will fail-fast on a non-routable
     // address. Bound the overall test to a few seconds.
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -624,7 +621,7 @@ async fn ws_boot_fails_cleanly_on_unreachable_host() {
         .result;
     let r = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        kernel.operator_send(vec![Item::new(
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "boot"}),
         )]),
@@ -638,7 +635,7 @@ async fn ws_boot_fails_cleanly_on_unreachable_host() {
         err.contains("ws connect failed") || err.contains("ws") || !err.is_empty(),
         "expected clean error, got: {r}",
     );
-    let ref_r = kernel.operator_send(vec![Item::new(
+    let ref_r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "reflect"}),
         )])
@@ -767,7 +764,7 @@ fn password_rules_are_symmetric() {
 
 /// Create a bridge agent carrying an `ingress_rule`.
 async fn create_bridge_with_ingress(kernel: &Arc<Kernel>, id: &str, peer_id: &str, rule: &str) {
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -791,7 +788,7 @@ async fn deny_inbound_refuses_inbound_call() {
     create_bridge_with_ingress(&kernel, &bid, "stand_in", "deny_ingress").await;
     // Inject A's half; keep the peer half to push a synthetic inbound call.
     let peer = inject_one(&AgentId::from(bid.as_str()));
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "boot"}),
         )])
@@ -799,7 +796,7 @@ async fn deny_inbound_refuses_inbound_call() {
         .remove(0)
         .result;
     // reflect surfaces the policy back (read-key == write-key, py parity).
-    let reflect = kernel.operator_send(vec![Item::new(
+    let reflect = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "reflect"}),
         )])
@@ -821,7 +818,7 @@ async fn deny_inbound_refuses_inbound_call() {
     assert_eq!(reply["id"], "c1");
     assert_eq!(reply["data"]["reason"], "unauthorized", "reply: {reply}");
 
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "shutdown"}),
         )])
@@ -840,7 +837,7 @@ async fn binary_call_round_trips_raw_bytes_over_the_bridge() {
     let tmp = TempDir::new().unwrap();
     let kernel = mk_kernel(&tmp).await;
     // An open file_bridge in the workdir to receive/serve the bytes.
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -857,7 +854,7 @@ async fn binary_call_round_trips_raw_bytes_over_the_bridge() {
     // the leg serves the inbound calls AS ITSELF: `fb` accepts the leg
     grant_edge(&kernel, &bid, "fb").await;
     let peer = inject_one(&AgentId::from(bid.as_str()));
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "boot"}),
         )])
@@ -921,7 +918,7 @@ async fn binary_call_round_trips_raw_bytes_over_the_bridge() {
         "the recorded outcome: {again}"
     );
     assert_eq!(std::fs::read(tmp.path().join("blob.bin")).unwrap(), payload);
-    let ledger = kernel.operator_send(vec![Item::new(
+    let ledger = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "ledger"}),
         )])
@@ -937,7 +934,7 @@ async fn binary_call_round_trips_raw_bytes_over_the_bridge() {
         "the binary call is a ledgered execution: {ledger}"
     );
 
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "shutdown"}),
         )])
@@ -952,7 +949,7 @@ async fn deny_inbound_default_refuses_inbound_call() {
     let kernel = mk_kernel(&tmp).await;
     let bid = id_for("brg_sealed", &tmp);
     // No `ingress_rule` meta ⇒ DenyInbound (SEALED by default).
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -966,14 +963,14 @@ async fn deny_inbound_default_refuses_inbound_call() {
         .remove(0)
         .result;
     let peer = inject_one(&AgentId::from(bid.as_str()));
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "boot"}),
         )])
         .await
         .remove(0)
         .result;
-    let reflect = kernel.operator_send(vec![Item::new(
+    let reflect = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "reflect"}),
         )])
@@ -997,7 +994,7 @@ async fn deny_inbound_default_refuses_inbound_call() {
         "sealed-by-default leg must deny: {reply}"
     );
 
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "shutdown"}),
         )])
@@ -1014,7 +1011,7 @@ async fn password_gate_checks_inbound_and_presents_on_forward() {
     let tmp = TempDir::new().unwrap();
     let kernel = mk_kernel(&tmp).await;
     let bid = id_for("brg_pw", &tmp);
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent",
@@ -1034,7 +1031,7 @@ async fn password_gate_checks_inbound_and_presents_on_forward() {
     // the leg serves the inbound calls AS ITSELF: the root accepts the leg
     grant_edge(&kernel, &bid, "kernel_state").await;
     let peer = inject_one(&AgentId::from(bid.as_str()));
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "boot"}),
         )])
@@ -1042,7 +1039,7 @@ async fn password_gate_checks_inbound_and_presents_on_forward() {
         .remove(0)
         .result;
     // reflect surfaces only the policy NAME (never the env-var config).
-    let reflect = kernel.operator_send(vec![Item::new(
+    let reflect = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "reflect"}),
         )])
@@ -1080,7 +1077,7 @@ async fn password_gate_checks_inbound_and_presents_on_forward() {
     let kc = Arc::clone(&kernel);
     let bid2 = bid.clone();
     let fwd = tokio::spawn(async move {
-        kc.operator_send(vec![Item::new(
+        fantastic_kernel::test_support::send_settled(&kc, vec![Item::new(
             AgentId::from(bid2.as_str()),
             json!({"type": "forward", "target": "remote", "payload": {"type": "reflect"}}),
         )])
@@ -1108,7 +1105,7 @@ async fn password_gate_checks_inbound_and_presents_on_forward() {
     let fwd_reply = fwd.await.unwrap();
     assert_eq!(fwd_reply["ok"], true);
 
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "shutdown"}),
         )])
@@ -1126,7 +1123,7 @@ async fn asymmetric_ingress_egress_via_engine() {
     let tmp = TempDir::new().unwrap();
     let kernel = mk_kernel(&tmp).await;
     let bid = id_for("brg_asym", &tmp);
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent",
@@ -1144,7 +1141,7 @@ async fn asymmetric_ingress_egress_via_engine() {
         .remove(0)
         .result;
     let peer = inject_one(&AgentId::from(bid.as_str()));
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "boot"}),
         )])
@@ -1152,7 +1149,7 @@ async fn asymmetric_ingress_egress_via_engine() {
         .remove(0)
         .result;
     // reflect surfaces both directions independently.
-    let reflect = kernel.operator_send(vec![Item::new(
+    let reflect = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "reflect"}),
         )])
@@ -1181,7 +1178,7 @@ async fn asymmetric_ingress_egress_via_engine() {
     let kc = Arc::clone(&kernel);
     let bid2 = bid.clone();
     let fwd = tokio::spawn(async move {
-        kc.operator_send(vec![Item::new(
+        fantastic_kernel::test_support::send_settled(&kc, vec![Item::new(
             AgentId::from(bid2.as_str()),
             json!({"type": "forward", "target": "remote", "payload": {"type": "reflect"}}),
         )])
@@ -1200,7 +1197,7 @@ async fn asymmetric_ingress_egress_via_engine() {
         .unwrap();
     let _ = fwd.await.unwrap();
 
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "shutdown"}),
         )])
@@ -1248,7 +1245,7 @@ impl Handler for BouncerBundle {
         let bouncer_verbs::Call::Bounce(b) = call else {
             return Ok(Some(json!({"id": agent_id.0, "sentence": "bouncer"})));
         };
-        let out = kernel.operator_send(vec![Item::new(
+        let out = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
                 AgentId::from(b.bridge.as_str()),
                 json!({
                     "type": "forward",
@@ -1297,8 +1294,7 @@ async fn a_reentrant_forward_completes_instead_of_deadlocking() {
     let probe = id_for("bouncer", &tmp);
     create_bridge(&ka, &a_id, &b_id, "memory").await;
     create_bridge(&kb, &b_id, &a_id, "memory").await;
-    let _ = kb
-        .operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kb, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
                    "handler_module": "bouncer.tools", "id": probe}),
@@ -1313,7 +1309,7 @@ async fn a_reentrant_forward_completes_instead_of_deadlocking() {
     grant_edge(&ka, &a_id, "kernel_state").await;
     inject_pair(&AgentId::from(a_id.as_str()), &AgentId::from(b_id.as_str()));
     for (k, id) in [(&ka, &a_id), (&kb, &b_id)] {
-        let _ = k.operator_send(vec![Item::new(
+        let _ = fantastic_kernel::test_support::send_settled(k, vec![Item::new(
                 AgentId::from(id.as_str()),
                 json!({"type": "boot"}),
             )])
@@ -1324,7 +1320,7 @@ async fn a_reentrant_forward_completes_instead_of_deadlocking() {
 
     let reply = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        ka.operator_send(vec![Item::new(
+        fantastic_kernel::test_support::send_settled(&ka, vec![Item::new(
             AgentId::from(a_id.as_str()),
             json!({"type": "forward", "target": probe,
                    "payload": {"type": "bounce", "bridge": b_id, "back_to": "kernel_state"}}),
@@ -1354,7 +1350,7 @@ async fn an_inbound_call_is_gated_as_the_leg_not_the_operator() {
     // A SIBLING of the leg: it is not in the leg's tree, so the only way the call
     // lands is an explicit line — or a bypassed gate.
     let target = id_for("ff_ident", &tmp);
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
                    "handler_module": "file_bridge.tools", "allow": ["."], "id": target,
@@ -1365,7 +1361,7 @@ async fn an_inbound_call_is_gated_as_the_leg_not_the_operator() {
         .result;
     create_bridge(&kernel, &bid, "stand_in", "memory").await;
     let peer = inject_one(&AgentId::from(bid.as_str()));
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "boot"}),
         )])
@@ -1396,7 +1392,7 @@ async fn an_inbound_call_is_gated_as_the_leg_not_the_operator() {
     let ok = answer(&*peer).await.expect("reply").into_value();
     assert_eq!(ok["data"]["id"], target, "granted edge refused: {ok}");
 
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "shutdown"}),
         )])
@@ -1419,7 +1415,7 @@ async fn create_leg(kernel: &Arc<Kernel>, handler: &str, id: &str, meta: Value) 
             payload.insert(k.clone(), v.clone());
         }
     }
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             Value::Object(payload),
         )])
@@ -1429,7 +1425,7 @@ async fn create_leg(kernel: &Arc<Kernel>, handler: &str, id: &str, meta: Value) 
 }
 
 async fn ask(kernel: &Arc<Kernel>, id: &str, payload: Value) -> Value {
-    kernel.operator_send(vec![Item::new(AgentId::from(id), payload)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from(id), payload)])
         .await
         .remove(0)
         .result
@@ -1841,8 +1837,7 @@ async fn forward_error_texts_match_python() {
     // `timed_out`, and a reply frame after it is late.
     let peer = inject_one(&AgentId::from(bid.as_str()));
     let _ = ask(&kernel, &bid, json!({"type": "boot"})).await;
-    let o = kernel
-        .operator_send(vec![Item::new(
+    let o = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}}),
         )
@@ -2326,7 +2321,7 @@ async fn send_bin_at(
     path: Vec<Step>,
     blob: Vec<u8>,
 ) -> fantastic_kernel::Outcome {
-    kernel.operator_send(vec![
+    fantastic_kernel::test_support::send_settled(kernel, vec![
             Item::new(AgentId::from(id), header).with_binary(path, blob)
         ])
         .await
@@ -2500,7 +2495,7 @@ async fn both_family_shells_share_one_behaviour() {
             json!({"transport": "memory"})
         };
         create_leg(&kernel, hm, &id, rec).await;
-        let out = kernel.operator_send(vec![Item::new(
+        let out = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from(id.as_str()),
                 json!({"type": "garbage"}),
             )
@@ -2513,7 +2508,7 @@ async fn both_family_shells_share_one_behaviour() {
             "{hm}"
         );
         assert_eq!(out.body, None);
-        let out = kernel.operator_send(vec![Item::new(
+        let out = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from(id.as_str()),
                 json!({"type": "forward", "target": "far", "payload": {"type": "x"}}),
             )
@@ -2527,7 +2522,7 @@ async fn both_family_shells_share_one_behaviour() {
             out.result
         );
         // delete runs the family's teardown and the agent is gone
-        let gone = kernel.operator_send(vec![Item::new(
+        let gone = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({"type": "delete_agent", "id": id}),
             )])
@@ -2568,7 +2563,7 @@ async fn a_malformed_rule_on_the_record_seals_the_leg() {
     let tmp = TempDir::new().unwrap();
     let kernel = mk_kernel(&tmp).await;
     let bid = id_for("brg_malformed", &tmp);
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -2583,7 +2578,7 @@ async fn a_malformed_rule_on_the_record_seals_the_leg() {
         .result;
     patch(&kernel, &bid, "ingress_rule", json!(7));
     let peer = inject_one(&AgentId::from(bid.as_str()));
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "boot"}),
         )])
@@ -2602,7 +2597,7 @@ async fn a_malformed_rule_on_the_record_seals_the_leg() {
     assert_eq!(reply["id"], "c7");
     assert_eq!(reply["data"]["error"], "edge sealed by policy");
     assert_eq!(reply["data"]["reason"], "unauthorized");
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(bid.as_str()),
             json!({"type": "shutdown"}),
         )])
@@ -2753,7 +2748,7 @@ async fn a_bridge_record_is_born_with_its_required_fields() {
         payload.insert("parent_id".into(), json!("kernel"));
         payload.insert("handler_module".into(), json!(handler));
         payload.insert("id".into(), json!(id));
-        let r = kernel.operator_send(vec![Item::new(
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel_state"),
                 Value::Object(payload),
             )])

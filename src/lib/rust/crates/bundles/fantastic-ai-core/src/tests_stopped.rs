@@ -32,8 +32,7 @@ fn stop_call(reason: &str) -> String {
 }
 
 async fn set_model(kernel: &Arc<Kernel>, agent: &AgentId, model: &str) {
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": agent.as_str(), "model": model}),
         )])
@@ -121,8 +120,7 @@ async fn run_chain(tag: &str, model: Option<&str>, passes: Vec<Vec<ScriptEvent>>
         *s.model.lock().unwrap() = m.to_string();
     }
     let mut rx = rebind_backend_inbox(&kernel, &a);
-    let _ = crate::tests::settled(&kernel, kernel
-        .operator_send(vec![Item::new(
+    let _ = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             b.clone(),
             json!({"type": "send", "text": "ask", "client_id": "probe"}),
         )]))
@@ -208,8 +206,7 @@ async fn stopped_row_is_a_stop_call() {
         ],
         Duration::ZERO,
     );
-    let _ = crate::tests::settled(&kernel, kernel
-        .operator_send(vec![Item::new(
+    let _ = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
         )]))
@@ -227,8 +224,7 @@ async fn stopped_row_is_a_stop_call() {
     assert_eq!(calls[0].arguments["reason"], json!(reason));
 
     // D: the next request shows it as stored
-    let _ = crate::tests::settled(&kernel, kernel
-        .operator_send(vec![Item::new(
+    let _ = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             json!({"type": "send", "text": "again", "client_id": "probe"}),
         )]))
@@ -245,8 +241,7 @@ async fn stopped_row_is_a_stop_call() {
     // H: the same row in the hermes form
     set_model(&kernel, &a, QWEN).await;
     *s.model.lock().unwrap() = QWEN.to_string();
-    let _ = crate::tests::settled(&kernel, kernel
-        .operator_send(vec![Item::new(
+    let _ = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             json!({"type": "send", "text": "once more", "client_id": "probe"}),
         )]))
@@ -280,8 +275,7 @@ async fn next_turn_after_stop() {
         ],
         Duration::ZERO,
     );
-    let _first = crate::tests::settled(&kernel, kernel
-        .operator_send(vec![Item::new(
+    let _first = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
         )]))
@@ -292,8 +286,7 @@ async fn next_turn_after_stop() {
         .as_str()
         .is_some_and(|r| r.starts_with("<call name=\"stop\">")));
     let mut rx = rebind_backend_inbox(&kernel, &a);
-    let second = crate::tests::settled(&kernel, kernel
-        .operator_send(vec![Item::new(
+    let second = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             json!({"type": "send", "text": "next", "client_id": "probe"}),
         )]))
@@ -329,8 +322,7 @@ async fn give_up_status_unchanged() {
         Duration::ZERO,
     );
     let mut rx = rebind_backend_inbox(&kernel, &a);
-    let _ = crate::tests::settled(&kernel, kernel
-        .operator_send(vec![Item::new(
+    let _ = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             json!({"type": "send", "text": "go", "client_id": "tab1"}),
         )]))
@@ -421,8 +413,7 @@ async fn stop_beside_other_calls() {
         Duration::ZERO,
     );
     let mut rx = rebind_backend_inbox(&kernel, &a);
-    let _ = crate::tests::settled(&kernel, kernel
-        .operator_send(vec![Item::new(
+    let _ = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
         )]))

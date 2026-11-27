@@ -194,7 +194,7 @@ async fn the_ingress_rule_never_judges_an_in_kernel_caller() {
             async move {
                 fantastic_kernel::test_support::as_agent(
                     AgentId::from(who),
-                    kernel.operator_send(vec![fantastic_kernel::Item::new(
+                    fantastic_kernel::test_support::send_settled(&kernel, vec![fantastic_kernel::Item::new(
                         AgentId::from("rest"),
                         json!({"type": "get_routes"}),
                     )]),

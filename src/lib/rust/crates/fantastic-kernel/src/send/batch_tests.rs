@@ -19,8 +19,7 @@ use std::time::{Duration, Instant};
 /// table is honest about that — it shows its own row — so a test counting "work
 /// in flight" has to say which row it means.
 async fn ps_rows(kernel: &Arc<crate::kernel::Kernel>) -> Vec<serde_json::Value> {
-    kernel
-        .operator_send(vec![Item::new(
+    crate::test_support::send_settled(kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"ps"}),
         )])
@@ -41,8 +40,7 @@ async fn a_mixed_batch_answers_every_item_in_input_order() {
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "b_fast").await;
 
-    let out = kernel
-        .operator_send(vec![
+    let out = crate::test_support::send_settled(&kernel, vec![
             Item::new(AgentId::from("nobody_at_all"), json!({"type": "fast"})),
             Item::new(a.clone(), json!({"type": "fast"})),
             Item::new(a.clone(), json!({"type": "boom"})),
@@ -75,7 +73,7 @@ async fn a_batch_runs_concurrently_not_one_after_another() {
     let started = Instant::now();
     let out = tokio::time::timeout(
         Duration::from_secs(5),
-        kernel.operator_send(vec![
+        crate::test_support::send_settled(&kernel, vec![
             Item::new(a.clone(), json!({"type": "slow"})).with_timeout(0.4),
             Item::new(a.clone(), json!({"type": "slow"})).with_timeout(0.4),
             Item::new(a.clone(), json!({"type": "slow"})).with_timeout(0.4),
@@ -100,8 +98,7 @@ async fn a_timeout_kills_through_the_front_door() {
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "b_to").await;
 
-    let out = kernel
-        .operator_send(vec![
+    let out = crate::test_support::send_settled(&kernel, vec![
             Item::new(a.clone(), json!({"type": "slow"})).with_timeout(0.2)
         ])
         .await;
@@ -141,7 +138,7 @@ async fn no_timeout_means_the_kernel_never_invents_one() {
 
     let raced = tokio::time::timeout(
         Duration::from_millis(600),
-        kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "slow"}))]),
+        crate::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "slow"}))]),
     )
     .await;
     assert!(raced.is_err(), "an item with no timeout settled on its own");
@@ -154,8 +151,7 @@ async fn a_bad_timeout_is_refused_not_guessed() {
     let a = mk_agent(&kernel, "b_badto").await;
 
     for bad in [0.0, -1.0, f64::NAN] {
-        let out = kernel
-            .operator_send(vec![
+        let out = crate::test_support::send_settled(&kernel, vec![
                 Item::new(a.clone(), json!({"type": "fast"})).with_timeout(bad)
             ])
             .await;
@@ -174,8 +170,7 @@ async fn a_name_that_looks_like_an_old_pid_is_just_a_name() {
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "b_ns").await;
 
-    let out = kernel
-        .operator_send(vec![
+    let out = crate::test_support::send_settled(&kernel, vec![
             Item::new(a.clone(), json!({"type": "fast"})).with_id("b_ns:deadbeef")
         ])
         .await;
@@ -195,7 +190,7 @@ async fn the_whole_batch_is_visible_in_ps_before_the_first_await() {
     let k = Arc::clone(&kernel);
     let peer = a.clone();
     let batch = tokio::spawn(async move {
-        k.operator_send(vec![
+        crate::test_support::send_settled(&k, vec![
             Item::new(peer.clone(), json!({"type": "slow"})).with_timeout(1.0),
             Item::new(peer.clone(), json!({"type": "slow"})).with_timeout(1.0),
         ])
@@ -225,7 +220,7 @@ async fn cancelling_one_item_leaves_its_siblings_alone() {
     let k = Arc::clone(&kernel);
     let peer = a.clone();
     let batch = tokio::spawn(async move {
-        k.operator_send(vec![
+        crate::test_support::send_settled(&k, vec![
             Item::new(peer.clone(), json!({"type": "slow"})),
             Item::new(peer.clone(), json!({"type": "fast"})),
         ])
@@ -245,8 +240,7 @@ async fn cancelling_one_item_leaves_its_siblings_alone() {
         }
     }
     let victim = victim.expect("the slow row never appeared");
-    let killed = kernel
-        .operator_send(vec![Item::new(
+    let killed = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "cancel", "task_id": victim}),
         )])
@@ -270,8 +264,7 @@ async fn two_items_to_one_agent_both_run() {
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "b_two").await;
 
-    let out = kernel
-        .operator_send(vec![
+    let out = crate::test_support::send_settled(&kernel, vec![
             Item::new(a.clone(), json!({"type": "fast"})),
             Item::new(a.clone(), json!({"type": "fast"})),
         ])
@@ -284,7 +277,7 @@ async fn two_items_to_one_agent_both_run() {
 async fn an_empty_batch_is_an_empty_answer() {
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
-    assert!(kernel.operator_send(vec![]).await.is_empty());
+    assert!(crate::test_support::send_settled(&kernel, vec![]).await.is_empty());
 }
 
 // ─── parallel EXECUTION, observed ───────────────────────────────────────────
@@ -374,8 +367,7 @@ async fn overlap_kernel(
     kernel.register(Arc::clone(&root));
     kernel.set_root(root);
     for id in ids {
-        let r = kernel
-            .operator_send(vec![Item::new(
+        let r = crate::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "overlap.tools", "id": id}),
             )])
@@ -400,7 +392,7 @@ async fn overlap_kernel(
 async fn assert_overlap(kernel: &Arc<crate::kernel::Kernel>, a: &str, b: &str) -> Vec<String> {
     let out = tokio::time::timeout(
         Duration::from_secs(10),
-        kernel.operator_send(vec![
+        crate::test_support::send_settled(kernel, vec![
             Item::new(AgentId::from(a), json!({"type": "wait_for_b"})),
             Item::new(AgentId::from(b), json!({"type": "b"})),
         ]),
@@ -445,8 +437,7 @@ async fn a_returned_raised_dict_settles_errored_not_failed() {
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "b_raised").await;
-    let out = kernel
-        .operator_send(vec![
+    let out = crate::test_support::send_settled(&kernel, vec![
             Item::new(a.clone(), json!({"type": "raised_reply"})).with_retries(2)
         ])
         .await
@@ -463,8 +454,7 @@ async fn the_unnamed_kernel_reflect_honours_its_timeout() {
     // on expiry it is cancelled and settles `timed_out` with `task_id: "-"`.
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "slow.tools",
                    "id": "b_slow_reflect", "reflect_ms": 5_000}),
@@ -474,8 +464,7 @@ async fn the_unnamed_kernel_reflect_honours_its_timeout() {
         .result;
     assert_eq!(r["id"], "b_slow_reflect", "{r}");
     let started = Instant::now();
-    let out = kernel
-        .operator_send(vec![Item::new(
+    let out = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "reflect"}),
         )
@@ -503,8 +492,7 @@ async fn timeout_prose_and_row_keep_the_number_the_caller_gave() {
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "b_prose").await;
-    let out = kernel
-        .operator_send(vec![
+    let out = crate::test_support::send_settled(&kernel, vec![
             Item::new(a.clone(), json!({"type": "slow"})).with_timeout(1.0),
             Item::new(a.clone(), json!({"type": "slow"})).with_timeout(1e-7),
             Item::new(a.clone(), json!({"type": "slow"})).with_timeout(0.1),
@@ -551,8 +539,7 @@ async fn a_named_kernel_reflect_is_ledgered_but_not_dispatched() {
     let _t = kernel.add_state_subscriber(Arc::new(move |ev, _| {
         sink.lock().unwrap().push(ev.clone());
     }));
-    let out = kernel
-        .operator_send(vec![Item::new(
+    let out = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "reflect"}),
         )
@@ -581,8 +568,7 @@ async fn a_named_kernel_reflect_is_ledgered_but_not_dispatched() {
         kernel.rows.get_one(pid).expect("call row")["verb"],
         "reflect"
     );
-    let again = kernel
-        .operator_send(vec![Item::new(
+    let again = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "reflect"}),
         )
@@ -605,8 +591,7 @@ async fn a_dead_letter_of_a_departed_caller_is_announced_on_the_root() {
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "dl_caller").await;
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "create_agent", "parent_id": a.as_str(),
                    "handler_module": "slow.tools", "id": "dl_child"}),
@@ -624,7 +609,7 @@ async fn a_dead_letter_of_a_departed_caller_is_announced_on_the_root() {
     );
     let k = Arc::clone(&kernel);
     let call = tokio::spawn(crate::test_support::as_agent(a.clone(), async move {
-        k.operator_send(vec![Item::new(
+        crate::test_support::send_settled(&k, vec![Item::new(
             AgentId::from("dl_child"),
             json!({"type": "slow"}),
         )

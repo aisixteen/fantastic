@@ -164,8 +164,7 @@ async fn answers(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<String> {
 }
 
 async fn send_go(kernel: &Arc<Kernel>, backend: &AgentId) -> Value {
-    crate::tests::settled(kernel, kernel
-        .operator_send(vec![Item::new(
+    crate::tests::settled(kernel, fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
         )]))
@@ -213,8 +212,7 @@ fn hermes_report(text: &str) -> Option<String> {
 
 /// Set a chat's record `model`, so its passes run under that model's type.
 async fn set_model(kernel: &Arc<Kernel>, agent: &AgentId, model: &str) {
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": agent.as_str(), "model": model}),
         )])
@@ -226,8 +224,7 @@ async fn set_model(kernel: &Arc<Kernel>, agent: &AgentId, model: &str) {
 
 /// Set a chat's `transport_retries`.
 async fn set_transport_retries(kernel: &Arc<Kernel>, agent: &AgentId, n: i64) {
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": agent.as_str(), "transport_retries": n}),
         )])
@@ -929,8 +926,7 @@ async fn cancel_during_reask() {
     let b = backend.clone();
     let send = tokio::spawn(async move { send_go(&k, &b).await });
     assert!(until_passes(&s, 2).await, "the re-ask never started");
-    let table = kernel
-        .operator_send(vec![Item::new(
+    let table = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "ps"}),
         )])
@@ -944,8 +940,7 @@ async fn cancel_during_reask() {
         .find(|t| t["agent"] == json!(backend.as_str()) && t["verb"] == json!("complete"))
         .and_then(|t| t["id"].as_i64())
         .expect("the pass's request in `ps`");
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "cancel", "task_id": task_id}),
         )])
@@ -1158,8 +1153,7 @@ async fn streamed_then_bad_is_marked() {
     assert!(default_report(bad).is_some());
     let _s = script_as(&a, PLAIN, vec![chars(bad), chars(DONE)]);
     let mut rx = watch(&kernel, &a).await;
-    let _ = crate::tests::settled(&kernel, kernel
-        .operator_send(vec![Item::new(
+    let _ = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             json!({"type": "send", "text": "go", "client_id": "tab1"}),
         )]))
@@ -1565,8 +1559,7 @@ mod rec {
     }
 
     async fn op(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-        kernel
-            .operator_send(vec![Item::new(AgentId::from(target), payload)])
+        fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from(target), payload)])
             .await
             .remove(0)
             .result
@@ -2053,8 +2046,7 @@ async fn a_harness_stop_is_told_to_the_asker() {
         Duration::ZERO,
     );
     let s = script(&a, (0..12).map(|_| pass(FOREIGN)).collect(), Duration::ZERO);
-    let _ = crate::tests::settled(&kernel, kernel
-        .operator_send(vec![Item::new(
+    let _ = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             b.clone(),
             json!({"type": "send", "text": "ask", "client_id": "probe"}),
         )]))

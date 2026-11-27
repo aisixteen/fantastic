@@ -198,7 +198,7 @@ async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
     } else {
         AgentId::from(target)
     };
-    k.operator_send(vec![Item::new(to, payload)])
+    fantastic_kernel::test_support::send_settled(k, vec![Item::new(to, payload)])
         .await
         .remove(0)
         .result

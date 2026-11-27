@@ -502,7 +502,7 @@ async fn mk_kernel_with(
     {
         create[k] = v;
     }
-    let _ = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), create)])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), create)])
         .await;
     (kernel, AgentId::from(id.as_str()))
 }
@@ -511,7 +511,7 @@ async fn mk_kernel_with(
 async fn reflect_sentence_is_python_verbatim() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, id) = mk_kernel(&tmp, "http://127.0.0.1:1/v1/responses").await;
-    let r = kernel.operator_send(vec![Item::new(id, json!({"type": "reflect"}))])
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(id, json!({"type": "reflect"}))])
         .await
         .remove(0)
         .result;
@@ -547,7 +547,7 @@ async fn send_streams_tokens_raw_on_both_channels() {
     let mut rx = kernel.ensure_inbox(&chat);
     let k2 = Arc::clone(&kernel);
     let join = tokio::spawn(async move {
-        k2.operator_send(vec![Item::new(
+        fantastic_kernel::test_support::send_settled(&k2, vec![Item::new(
             chat,
             json!({"type": "send", "text": "hi", "client_id": "c"}),
         )])
@@ -589,7 +589,7 @@ async fn send_streams_tokens_raw_on_both_channels() {
 async fn a_record_without_an_endpoint_is_refused_at_the_write_naming_it() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, id) = mk_kernel(&tmp, "http://127.0.0.1:9/stub").await;
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": id.as_str(), "endpoint": ""}),
         )])
@@ -606,7 +606,7 @@ async fn a_record_without_an_endpoint_is_refused_at_the_write_naming_it() {
 async fn sampling_may_not_override_what_the_provider_owns() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, id) = mk_kernel(&tmp, "http://127.0.0.1:1/v1/responses").await;
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": id.as_str(),
                    "sampling": {"store": true, "temperature": 0.1, "model": "x"}}),
@@ -749,7 +749,7 @@ fn raw_header(head: &str, name: &str) -> Option<String> {
 
 /// Send one message, wait until every agent is quiet, and return the ack.
 async fn send_once(kernel: &Arc<Kernel>, id: &AgentId) -> Value {
-    let ack = kernel.operator_send(vec![Item::new(
+    let ack = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             pair_chat(kernel, id).await,
             json!({"type": "send", "text": "go", "client_id": "t"}),
         )])
@@ -767,7 +767,7 @@ async fn send_once(kernel: &Arc<Kernel>, id: &AgentId) -> Value {
 /// The chat's conversation rows, as it holds them.
 async fn chat_rows(kernel: &Arc<Kernel>, id: &AgentId) -> Vec<Value> {
     let chat = pair_chat(kernel, id).await;
-    let r = kernel.operator_send(vec![Item::new(chat, json!({"type": "rows"}))])
+    let r = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(chat, json!({"type": "rows"}))])
         .await
         .remove(0)
         .result;
@@ -872,7 +872,7 @@ async fn the_key_rides_verbatim_a_rotated_key_rides_next_and_nothing_pools() {
 async fn unknown_type_wire_shape_is_byte_exact() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, id) = mk_kernel(&tmp, "http://127.0.0.1:1/v1/responses").await;
-    let r = kernel.operator_send(vec![Item::new(id, json!({"type": "frob"}))])
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(id, json!({"type": "frob"}))])
         .await
         .remove(0)
         .result;

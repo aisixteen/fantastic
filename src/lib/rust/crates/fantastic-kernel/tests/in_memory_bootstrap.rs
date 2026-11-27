@@ -70,14 +70,12 @@ async fn in_memory_boots_and_creates_agents_without_touching_disk() {
 
     // Create + mutate + delete an agent — all should work in
     // memory.
-    let v = kernel
-        .operator_send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"brainpipe"}))])
+    let v = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"brainpipe"}))])
         .await.remove(0).result;
     assert_eq!(v["id"], "brainpipe");
     assert!(kernel.exists("brainpipe"));
 
-    let _ = kernel
-        .operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type":"update_agent","id":"brainpipe","note":"tutor"}),
         )])
@@ -88,8 +86,7 @@ async fn in_memory_boots_and_creates_agents_without_touching_disk() {
     let bp = snap.agents.iter().find(|a| a.id == "brainpipe").unwrap();
     assert_eq!(bp.meta.get("note"), Some(&json!("tutor")));
 
-    let _ = kernel
-        .operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type":"delete_agent","id":"brainpipe"}),
         )])
@@ -117,8 +114,7 @@ async fn in_memory_save_load_roundtrips() {
     let booted = bootstrap(registry(), BootstrapOptions::in_memory()).unwrap();
     let kernel = Arc::clone(&booted.kernel);
     for id in ["a", "b", "c"] {
-        let _ = kernel
-            .operator_send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":id}))])
+        let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":id}))])
             .await.remove(0).result;
     }
     let snapshot = kernel.save_json();

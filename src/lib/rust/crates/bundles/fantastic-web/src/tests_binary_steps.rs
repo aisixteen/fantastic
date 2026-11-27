@@ -126,7 +126,7 @@ pub(super) fn tag() -> String {
 }
 
 pub(super) async fn op(k: &Arc<Kernel>, target: &str, payload: Value) -> Outcome {
-    k.operator_send(vec![Item::new(AgentId::from(target), payload)])
+    fantastic_kernel::test_support::send_settled(k, vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
 }
@@ -325,8 +325,7 @@ async fn a_literal_key_crosses_a_ws_bridge_forward_both_ways() {
     assert_eq!(booted["booted"], json!(true), "{booted}");
     let heads = ws_end(port, &b_web, half).await;
 
-    let out = ka
-        .operator_send(vec![Item::new(
+    let out = fantastic_kernel::test_support::send_settled(&ka, vec![Item::new(
             AgentId::from(a_leg.as_str()),
             json!({"type": "forward", "target": "echo",
                    "payload": {"type": "take", "a": {"b": "kept"}, "a.b": null}}),

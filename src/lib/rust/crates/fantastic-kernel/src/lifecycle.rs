@@ -18,8 +18,9 @@
 //!
 //! THE CRATE-PRIVATE BOUNDARY. The `create_agent` and `delete_agent` bodies take
 //! the creator as an argument, so only the kernel calls them, for its own verb.
-//! A bundle that acts for its asker sends the verb with
-//! [`Kernel::send_as_caller`], which reads the origin scope inside the kernel.
+//! A bundle that acts for its asker calls the verb with [`Kernel::call_for`] (the
+//! [`crate::Asker`] its dispatch captured), which reads the origin scope inside the
+//! kernel.
 //! Neither body, nor the unchecked tree load, is reachable from outside:
 //!
 //! ```compile_fail
@@ -45,12 +46,13 @@
 //! (`test-support`); the kernel's own bring-up is the only shipped path.
 //!
 //! ```
-//! # async fn f(k: std::sync::Arc<fantastic_kernel::Kernel>) {
-//! let _ = k
-//!     .send_as_caller(vec![fantastic_kernel::Item::new(
-//!         "kernel",
-//!         serde_json::json!({"type": "delete_agent", "id": "x"}),
-//!     )])
+//! # async fn f(k: std::sync::Arc<fantastic_kernel::Kernel>, asker: fantastic_kernel::Asker) {
+//! let _ack = k
+//!     .call_for(
+//!         &asker,
+//!         fantastic_kernel::Item::new("kernel", serde_json::json!({"type": "delete_agent", "id": "x"})),
+//!         |_settle| async {},
+//!     )
 //!     .await;
 //! # }
 //! ```
@@ -472,8 +474,8 @@ fn create_denial(
 
 /// The `create_agent` body, for the kernel verb alone (crate-private): a bundle
 /// that makes a child for its asker (a file bridge's view, `fork`,
-/// `import_subtree`) sends the verb with [`Kernel::send_as_caller`], which reads
-/// the origin scope inside the kernel, so no bundle names the creator. `caller` is
+/// `import_subtree`) calls the verb with [`Kernel::call_for`], which reads the
+/// origin scope inside the kernel, so no bundle names the creator. `caller` is
 /// the creator: `None` for the operator, which no line limits. `args` are the declared, typed arguments of `create_agent`; any field
 /// beyond them is a field of the new agent's record, which its bundle's shared
 /// entry checks.

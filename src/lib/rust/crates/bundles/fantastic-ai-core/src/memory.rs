@@ -102,11 +102,12 @@ pub fn store_of(self_id: &AgentId, kernel: &Kernel) -> MemResult<AgentId> {
     }
 }
 
-/// ONE gated send to this agent's memory store, as this agent — it runs in the
-/// agent's own code (its dispatch, a task that dispatch spawned, or one of its
-/// hooks), so the send is the agent's. A refusal or a failed dispatch is a
-/// [`MemoryStoreError`] — the turn fails fast. The store keys a row by its
-/// writer: this agent's own memory.
+/// TESTS: ONE gated call to this agent's memory store, as this agent, driven to its
+/// settle ([`fantastic_kernel::test_support::settled`]) — it runs in the agent's own
+/// scope, so the call is the agent's. A refusal or a failed dispatch is a
+/// [`MemoryStoreError`]. A pass reads and writes its store as steps
+/// ([`crate::steps`]).
+#[cfg(any(test, feature = "test-support"))]
 pub async fn store_call(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
@@ -115,8 +116,9 @@ pub async fn store_call(
     Ok(store_item(self_id, kernel, payload, None).await?.0)
 }
 
-/// [`store_call`] with a request body (the raw bytes at `data`), and the reply body
-/// beside the reply: the store's byte verbs (`put_bytes`, `get_bytes`).
+/// TESTS: [`store_call`] with a request body (the raw bytes at `data`), and the reply
+/// body beside the reply: the store's byte verbs (`put_bytes`, `get_bytes`).
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn store_item(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
@@ -124,7 +126,7 @@ pub(crate) async fn store_item(
     body: Option<Vec<u8>>,
 ) -> MemResult<StoreReply> {
     let (item, sid, verb) = store_request(self_id, kernel, payload, body)?;
-    let out = kernel.send(vec![item]).await.remove(0);
+    let out = fantastic_kernel::test_support::settled(kernel, vec![item]).await.remove(0);
     checked(self_id, &sid, &verb, out)
 }
 
@@ -267,8 +269,9 @@ fn is_trace(r: &Value) -> bool {
     kind_of(r) == Some(crate::model_format::trace::KIND)
 }
 
-/// The head cache — loaded from the store on first use (lazy boot). Python
-/// `_head`.
+/// TESTS: the head cache — loaded from the store on first use (lazy boot). Python
+/// `_head`. A pass reads it as a step ([`crate::steps`]).
+#[cfg(any(test, feature = "test-support"))]
 pub async fn head(self_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<Vec<Value>> {
     if let Some(h) = cached_head(self_id, kernel) {
         return Ok(h);
@@ -377,6 +380,8 @@ pub fn head_loaded(self_id: &AgentId, kernel: &Kernel) -> bool {
 /// read of the head first reads every row AFTER the newest cached id and merges it
 /// by id (a row the agent wrote meanwhile is already there). A `clear` among them
 /// restarts the head. One small read per turn; the store stays passive (no push).
+/// TESTS: a pass reads it as a step ([`crate::steps`]).
+#[cfg(any(test, feature = "test-support"))]
 pub async fn refresh_head(self_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<Vec<Value>> {
     let read = head_read(self_id, kernel);
     let res = store_call(self_id, kernel, read.payload()).await?;
@@ -389,6 +394,8 @@ pub async fn refresh_head(self_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<
 /// A CLEAR IS A BOUNDARY, NOT A DELETION (`context_clear`): the head starts at the
 /// LAST `clear` row. `behind = true` (recall, grep, `history {fold}` — the verbs
 /// that reach what is not in view) reads the WHOLE conversation from the store.
+/// TESTS: a pass reads it as a step ([`crate::steps`]).
+#[cfg(any(test, feature = "test-support"))]
 pub async fn load_history(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
@@ -450,7 +457,9 @@ pub(crate) fn keep_check(self_id: &AgentId, kernel: &Kernel, of: i64) -> Result<
 
 /// APPEND rows to the memory store, then to the head cache (write-through). A row
 /// without an id takes the kernel's next one. A `clear` restarts the head.
-/// Returns the ids. Python `_save_history`.
+/// Returns the ids. Python `_save_history`. TESTS: a pass writes as a step
+/// ([`crate::steps`]).
+#[cfg(any(test, feature = "test-support"))]
 pub async fn save_history(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
@@ -570,18 +579,24 @@ pub async fn purge(self_id: &AgentId, kernel: &Arc<Kernel>) {
     if fantastic_kernel::lifecycle::keep_memory(kernel, self_id) {
         return;
     }
-    if store_of(self_id, kernel).is_err() {
-        return;
-    }
-    if let Err(e) = store_call(
+    let Ok((item, sid, verb)) = store_request(
         self_id,
         kernel,
         json!({"type": "prune", "before_id": i64::MAX}),
-    )
-    .await
-    {
-        println!("  [cascade] {self_id} memory purge failed: {e}");
-    }
+        None,
+    ) else {
+        return;
+    };
+    // the prune is a call (#795): its settle is read when it comes, and nothing
+    // waits for it — the cascade goes on
+    let me = self_id.clone();
+    kernel
+        .call_then(item, move |out| async move {
+            if let Err(e) = checked(&me, &sid, &verb, out) {
+                println!("  [cascade] {me} memory purge failed: {e}");
+            }
+        })
+        .await;
 }
 
 /// Drop a deleted agent's head, bodies and watchers on this kernel
@@ -641,7 +656,9 @@ pub fn bodies(self_id: &AgentId, kernel: &Kernel) -> Vec<(i64, String)> {
 /// `content`) and in the view's `ids` ([`crate::folds::remap_ids`]): a row appended
 /// while a summarizer ran has a lower id than the folds, and the store's id order after
 /// a restart is the order before the stop (#766, fold id order). Returns the map
-/// (provisional -> minted), for the caller's own copies of the rows.
+/// (provisional -> minted), for the caller's own copies of the rows. TESTS: a pass
+/// writes its view as a step ([`crate::steps::save_view`]).
+#[cfg(any(test, feature = "test-support"))]
 pub async fn save_view(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
@@ -684,8 +701,9 @@ pub(crate) fn view_rows(
     (rows, map)
 }
 
-/// The current view doc, when one has been written and carries an `ids` list.
+/// TESTS: the current view doc, when one has been written and carries an `ids` list.
 /// Python `_load_view`.
+#[cfg(any(test, feature = "test-support"))]
 pub async fn load_view(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,

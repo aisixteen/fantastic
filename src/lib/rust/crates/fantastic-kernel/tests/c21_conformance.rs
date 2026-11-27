@@ -130,8 +130,7 @@ async fn wired() -> Arc<Kernel> {
     );
     fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
-    let _ = kernel
-        .operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(ROOT_ID),
             json!({
                 "type": "create_agent",
@@ -163,7 +162,7 @@ async fn the_shared_c21_corpus_holds_on_this_runtime() {
         let target = c["target"].as_str().expect("case has no target");
         let payload = c["payload"].clone();
         let item = Item::new(AgentId::from(target), payload);
-        let reply = kernel.operator_send(vec![item]).await.remove(0).result;
+        let reply = fantastic_kernel::test_support::send_settled(&kernel, vec![item]).await.remove(0).result;
 
         if let Some(expect) = c.get("expect") {
             let want = subst_root(expect);

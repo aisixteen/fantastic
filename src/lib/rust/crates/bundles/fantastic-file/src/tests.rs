@@ -321,7 +321,7 @@ async fn mk_kernel_with(tmp: &tempfile::TempDir, extra: Value) -> Arc<Kernel> {
     for (k, v) in extra.as_object().expect("extra is an object") {
         create[k] = v.clone();
     }
-    let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), create)])
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), create)])
         .await
         .remove(0)
         .result;
@@ -330,7 +330,7 @@ async fn mk_kernel_with(tmp: &tempfile::TempDir, extra: Value) -> Arc<Kernel> {
 }
 
 async fn call(kernel: &Arc<Kernel>, payload: Value) -> Value {
-    kernel.operator_send(vec![Item::new(AgentId::from("fb"), payload)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from("fb"), payload)])
         .await
         .remove(0)
         .result
@@ -338,7 +338,7 @@ async fn call(kernel: &Arc<Kernel>, payload: Value) -> Value {
 
 /// A call to the kernel itself (`update_agent`, …).
 async fn call_root(kernel: &Arc<Kernel>, payload: Value) -> Value {
-    kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), payload)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from("kernel_state"), payload)])
         .await
         .remove(0)
         .result
@@ -933,7 +933,7 @@ fn callers(kernel: &Arc<Kernel>) {
 async fn call_as(kernel: &Arc<Kernel>, who: &str, payload: Value) -> Value {
     fantastic_kernel::test_support::as_agent(
         AgentId::from(who),
-        kernel.operator_send(vec![Item::new(AgentId::from("fb"), payload)]),
+        fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from("fb"), payload)]),
     )
     .await
     .remove(0)
@@ -1021,7 +1021,7 @@ async fn text_write_stream_with_a_json_bytes_is_an_unknown_argument() {
     }
     // THE RAW CHUNK, on the binary channel: this is the path a model's
     // `<bytes>` document takes, and it writes.
-    let out = kernel.operator_send(vec![Item::new(
+    let out = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("fb"),
             json!({"type": "write_stream", "path": "a.txt", "truncate": true}),
         )
@@ -1034,7 +1034,7 @@ async fn text_write_stream_with_a_json_bytes_is_an_unknown_argument() {
 
     // …and it comes back as a CHUNK, in the reply body, with the reply's own
     // `bytes` key nulled in place.
-    let back = kernel.operator_send(vec![Item::new(
+    let back = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("fb"),
             json!({"type": "read_stream", "path": "a.txt", "offset": 0}),
         )
@@ -1371,7 +1371,7 @@ async fn a_readonly_leg_refuses_a_binary_write_before_judging_the_chunk() {
         json!({"type": "write_stream", "path": "a.txt", "bytes": "x"}),
         json!({"type": "write_stream", "path": "a.txt"}),
     ] {
-        let out = kernel.operator_send(vec![Item::new(AgentId::from("fb"), header.clone())
+        let out = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("fb"), header.clone())
                 .with_binary_key("bytes", b"data".to_vec())])
             .await
             .remove(0)
@@ -1455,7 +1455,7 @@ async fn both(
     blob: &[u8],
 ) -> (String, String, Option<Vec<u8>>) {
     let txt = call(kernel, header.clone()).await;
-    let bin = kernel.operator_send(vec![
+    let bin = fantastic_kernel::test_support::send_settled(kernel, vec![
             Item::new(AgentId::from("fb"), header).with_binary_key("bytes", blob.to_vec())
         ])
         .await
@@ -1484,7 +1484,7 @@ async fn a_caller_with_no_line_is_refused_identically_on_both_channels() {
         let txt = call_as(&kernel, "stranger", header.clone()).await;
         let bin = fantastic_kernel::test_support::as_agent(
             AgentId::from("stranger"),
-            kernel.operator_send(vec![
+            fantastic_kernel::test_support::send_settled(&kernel, vec![
                 Item::new(AgentId::from("fb"), header.clone()).with_binary_key("bytes", b"x".to_vec())
             ]),
         )

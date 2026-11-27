@@ -16,6 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _lib.canvas_live import Rig, verdict  # noqa: E402
+from _lib.mcp_session import result_of  # noqa: E402
 
 OTHER = {"z_other": {"command": "/opt/other/bin/srv", "args": ["--stdio"], "env": {"K": "v"}}}
 
@@ -47,9 +48,9 @@ def main() -> bool:
         rig.stop()
         rig.start()
         r["unchanged_on_reboot"] = cfg.read_bytes() == before
-        p = subprocess.run([str(rig.binary), "send", json.dumps({"target": "mcp", "payload": {"type": "reflect", "tree": "none"}})],
-                           cwd=rig.proj, env=rig.env(), capture_output=True, text=True, timeout=60)
-        refl = (json.loads(p.stdout).get("result") or {}) if p.stdout.strip().startswith("{") else {}
+        # the ack, then the result from the session's settle notification (#795)
+        refl = result_of(rig.proj / ".fantastic", "mcp", {"type": "reflect", "tree": "none"})
+        refl = {} if "error" in refl and len(refl) == 1 else refl
         info["leg"] = {k: refl.get(k) for k in ("file_bridge_id", "mcp_config_file", "mcp_config_error")}
         r["no_error"] = bool(refl) and not refl.get("mcp_config_error")
         import yaml

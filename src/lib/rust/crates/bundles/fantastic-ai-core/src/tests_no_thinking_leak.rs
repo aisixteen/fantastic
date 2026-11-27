@@ -24,8 +24,7 @@ async fn stored(kernel: &Arc<Kernel>, agent: &AgentId) -> String {
 
 /// Start `agent`'s run as the operator.
 async fn start(kernel: &Arc<Kernel>, agent: &AgentId) {
-    let _ = crate::tests::settled(kernel, kernel
-        .operator_send(vec![Item::new(
+    let _ = crate::tests::settled(kernel, fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             agent.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
         )]))
@@ -95,8 +94,7 @@ async fn the_send_reply_is_the_answer_only() {
         vec![pass(format!("<think>DEEP-THOUGHT</think>The answer.\n{DONE}"))],
         Duration::ZERO,
     );
-    let r = crate::tests::settled(&kernel, kernel
-        .operator_send(vec![Item::new(
+    let r = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             agent.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
         )]))

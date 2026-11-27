@@ -281,8 +281,7 @@ fn by_content(rows: &[Value], content: &str) -> Value {
 
 /// One verb sent to the agent; its result.
 async fn verb(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    crate::tests::settled(kernel, kernel
-        .operator_send(vec![Item::new(agent.clone(), payload)]))
+    crate::tests::settled(kernel, fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(agent.clone(), payload)]))
         .await
         .remove(0)
         .result

@@ -55,7 +55,7 @@ fn registry(home: &std::path::Path, here: &std::path::Path) -> BundleRegistry {
 /// As the shell: the operator.
 async fn act(kernel: &std::sync::Arc<Kernel>, target: &str, payload: Value) -> Value {
     let item = Item::new(AgentId::from(target), payload);
-    kernel.operator_send(vec![item]).await.remove(0).result
+    fantastic_kernel::test_support::send_settled(kernel, vec![item]).await.remove(0).result
 }
 
 /// The `home` record as it is ON DISK right now.
@@ -79,7 +79,7 @@ async fn the_switch_and_the_name_are_on_disk_when_the_verbs_answer() {
     )
     .expect("boots");
     let kernel = std::sync::Arc::clone(&booted.kernel);
-    kernel.operator_send(vec![Item::new(
+    fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"update_agent","id":bootstrap::DEFAULT_ROOT_ID,"memory_store_id":"kernel_memory"}),
         )])
@@ -88,10 +88,10 @@ async fn the_switch_and_the_name_are_on_disk_when_the_verbs_answer() {
     assert_eq!(out["started"], json!(true), "kernel_start: {out}");
     for id in &booted.loaded {
         if !out["booted"].as_array().unwrap().contains(&json!(id.0)) {
-            kernel.operator_send(vec![Item::new(id.clone(), json!({"type":"boot"}))]).await;
+            fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(id.clone(), json!({"type":"boot"}))]).await;
         }
     }
-    let root = kernel.operator_send(vec![Item::new(AgentId::from("kernel"), json!({"type":"reflect","tree":"none"}))]).await.remove(0).result;
+    let root = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel"), json!({"type":"reflect","tree":"none"}))]).await.remove(0).result;
     assert_eq!(root["persistence"]["provider"], "store", "records persist through `store`: {root}");
     let guid = root["guid"].as_str().expect("a guid").to_string();
 

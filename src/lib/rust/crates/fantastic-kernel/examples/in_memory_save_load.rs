@@ -95,8 +95,7 @@ async fn main() {
 
     banner("Step 2: create three agents (alpha, beta, gamma)");
     for id in ["alpha", "beta", "gamma"] {
-        let r = kernel
-            .operator_send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"demo.tools","id":id,"display_name":format!("Agent {id}")}))])
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"demo.tools","id":id,"display_name":format!("Agent {id}")}))])
             .await.remove(0).result;
         println!("  create_agent {id} → ok={}", r["ok"]);
     }
@@ -144,16 +143,14 @@ async fn main() {
     assert_or_die(snapshot == snapshot2, "round-trip byte-identical");
 
     banner("Step 6: mutate the restored kernel + show the snapshot diff");
-    let _ = kernel2
-        .operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel2, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type":"update_agent","id":"alpha","note":"tutor pipeline"}),
         )])
         .await
         .remove(0)
         .result;
-    let _ = kernel2
-        .operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel2, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type":"delete_agent","id":"gamma"}),
         )])

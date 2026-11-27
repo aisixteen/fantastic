@@ -88,9 +88,17 @@ async fn mcp_json_lives_in_the_mcp_config_bridges_folder() {
     let _g = ONE_AT_A_TIME.lock().await;
     let (d, k) = boot("mcp").await;
     let state = d.join(".fantastic");
+    // the leg's boot reads and writes the config by calls (#795): the file is there once
+    // they settled
+    let file = mcp_config_dir(&state).join(".mcp.json");
+    for _ in 0..500 {
+        if file.is_file() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     let cfg: Value = serde_json::from_str(
-        &std::fs::read_to_string(mcp_config_dir(&state).join(".mcp.json"))
-            .expect("written in the bridge's folder"),
+        &std::fs::read_to_string(&file).expect("written in the bridge's folder"),
     )
     .unwrap();
     assert!(cfg["mcpServers"]["fantastic"].is_object(), "{cfg}");
@@ -143,7 +151,7 @@ async fn the_readme_names_the_live_paths_and_is_rewritten_each_boot() {
 }
 
 async fn call(k: &Arc<Kernel>, to: &str, payload: Value) -> Value {
-    k.operator_send(vec![Item::new(AgentId::from(to), payload)]).await.remove(0).result
+    fantastic_kernel::test_support::send_settled(k, vec![Item::new(AgentId::from(to), payload)]).await.remove(0).result
 }
 
 /// State `<tmp>/s` and work `<tmp>/w`, apart: seeded and booted in-process.

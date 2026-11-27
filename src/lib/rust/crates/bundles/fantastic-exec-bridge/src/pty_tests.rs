@@ -53,7 +53,7 @@ async fn kernel_with(tmp: &TempDir, id: &str, extra: Value) -> Arc<Kernel> {
     for (k, v) in extra.as_object().cloned().unwrap_or_default() {
         create[k] = v;
     }
-    let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), create)])
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), create)])
         .await
         .remove(0)
         .result;
@@ -62,7 +62,7 @@ async fn kernel_with(tmp: &TempDir, id: &str, extra: Value) -> Arc<Kernel> {
 }
 
 async fn call(kernel: &Arc<Kernel>, id: &str, p: Value) -> Value {
-    kernel.operator_send(vec![Item::new(AgentId::from(id), p)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from(id), p)])
         .await
         .remove(0)
         .result
@@ -280,7 +280,7 @@ async fn paste_image_types_a_saved_path() {
         json!({"type": "paste_image", "job_id": jid}),
     )
     .with_binary_key("data", b"\x89PNG".to_vec());
-    let r = k.operator_send(vec![item]).await.remove(0).result;
+    let r = fantastic_kernel::test_support::send_settled(&k, vec![item]).await.remove(0).result;
     assert_eq!(
         (&r["reason"], &r["arg"]),
         (&json!("missing_arg"), &json!("mime")),
@@ -291,7 +291,7 @@ async fn paste_image_types_a_saved_path() {
         json!({"type": "paste_image", "job_id": jid, "mime": "image/png"}),
     )
     .with_binary_key("data", b"\x89PNG....".to_vec());
-    let r = k.operator_send(vec![item]).await.remove(0).result;
+    let r = fantastic_kernel::test_support::send_settled(&k, vec![item]).await.remove(0).result;
     assert_eq!(r["bytes"], json!(8), "{r}");
     let path = r["path"].as_str().unwrap().to_string();
     assert!(path.ends_with(".png"), "{r}");

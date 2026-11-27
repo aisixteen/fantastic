@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _lib.canvas_live import FOLDER, Rig, verdict, ask  # noqa: E402
+from _lib.mcp_session import result_of  # noqa: E402
 
 FNS = ["det", "factor", "simpson", "roots", "fib_mod", "gcd_lcm"]
 
@@ -195,12 +196,8 @@ def main() -> bool:
             rig.summary["samples"] = samples
 
             def shell(target: str, payload: dict) -> dict:
-                r = subprocess.run([str(rig.binary), "send", json.dumps({"target": target, "payload": payload})],
-                                   cwd=rig.proj, env=rig.env(), capture_output=True, text=True, timeout=30)
-                try:
-                    return json.loads(r.stdout).get("result") or {}
-                except ValueError:
-                    return {"raw": r.stdout[-300:], "err": r.stderr[-300:]}
+                # the ack, then the result from the session's settle notification (#795)
+                return result_of(rig.proj / ".fantastic", target, payload, 30)
 
             def snap() -> dict:
                 ags = shell("kernel", {"type": "list_agents", "limit": 200}).get("agents") or []

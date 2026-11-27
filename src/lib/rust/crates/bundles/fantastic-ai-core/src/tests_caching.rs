@@ -11,8 +11,7 @@ use fantastic_kernel::test_support::as_agent;
 
 /// One verb sent to the agent; its result.
 async fn verb(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    crate::tests::settled(kernel, kernel
-        .operator_send(vec![Item::new(agent.clone(), payload)]))
+    crate::tests::settled(kernel, fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(agent.clone(), payload)]))
         .await
         .remove(0)
         .result
@@ -25,8 +24,7 @@ async fn set(kernel: &Arc<Kernel>, agent: &AgentId, fields: Value) {
         .as_object_mut()
         .expect("object")
         .extend(fields.as_object().expect("object").clone());
-    let r = kernel
-        .operator_send(vec![Item::new(AgentId::from("kernel_state"), payload)])
+    let r = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from("kernel_state"), payload)])
         .await
         .remove(0)
         .result;
@@ -166,8 +164,7 @@ async fn turn_messages(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) -> Vec
         Duration::ZERO,
     );
     let _rx = rebind_backend_inbox(kernel, agent);
-    let reply = crate::tests::settled(kernel, kernel
-        .operator_send(vec![Item::new(
+    let reply = crate::tests::settled(kernel, fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             agent.clone(),
             json!({"type": "send", "text": text, "client_id": "c"}),
         )]))

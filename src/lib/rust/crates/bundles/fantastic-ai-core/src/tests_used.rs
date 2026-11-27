@@ -288,8 +288,7 @@ fn running_of(row: &Value) -> &Value {
 
 /// Set a chat's record `model`.
 async fn set_model(kernel: &Arc<Kernel>, agent: &AgentId, model: &str) {
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": agent.as_str(), "model": model}),
         )])
@@ -609,8 +608,7 @@ async fn window_calibrates() {
 async fn cost_from_total() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp, "u_cost").await;
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE,
                    "id": "u_cost_prov", "prices": {"test-model": {"input": 1.0, "output": 5.0}}}),
@@ -619,8 +617,7 @@ async fn cost_from_total() {
         .remove(0)
         .result;
     assert!(r.get("error").is_none(), "{r}");
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": a.as_str(), "provider_id": "u_cost_prov"}),
         )])
@@ -954,8 +951,7 @@ async fn task_outside_turn() {
     // the verb's pass runs on the bundle's provider (the scripted one)
     let s = script(&a, vec![pass("{}")], Duration::ZERO);
     *s.report.lock().unwrap() = rep(300, 30, None, None);
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             json!({"type": "context_recall"}),
         )])

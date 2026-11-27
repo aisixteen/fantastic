@@ -68,8 +68,7 @@ fn mk() -> (TempDir, Arc<Kernel>) {
 }
 
 async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    kernel
-        .operator_send(vec![Item::new(AgentId::from(target), payload)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -203,13 +202,11 @@ async fn a_grandchilds_line_on_the_root_is_capped_by_its_parent() {
         if !can.is_null() {
             p["can"] = can;
         }
-        let _ = kernel
-            .operator_send(vec![Item::new(AgentId::from("kernel"), p)])
+        let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel"), p)])
             .await;
     }
     let denial = fantastic_kernel::test_support::as_agent(AgentId::from("leaf"), async {
-        kernel
-            .operator_send(vec![Item::new(
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel"),
                 json!({"type": "persist_blob", "agent_id": "leaf", "name": "s.yaml", "content": "x"}),
             )])

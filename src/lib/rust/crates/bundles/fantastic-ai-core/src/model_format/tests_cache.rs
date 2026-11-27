@@ -1288,8 +1288,7 @@ async fn dropped_chat_frees_cache() {
         run(&state.render_cache, &r, &m, &Opts::default());
         Arc::downgrade(&state)
     };
-    let out = kernel
-        .operator_send(vec![fantastic_kernel::Item::new(
+    let out = fantastic_kernel::test_support::send_settled(&kernel, vec![fantastic_kernel::Item::new(
             fantastic_kernel::AgentId::from("kernel"),
             json!({"type": "delete_agent", "id": agent.as_str()}),
         )])
@@ -1383,8 +1382,7 @@ async fn chat_kernel(tmp: &tempfile::TempDir, meta: &str) -> Arc<fantastic_kerne
 }
 
 async fn kernel_state(kernel: &Arc<fantastic_kernel::Kernel>, payload: Value) -> Value {
-    kernel
-        .operator_send(vec![fantastic_kernel::Item::new(
+    fantastic_kernel::test_support::send_settled(kernel, vec![fantastic_kernel::Item::new(
             fantastic_kernel::AgentId::from("kernel_state"),
             payload,
         )])

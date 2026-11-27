@@ -50,9 +50,9 @@ fn store() -> Arc<Kernel> {
 async fn call(k: &Arc<Kernel>, payload: Value, as_: Option<&str>) -> Value {
     let item = Item::new(AgentId::from("mem"), payload);
     match as_ {
-        None => k.operator_send(vec![item]).await.remove(0).result,
+        None => fantastic_kernel::test_support::send_settled(k, vec![item]).await.remove(0).result,
         Some(who) => {
-            as_agent(AgentId::from(who), k.operator_send(vec![item]))
+            as_agent(AgentId::from(who), fantastic_kernel::test_support::send_settled(k, vec![item]))
                 .await
                 .remove(0)
                 .result
@@ -687,7 +687,7 @@ async fn two_stores_hold_separate_tables_and_delete_frees_one() {
     append(&k, "alice", json!([{"id": 1, "content": "in mem"}])).await;
     let read2 = as_agent(
         AgentId::from("alice"),
-        k.operator_send(vec![Item::new(
+        fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             AgentId::from("mem2"),
             json!({"type": "read"}),
         )]),
@@ -700,7 +700,7 @@ async fn two_stores_hold_separate_tables_and_delete_frees_one() {
         json!([]),
         "mem2 shares nothing with mem: {read2}"
     );
-    let gone = k.operator_send(vec![Item::new(
+    let gone = fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "delete_agent", "id": "mem2"}),
         )])
@@ -790,7 +790,7 @@ async fn call_bytes(
     if let Some(b) = bytes {
         item = item.with_binary_key("data", b.to_vec());
     }
-    let out = as_agent(AgentId::from(as_), k.operator_send(vec![item]))
+    let out = as_agent(AgentId::from(as_), fantastic_kernel::test_support::send_settled(k, vec![item]))
         .await
         .remove(0);
     let body = out.body_bytes().map(<[u8]>::to_vec);

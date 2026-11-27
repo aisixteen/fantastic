@@ -30,7 +30,10 @@ use crate::outcome::{Outcome, Status};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::Mutex;
-use tokio::sync::watch;
+
+/// A JOINER's delivery: run once with the joined execution's settle
+/// ([`Ledger::settle`] hands every one back to the settler).
+pub(crate) type Joined = Box<dyn FnOnce(Outcome) + Send>;
 
 /// Default ring size. Big enough that a normal session never evicts, bounded so
 /// a long-lived kernel cannot grow without limit.
@@ -59,10 +62,9 @@ struct Row {
     /// execution does not settle its intermediate attempts, so a joiner never
     /// sees an answer that was later retried away.
     outcome: Option<Outcome>,
-    /// How joiners wait. `watch` (not `Notify`) because it carries the value and
-    /// cannot miss an edge: a joiner that subscribes after the settle still
-    /// reads it immediately.
-    tx: watch::Sender<Option<Outcome>>,
+    /// The JOINERS of this execution in flight, by token: each is delivered the
+    /// settle once it comes. Nothing waits for it.
+    joiners: Vec<(u64, Joined)>,
 }
 
 /// What [`Ledger::open`] decided for one item.
@@ -72,8 +74,9 @@ struct Row {
 pub enum Opened {
     /// A new execution: dispatch it, then call [`Ledger::settle`].
     Fresh,
-    /// Someone else is running this id — await their outcome, run nothing.
-    Join(watch::Receiver<Option<Outcome>>, Value),
+    /// Someone else is running this id — join its settle ([`Ledger::join`]), run
+    /// nothing.
+    Join(Value),
     /// Already settled: this IS the answer, the handler must not run again.
     Settled(Box<Outcome>, Value),
     /// The id is unusable — the refusal to hand back verbatim.
@@ -91,6 +94,8 @@ struct Inner {
     /// Insertion order, for the ring. Mirrors python's dict ordering.
     order: Vec<i64>,
     cap: Option<usize>,
+    /// The last joiner token handed out.
+    joiner_seq: u64,
 }
 
 /// The kernel's execution ledger, process side. The durable half is the `call` +
@@ -115,6 +120,7 @@ impl Ledger {
                 names: HashMap::new(),
                 order: Vec::new(),
                 cap,
+                joiner_seq: 0,
             }),
         }
     }
@@ -167,14 +173,13 @@ impl Ledger {
                 // The joiner is authorized against THIS row's verb by the
                 // caller — hand it out with the decision.
                 Some(o) => Opened::Settled(Box::new(o.clone()), row.payload.clone()),
-                None => Opened::Join(row.tx.subscribe(), row.payload.clone()),
+                None => Opened::Join(row.payload.clone()),
             };
         }
 
         // THE NAME IS THE CALLER'S, THE ID IS THE KERNEL'S. Bind them here, so
         // a later send under the same name JOINS this execution instead of
         // starting a second one.
-        let (tx, _rx) = watch::channel(None);
         if let Some(n) = name {
             g.names.insert(n.to_string(), execution_id);
         }
@@ -189,7 +194,7 @@ impl Ledger {
                 caller,
                 acked: false,
                 outcome: None,
-                tx,
+                joiners: Vec::new(),
             },
         );
         g.order.push(execution_id);
@@ -272,17 +277,47 @@ impl Ledger {
             .is_some_and(|r| r.attempts <= r.retries)
     }
 
-    /// Record the FINAL outcome and wake every joiner. Stamps `attempts`, so a
-    /// caller can see what its work actually cost.
-    pub fn settle(&self, execution_id: i64, mut outcome: Outcome) -> Outcome {
+    /// Record the FINAL outcome, and hand back every joiner it is owed to (the
+    /// settler delivers it once the settle row is written). Stamps `attempts`, so
+    /// a caller can see what its work actually cost.
+    pub(crate) fn settle(&self, execution_id: i64, mut outcome: Outcome) -> (Outcome, Vec<Joined>) {
         let mut g = self.inner.lock().expect("ledger poisoned");
+        let mut joiners = Vec::new();
         if let Some(row) = g.rows.get_mut(&execution_id) {
             outcome.attempts = row.attempts.max(1);
             row.outcome = Some(outcome.clone());
-            // Ignore the send error: no subscribers is the normal case.
-            let _ = row.tx.send(Some(outcome.clone()));
+            joiners = std::mem::take(&mut row.joiners).into_iter().map(|(_, j)| j).collect();
         }
-        outcome
+        (outcome, joiners)
+    }
+
+    /// JOIN `execution_id` in flight: `deliver` runs with its settle. The token
+    /// [`Self::unjoin`] takes it back with. `Err` hands `deliver` back with the
+    /// recorded outcome when the execution already settled, or with `None` when it
+    /// is gone from the ring.
+    pub(crate) fn join(&self, execution_id: i64, deliver: Joined) -> Result<u64, (Joined, Option<Box<Outcome>>)> {
+        let mut g = self.inner.lock().expect("ledger poisoned");
+        g.joiner_seq += 1;
+        let token = g.joiner_seq;
+        match g.rows.get_mut(&execution_id) {
+            Some(row) => match &row.outcome {
+                Some(o) => Err((deliver, Some(Box::new(o.clone())))),
+                None => {
+                    row.joiners.push((token, deliver));
+                    Ok(token)
+                }
+            },
+            None => Err((deliver, None)),
+        }
+    }
+
+    /// Take joiner `token` of `execution_id` back, when it is still owed a
+    /// delivery (its own deadline passed first).
+    pub(crate) fn unjoin(&self, execution_id: i64, token: u64) -> Option<Joined> {
+        let mut g = self.inner.lock().expect("ledger poisoned");
+        let row = g.rows.get_mut(&execution_id)?;
+        let at = row.joiners.iter().position(|(t, _)| *t == token)?;
+        Some(row.joiners.remove(at).1)
     }
 
     /// Set the retention ring. `None` = unbounded.
@@ -473,7 +508,6 @@ impl Ledger {
             body: None,
             secret: Vec::new(),
         };
-        let (tx, _rx) = watch::channel(Some(out.clone()));
         let name = call.get("name").and_then(Value::as_str).map(str::to_string);
         if let Some(n) = &name {
             g.names.insert(n.clone(), execution_id);
@@ -494,7 +528,7 @@ impl Ledger {
                     .map(AgentId::from),
                 acked: false,
                 outcome: Some(out),
-                tx,
+                joiners: Vec::new(),
             },
         );
         g.order.push(execution_id);

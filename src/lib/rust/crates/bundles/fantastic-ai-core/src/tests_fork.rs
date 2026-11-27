@@ -12,8 +12,7 @@ use fantastic_kernel::test_support::as_agent;
 const DONE: &str = "<call name=\"done\"></call>";
 
 async fn verb(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    crate::tests::settled(kernel, kernel
-        .operator_send(vec![Item::new(agent.clone(), payload)]))
+    crate::tests::settled(kernel, fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(agent.clone(), payload)]))
         .await
         .remove(0)
         .result
@@ -442,8 +441,7 @@ async fn the_forks_prompt_equals_the_parents_for_the_same_prefix() {
     };
     // one short record prompt for both: the default block names each agent's own id
     for a in [&fork, &reference] {
-        let _ = kernel
-            .operator_send(vec![Item::new(
+        let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({"type": "update_agent", "id": a.as_str(), "system_prompt": "sys"}),
             )])

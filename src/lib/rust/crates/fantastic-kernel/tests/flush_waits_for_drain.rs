@@ -154,8 +154,7 @@ async fn a_flush_waits_for_the_drain_the_writer_already_took() {
     let kernel = kernel_at(&store, &gate, &entered);
     boot_root(&kernel).await;
     wire_fake_store(&kernel, &store).await;
-    kernel
-        .operator_send(vec![Item::new(
+    fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "create_agent", "parent_id": "kernel_state",
                    "handler_module": "readme_bundle.tools", "id": "probe"}),

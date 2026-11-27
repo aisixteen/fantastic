@@ -144,7 +144,7 @@ async fn boot_with_manifest(text: &str) -> (Arc<Kernel>, tempfile::TempDir) {
     let (fixture, path) = write_manifest(text);
     // Operator send (top-level → ungated); create_agent auto-boots the loader,
     // which hydrates the roster.
-    let rec = kernel.operator_send(vec![Item::new(
+    let rec = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -158,6 +158,17 @@ async fn boot_with_manifest(text: &str) -> (Arc<Kernel>, tempfile::TempDir) {
         .remove(0)
         .result;
     assert_eq!(rec["id"], json!("static_loader"), "loader create: {rec}");
+    // the create's boot answers at once and its hydration goes on as calls (#795); a
+    // `boot` sent AS A CALL settles once its own hydration did — idempotent by id, so it
+    // is the test's barrier that the roster is in the tree
+    let again = fantastic_kernel::test_support::send_settled(
+        &kernel,
+        vec![Item::new(AgentId::from("static_loader"), json!({"type": "boot"}))],
+    )
+    .await
+    .remove(0)
+    .result;
+    assert!(again.get("error").is_none() || again.get("booted") == Some(&json!(false)), "{again}");
     (kernel, fixture)
 }
 
@@ -194,7 +205,7 @@ async fn roster_is_closed_a_child_cannot_create_more() {
     let (kernel, _fixture) = boot_with_manifest(MANIFEST).await;
     let r = as_agent(
         AgentId::from("worker"),
-        kernel.operator_send(vec![Item::new(
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "mock.tools"}),
         )]),
@@ -210,7 +221,7 @@ async fn roster_is_closed_a_child_cannot_create_more() {
 async fn boot_is_idempotent_by_id() {
     let (kernel, _fixture) = boot_with_manifest(MANIFEST).await;
     let before = kernel.agent_ids().len();
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("static_loader"),
             json!({"type": "boot"}),
         )])
@@ -231,7 +242,7 @@ async fn boot_is_idempotent_by_id() {
 
 /// Create a static_loader under the root with `manifest`; returns the create reply.
 async fn create_loader(kernel: &Arc<Kernel>, id: &str, manifest: Value) -> Value {
-    kernel.operator_send(vec![Item::new(
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE,
@@ -244,7 +255,7 @@ async fn create_loader(kernel: &Arc<Kernel>, id: &str, manifest: Value) -> Value
 }
 
 async fn boot_loader(kernel: &Arc<Kernel>, id: &str) -> Value {
-    kernel.operator_send(vec![Item::new(AgentId::from(id), json!({"type": "boot"}))])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from(id), json!({"type": "boot"}))])
         .await
         .remove(0)
         .result
@@ -326,7 +337,7 @@ async fn a_roster_entry_without_an_id_is_refused_loud() {
     // the flush persisted them all, with no word to the operator.
     let (kernel, _fixture) = boot_with_manifest("agents:\n  - handler_module: mock.tools\n").await;
     let before = kernel.agent_ids().len();
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("static_loader"),
             json!({"type": "boot"}),
         )])
@@ -349,7 +360,7 @@ async fn an_id_less_entry_is_refused_before_the_valid_ones_hydrate() {
         "agents:\n  - handler_module: mock.tools\n  - id: memory\n    handler_module: mock.tools\n",
     )
     .await;
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("static_loader"),
             json!({"type": "boot"}),
         )])
@@ -388,7 +399,7 @@ fn meta_of(pairs: &[(&str, Value)]) -> Map<String, Value> {
 async fn an_unknown_verb_is_a_coded_refusal() {
     // `shutdown` is not a verb of this bundle either.
     let (kernel, _fixture) = boot_with_manifest(MANIFEST).await;
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("static_loader"),
             json!({"type": "frobnicate"}),
         )])
@@ -398,7 +409,7 @@ async fn an_unknown_verb_is_a_coded_refusal() {
     assert_eq!(r["reason"], json!("unhandled"), "{r}");
     assert_eq!(r["verb"], json!("frobnicate"), "{r}");
     // `shutdown` is declared by none: refused like any unknown verb
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("static_loader"),
             json!({"type": "shutdown"}),
         )])
@@ -413,7 +424,7 @@ async fn a_record_without_a_manifest_boots_with_pythons_text() {
     // A loader may exist before its roster does; `boot` says so in
     // python's words rather than the record being unwritable.
     let kernel = mk_kernel();
-    let rec = kernel.operator_send(vec![Item::new(
+    let rec = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -424,7 +435,7 @@ async fn a_record_without_a_manifest_boots_with_pythons_text() {
         .remove(0)
         .result;
     assert_eq!(rec["id"], json!("sl4"), "{rec}");
-    let b = kernel.operator_send(vec![Item::new(
+    let b = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("sl4"),
             json!({"type": "boot"}),
         )])
@@ -537,7 +548,7 @@ fn a_falsy_yaml_document_boots_empty() {
 #[tokio::test]
 async fn a_roster_entry_without_a_handler_module_is_refused_and_a_bad_one_is_judged_by_create() {
     let (kernel, _fixture) = boot_with_manifest("agents:\n  - id: a\n").await;
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("static_loader"),
             json!({"type": "boot"}),
         )])
@@ -553,7 +564,7 @@ async fn a_roster_entry_without_a_handler_module_is_refused_and_a_bad_one_is_jud
     for value in ["''", "0", "5"] {
         let (kernel, _fixture) =
             boot_with_manifest(&format!("agents:\n  - id: a\n    handler_module: {value}\n")).await;
-        let r = kernel.operator_send(vec![Item::new(
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("static_loader"),
                 json!({"type": "boot"}),
             )])
@@ -578,7 +589,7 @@ async fn a_spec_type_key_cannot_change_the_create_verb() {
         "agents:\n  - id: a\n    handler_module: mock.tools\n    type: reflect\n",
     )
     .await;
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("static_loader"),
             json!({"type": "boot"}),
         )])
@@ -622,7 +633,7 @@ async fn a_manifest_that_reassigns_a_handler_module_fails_loud() {
     drop(fixture);
     let (fixture, path) =
         write_manifest("agents:\n  - id: memory\n    handler_module: static_loader.tools\n");
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "update_agent", "id": "static_loader", "manifest": path}),
         )])
@@ -630,7 +641,7 @@ async fn a_manifest_that_reassigns_a_handler_module_fails_loud() {
         .remove(0)
         .result;
     assert_eq!(r["updated"], json!(true), "{r}");
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("static_loader"),
             json!({"type": "boot"}),
         )])
@@ -655,7 +666,7 @@ async fn a_manifest_that_reassigns_a_handler_module_fails_loud() {
 async fn a_manifest_never_re_applies_an_agent_outside_its_loader() {
     let (kernel, fixture) = boot_with_manifest(MANIFEST).await;
     drop(fixture);
-    let made = kernel.operator_send(vec![Item::new(
+    let made = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "create_agent", "parent_id": "kernel", "id": "outsider",
                    "handler_module": "mock.tools"}),
@@ -667,7 +678,7 @@ async fn a_manifest_never_re_applies_an_agent_outside_its_loader() {
     let (_fixture, path) = write_manifest(
         "agents:\n  - id: outsider\n    handler_module: mock.tools\n    display_name: taken\n",
     );
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "update_agent", "id": "static_loader", "manifest": path}),
         )])
@@ -675,7 +686,7 @@ async fn a_manifest_never_re_applies_an_agent_outside_its_loader() {
         .remove(0)
         .result;
     assert_eq!(r["updated"], json!(true), "{r}");
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("static_loader"),
             json!({"type": "boot"}),
         )])
@@ -699,7 +710,7 @@ async fn a_refused_re_apply_names_the_agent_and_forwards_the_error() {
     let (_fixture, path) = write_manifest(
         "agents:\n  - id: memory\n    handler_module: mock.tools\n    handler_module_x: 1\n    id_2: 2\n    display_name: ''\n    can: 5\n",
     );
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "update_agent", "id": "static_loader", "manifest": path}),
         )])
@@ -707,7 +718,7 @@ async fn a_refused_re_apply_names_the_agent_and_forwards_the_error() {
         .remove(0)
         .result;
     assert_eq!(r["updated"], json!(true), "{r}");
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("static_loader"),
             json!({"type": "boot"}),
         )])
@@ -753,7 +764,7 @@ fn an_unhashable_mapping_key_is_invalid_yaml() {
 #[tokio::test]
 async fn unknown_type_wire_shape_is_byte_exact() {
     let (kernel, _fixture) = boot_with_manifest(MANIFEST).await;
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("static_loader"),
             json!({"type": "frob"}),
         )])
@@ -765,7 +776,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
     assert_eq!(r["verb"], json!("frob"), "{r}");
     assert!(r["error"].as_str().is_some_and(|e| e.contains("boot")), "{r}");
     // a call with no verb at all is refused the same way
-    let r = kernel.operator_send(vec![Item::new(AgentId::from("static_loader"), json!({}))])
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("static_loader"), json!({}))])
         .await
         .remove(0)
         .result;
@@ -788,7 +799,7 @@ async fn a_boot_is_the_loaders_own_whoever_sends_it() {
         json!({"type": "update_agent", "id": "worker", "can": {"static_loader": {"call": ["boot"]}}}),
         json!({"type": "delete_agent", "id": "memory"}),
     ] {
-        let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel"), p)])
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel"), p)])
             .await
             .remove(0)
             .result;
@@ -796,7 +807,7 @@ async fn a_boot_is_the_loaders_own_whoever_sends_it() {
     }
     let r = as_agent(
         AgentId::from("worker"),
-        kernel.operator_send(vec![Item::new(
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("static_loader"),
             json!({"type": "boot"}),
         )]),
@@ -818,8 +829,7 @@ async fn the_boot_after_load_is_the_same_pass_as_at_create() {
     )
     .await;
     assert!(kernel.exists("memory"));
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "delete_agent", "id": "memory"}),
         )])
@@ -832,8 +842,16 @@ async fn the_boot_after_load_is_the_same_pass_as_at_create() {
         .announce(&loader, json!({"type": "boot"}))
         .await
         .expect("the loader declares boot");
-    assert_eq!(out.result, json!({"booted": true, "created": ["memory"], "reapplied": []}), "{}", out.result);
-    assert!(kernel.exists("memory"));
+    // a boot the kernel runs directly answers at once (#795): the roster's creates are
+    // calls, and the agent is back once they settled
+    assert_eq!(out.result, json!({"booted": true}), "{}", out.result);
+    for _ in 0..500 {
+        if kernel.exists("memory") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(kernel.exists("memory"), "the hydration re-created the roster");
 }
 
 /// A loader whose record holds no create line on itself builds nothing, whoever made
@@ -842,7 +860,7 @@ async fn the_boot_after_load_is_the_same_pass_as_at_create() {
 async fn a_loader_without_a_create_line_builds_nothing() {
     let kernel = mk_kernel();
     let (_fixture, path) = write_manifest("agents:\n  - id: memory\n    handler_module: mock.tools\n");
-    let rec = kernel.operator_send(vec![Item::new(
+    let rec = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",

@@ -43,8 +43,7 @@ async fn world(tmp: &TempDir, next_id: Option<i64>) -> (Arc<Kernel>, Ids) {
     };
     let all = [ids.lead.clone(), ids.slow.clone(), ids.asker.clone()];
     // the slow peer is the slow non-AI stand-in
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "sleeper.tools", "id": ids.slow.as_str()}),
         )])
@@ -69,7 +68,7 @@ async fn world(tmp: &TempDir, next_id: Option<i64>) -> (Arc<Kernel>, Ids) {
         for o in all.iter().filter(|o| *o != a) {
             can[o.as_str()] = line.clone();
         }
-        let r = kernel.operator_send(vec![Item::new(
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({"type": "update_agent", "id": a.as_str(), "can": can}),
             )])
@@ -137,7 +136,7 @@ async fn first_life(tmp: &TempDir) -> (Value, i64) {
         Duration::ZERO,
     );
     // no settle: the lead's call stays open
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             ids.lead.clone(),
             json!({"type": "send", "text": "start the work", "client_id": "o"}),
         )])
@@ -151,7 +150,7 @@ async fn first_life(tmp: &TempDir) -> (Value, i64) {
     .await;
     // the lead's next request is held: the asker's message wakes a pass that never ends
     let _held = sl.hold_next();
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             ids.asker.clone(),
             json!({"type": "send", "text": "ask the lead", "client_id": "o"}),
         )])
@@ -165,7 +164,7 @@ async fn first_life(tmp: &TempDir) -> (Value, i64) {
     );
     // what reached the store is all the next life has
     kernel.flush_executions().await;
-    let tables = kernel.operator_send(vec![Item::new(
+    let tables = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(MEMORY),
             json!({"type": "dump"}),
         )])
@@ -207,7 +206,7 @@ fn a_chain_cut_by_a_restart_is_told_as_dead_letters_and_goes_on() {
     rt.block_on(async {
         // THE SECOND PROCESS, on the same records
         let (kernel, ids) = world(&tmp, Some(next_id)).await;
-        let r = kernel.operator_send(vec![Item::new(
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from(MEMORY),
                 json!({"type": "inject", "tables": tables}),
             )])
@@ -246,7 +245,7 @@ fn a_chain_cut_by_a_restart_is_told_as_dead_letters_and_goes_on() {
 
         // THE LEDGER: the call that died is a dead letter, nothing is in flight; the
         // asker's message to the lead was acked at once, so it is no dead letter
-        let entries = kernel.operator_send(vec![Item::new(
+        let entries = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({"type": "ledger", "limit": 1000}),
             )])
@@ -304,7 +303,7 @@ fn a_chain_cut_by_a_restart_is_told_as_dead_letters_and_goes_on() {
         // TOLD ONCE: a reboot of the lead tells it nothing again
         tokio::time::sleep(Duration::from_millis(300)).await;
         let before = sl.passes_served();
-        let r = kernel.operator_send(vec![Item::new(ids.lead.clone(), json!({"type": "boot"}))])
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(ids.lead.clone(), json!({"type": "boot"}))])
             .await
             .remove(0);
         assert!(r.result.get("error").is_none(), "{}", r.result);
