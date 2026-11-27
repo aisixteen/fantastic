@@ -102,8 +102,8 @@ async fn watch_directory_re_emits_directory_events_on_the_connector_inbox() {
 
     let (url, push) = directory_relay().await;
     let no_password: transport::relay::PasswordReader =
-        Arc::new(|| Box::pin(async { Ok(String::new()) }));
-    let relay = RelayTransport::connect(
+        Arc::new(|next| Box::pin(async move { next(Ok(String::new())).await }));
+    let relay = transport::relay::connected(
         &url,
         "A",
         no_password,

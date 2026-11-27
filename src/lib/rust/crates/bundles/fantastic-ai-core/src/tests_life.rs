@@ -302,7 +302,10 @@ async fn a_pass_ends_when_it_sends_complete() {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(theirs.len(), 1, "the provider answers the request");
+    // one execution is the request; the provider's own I/O (its stream) runs under it
+    let ids: Vec<Value> = theirs.iter().map(|t| t["id"].clone()).collect();
+    let requests = theirs.iter().filter(|t| !ids.contains(&t["parent"])).count();
+    assert_eq!(requests, 1, "the provider answers the request: {theirs:?}");
     let mine = tasks_of(&kernel, chat.as_str(), None).await;
     assert!(mine.is_empty(), "no task of the chat waits: {mine:?}");
     assert!(crate::state::is_generating(&chat), "the pass is in flight, as a record");

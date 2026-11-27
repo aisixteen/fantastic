@@ -891,8 +891,8 @@ async fn a_restart_and_a_compaction_each_start_a_checkpoint_and_the_totals_go_on
     fat.extend(body(60, 8000));
     fantastic_kernel::test_support::as_agent(
         agent.clone(),
-        crate::projection::project_context(
-            &crate::model_format::pass::Pass::for_test(Arc::clone(&provider)),
+        crate::projection::projected(
+            crate::model_format::pass::Pass::for_test(Arc::clone(&provider)),
             &agent,
             &state,
             &kernel,

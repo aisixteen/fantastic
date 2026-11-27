@@ -423,6 +423,9 @@ pub enum BlockFail {
     FoldSummary(crate::strategies::fold::FoldSummaryError),
     /// A fold's anchor cannot be known (a `context_recall` fold).
     FoldAnchor(crate::folds::FoldAnchorError),
+    /// A helper's task answer has not come yet (#795): the step that runs it sends the
+    /// request and runs it again ([`crate::model_format::pass::drive`]).
+    Pending,
 }
 
 impl From<crate::strategies::fold::FoldFail> for BlockFail {
@@ -431,7 +434,14 @@ impl From<crate::strategies::fold::FoldFail> for BlockFail {
             crate::strategies::fold::FoldFail::Store(e) => Self::Store(e),
             crate::strategies::fold::FoldFail::Summary(e) => Self::FoldSummary(e),
             crate::strategies::fold::FoldFail::Anchor(e) => Self::FoldAnchor(e),
+            crate::strategies::fold::FoldFail::Pending => Self::Pending,
         }
+    }
+}
+
+impl From<crate::model_format::pass::Pending> for BlockFail {
+    fn from(_: crate::model_format::pass::Pending) -> Self {
+        Self::Pending
     }
 }
 
@@ -454,6 +464,10 @@ impl From<BlockFail> for fantastic_kernel::bundle::BundleError {
             BlockFail::PromptFile(e) => e.into(),
             BlockFail::FoldSummary(e) => e.into(),
             BlockFail::FoldAnchor(e) => e.into(),
+            // the helper's steps answer every task request before they end
+            BlockFail::Pending => {
+                MemoryStoreError("a helper's task request was left unanswered".to_string()).into()
+            }
         }
     }
 }

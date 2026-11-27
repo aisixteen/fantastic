@@ -12,7 +12,7 @@
 //! for the next pass on the same model.
 
 use fantastic_ai_core::constants::default_max_tokens;
-use fantastic_ai_core::credentials::{key_reader, KeySource};
+use fantastic_ai_core::credentials::KeySource;
 use fantastic_ai_core::helpers;
 use fantastic_kernel::refusal::{refusal, with, BAD_ARG};
 use fantastic_kernel::{AgentId, Kernel};
@@ -242,6 +242,8 @@ pub async fn read(
 /// budget. `Ok` carries that budget (`None`: the chat names one, or nothing can be
 /// read); `Err` is the verb's refusal.
 ///
+/// `key`: the key read for the record's endpoint (a step before, #795).
+///
 /// # Errors
 /// The refusal, naming the field the API did not answer.
 pub async fn resolve(
@@ -249,6 +251,7 @@ pub async fn resolve(
     kernel: &Arc<Kernel>,
     model: Option<String>,
     chat_max: Option<i64>,
+    key: &dyn KeySource,
 ) -> Result<Option<i64>, Value> {
     // the model of the pass (a provider's record names none: the chat's, else its default)
     let mut rec = helpers::agent_meta(agent_id, kernel);
@@ -283,8 +286,7 @@ pub async fn resolve(
     if missing(&rec).is_empty() || !named("model") || !named("endpoint") {
         return Ok(pass_max);
     }
-    let key = key_reader(agent_id, kernel, crate::NAME, false);
-    let mut values = match read(&rec, &key).await {
+    let mut values = match read(&rec, key).await {
         Ok(v) => v,
         Err(e) => {
             // a key the store refuses is permanent too: no retry mends it

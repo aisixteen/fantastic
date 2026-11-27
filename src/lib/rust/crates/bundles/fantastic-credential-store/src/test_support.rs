@@ -126,3 +126,97 @@ fn meta_map(kernel: &Kernel, id: &AgentId, key: &str) -> Map<String, Value> {
         })
         .unwrap_or_default()
 }
+
+/// A SLOW STORE (#795): the test store, holding every call one agent makes until the
+/// test opens its gate — so a test sees what that agent does while its key read is out.
+/// [`held_bundle`] makes it with its gate.
+pub struct HeldBundle {
+    inner: CredentialStoreBundle,
+    holder: String,
+    held: Arc<std::sync::atomic::AtomicUsize>,
+    open: tokio::sync::watch::Receiver<bool>,
+}
+
+/// The gate of a [`HeldBundle`]: how many of the holder's calls it took, and the switch
+/// that lets them through.
+#[derive(Clone)]
+pub struct Gate {
+    held: Arc<std::sync::atomic::AtomicUsize>,
+    open: Arc<tokio::sync::watch::Sender<bool>>,
+}
+
+impl Gate {
+    /// How many of the holder's calls the store took so far.
+    #[must_use]
+    pub fn held(&self) -> usize {
+        self.held.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Let every held call (and every later one) through.
+    pub fn open(&self) {
+        let _ = self.open.send(true);
+    }
+}
+
+/// The test store as a [`HeldBundle`] that holds every call of `holder`, and its gate.
+#[must_use]
+pub fn held_bundle(holder: &str) -> (HeldBundle, Gate) {
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    let held = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let gate = Gate {
+        held: Arc::clone(&held),
+        open: Arc::new(tx),
+    };
+    (
+        HeldBundle {
+            inner: bundle(),
+            holder: holder.to_string(),
+            held,
+            open: rx,
+        },
+        gate,
+    )
+}
+
+#[async_trait::async_trait]
+impl fantastic_kernel::bundle::Handler for HeldBundle {
+    type Call = <CredentialStoreBundle as fantastic_kernel::bundle::Handler>::Call;
+    fn name(&self) -> &str {
+        fantastic_kernel::bundle::Handler::name(&self.inner)
+    }
+    fn man(&self) -> &'static str {
+        fantastic_kernel::bundle::Handler::man(&self.inner)
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::bundle::Handler::verbs(&self.inner)
+    }
+    fn dynamic_verbs(&self, a: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        fantastic_kernel::bundle::Handler::dynamic_verbs(&self.inner, a)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::bundle::Handler::record(&self.inner)
+    }
+    fn payload_secret(&self, payload: &Value) -> Vec<String> {
+        fantastic_kernel::bundle::Handler::payload_secret(&self.inner, payload)
+    }
+    fn reply_secret(&self, payload: &Value, reply: &Value) -> Vec<String> {
+        fantastic_kernel::bundle::Handler::reply_secret(&self.inner, payload, reply)
+    }
+    async fn handle(
+        &self,
+        agent_id: &AgentId,
+        call: Self::Call,
+        kernel: &Arc<Kernel>,
+    ) -> Result<fantastic_kernel::bundle::Reply, fantastic_kernel::bundle::BundleError> {
+        if fantastic_kernel::current_origin().is_some_and(|a| a.as_str() == self.holder) {
+            self.held.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut rx = self.open.clone();
+            while !*rx.borrow_and_update() {
+                if rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        }
+        fantastic_kernel::bundle::Handler::handle(&self.inner, agent_id, call, kernel).await
+    }
+}

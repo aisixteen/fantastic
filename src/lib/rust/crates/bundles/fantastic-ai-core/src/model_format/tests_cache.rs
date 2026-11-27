@@ -1700,7 +1700,7 @@ async fn task_pass_leaves_cache() {
     assert!(a.cold && a.rows == rows.len());
     let before = state.render_cache.stats();
     let span: Vec<Value> = first[1..first.len() - 1].to_vec();
-    let (summary, _) = crate::strategies::summarize(&pass, &span, None).await;
+    let (summary, _) = crate::model_format::pass::settled(&pass, None, |p| crate::strategies::summarize(p, &span, None)).await;
     assert_eq!(summary, "TITLE\n\nthe summary");
     assert_eq!(provider.asked().len(), 1, "one task request");
     assert_eq!(

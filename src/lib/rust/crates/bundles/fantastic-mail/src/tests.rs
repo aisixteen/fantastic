@@ -30,6 +30,18 @@ async fn rig() -> Rig {
 
 /// A rig whose stored password is `password` and whose record `tweak` may change.
 async fn rig_with(password: &str, tweak: impl FnOnce(&mut Map<String, Value>)) -> Rig {
+    rig_on(password, tweak, None).await
+}
+
+/// A rig whose credential store holds every call of the mail agent until its gate
+/// opens (a slow store, #795).
+async fn rig_held() -> (Rig, creds::Gate) {
+    let (store, gate) = creds::held_bundle("mail");
+    (rig_on(fake::PASS, |_| {}, Some(store)).await, gate)
+}
+
+/// [`rig_with`] on `held` as the credential store, else the plain test store.
+async fn rig_on(password: &str, tweak: impl FnOnce(&mut Map<String, Value>), held: Option<creds::HeldBundle>) -> Rig {
     let imap = Arc::new(Mutex::new(ImapState::default()));
     {
         let mut st = imap.lock().unwrap();
@@ -49,7 +61,10 @@ async fn rig_with(password: &str, tweak: impl FnOnce(&mut Map<String, Value>)) -
 
     let tmp = tempfile::TempDir::new().unwrap();
     let mut kernel = Kernel::new();
-    kernel.bundles.register(fantastic_credential_store::HANDLER_MODULE, creds::bundle());
+    match held {
+        Some(h) => kernel.bundles.register(fantastic_credential_store::HANDLER_MODULE, h),
+        None => kernel.bundles.register(fantastic_credential_store::HANDLER_MODULE, creds::bundle()),
+    }
     kernel.bundles.register(HANDLER_MODULE, MailBundle::default());
     let kernel = Arc::new(kernel);
     let root = Agent::new(
@@ -441,4 +456,30 @@ async fn a_send_whose_call_ended_sends_nothing_on_a_later_yes() {
     approve(&r, json!(true)).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(r.smtp.lock().unwrap().mails.is_empty(), "a cancelled send was sent");
+}
+
+/// THE LOGIN READ IS A STEP (#795): a `list` defers and sends the login read to the
+/// credential store; while the store holds it the call stays open and the IMAP server
+/// is not reached; the read's settle signs in and settles the call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_login_read_is_a_step_and_its_settle_signs_in() {
+    let (r, gate) = rig_held().await;
+    let k = Arc::clone(&r.kernel);
+    let list = tokio::spawn(async move { send(&k, json!({"type": "list", "mailbox": "INBOX"})).await });
+    for _ in 0..250 {
+        if gate.held() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(gate.held() >= 1, "the login was never read");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!list.is_finished(), "list was answered before its login was read");
+    gate.open();
+    let out = tokio::time::timeout(Duration::from_secs(5), list)
+        .await
+        .expect("list never settled")
+        .unwrap();
+    assert_eq!(out.status, Status::Completed, "{}", out.result);
+    assert_eq!(out.result["messages"].as_array().map(Vec::len), Some(3), "{}", out.result);
 }

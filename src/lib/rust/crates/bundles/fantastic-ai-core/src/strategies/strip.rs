@@ -152,17 +152,15 @@ fn halve(body: &[Value]) -> Vec<Value> {
 }
 
 /// SEEDED FROM THE VIEW ARRAY on first use — stubs survive a restart, and the
-/// prefix bytes are the same before and after it.
-async fn seed(
-    ctx: &ProjectionCtx<'_>,
-    body: &[Value],
-) -> Result<HashSet<String>, crate::memory::MemoryStoreError> {
+/// prefix bytes are the same before and after it. The view is the head cache's: the
+/// projection reads the head (a step) before a strip runs ([`crate::projection`]).
+fn seed(ctx: &ProjectionCtx<'_>, body: &[Value]) -> HashSet<String> {
     let mut out = HashSet::new();
-    let Some(view) = crate::memory::load_view(ctx.self_id, ctx.kernel).await? else {
-        return Ok(out);
+    let Some(view) = crate::memory::cached_view(ctx.self_id, ctx.kernel) else {
+        return out;
     };
     let Some(ids) = view.get("ids").and_then(Value::as_array) else {
-        return Ok(out);
+        return out;
     };
     let stubbed: HashSet<i64> = ids
         .iter()
@@ -183,22 +181,19 @@ async fn seed(
             }
         }
     }
-    Ok(out)
+    out
 }
 
 /// Reduce delivered reply BODIES to their stubs, oldest first, down to the low
 /// watermark; cut only when the prose alone still overflows.
-pub async fn strip(
-    body: &[Value],
-    ctx: &ProjectionCtx<'_>,
-) -> Result<Projection, crate::memory::MemoryStoreError> {
+pub fn strip(body: &[Value], ctx: &ProjectionCtx<'_>) -> Projection {
     let size = |m: &Value| ctx.pass.tokens(m);
     let total = |ms: &[Value]| ctx.pass.tokens_all(ms);
     if body.len() <= 1 {
-        return Ok(Projection {
+        return Projection {
             body: fit_tail(body, ctx.budget, &size),
             ..Default::default()
-        });
+        };
     }
     let key = ctx.self_id.as_str().to_string();
     let seeded = stripped_state()
@@ -206,7 +201,7 @@ pub async fn strip(
         .expect("strip state poisoned")
         .contains_key(&key);
     if !seeded {
-        let s = seed(ctx, body).await?;
+        let s = seed(ctx, body);
         stripped_state()
             .lock()
             .expect("strip state poisoned")
@@ -265,7 +260,7 @@ pub async fn strip(
         rendered = out;
         cut = true;
     }
-    Ok(Projection {
+    Projection {
         body: rendered,
         summary: None,
         omitted_marker: cut,
@@ -273,5 +268,5 @@ pub async fn strip(
         stripped_bytes: saved,
         folds: Vec::new(),
         unanchored: 0,
-    })
+    }
 }

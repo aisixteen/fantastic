@@ -246,7 +246,7 @@ async fn summarize(kernel: &Arc<Kernel>, agent: &AgentId, provider: &Arc<Metered
     let rows = vec![json!({"role": "user", "id": 1, "content": "go"})];
     fantastic_kernel::test_support::as_agent(agent.clone(), async {
         let pass = Pass::new(p, agent, &state, kernel).await;
-        crate::strategies::summarize(&pass, &rows, None).await.0
+        crate::model_format::pass::settled(&pass, Some(kernel), |p| crate::strategies::summarize(p, &rows, None)).await.0
     })
     .await
 }

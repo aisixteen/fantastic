@@ -130,11 +130,12 @@ impl Handler for ThinkerProvider {
         &crate::tests_decl::any::RECORD
     }
     async fn handle(&self, id: &AgentId, call: Self::Call, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
-        let build = |m: Map<String, Value>| -> Arc<dyn Provider> {
+        let id_key = id.as_str().to_string();
+        let build = move |m: Map<String, Value>| -> Arc<dyn Provider> {
             let runaway = m.get("runaway").and_then(Value::as_u64).map_or(0, |n| usize::try_from(n).unwrap());
             let nth = {
                 let mut all = served().lock().unwrap();
-                let n = all.entry(id.as_str().to_string()).or_default();
+                let n = all.entry(id_key.clone()).or_default();
                 *n += 1;
                 *n - 1
             };
@@ -147,7 +148,10 @@ impl Handler for ThinkerProvider {
         };
         use provider_verbs::Call;
         Ok(Some(match call {
-            Call::Complete(a) => crate::remote_provider::complete_verb(id, &a, kernel, build).await,
+            Call::Complete(a) => {
+                crate::remote_provider::complete_verb(id, a, kernel, None, None, move |m, _key| build(m), crate::steps::deferred(kernel)).await;
+                Value::Null
+            }
             _ => json!({"id": id.as_str()}),
         }))
     }

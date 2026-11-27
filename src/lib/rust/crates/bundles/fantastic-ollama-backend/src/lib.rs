@@ -24,7 +24,7 @@
 
 use async_trait::async_trait;
 use fantastic_ai_core::constants::DEFAULT_TURN_TOKENS;
-use fantastic_ai_core::credentials::{key_reader, KeySource};
+use fantastic_ai_core::credentials::KeySource;
 use fantastic_ai_core::provider::{
     stream_idle_of, within, Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream,
     ReportCell, Unconfigured,
@@ -456,19 +456,26 @@ impl Handler for OllamaBackendBundle {
         call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        // A verb that runs a turn first reads a `model` the record leaves out; a
-        // server that does not answer refuses the verb, naming it.
-        if matches!(call, provider::Call::Complete(_)) {
-            if let Some(refused) = server::resolve(agent_id, kernel).await {
-                return Ok(Some(refused));
-            }
-        }
+        // A verb that runs a turn first reads a `model` the record leaves out (with the
+        // key read for it, a step); a server that does not answer refuses the verb,
+        // naming it.
+        let (id, k) = (agent_id.clone(), Arc::clone(kernel));
+        let prepare: fantastic_ai_core::remote_provider::Prepare = Box::new(move |key, args, _chosen| {
+            Box::pin(async move {
+                match server::resolve(&id, &k, key.as_ref()).await {
+                    Some(refused) => Err(refused),
+                    None => Ok(args),
+                }
+            })
+        });
         // THE PROVIDER VERBS (`complete`, `models`, `set_default_model`): an AI chat completes here
         fantastic_ai_core::remote_provider::handle(
             agent_id,
             call,
             kernel,
-            |m| build_provider_with(agent_id, kernel, m),
+            Some(fantastic_ai_core::remote_provider::Keys { backend: BACKEND, required: false }),
+            Some(prepare),
+            build_provider_with,
             fantastic_ai_core::remote_provider::NO_LIVE,
             || reflect_reply(agent_id, kernel),
         )
@@ -501,8 +508,8 @@ impl Handler for OllamaBackendBundle {
 /// `endpoint` and `model` are REQUIRED on the record — nothing is guessed; a
 /// record without them builds a provider whose every pass raises, naming the
 /// field (python `required_meta`). The record is passed in (`complete` lays the
-/// pass's `model` over the agent's).
-fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<String, Value>) -> Arc<dyn Provider> {
+/// pass's `model` over the agent's), with the key read for the pass.
+fn build_provider_with(meta: Map<String, Value>, key: Arc<dyn KeySource>) -> Arc<dyn Provider> {
     let (endpoint, model) = match (
         helpers::required_meta(&meta, "endpoint", BACKEND),
         helpers::required_meta(&meta, "model", BACKEND),
@@ -520,7 +527,7 @@ fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<Strin
         // cap at all
         num_predict: Some(num_predict_of(&meta)),
         think: meta.get("think").and_then(Value::as_bool),
-        key: Arc::new(key_reader(agent_id, kernel, BACKEND, false)),
+        key,
         report: ReportCell::default(),
         stream_idle,
     })

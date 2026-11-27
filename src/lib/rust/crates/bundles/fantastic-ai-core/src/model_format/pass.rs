@@ -15,12 +15,19 @@
 //!   calls; one request; no parse, no check, no retry; the result is plain text with the
 //!   reasoning stripped ([`Pass::task`]).
 //!
+//! A HELPER'S REQUEST IS A STEP (#795): a helper is plain code that READS its task
+//! answers from the pass's book ([`Pass::task`]); one it has not got yet makes it stop
+//! with [`Pending`], and the step that ran it sends that request ([`answer`], a
+//! `complete` through [`crate::provider::begin`]). The settle writes the answer in the
+//! book and runs the helper again from its start ([`drive`]): every answer it read
+//! before is read again, in the same order, so the helper is a pure function of its
+//! input and its answers, and nothing waits for a model.
+//!
 //! The window estimate of a message is counted on the bytes the pass sends of it
 //! ([`Pass::tokens`]), so a projection fits what this type is sent.
 //!
 //! Every request clears the provider's counts first and reads its report after, so a
-//! count is never read from a report an earlier request left. `pass.rs` holds the only
-//! `provider.chat` call of the crate outside tests.
+//! count is never read from a report an earlier request left.
 //!
 //! Both modes hand their counts to the chat's token accounting ([`crate::used`]): a
 //! task pass's go to `task` as it ends; a turn attempt's go to `turn.rejected`
@@ -31,7 +38,6 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use fantastic_kernel::{AgentId, Kernel};
-use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
 
 use sha2::{Digest as _, Sha256};
@@ -39,7 +45,7 @@ use sha2::{Digest as _, Sha256};
 use super::cache::{bound_of, epoch, Ctx, View};
 use super::map::Shown;
 use super::{trace, Decl};
-use crate::provider::{Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream};
+use crate::provider::{Provider, ProviderError, ProviderReport};
 use crate::state::BackendState;
 
 /// Which of the two kinds of model request a pass makes: the `mode` of its trace rows.
@@ -63,7 +69,7 @@ impl Mode {
 }
 
 /// What a task pass gives back.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Task {
     /// The answer, reasoning stripped; never parsed.
     pub(crate) text: String,
@@ -94,6 +100,29 @@ pub(crate) struct Pass {
     /// The window estimate of each message mapped so far, by the digest of what it maps
     /// from: a projection sizes one message many times.
     sizes: Mutex<BTreeMap<[u8; 32], i64>>,
+    /// The task answers its helpers read, in the order they asked ([`Pass::task`]).
+    book: Mutex<Book>,
+}
+
+/// A HELPER STOPPED for a task answer it has not got yet ([`Pass::task`]): the step that
+/// ran it sends the request ([`answer`]) and runs it again once it settled ([`drive`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Pending;
+
+/// One task request: the messages in the type's form and the output bound.
+#[derive(Debug, Clone, PartialEq)]
+struct Asked {
+    sent: Vec<Value>,
+    max_tokens: Option<i64>,
+}
+
+/// The task answers of a pass, in ask order: each request with its answer (`None`: the
+/// request failed), the next to read, and the request the helper stopped at.
+#[derive(Debug, Default)]
+struct Book {
+    answered: Vec<(Asked, Option<Task>)>,
+    cursor: usize,
+    need: Option<Asked>,
 }
 
 impl Pass {
@@ -186,6 +215,7 @@ impl Pass {
             provider_id,
             events: Mutex::new(trace::Events::default()),
             sizes: Mutex::new(BTreeMap::new()),
+            book: Mutex::new(Book::default()),
         }
     }
 
@@ -307,22 +337,6 @@ impl Pass {
         messages.iter().map(|m| self.tokens(m)).sum()
     }
 
-    /// THE ONE MODEL REQUEST: the provider's counts and stop reason cleared, then
-    /// `messages` (already in the type's form) sent. `max_tokens` bounds this call's
-    /// output; `None` keeps the provider's own bound.
-    ///
-    /// # Errors
-    /// The provider refused or failed to open the stream.
-    pub(crate) async fn request(
-        &self,
-        messages: &[Value],
-        max_tokens: Option<i64>,
-    ) -> Result<ProviderStream, ProviderError> {
-        self.provider.clear_prompt_tokens();
-        self.provider.clear_stop_reason();
-        self.provider.chat(messages, max_tokens).await
-    }
-
     /// THE REPORT READ, after a request's stream ended: the endpoint's report. When it
     /// holds cache counts, a `prefix_cache` event carries them as reported, the one
     /// measured value about the endpoint's cache; nothing else reads them as a
@@ -360,26 +374,197 @@ impl Pass {
         crate::used::Accepted::hold(&self.state, report)
     }
 
-    /// A TASK PASS (step 7): each message mapped for the type with no cache (one stored
-    /// text each), one request, the answer read whole, reasoning stripped; never parsed,
-    /// so a call form in it is text. `None`: the request failed or its stream did.
-    pub(crate) async fn task(&self, messages: &[Value], max_tokens: Option<i64>) -> Option<Task> {
-        let sent = super::map::messages(self.decl, &self.own, messages);
-        let mut stream = self.request(&sent, max_tokens).await.ok()?;
-        let mut parts: Vec<String> = Vec::new();
-        while let Some(ev) = stream.next().await {
-            match ev {
-                Ok(ProviderEvent::Token(t)) => parts.push(t),
-                Err(_) => return None,
+    /// A TASK PASS (step 7), READ FROM THE BOOK (#795): each message mapped for the type
+    /// with no cache (one stored text each), the answer whole, reasoning stripped; never
+    /// parsed, so a call form in it is text. `Ok(None)`: the request failed or its stream
+    /// did. [`Pending`]: this request has no answer yet — the helper stops, and the step
+    /// that runs it sends the request ([`answer`]) and runs it again ([`drive`]).
+    pub(crate) fn task(&self, messages: &[Value], max_tokens: Option<i64>) -> Result<Option<Task>, Pending> {
+        let asked = Asked {
+            sent: super::map::messages(self.decl, &self.own, messages),
+            max_tokens,
+        };
+        let mut b = self.book.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let i = b.cursor;
+        match b.answered.get(i) {
+            Some((a, t)) if *a == asked => {
+                let t = t.clone();
+                b.cursor += 1;
+                Ok(t)
+            }
+            _ => {
+                // a helper that asks something else from here on: its later answers are not its
+                b.answered.truncate(i);
+                b.need = Some(asked);
+                Err(Pending)
             }
         }
-        drop(stream);
-        let report = self.report(Mode::Task);
-        // its counts wait for the next stored row's `task`
-        crate::used::task(&self.state, &report);
-        Some(Task {
-            text: crate::think::without_thinking(&parts.join("")),
-            report,
+    }
+
+    /// The helper runs again from its start: it reads its answers from the first.
+    fn replay(&self) {
+        let mut b = self.book.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        b.cursor = 0;
+        b.need = None;
+    }
+
+    /// The request the helper stopped at, taken.
+    fn take_need(&self) -> Option<Asked> {
+        self.book
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .need
+            .take()
+    }
+
+    /// A task request settled: its answer (or `None`) is written in the book, its counts
+    /// go to the next stored row's `task` ([`crate::used::task`]).
+    fn answered(&self, asked: Asked, read: Result<String, ProviderError>) {
+        let task = read.ok().map(|text| {
+            let report = self.report(Mode::Task);
+            crate::used::task(&self.state, &report);
+            Task {
+                text: crate::think::without_thinking(&text),
+                report,
+            }
+        });
+        self.book
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .answered
+            .push((asked, task));
+    }
+}
+
+/// Where a task request's tokens go: nowhere — its answer is read from the settle.
+struct Unseen;
+
+#[async_trait::async_trait]
+impl crate::provider::Live for Unseen {
+    async fn token(&self, _t: &str) {}
+}
+
+/// THE HELPER'S REQUEST, as a STEP (#795): the request `pass`'s helper stopped at goes
+/// out as one `complete` ([`crate::provider::begin`], `owner`'s), and its settle writes
+/// the answer in the book and runs `next` with `rec` and the pass. A pass whose helper
+/// stopped at nothing runs `next` at once.
+pub(crate) async fn answer<R, F, Fut>(kernel: &Arc<Kernel>, owner: &AgentId, pass: Pass, rec: R, next: F)
+where
+    R: Send + 'static,
+    F: FnOnce(R, Pass) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let Some(asked) = pass.take_need() else {
+        return next(rec, pass).await;
+    };
+    let provider = Arc::clone(&pass.provider);
+    // A FRESH reading per request: the provider's counts cleared first
+    provider.clear_prompt_tokens();
+    provider.clear_stop_reason();
+    let sent = asked.sent.clone();
+    let max_tokens = asked.max_tokens;
+    let done: crate::provider::Done = Box::new(move |read| {
+        Box::pin(async move {
+            pass.answered(asked, read);
+            next(rec, pass).await;
         })
+    });
+    let secs = crate::constants::send_timeout_secs();
+    crate::provider::begin(
+        provider,
+        kernel,
+        owner,
+        sent,
+        max_tokens,
+        (std::time::Duration::from_secs_f64(secs), secs),
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(Unseen),
+        done,
+        Box::new(|_| {}),
+    )
+    .await;
+}
+
+/// A HELPER RUN TO ITS END, as STEPS (#795): `helper` runs over the pass; each time it
+/// stops for a task answer ([`Pending`]), that request is sent ([`answer`]) and the
+/// helper runs again, from its start, when it settled. `next` gets the helper's result.
+pub(crate) fn drive<R, T, H, F, Fut>(
+    kernel: Arc<Kernel>,
+    owner: AgentId,
+    pass: Pass,
+    rec: R,
+    helper: H,
+    next: F,
+) -> futures_util::future::BoxFuture<'static, ()>
+where
+    R: Send + 'static,
+    T: Send + 'static,
+    H: Fn(&Pass, &mut R) -> Result<T, Pending> + Send + Sync + 'static,
+    F: FnOnce(R, Pass, T) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    Box::pin(async move {
+        pass.replay();
+        let mut rec = rec;
+        match helper(&pass, &mut rec) {
+            Ok(t) => next(rec, pass, t).await,
+            Err(Pending) => {
+                let (k, me) = (Arc::clone(&kernel), owner.clone());
+                answer(&k, &me, pass, rec, move |rec, pass| drive(kernel, owner, pass, rec, helper, next)).await;
+            }
+        }
+    })
+}
+
+/// TESTS: `helper` run to its end over `pass`, its task requests read whole here (an
+/// in-process provider's stream; a provider agent's request through
+/// [`crate::provider::begin`], its settle awaited by the test).
+#[cfg(test)]
+pub(crate) async fn settled<T>(pass: &Pass, kernel: Option<&Arc<Kernel>>, helper: impl Fn(&Pass) -> Result<T, Pending>) -> T {
+    pass.replay();
+    loop {
+        if let Ok(t) = helper(pass) {
+            return t;
+        }
+        let asked = pass.take_need().expect("a pending helper names its request");
+        pass.provider.clear_prompt_tokens();
+        pass.provider.clear_stop_reason();
+        let read = if pass.provider.remote().is_some() {
+            let kernel = kernel.expect("a provider agent is reached through a kernel");
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let done: crate::provider::Done = Box::new(move |r| {
+                Box::pin(async move {
+                    let _ = tx.send(r);
+                })
+            });
+            let secs = crate::constants::send_timeout_secs();
+            crate::provider::begin(
+                Arc::clone(&pass.provider),
+                kernel,
+                &AgentId::from(pass.own.as_str()),
+                asked.sent.clone(),
+                asked.max_tokens,
+                (std::time::Duration::from_secs_f64(secs), secs),
+                Arc::new(tokio::sync::Notify::new()),
+                Arc::new(Unseen),
+                done,
+                Box::new(|_| {}),
+            )
+            .await;
+            rx.await.unwrap_or_else(|_| Err(ProviderError::cancelled("the request was dropped")))
+        } else {
+            async {
+                let mut stream = pass.provider.chat(&asked.sent, asked.max_tokens).await?;
+                let mut text = String::new();
+                while let Some(ev) = futures_util::StreamExt::next(&mut stream).await {
+                    let crate::provider::ProviderEvent::Token(t) = ev?;
+                    text.push_str(&t);
+                }
+                Ok::<String, ProviderError>(text)
+            }
+            .await
+        };
+        pass.answered(asked, read);
+        pass.replay();
     }
 }

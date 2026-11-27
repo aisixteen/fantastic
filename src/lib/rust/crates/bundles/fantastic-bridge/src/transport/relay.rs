@@ -5,8 +5,9 @@
 //! `fantastic.relay.v1`, header `X-Fantastic-Auth: <group password>` checked once
 //! at the WS upgrade) and reach a fixed `partner` GUID. The password is a SECRET
 //! and lives only in a credential_store: the
-//! transport is handed a [`PasswordReader`] and awaits it before EVERY dial —
-//! nothing cached, a rotated password is used by the next dial. The relay routes by
+//! transport is handed a [`PasswordReader`] and reads it before EVERY dial — one
+//! call to the store, a STEP (#795): its settle runs the dial, nothing waits for the
+//! store; nothing cached, a rotated password is used by the next dial. The relay routes by
 //! `target` and delivers peer→peer ONE-WAY as `{type:"event", source, payload}`.
 //!
 //! So this transport TUNNELS the shared bridge frames: `send` wraps each frame in
@@ -175,7 +176,8 @@ pub struct RelayTransport {
     rx: Mutex<mpsc::Receiver<Result<Frame, TransportError>>>,
     closed: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
-    supervisor: Mutex<Option<JoinHandle<()>>>,
+    /// The supervisor's current step (it pumps the socket, then re-dials as a step).
+    supervisor: Running,
     /// Fired by `close` so the registered heartbeat task ends at once (python
     /// cancels its `_hb_task`).
     stop_heartbeat: Arc<tokio::sync::Notify>,
@@ -184,18 +186,42 @@ pub struct RelayTransport {
     identity: SharedIdentity,
 }
 
-/// The relay password, read at dial time — python `PasswordReader`, `() -> str`:
-/// `Err` names the store and the ref (python's `CredentialError`).
+/// What runs with the relay password once it is read: the password, or why not
+/// (`Err` names the store and the ref, python's `CredentialError`).
+pub type PasswordNext =
+    Box<dyn FnOnce(Result<String, String>) -> futures_util::future::BoxFuture<'static, ()> + Send>;
+
+/// The relay password, read at dial time — python `PasswordReader`, `() -> str` — as
+/// a STEP (#795): the reader sends its read and returns; the read's settle runs the
+/// [`PasswordNext`] it was handed.
 pub type PasswordReader =
-    Arc<dyn Fn() -> futures_util::future::BoxFuture<'static, Result<String, String>> + Send + Sync>;
+    Arc<dyn Fn(PasswordNext) -> futures_util::future::BoxFuture<'static, ()> + Send + Sync>;
+
+/// What runs with a dial's socket, or why there is none.
+type DialNext =
+    Box<dyn FnOnce(Result<WsStream, TransportError>) -> futures_util::future::BoxFuture<'static, ()> + Send>;
 
 /// One dial: the password read at USE time, every (re)dial — a rotated password
-/// reaches the relay on the next connect, and no copy outlives this call. Python
+/// reaches the relay on the next connect, and no copy outlives this call — then the
+/// socket opened (the transport's own I/O); `next` gets it. Python
 /// `_default_dialer`'s `dial`.
-async fn dial(url: &str, password: &PasswordReader) -> Result<WsStream, TransportError> {
-    let token = password().await.map_err(TransportError::Other)?;
-    open_ws(url, &token).await
+async fn dial(url: String, password: &PasswordReader, next: DialNext) {
+    password(Box::new(move |token| {
+        Box::pin(async move {
+            let r = match token {
+                Ok(t) => open_ws(&url, &t).await,
+                Err(e) => Err(TransportError::Other(e)),
+            };
+            next(r).await;
+        })
+    }))
+    .await;
 }
+
+/// What runs with a connect's transport, or why the eager dial of a one-shot leg
+/// failed ([`RelayTransport::connect`]).
+pub type ConnectNext =
+    Box<dyn FnOnce(Result<Arc<RelayTransport>, TransportError>) -> futures_util::future::BoxFuture<'static, ()> + Send>;
 
 /// THE network dial — the one place a relay socket opens (python `_open_ws`):
 /// the WS upgrade request (path GUID + subprotocol + auth header).
@@ -228,7 +254,8 @@ async fn open_ws(url: &str, token: &str) -> Result<WsStream, TransportError> {
 impl RelayTransport {
     /// Dial the relay as `guid` and tunnel to `partner_guid`. `reconnect_secs` is
     /// the backoff before each re-dial (0 = one-shot: the initial dial must
-    /// succeed, and a later drop is terminal). The initial dial is eager.
+    /// succeed, and a later drop is terminal). The initial dial is eager: `next` gets
+    /// the transport once it was tried (its password read is a step).
     #[allow(clippy::too_many_arguments)]
     pub async fn connect(
         relay_url: &str,
@@ -239,73 +266,77 @@ impl RelayTransport {
         heartbeat_secs: f64,
         identity: Value,
         spawn: RelaySpawn,
-    ) -> Result<Arc<Self>, TransportError> {
+        next: ConnectNext,
+    ) {
         let url = format!("{}/{}", relay_url.trim_end_matches('/'), guid);
         let partner = partner_guid.to_string();
-        let sink: SharedSink = Arc::new(Mutex::new(None));
         let (tx, rx) = mpsc::channel::<Result<Frame, TransportError>>(64);
-        let closed = Arc::new(AtomicBool::new(false));
-        let connected = Arc::new(AtomicBool::new(false));
-        let relay_pending: RelayPending = Arc::new(std::sync::Mutex::new(HashMap::new()));
-        let identity: SharedIdentity = Arc::new(std::sync::Mutex::new(identity));
-        let stop = Arc::new(tokio::sync::Notify::new());
-
+        let sup = Arc::new(Sup {
+            url: url.clone(),
+            password: Arc::clone(&password),
+            partner: partner.clone(),
+            sink: Arc::new(Mutex::new(None)),
+            tx,
+            closed: Arc::new(AtomicBool::new(false)),
+            connected: Arc::new(AtomicBool::new(false)),
+            relay_pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            identity: Arc::new(std::sync::Mutex::new(identity)),
+            reconnect_secs,
+            spawn,
+            stop: Arc::new(tokio::sync::Notify::new()),
+            heartbeat_secs,
+            running: Running::default(),
+        });
+        let t = Arc::new(Self {
+            partner,
+            sink: Arc::clone(&sup.sink),
+            rx: Mutex::new(rx),
+            closed: Arc::clone(&sup.closed),
+            connected: Arc::clone(&sup.connected),
+            supervisor: sup.running.clone(),
+            stop_heartbeat: Arc::clone(&sup.stop),
+            relay_pending: Arc::clone(&sup.relay_pending),
+            relay_next_id: AtomicU64::new(0),
+            identity: Arc::clone(&sup.identity),
+        });
         // Eager first dial. On success seed the initial source; on failure with
         // reconnect off, fail the boot; otherwise heal in the background.
-        let initial: Option<SplitStream<WsStream>> = match dial(&url, &password).await {
-            Ok(stream) => {
-                let (s, source) = stream.split();
-                *sink.lock().await = Some(s);
-                connected.store(true, Ordering::SeqCst);
-                Some(source)
-            }
-            Err(e) => {
-                if reconnect_secs <= 0.0 {
-                    return Err(e);
-                }
-                None
-            }
-        };
-        // python's `_on_socket_open`: the beat, then the announce — BOTH only
-        // where a socket came up. Each later reconnect repeats the pair (in
-        // supervise).
-        if initial.is_some() {
-            start_heartbeat(&spawn, &sink, &closed, &connected, &stop, heartbeat_secs);
-        }
-        send_announce(&sink, &connected, &identity).await;
-
-        // THE CONNECTOR'S OWN WORK: `connect` runs in its `boot` dispatch, so the
-        // supervisor carries that identity (`spawn_inherit`) — every re-dial's
-        // password read is the connector's send, gated as it.
-        let supervisor = fantastic_kernel::spawn_inherit(supervise(
+        dial(
             url,
-            password,
-            partner.clone(),
-            Arc::clone(&sink),
-            tx,
-            Arc::clone(&closed),
-            Arc::clone(&connected),
-            Arc::clone(&relay_pending),
-            Arc::clone(&identity),
-            reconnect_secs,
-            initial,
-            spawn.clone(),
-            Arc::clone(&stop),
-            heartbeat_secs,
-        ));
-
-        Ok(Arc::new(Self {
-            partner,
-            sink,
-            rx: Mutex::new(rx),
-            closed,
-            connected,
-            supervisor: Mutex::new(Some(supervisor)),
-            stop_heartbeat: Arc::clone(&stop),
-            relay_pending,
-            relay_next_id: AtomicU64::new(0),
-            identity,
-        }))
+            &password,
+            Box::new(move |dialed| {
+                Box::pin(async move {
+                    let initial = match dialed {
+                        Ok(stream) => {
+                            let (s, source) = stream.split();
+                            *sup.sink.lock().await = Some(s);
+                            sup.connected.store(true, Ordering::SeqCst);
+                            Some(source)
+                        }
+                        Err(e) => {
+                            if sup.reconnect_secs <= 0.0 {
+                                return next(Err(e)).await;
+                            }
+                            None
+                        }
+                    };
+                    // python's `_on_socket_open`: the beat, then the announce — BOTH only
+                    // where a socket came up. Each later reconnect repeats the pair (in
+                    // `supervise`).
+                    if initial.is_some() {
+                        sup.beat();
+                    }
+                    send_announce(&sup.sink, &sup.connected, &sup.identity).await;
+                    // THE CONNECTOR'S OWN WORK: the supervisor carries the connector's
+                    // identity (`spawn_inherit`) — every re-dial's password read is the
+                    // connector's call, gated as it. A failed eager dial re-dials AT ONCE.
+                    let dial_now = initial.is_none();
+                    supervise(sup, initial, dial_now);
+                    next(Ok(t)).await;
+                })
+            }),
+        )
+        .await;
     }
 
     /// Send a relay-LEVEL frame to the directory (`target:"relay"` + a minted id)
@@ -471,11 +502,30 @@ fn classify_text(env: Value, partner: &str, relay_pending: &RelayPending) -> Opt
     }
 }
 
-/// The connection supervisor: pump the current source; on a drop, re-dial with
-/// the backoff and swap in the new sink. Terminal on explicit close (or one-shot
-/// drop) — pushes ConnectionClosed so `recv_frame` (the engine read loop) ends.
-#[allow(clippy::too_many_arguments)]
-async fn supervise(
+/// The supervisor's current step: what `close` aborts.
+#[derive(Clone, Default)]
+struct Running(Arc<std::sync::Mutex<Option<JoinHandle<()>>>>);
+
+impl Running {
+    /// The step `h` runs now.
+    fn set(&self, h: JoinHandle<()>) {
+        *self.0.lock().expect("supervisor poisoned") = Some(h);
+    }
+
+    /// The running step, taken (to abort it).
+    fn take(&self) -> Option<JoinHandle<()>> {
+        self.0.lock().expect("supervisor poisoned").take()
+    }
+
+    /// Whether no step runs (it was taken by `close`).
+    #[cfg(test)]
+    fn is_none(&self) -> bool {
+        self.0.lock().expect("supervisor poisoned").is_none()
+    }
+}
+
+/// What the supervisor's steps share.
+struct Sup {
     url: String,
     password: PasswordReader,
     partner: String,
@@ -486,60 +536,89 @@ async fn supervise(
     relay_pending: RelayPending,
     identity: SharedIdentity,
     reconnect_secs: f64,
-    mut initial: Option<SplitStream<WsStream>>,
     spawn: RelaySpawn,
     stop: Arc<tokio::sync::Notify>,
     heartbeat_secs: f64,
-) {
-    let backoff = Duration::from_secs_f64(reconnect_secs.max(0.0));
-    // A FAILED EAGER DIAL re-dials AT ONCE: python's `recv()` finds `_ws` None
-    // and `_reconnect_ws` dials before any sleep — the backoff only follows a
-    // failure or a drop.
-    let mut dial_now = initial.is_none();
-    loop {
-        if closed.load(Ordering::SeqCst) {
-            break;
-        }
-        let source = if let Some(s) = initial.take() {
-            s // first iteration: the eager connection (announced in connect())
-        } else {
-            if !std::mem::take(&mut dial_now) {
-                tokio::time::sleep(backoff).await;
-            }
-            if closed.load(Ordering::SeqCst) {
-                break;
-            }
-            match dial(&url, &password).await {
-                Ok(stream) => {
-                    let (s, source) = stream.split();
-                    *sink.lock().await = Some(s);
-                    connected.store(true, Ordering::SeqCst);
-                    // python `_on_socket_open` again: re-beat, then re-advertise
-                    // (the relay drops our state on disconnect).
-                    start_heartbeat(&spawn, &sink, &closed, &connected, &stop, heartbeat_secs);
-                    send_announce(&sink, &connected, &identity).await;
-                    source
-                }
-                Err(_) => {
-                    if reconnect_secs <= 0.0 {
-                        break;
-                    }
-                    continue;
-                }
-            }
-        };
-        pump(source, &partner, &relay_pending, &tx).await;
-        connected.store(false, Ordering::SeqCst);
-        *sink.lock().await = None;
-        if reconnect_secs <= 0.0 {
-            break; // one-shot: a drop is terminal.
-        }
+    running: Running,
+}
+
+impl Sup {
+    /// The beat of a socket that came up.
+    fn beat(&self) {
+        start_heartbeat(&self.spawn, &self.sink, &self.closed, &self.connected, &self.stop, self.heartbeat_secs);
     }
-    connected.store(false, Ordering::SeqCst);
-    *sink.lock().await = None;
-    let _ = tx
-        .send(Err(TransportError::ConnectionClosed("relay closed".into())))
+
+    /// Terminal: the engine's read loop is told the connection closed.
+    async fn finish(&self) {
+        self.connected.store(false, Ordering::SeqCst);
+        *self.sink.lock().await = None;
+        let _ = self
+            .tx
+            .send(Err(TransportError::ConnectionClosed("relay closed".into())))
+            .await;
+    }
+}
+
+/// THE CONNECTION SUPERVISOR, as STEPS (#795): pump the current source; on a drop,
+/// re-dial after the backoff — the dial's password read is a step, and its socket
+/// starts the next pump. Terminal on explicit close (or one-shot drop) — pushes
+/// ConnectionClosed so `recv_frame` (the engine read loop) ends. `dial_now`: a failed
+/// EAGER dial re-dials AT ONCE (python's `recv()` finds `_ws` None and
+/// `_reconnect_ws` dials before any sleep) — the backoff only follows a failure or a
+/// drop.
+fn supervise(sup: Arc<Sup>, source: Option<SplitStream<WsStream>>, dial_now: bool) {
+    let running = sup.running.clone();
+    // the step is known as the running one before it does anything
+    let (go, gate) = oneshot::channel::<()>();
+    let h = fantastic_kernel::spawn_inherit(async move {
+        let _ = gate.await;
+        if let Some(source) = source {
+            pump(source, &sup.partner, &sup.relay_pending, &sup.tx).await;
+            sup.connected.store(false, Ordering::SeqCst);
+            *sup.sink.lock().await = None;
+            if sup.reconnect_secs <= 0.0 {
+                return sup.finish().await; // one-shot: a drop is terminal.
+            }
+        }
+        if sup.closed.load(Ordering::SeqCst) {
+            return sup.finish().await;
+        }
+        if !dial_now {
+            tokio::time::sleep(Duration::from_secs_f64(sup.reconnect_secs.max(0.0))).await;
+        }
+        if sup.closed.load(Ordering::SeqCst) {
+            return sup.finish().await;
+        }
+        let (url, password) = (sup.url.clone(), Arc::clone(&sup.password));
+        dial(
+            url,
+            &password,
+            Box::new(move |dialed| {
+                Box::pin(async move {
+                    if sup.closed.load(Ordering::SeqCst) {
+                        return sup.finish().await;
+                    }
+                    match dialed {
+                        Ok(stream) => {
+                            let (s, source) = stream.split();
+                            *sup.sink.lock().await = Some(s);
+                            sup.connected.store(true, Ordering::SeqCst);
+                            // python `_on_socket_open` again: re-beat, then re-advertise
+                            // (the relay drops our state on disconnect).
+                            sup.beat();
+                            send_announce(&sup.sink, &sup.connected, &sup.identity).await;
+                            supervise(sup, Some(source), false);
+                        }
+                        Err(_) if sup.reconnect_secs <= 0.0 => sup.finish().await,
+                        Err(_) => supervise(sup, None, false),
+                    }
+                })
+            }),
+        )
         .await;
+    });
+    running.set(h);
+    let _ = go.send(());
 }
 
 /// Advertise our directory attributes to the relay (`{type:"announce", attrs,
@@ -689,7 +768,7 @@ impl BridgeTransport for RelayTransport {
         // taking it here first meant `close()` — and therefore `delete_agent` on
         // the bridge — could never return. Aborting the two owners leaves only
         // this one bounded wait.
-        if let Some(h) = self.supervisor.lock().await.take() {
+        if let Some(h) = self.supervisor.take() {
             h.abort();
         }
         // `notify_one` (not `notify_waiters`): it STORES a permit, so a heartbeat
@@ -740,13 +819,48 @@ impl BridgeTransport for RelayTransport {
 }
 
 #[cfg(test)]
+/// TESTS: [`RelayTransport::connect`] driven to its transport.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn connected(
+    relay_url: &str,
+    guid: &str,
+    password: PasswordReader,
+    partner_guid: &str,
+    reconnect_secs: f64,
+    heartbeat_secs: f64,
+    identity: Value,
+    spawn: RelaySpawn,
+) -> Result<Arc<RelayTransport>, TransportError> {
+    let (tx, rx) = oneshot::channel();
+    RelayTransport::connect(
+        relay_url,
+        guid,
+        password,
+        partner_guid,
+        reconnect_secs,
+        heartbeat_secs,
+        identity,
+        spawn,
+        Box::new(move |t| {
+            Box::pin(async move {
+                let _ = tx.send(t);
+            })
+        }),
+    )
+    .await;
+    rx.await.expect("the connect ran its next step")
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     /// A reader for a relay that checks no password (the fake ones here).
     fn no_password() -> PasswordReader {
-        Arc::new(|| Box::pin(async { Ok(String::new()) }))
+        Arc::new(|next| Box::pin(async move { next(Ok(String::new())).await }))
     }
+
+
 
     /// python starts the beat in `_on_socket_open`, so a leg whose eager dial
     /// FAILED has no `relay_heartbeat` task at all — and no `ps` row for one.
@@ -755,7 +869,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_dial_starts_no_heartbeat() {
         let kernel = Arc::new(Kernel::new());
-        let t = RelayTransport::connect(
+        let t = connected(
             "ws://127.0.0.1:1",
             "A",
             no_password(),
@@ -815,7 +929,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(200)).await;
         });
         let kernel = Arc::new(Kernel::new());
-        let t = RelayTransport::connect(
+        let t = connected(
             &format!("ws://127.0.0.1:{port}"),
             "A",
             no_password(),
@@ -1030,7 +1144,11 @@ mod tests {
             rx: Mutex::new(rx),
             closed: Arc::new(AtomicBool::new(false)),
             connected: Arc::new(AtomicBool::new(true)),
-            supervisor: Mutex::new(Some(supervisor)),
+            supervisor: {
+                let r = Running::default();
+                r.set(supervisor);
+                r
+            },
             stop_heartbeat: Arc::clone(&stop),
             relay_pending,
             relay_next_id: AtomicU64::new(0),
@@ -1041,7 +1159,7 @@ mod tests {
             .expect("close() must return");
         assert!(t.closed.load(Ordering::SeqCst));
         assert!(
-            t.supervisor.lock().await.is_none(),
+            t.supervisor.is_none(),
             "supervisor not aborted"
         );
         assert!(

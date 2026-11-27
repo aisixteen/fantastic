@@ -1260,12 +1260,12 @@ where
                         let (k4, me4) = (Arc::clone(&k3), me3.clone());
                         crate::steps::own_reflect(&me3, &k3, (settle, pass), move |(settle, pass), reflected| async move {
                             // A dry recall makes no model call, so it uses no pass (#766).
-                            let used = (!dry).then_some(&pass);
-                            let r = crate::retrieval::context_recall(
-                                &me4, dry, &k4, used, pass.decl, window, None, &[], &reflected,
+                            let decl = pass.decl;
+                            crate::retrieval::context_recall(
+                                &me4, dry, &k4, Some(pass), decl, window, None, Vec::new(), reflected, settle,
+                                |settle, _pass, r| async move { settle.with(r) },
                             )
                             .await;
-                            settle.with(r);
                         })
                         .await;
                     })
@@ -1292,8 +1292,7 @@ where
                 let st = state_for(&me);
                 let (k2, me2) = (Arc::clone(&k), me.clone());
                 Pass::begin(p, &me, &st, &k, rows.unwrap_or_default(), settle, move |settle, pass| async move {
-                    let r = crate::retrieval::context_fold(&me2, &a, &k2, &pass, window).await;
-                    settle.with(r);
+                    crate::retrieval::context_fold(&me2, a, &k2, pass, window, settle).await;
                 })
                 .await;
             })
