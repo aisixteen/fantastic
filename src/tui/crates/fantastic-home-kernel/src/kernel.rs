@@ -351,17 +351,23 @@ impl HomeKernel {
     }
 
     /// Send `payload` to `home` the way a page does: `user.forward`, so the
-    /// grants apply. A refusal is `Err("<error> — <hint>")`.
-    pub async fn call(&self, payload: Value) -> Result<Value, String> {
+    /// grants apply. A CALL (#795): `then` gets the reply when it settles, as a
+    /// message to the host — a refusal is `Err("<error> — <hint>")` — and nothing
+    /// waits for it.
+    pub async fn call<F, Fut>(&self, payload: Value, then: F)
+    where
+        F: FnOnce(Result<Value, String>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
         let forward = json!({"type": "forward", "target": tree::HOME, "payload": payload});
-        let out = Arc::clone(&self.kernel)
-            .send(vec![Item::new(AgentId::from(tree::USER), forward)])
-            .await
-            .remove(0);
-        match refused(&out.result) {
-            Some(e) => Err(e),
-            None => Ok(out.result),
-        }
+        let item = Item::new(AgentId::from(tree::USER), forward);
+        fantastic_kernel::send::as_operator(self.kernel.call_then(item, move |out| {
+            then(match refused(&out.result) {
+                Some(e) => Err(e),
+                None => Ok(out.result),
+            })
+        }))
+        .await;
     }
 
     /// Every payload sent or emitted on `home` from now on: the `state` emits,

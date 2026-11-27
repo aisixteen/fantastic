@@ -358,12 +358,15 @@ pub async fn read(
 }
 
 /// Read the record's absent fields from the server with `key` (read for the record's
-/// endpoint before, a step) and write them back. `None` when nothing is absent or all
-/// were written; otherwise the verb's refusal.
-pub async fn resolve(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &dyn KeySource) -> Option<Value> {
+/// endpoint before, a step): the fields to write back (empty when nothing is absent),
+/// or the verb's refusal. The write is the caller's step.
+///
+/// # Errors
+/// The refusal, naming the field the server did not answer or that does not fit.
+pub async fn resolve(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &dyn KeySource) -> Result<Map<String, Value>, Value> {
     let rec = helpers::agent_meta(agent_id, kernel);
     if missing(&rec).is_empty() {
-        return None;
+        return Ok(Map::new());
     }
     let values = match read(&rec, key).await {
         Ok(v) => v,
@@ -376,7 +379,7 @@ pub async fn resolve(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &dyn KeySour
             };
             let mut r = refusal(reason, e.message);
             with(&mut r, "arg", json!(e.field));
-            return Some(r);
+            return Err(r);
         }
     };
     // What the server gave passes the same write check as the operator's values.
@@ -387,10 +390,9 @@ pub async fn resolve(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &dyn KeySour
             format!("the server's values do not fit the record: {bad}"),
         );
         with(&mut r, "arg", json!(first));
-        return Some(r);
+        return Err(r);
     }
-    let written = kernel.write_own(agent_id, values).await;
-    fantastic_kernel::is_refused(&written).then_some(written)
+    Ok(values)
 }
 
 

@@ -296,13 +296,23 @@ fn meta_truthy(agent_id: &AgentId, kernel: &Kernel, key: &str) -> bool {
 /// any own write (self-writes are uniform: its ordinary fields only): the `updated` state event names the
 /// changed key — which is what the root loader's writer turns into the persist,
 /// as for every other update.
-async fn update_meta(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &str, value: Value) {
+async fn update_meta<F, Fut>(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &str, value: Value, then: F)
+where
+    F: FnOnce(Value) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
     let mut patch = serde_json::Map::new();
     patch.insert(key.to_string(), value);
-    let r = kernel.write_own(agent_id, patch).await;
-    if fantastic_kernel::is_refused(&r) {
-        eprintln!("  [scheduler] {agent_id}: {key} not written: {r}");
-    }
+    // a call (#795): `then` gets the reply; a refusal is said here too
+    let (me, key) = (agent_id.clone(), key.to_string());
+    kernel
+        .write_own(agent_id, patch, move |r| async move {
+            if fantastic_kernel::is_refused(&r) {
+                eprintln!("  [scheduler] {me}: {key} not written: {r}");
+            }
+            then(r).await;
+        })
+        .await;
 }
 
 // ── file-agent-routed persistence ───────────────────────────────────
@@ -863,8 +873,20 @@ async fn set_paused(
         }
         return json!({flag_key: touched > 0, "schedule_id": sid});
     }
-    update_meta(agent_id, kernel, "paused", json!(paused)).await;
-    json!({flag_key: true, "scheduler_id": agent_id.as_str()})
+    // the scheduler's own field: the write is a call (#795), so the verb defers and
+    // answers once it is written (a refusal is the answer)
+    let d = match kernel.defer() {
+        Ok(d) => d,
+        Err(refused) => return refused,
+    };
+    let reply = json!({flag_key: true, "scheduler_id": agent_id.as_str()});
+    let k = Arc::clone(kernel);
+    update_meta(agent_id, kernel, "paused", json!(paused), move |written| async move {
+        let out = if fantastic_kernel::is_refused(&written) { written } else { reply };
+        k.settle_deferred(d.pid(), fantastic_kernel::Outcome::of_reply(Some(d.pid()), out));
+    })
+    .await;
+    Value::Null
 }
 
 async fn tick_now_reply(agent_id: &AgentId, sid: &str, kernel: &Arc<Kernel>) -> Value {

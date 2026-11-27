@@ -444,22 +444,47 @@ pub(crate) async fn call_peer(kernel: &Arc<Kernel>, remote: &RemoteRef, payload:
 }
 
 /// THE PEER'S OWN `reflect` of one of its agents (`ask`), as this kernel's typing reads
-/// it before a call (`docs::remote_docs`): the first route's answer, or the refusal
-/// of a peer that disconnected first.
-pub(crate) async fn ask_peer(remote: &RemoteRef, ask: Value) -> Value {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let answer = PeerAnswer::new(move |(reply, _), _| {
-        let _ = tx.send(reply);
-    });
+/// it before a call (`docs::remote_docs`): a call to the peer (#795) — `then` gets the
+/// first route's answer when it comes, or the refusal of a peer that disconnected
+/// first (every route let the ask go unanswered). Nothing waits for it.
+pub(crate) async fn ask_peer<F>(remote: &RemoteRef, ask: Value, then: F)
+where
+    F: FnOnce(Value) + Send + 'static,
+{
+    let once = AskOnce {
+        then: Some(Box::new(then)),
+        guid: remote.guid.clone(),
+    };
+    let answer = PeerAnswer::new(move |(reply, _), _| once.give(reply));
     for r in &remote.routes {
         r.call(remote.agent_id.clone(), ask.clone(), None, answer.clone()).await;
     }
-    rx.await.unwrap_or_else(|_| {
-        crate::refusal::refusal(
-            crate::refusal::TRANSPORT_ERROR,
-            format!("the peer {} disconnected before answering", remote.guid),
-        )
-    })
+}
+
+/// An ask's continuation: given the peer's answer once, or — dropped unanswered (the
+/// peer disconnected) — the refusal that says so.
+struct AskOnce {
+    then: Option<Box<dyn FnOnce(Value) + Send>>,
+    guid: String,
+}
+
+impl AskOnce {
+    fn give(mut self, v: Value) {
+        if let Some(then) = self.then.take() {
+            then(v);
+        }
+    }
+}
+
+impl Drop for AskOnce {
+    fn drop(&mut self) {
+        if let Some(then) = self.then.take() {
+            then(crate::refusal::refusal(
+                crate::refusal::TRANSPORT_ERROR,
+                format!("the peer {} disconnected before answering", self.guid),
+            ));
+        }
+    }
 }
 
 /// An emit to a remote target: hand it to EVERY live route of the peer (each tab

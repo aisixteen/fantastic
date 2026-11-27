@@ -443,7 +443,8 @@ async fn imported_agents_call_only_what_they_were_granted_and_what_ports_were_bo
 /// THE ASKER'S CREATES (Q39): `leg` holds `import_subtree` on `user` and a `create`
 /// line on `other` only. Each create of its import is checked as `leg`, never as
 /// `user`: aimed at `other` it lands; aimed anywhere else (a helper beside it, its
-/// own ancestor) every create gets the unknown answer and nothing is kept.
+/// own ancestor) every create is refused by the grant check, naming the create `leg`
+/// lacks there (#792), and nothing is kept.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_import_is_checked_as_the_asker_and_refused_outside_its_create_line() {
     let k = setup().await;
@@ -474,7 +475,9 @@ async fn an_import_is_checked_as_the_asker_and_refused_outside_its_create_line()
         let msg = r["error"].as_str().unwrap_or_default();
         assert_eq!(r["reason"], "failed", "{outside}: {r}");
         assert!(
-            msg.contains("was not created") && msg.contains(&format!("no agent '{outside}'")) && msg.contains("nothing was kept"),
+            msg.contains("was not created")
+                && msg.contains(&format!("'leg' holds no create of 'echo.tools' under '{outside}'"))
+                && msg.contains("nothing was kept"),
             "{outside}: {r}"
         );
         assert!(r.get("imported").is_none(), "{outside}: {r}");

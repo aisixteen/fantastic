@@ -564,13 +564,20 @@ async fn a_call_to_a_peer_agent_is_typed_by_the_peers_schema() {
             "properties": {"x": {"type": "number"}, "kind": {"type": "string"}},
             "required": ["x"]}}})),
     );
+    let target = format!("{PAGE}|view_root");
+    assert!(fantastic_kernel::typing::needs_remote_schema(&k, &target, "place"));
+    // the ask is a call to the peer (#795): its answer comes to the continuation
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    fantastic_kernel::typing::remote_schema(&k, &target, "place", move |schema| async move {
+        let _ = tx.send(schema);
+    })
+    .await;
+    let schema = rx.await.expect("the peer answered").expect("the peer declares place");
     let mut payload = json!({"type": "place", "x": "100", "kind": "007"})
         .as_object()
         .cloned()
         .unwrap();
-    fantastic_kernel::typing::payload(&k, &format!("{PAGE}|view_root"), &mut payload)
-        .await
-        .unwrap();
+    fantastic_kernel::typing::payload(&k, &target, &mut payload, Some(&schema)).unwrap();
     assert_eq!(payload["x"], json!(100));
     assert_eq!(payload["kind"], json!("007"));
     assert_eq!(
@@ -581,10 +588,31 @@ async fn a_call_to_a_peer_agent_is_typed_by_the_peers_schema() {
         )]
     );
     let mut wrong = json!({"type": "place", "x": "far"}).as_object().cloned().unwrap();
-    let refused = fantastic_kernel::typing::payload(&k, &format!("{PAGE}|view_root"), &mut wrong)
-        .await
-        .unwrap_err();
+    let refused = fantastic_kernel::typing::payload(&k, &target, &mut wrong, Some(&schema)).unwrap_err();
     assert_eq!(refused["arg"], json!("x"), "{refused}");
+}
+
+/// A schema ask the peer drops unanswered (it disconnected) ends: its continuation is
+/// told, with no schema, so the call it was for still goes out (#795).
+#[tokio::test]
+async fn a_schema_ask_the_peer_drops_ends_with_no_schema() {
+    let tmp = TempDir::new().unwrap();
+    let k = kernel(&tmp, Some(HOST));
+    let dropped = PeerRoute::new(
+        "leg",
+        |_agent_id, _payload, _body, answer: fantastic_kernel::PeerAnswer| {
+            drop(answer);
+            Box::pin(async {})
+        },
+        |_, _, _| Box::pin(async {}),
+    );
+    k.register_peer(PAGE, &dropped);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    fantastic_kernel::typing::remote_schema(&k, &format!("{PAGE}|view_root"), "place", move |schema| async move {
+        let _ = tx.send(schema);
+    })
+    .await;
+    assert_eq!(rx.await.expect("the continuation ran"), None);
 }
 
 /// A PEER CALL IS ASYNC (#795): the route's future ends once the frame is out, the

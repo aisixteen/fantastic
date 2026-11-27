@@ -187,6 +187,35 @@ impl Kernel {
             .await
     }
 
+    /// [`Self::call`], with `then` run EXACTLY ONCE: with the settle when the call was
+    /// accepted, or at once with the launch's refusal (a gate denial, a bad item, an
+    /// unknown target). Nothing waits for the settle; the step that calls this ends
+    /// when it returns.
+    pub async fn call_then<F, Fut>(self: &Arc<Self>, item: Item, then: F)
+    where
+        F: FnOnce(Outcome) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let (slot, held) = once(then);
+        let ack = self.call(item, move |out| run_once(held, out)).await;
+        if ack.status != Status::Accepted {
+            run_once(slot, ack).await;
+        }
+    }
+
+    /// [`Self::call_for`], with `then` run exactly once, as [`Self::call_then`] runs it.
+    pub async fn call_for_then<F, Fut>(self: &Arc<Self>, asker: &Asker, item: Item, then: F)
+    where
+        F: FnOnce(Outcome) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let (slot, held) = once(then);
+        let ack = self.call_for(asker, item, move |out| run_once(held, out)).await;
+        if ack.status != Status::Accepted {
+            run_once(slot, ack).await;
+        }
+    }
+
     /// DEFER this dispatch's settle: called by a handler whose answer comes from
     /// another agent's later settle. The handler returns as soon as it has made
     /// that call (its reply is then not the settle); the execution stays open
@@ -408,6 +437,27 @@ impl Kernel {
             self.deliver_reply(&recipient, pid, &target, &verb, &out).await;
             self.append_delivered(pid, sid);
         }
+    }
+}
+
+/// One continuation, shared by the settle and the launch's refusal: whichever comes
+/// first takes it.
+type Once<F> = Arc<Mutex<Option<F>>>;
+
+fn once<F>(then: F) -> (Once<F>, Once<F>) {
+    let slot = Arc::new(Mutex::new(Some(then)));
+    let held = Arc::clone(&slot);
+    (slot, held)
+}
+
+async fn run_once<F, Fut>(slot: Once<F>, out: Outcome)
+where
+    F: FnOnce(Outcome) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let taken = slot.lock().expect("continuation poisoned").take();
+    if let Some(then) = taken {
+        then(out).await;
     }
 }
 

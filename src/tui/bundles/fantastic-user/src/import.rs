@@ -562,22 +562,78 @@ fn read_folder(dir: &Path) -> Result<BTreeMap<String, String>, String> {
     Ok(out)
 }
 
-/// One kernel tree verb sent to the root for the asker of the running verb
-/// ([`Kernel::send_as_caller`]): checked as that asker, and refused for work that
-/// carries no origin at all.
-async fn as_asker(kernel: &Arc<Kernel>, payload: Value) -> Value {
-    kernel
-        .send_as_caller(vec![fantastic_kernel::Item::new(AgentId::from("kernel"), payload)])
-        .await
-        .remove(0)
-        .result
+/// THE APPROVED IMPORT, as calls (#795): each create is a kernel tree verb sent to the
+/// root for the asker of the verb ([`Kernel::call_for_then`]), checked as that asker;
+/// its settle sends the next one, and the last settles the deferred `import_subtree`. A
+/// refused create deletes what the import made (the top agent, cascading: the asker's
+/// create line that made it covers its delete), and the refusal is the answer.
+struct Approved {
+    kernel: Arc<Kernel>,
+    asker: fantastic_kernel::Asker,
+    d: fantastic_kernel::Deferred,
+    /// The agents still to create, depth first.
+    left: std::collections::VecDeque<Planned>,
+    /// The top agent of the import.
+    top: Option<String>,
+    /// The answer once every agent is made.
+    done: Value,
 }
 
-/// Delete what an import made (the top agent, cascading), as the asker: the
-/// asker's create line that made it covers its delete.
-async fn roll_back(kernel: &Arc<Kernel>, top: Option<&str>) {
-    if let Some(top) = top {
-        let _ = as_asker(kernel, json!({"type": "delete_agent", "id": top})).await;
+impl Approved {
+    fn settle(&self, reply: Value) {
+        self.kernel
+            .settle_deferred(self.d.pid(), fantastic_kernel::Outcome::of_reply(Some(self.d.pid()), reply));
+    }
+
+    /// Create the next agent, or answer.
+    fn next(mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        Box::pin(async move {
+            let Some(a) = self.left.pop_front() else {
+                let done = std::mem::take(&mut self.done);
+                return self.settle(done);
+            };
+            // the record's fields first, then the declared arguments of `create_agent`:
+            // a field can never change the verb, the bundle, the parent or the id
+            let mut payload = a.meta.clone();
+            payload.insert("type".to_string(), json!("create_agent"));
+            payload.insert("handler_module".to_string(), json!(a.handler_module));
+            payload.insert("parent_id".to_string(), json!(a.parent));
+            payload.insert("id".to_string(), json!(a.new_id));
+            let item = fantastic_kernel::Item::new(AgentId::from("kernel"), Value::Object(payload));
+            let (k, asker) = (Arc::clone(&self.kernel), self.asker.clone());
+            k.call_for_then(&asker, item, move |out| async move {
+                match out.result.get("error") {
+                    None => self.next().await,
+                    Some(e) => {
+                        let refused = refuse(
+                            "failed",
+                            format!(
+                                "user.import_subtree: agent {} ({}) was not created — {}; nothing was kept",
+                                a.old_id,
+                                a.new_id,
+                                e.as_str().map_or_else(|| e.to_string(), str::to_string)
+                            ),
+                        );
+                        self.roll_back(refused).await;
+                    }
+                }
+            })
+            .await;
+        })
+    }
+
+    /// Delete what the import made, then answer `refused`.
+    async fn roll_back(self, refused: Value) {
+        let top = self.top.clone().filter(|t| self.kernel.exists(t));
+        let Some(top) = top else {
+            return self.settle(refused);
+        };
+        let item = fantastic_kernel::Item::new(AgentId::from("kernel"), json!({"type": "delete_agent", "id": top}));
+        let (k, asker) = (Arc::clone(&self.kernel), self.asker.clone());
+        k.call_for_then(&asker, item, move |_| async move {
+            self.settle(refused);
+        })
+        .await;
     }
 }
 
@@ -653,35 +709,24 @@ pub async fn import_subtree(kernel: &Arc<Kernel>, args: crate::verbs::ImportSubt
 
     // APPROVED: depth first, AS THE ASKER — each create is checked as whoever asked
     // for the import. Only the new agents' own `can` is written (it rides in their
-    // records); no line is written on any other agent.
+    // records); no line is written on any other agent. Work with no origin at all is
+    // refused, as every agent gets the unknown answer there.
+    let Some(asker) = fantastic_kernel::Asker::current() else {
+        return fantastic_kernel::refusal::unknown_agent("kernel");
+    };
+    let d = match kernel.defer() {
+        Ok(d) => d,
+        Err(refused) => return refused,
+    };
     let top = plan.agents.first().map(|a| a.new_id.clone());
-    for a in &plan.agents {
-        // the record's fields first, then the declared arguments of `create_agent`:
-        // a field can never change the verb, the bundle, the parent or the id
-        let mut payload = a.meta.clone();
-        payload.insert("type".to_string(), json!("create_agent"));
-        payload.insert("handler_module".to_string(), json!(a.handler_module));
-        payload.insert("parent_id".to_string(), json!(a.parent));
-        payload.insert("id".to_string(), json!(a.new_id));
-        let r = as_asker(kernel, Value::Object(payload)).await;
-        if let Some(e) = r.get("error") {
-            let made = kernel.exists(top.as_deref().unwrap_or(""));
-            roll_back(kernel, made.then_some(top.as_deref()).flatten()).await;
-            return refuse(
-                "failed",
-                format!(
-                    "user.import_subtree: agent {} ({}) was not created — {}; nothing was kept",
-                    a.old_id,
-                    a.new_id,
-                    e.as_str().map_or_else(|| e.to_string(), str::to_string)
-                ),
-            );
-        }
-    }
-    json!({
+    let done = json!({
         "imported": plan.agents.len(),
         "ids": plan.ids,
         "parent_id": parent_id,
         "ports": plan.ports,
-    })
+    });
+    Approved { kernel: Arc::clone(kernel), asker, d, left: plan.agents.into(), top, done }
+        .next()
+        .await;
+    Value::Null
 }

@@ -8384,3 +8384,59 @@ async fn a_provider_completes_on_its_default_model_field_and_lists_and_sets_it()
 
 #[path = "tests_life.rs"]
 mod life_machine;
+
+/// A MODEL'S CALL TO AN AGENT ON A CONNECTED KERNEL is read by THAT kernel's schema
+/// (#719): the route asks the peer `reflect verb part=schema` as a step (#795) and goes
+/// on with its answer, never waiting in the route. The call itself is then judged by
+/// the gate — an agent holds no peer lines yet, so it is refused — and the model is
+/// told, in its next pass: the chain ends, nothing hangs on the ask.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_to_a_peer_agent_asks_the_peers_schema_as_a_step() {
+    const PEER: &str = "peer-guid-719";
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp, "peer_typed").await;
+    let sa = script(&a, vec![pass(r#"told <call name="done"></call>"#)], Duration::ZERO);
+    let calls: Arc<std::sync::Mutex<Vec<(String, Value)>>> = Arc::default();
+    let seen = Arc::clone(&calls);
+    let route = fantastic_kernel::PeerRoute::new(
+        "leg",
+        move |agent_id, payload: Value, _body, answer: fantastic_kernel::PeerAnswer| {
+            seen.lock().unwrap().push((agent_id.clone(), payload.clone()));
+            let reply = json!({"id": agent_id, "schemas": {"place": {"type": "object",
+                "properties": {"x": {"type": "number"}}, "required": ["x"]}}});
+            answer.answer((reply, None), Vec::new());
+            Box::pin(async {})
+        },
+        |_, _, _| Box::pin(async {}),
+    );
+    kernel.register_peer(PEER, &route);
+    let target = format!("{PEER}|view_root");
+    let call = call_envelope(&target, json!({"type": "place", "x": "100"}), Some("self"));
+    fantastic_kernel::test_support::as_agent(
+        a.clone(),
+        crate::route::route_reply(
+            a.clone(),
+            Arc::clone(&kernel),
+            crate::route::Routed {
+                text: call,
+                clients: vec!["probe".to_string()],
+                client_id: "probe".to_string(),
+                send_timeout: 30.0,
+                model_window: crate::constants::DEFAULT_CONTEXT_WINDOW,
+                message_id: None,
+                call_streams: Vec::new(),
+                cut: false,
+            },
+        ),
+    )
+    .await;
+    assert!(until_passes(&sa, 1).await, "the model was never told");
+    let calls = calls.lock().unwrap().clone();
+    assert_eq!(
+        calls,
+        vec![("view_root".to_string(), json!({"type": "reflect", "verb": "place", "part": "schema"}))],
+        "the peer was asked its schema, and the refused call never reached it"
+    );
+    let told = sa.request(0);
+    assert!(told.contains("view_root"), "the refusal names the target: {told}");
+}

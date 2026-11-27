@@ -60,7 +60,7 @@ fn meta(h: &Host, id: &str) -> Map<String, Value> {
 
 async fn create(h: &Host, spec: Value) -> Result<(), String> {
     let id = spec["id"].as_str().unwrap_or("?").to_string();
-    let r = fantastic_kernel::verbs::create_agent(&h.kernel, spec).await;
+    let r = h.operator("kernel", fantastic_kernel::verbs::call("create_agent", spec)).await.result;
     fantastic_kernel::refusal::error_text(&r).map_or(Ok(()), |e| Err(format!("could not create `{id}`: {e}")))
 }
 

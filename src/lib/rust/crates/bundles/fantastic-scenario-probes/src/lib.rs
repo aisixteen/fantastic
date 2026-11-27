@@ -277,11 +277,11 @@ pub struct UserProbe {
     /// leaves the tally at zero, exactly as the other fixtures count their own
     /// side effects. Keyed by id like python's `_RECEIVED`, so two humans in one
     /// scenario keep two scores.
-    inquiries: PerAgent<u64>,
+    inquiries: Arc<PerAgent<u64>>,
     /// PROPOSALS handed over, per agent id. An inquiry may carry an `action` the
     /// sender may not perform itself — "buy this, if you agree". It is HELD,
     /// never run here; pressing the button is a separate act by the person.
-    proposals: PerAgent<Vec<Value>>,
+    proposals: Arc<PerAgent<Vec<Value>>>,
 }
 
 pub const USER_MODULE: &str = "user_probe.tools";
@@ -336,19 +336,24 @@ impl Handler for UserProbe {
             // any agent, dispatched AS THIS AGENT — work, an inquiry of its own,
             // a kernel verb. No agent carries a narrower repertoire than another.
             Call::Send(a) => {
-                {
-                    // THE SENDER IS THIS AGENT. A handler runs inside its own
-                    // dispatch scope, so this is a gated `user -> <target>` send
-                    // with its own ledger row — not an operator injection.
-                    let out = kernel
-                        .send(vec![fantastic_kernel::Item::new(
-                            AgentId::from(a.target.as_str()),
-                            Value::Object(a.payload),
-                        )])
-                        .await
-                        .remove(0);
-                    json!({"sent": a.target, "result": out.result})
-                }
+                // THE SENDER IS THIS AGENT. A handler runs inside its own dispatch
+                // scope, so this is a gated `user -> <target>` call with its own
+                // ledger row — not an operator injection. A call (#795): the verb
+                // defers, and the call's settle answers it.
+                let d = match kernel.defer() {
+                    Ok(d) => d,
+                    Err(refused) => return Ok(Some(refused)),
+                };
+                let k = Arc::clone(kernel);
+                let target = a.target.clone();
+                let item = fantastic_kernel::Item::new(AgentId::from(a.target.as_str()), Value::Object(a.payload));
+                kernel
+                    .call_then(item, move |out| async move {
+                        let reply = json!({"sent": target, "result": out.result});
+                        k.settle_deferred(d.pid(), fantastic_kernel::Outcome::new(Some(d.pid()), fantastic_kernel::Status::Completed, reply));
+                    })
+                    .await;
+                Value::Null
             }
         };
         Ok(Some(reply))
@@ -357,6 +362,8 @@ impl Handler for UserProbe {
 
 impl UserProbe {
     /// `inquiry`: held until the human's `answer` on the record says what it replies.
+    /// The grants are calls (#795): with any, the verb defers, each grant's settle
+    /// sends the next, and the last answers.
     async fn inquiry(
         &self,
         agent_id: &AgentId,
@@ -380,63 +387,116 @@ impl UserProbe {
         // by the time it is read. A grant that was REFUSED must not be answered
         // over: saying "granted" over a door that never opened sends the sender back
         // to an unchanged wall.
-        let mut applied = 0u64;
-        if let Some(gs) = kernel.resolve_target(agent_id.as_str())
+        let grants = kernel.resolve_target(agent_id.as_str())
             .and_then(|ag| ag.record().meta.get("grants").cloned())
             .and_then(|v| v.as_array().cloned())
-        {
-            let Some(root) = kernel.root().map(|r| r.id.clone()) else {
-                return json!({
-                    "error": "user_probe: no root to grant through",
-                    "reason": "not_connected",
-                });
+            .unwrap_or_default();
+        let held = Held {
+            me: agent_id.clone(),
+            kernel: Arc::clone(kernel),
+            inquiries: Arc::clone(&self.inquiries),
+            proposals: Arc::clone(&self.proposals),
+            a,
+            answer,
+            task: fantastic_kernel::current_task(),
+            asker: fantastic_kernel::current_origin(),
+        };
+        if grants.is_empty() {
+            return held.answered(0);
+        }
+        let Some(root) = kernel.root().map(|r| r.id.clone()) else {
+            return json!({
+                "error": "user_probe: no root to grant through",
+                "reason": "not_connected",
+            });
+        };
+        let d = match kernel.defer() {
+            Ok(d) => d,
+            Err(refused) => return refused,
+        };
+        held.grant(root, grants.into(), 0, d).await;
+        Value::Null
+    }
+}
+
+/// One inquiry the human holds, between its grants.
+struct Held {
+    me: AgentId,
+    kernel: Arc<Kernel>,
+    inquiries: Arc<PerAgent<u64>>,
+    proposals: Arc<PerAgent<Vec<Value>>>,
+    a: verbs::user::Inquiry,
+    answer: String,
+    task: Option<fantastic_kernel::TaskId>,
+    asker: Option<AgentId>,
+}
+
+impl Held {
+    /// Apply the next grant (`applied` so far), or answer.
+    fn grant(
+        self,
+        root: AgentId,
+        mut left: std::collections::VecDeque<Value>,
+        applied: u64,
+        d: fantastic_kernel::Deferred,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        Box::pin(async move {
+            let Some(g) = left.pop_front() else {
+                let k = Arc::clone(&self.kernel);
+                let reply = self.answered(applied);
+                k.settle_deferred(d.pid(), fantastic_kernel::Outcome::of_reply(Some(d.pid()), reply));
+                return;
             };
-            for g in &gs {
-                let out = kernel
-                    .send(vec![fantastic_kernel::Item::new(root.clone(), g.clone())])
-                    .await
-                    .remove(0);
+            let k = Arc::clone(&self.kernel);
+            let item = fantastic_kernel::Item::new(root.clone(), g.clone());
+            k.call_then(item, move |out| async move {
                 if let Some(e) = out.result.get("error").and_then(Value::as_str) {
-                    return json!({
-                        "error": format!(
-                            "user_probe: grant refused, so the answer would be false: {e}"
-                        ),
+                    let refused = json!({
+                        "error": format!("user_probe: grant refused, so the answer would be false: {e}"),
                         "reason": "unauthorized",
                         "grant": g,
                     });
+                    self.kernel
+                        .settle_deferred(d.pid(), fantastic_kernel::Outcome::of_reply(Some(d.pid()), refused));
+                    return;
                 }
-                applied += 1;
-            }
-        }
+                self.grant(root, left, applied + 1, d).await;
+            })
+            .await;
+        })
+    }
+
+    /// The grants applied: the proposal held, the inquiry counted, the answer sent
+    /// later, and the reply.
+    fn answered(self, applied: u64) -> Value {
+        let Self { me, kernel, inquiries, proposals, a, answer, task, asker } = self;
         if let Some(act) = &a.action {
-            self.proposals
-                .with(agent_id, |v| v.push(Value::Object(act.clone())));
+            proposals.with(&me, |v| v.push(Value::Object(act.clone())));
         }
-        let n = self.inquiries.with(agent_id, |n| {
+        let n = inquiries.with(&me, |n| {
             *n += 1;
             *n
         });
         // A PERSON READS, THEN REPLIES (fully async) — later, as this agent's own
-        // send into the asker's conversation under the inquiry's pid, gated like any
-        // send. Python `user_probe`, same text.
-        let task = fantastic_kernel::current_task();
+        // call into the asker's conversation under the inquiry's pid, gated like any
+        // call. Python `user_probe`, same text.
         let pid = task.map_or_else(|| "-".to_string(), |t| t.0.to_string());
         let text = format!(
             "[reply to {pid} · {} inquiry]\n<answer>{answer}</answer>\n<request_id>{}</request_id>",
-            agent_id.as_str(),
+            me.as_str(),
             a.request_id.clone().unwrap_or_default()
         );
-        if let Some(asker) = fantastic_kernel::current_origin() {
-            let k = Arc::clone(kernel);
+        if let Some(asker) = asker {
+            let k = Arc::clone(&kernel);
             let reply_client = a.reply_client_id.clone();
-            kernel.spawn_task(agent_id, "inquiry_answer", async move {
+            kernel.spawn_task(&me, "inquiry_answer", async move {
                 tokio::time::sleep(READ_DELAY).await;
-                let _ = k
-                    .send(vec![fantastic_kernel::Item::new(
-                        asker,
-                        json!({"type": "send", "text": text, "client_id": reply_client}),
-                    )])
-                    .await;
+                let item = fantastic_kernel::Item::new(
+                    asker,
+                    json!({"type": "send", "text": text, "client_id": reply_client}),
+                );
+                // a call: the asker's accept settles it, nothing waits for that
+                k.call_then(item, |_| async {}).await;
             });
         }
         // `granted` is the count of grants actually APPLIED — the sender needs to

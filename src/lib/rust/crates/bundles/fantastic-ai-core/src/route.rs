@@ -628,11 +628,84 @@ pub(crate) struct Routed {
     pub(crate) cut: bool,
 }
 
+/// The schemas a pass's calls to agents on CONNECTED kernels are read by, asked of each
+/// peer before the calls go out (#719): `(target, verb)` → the peer's schema (`None`: it
+/// declares none).
+type PeerSchemas = HashMap<(String, String), Option<Value>>;
+
 /// Honour where this pass's answer goes. THE MODEL'S CALLS ARE THE AGENT'S CALLS: this
 /// runs in a task the agent's pass spawned (`Kernel::spawn_task`), so every call is the
 /// agent's and is gated as the agent. It ends once every call is OUT: each reply comes
-/// later, as a message.
+/// later, as a message. A call to an agent on a connected kernel is read by that
+/// kernel's schema first: each is asked as a step (#795), and the calls go out once
+/// every peer answered.
 pub(crate) async fn route_reply(self_id: AgentId, kernel: Arc<Kernel>, routed: Routed) {
+    let wanted = peer_schemas_wanted(&kernel, &routed);
+    if wanted.is_empty() {
+        return route_typed(self_id, kernel, routed, PeerSchemas::new()).await;
+    }
+    ask_schemas(kernel, wanted.into(), PeerSchemas::new(), self_id, routed).await;
+}
+
+/// The `(target, verb)` of every call of the answer to an agent on a connected kernel
+/// that this kernel does not declare.
+fn peer_schemas_wanted(kernel: &Arc<Kernel>, routed: &Routed) -> Vec<(String, String)> {
+    if routed.cut {
+        return Vec::new();
+    }
+    let answer = crate::call_check::repair(&crate::think::without_thinking(&routed.text));
+    let calls: Vec<crate::tool_parse::ToolCall> = terminated_calls(&answer).into_iter().map(|(c, _)| c).collect();
+    let mut out: Vec<(String, String)> = Vec::new();
+    for call in fan_out(calls, routed.message_id) {
+        if CONTROL_CALLS.contains(&call.name.as_str()) {
+            continue;
+        }
+        let args = &call.arguments;
+        let Some(target) = args
+            .get("target_id")
+            .or_else(|| args.get("target"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let Some(verb) = args.get("payload").and_then(|p| p.get("type")).and_then(Value::as_str) else {
+            continue;
+        };
+        let key = (target.to_string(), verb.to_string());
+        if fantastic_kernel::typing::needs_remote_schema(kernel, target, verb) && !out.contains(&key) {
+            out.push(key);
+        }
+    }
+    out
+}
+
+/// Ask each peer for the schema of the next wanted `(target, verb)` (a step); once all
+/// answered, route with them.
+fn ask_schemas(
+    kernel: Arc<Kernel>,
+    mut left: std::collections::VecDeque<(String, String)>,
+    mut got: PeerSchemas,
+    self_id: AgentId,
+    routed: Routed,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async move {
+        let Some((target, verb)) = left.pop_front() else {
+            return route_typed(self_id, kernel, routed, got).await;
+        };
+        let k = Arc::clone(&kernel);
+        let key = (target.clone(), verb.clone());
+        fantastic_kernel::typing::remote_schema(&kernel, &target, &verb, move |schema| async move {
+            got.insert(key, schema);
+            ask_schemas(k, left, got, self_id, routed).await;
+        })
+        .await;
+    })
+}
+
+/// [`route_reply`] with the peers' schemas read.
+async fn route_typed(self_id: AgentId, kernel: Arc<Kernel>, routed: Routed, peer_schemas: PeerSchemas) {
     let Routed {
         text,
         client_id,
@@ -891,7 +964,12 @@ pub(crate) async fn route_reply(self_id: AgentId, kernel: Arc<Kernel>, routed: R
         }
         // THE PARSER READ TEXT: each value takes the type the target verb's schema
         // states (a `limit` of `7` is the integer 7, a `path` of `007` stays text).
-        if let Err(refused) = crate::tool_parse::typed::payload(&kernel, target, &mut payload).await {
+        let remote = payload
+            .get("type")
+            .and_then(Value::as_str)
+            .and_then(|verb| peer_schemas.get(&(target.to_string(), verb.to_string())))
+            .and_then(Option::as_ref);
+        if let Err(refused) = crate::tool_parse::typed::payload(&kernel, target, &mut payload, remote) {
             if let Some(rt) = reply_to {
                 units.push(Unit {
                     dest: rt,

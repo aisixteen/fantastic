@@ -212,11 +212,24 @@ pub(crate) async fn await_cancel(
 
 /// Deliver each held report to the caller as ITS OWN message, from the agent
 /// that sent it, in the order held. The wait is gone, so the hook lets them by.
-async fn redeliver(kernel: Arc<Kernel>, caller: AgentId, held: Vec<(String, Held)>) {
-    for (from, h) in held {
+/// Each is a call (#795): its settle sends the next, so the order holds and nothing
+/// waits.
+fn redeliver(
+    kernel: Arc<Kernel>,
+    caller: AgentId,
+    held: Vec<(String, Held)>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async move {
+        let mut held = std::collections::VecDeque::from(held);
+        let Some((from, h)) = held.pop_front() else { return };
         let item = Item::new(caller.clone(), h.payload);
-        let _ = crate::send::as_agent(&AgentId::from(from.as_str()), kernel.send(vec![item])).await;
-    }
+        let k = Arc::clone(&kernel);
+        crate::send::as_agent(
+            &AgentId::from(from.as_str()),
+            kernel.call_then(item, move |_| redeliver(k, caller, held.into())),
+        )
+        .await;
+    })
 }
 
 /// The `report` message a named agent sends the lead that awaits it (`dispatch` hands
