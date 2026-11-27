@@ -81,13 +81,17 @@ pub fn spawn(h: Arc<Host>) {
                 }
                 seen.insert(agent.clone(), fg.pid);
                 let cmd = fg.args.clone();
-                let r = h.operator("kernel", json!({"type": "update_agent", "id": agent.as_str(), "last_cmd": cmd})).await.result;
-                if let Some(e) = r.get("error").and_then(Value::as_str) {
-                    tracing::warn!("last_cmd on {agent}: {e}");
-                    continue;
-                }
-                // the shell is the in-process operator
-                fantastic_kernel::send::as_operator(h.kernel.emit(&agent, json!({"type": "last_cmd", "cmd": cmd}))).await;
+                // the record is updated, and its settle announces it (#795): nothing waits
+                let (k, who) = (Arc::clone(&h.kernel), agent.clone());
+                h.operator_then("kernel", json!({"type": "update_agent", "id": agent.as_str(), "last_cmd": cmd}), move |out| async move {
+                    if let Some(e) = out.result.get("error").and_then(Value::as_str) {
+                        tracing::warn!("last_cmd on {who}: {e}");
+                        return;
+                    }
+                    // the shell is the in-process operator
+                    fantastic_kernel::send::as_operator(k.emit(&who, json!({"type": "last_cmd", "cmd": cmd}))).await;
+                })
+                .await;
             }
         }
     });

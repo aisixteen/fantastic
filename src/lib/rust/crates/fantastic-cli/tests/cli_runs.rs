@@ -972,6 +972,121 @@ fn run_cli(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
 /// carries no HTTP client in its dev-deps, and the wire form is the point.
 /// `x-fantastic-execution-id` names the execution, so the ledger row this call
 /// settles is identifiable on disk by a string only this test knows.
+/// A WATCHER of one leg over the daemon's ws face — a minimal blocking RFC 6455
+/// client (masked text frames out, unmasked frames in, pings answered): the REST
+/// leg tells each call's `settle` on its own stream (#795).
+struct LegWatch {
+    sock: std::net::TcpStream,
+    buf: Vec<u8>,
+}
+
+impl LegWatch {
+    /// Connect, watch `leg`, and return once the watch is LIVE: the connection's
+    /// frames take effect in order, so an `emit` to the leg sent after the `watch`
+    /// comes back on it only once the watch is in place (no sleep).
+    fn open(port: u16, leg: &str) -> Self {
+        use std::io::{Read, Write};
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut sock = loop {
+            match std::net::TcpStream::connect(("127.0.0.1", port)) {
+                Ok(s) => break s,
+                Err(e) => {
+                    assert!(std::time::Instant::now() < deadline, "no listener on {port}: {e}");
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+        };
+        sock.set_read_timeout(Some(std::time::Duration::from_secs(30))).unwrap();
+        sock.write_all(
+            format!(
+                "GET /web/ws HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\n\
+                 Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                 Sec-WebSocket-Version: 13\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            sock.read_exact(&mut byte).expect("the upgrade answer");
+            head.push(byte[0]);
+        }
+        assert!(String::from_utf8_lossy(&head).starts_with("HTTP/1.1 101"), "{}", String::from_utf8_lossy(&head));
+        let mut w = Self { sock, buf: Vec::new() };
+        w.send(&serde_json::json!({"type": "watch", "src": leg}));
+        w.send(&serde_json::json!({"type": "emit", "target": leg, "payload": {"type": "watch_ready"}}));
+        w.until(|f| f["type"] == "event" && f["payload"]["type"] == "watch_ready");
+        w
+    }
+
+    fn send(&mut self, v: &serde_json::Value) {
+        use std::io::Write;
+        let body = v.to_string().into_bytes();
+        let mut f = vec![0x81u8];
+        match body.len() {
+            n if n < 126 => f.push(0x80 | n as u8),
+            n => {
+                f.push(0x80 | 126);
+                f.extend_from_slice(&(n as u16).to_be_bytes());
+            }
+        }
+        let mask = [7u8, 1, 9, 3];
+        f.extend_from_slice(&mask);
+        f.extend(body.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+        self.sock.write_all(&f).unwrap();
+    }
+
+    fn read(&mut self, n: usize) -> Vec<u8> {
+        use std::io::Read;
+        while self.buf.len() < n {
+            let mut chunk = [0u8; 4096];
+            let got = self.sock.read(&mut chunk).expect("a frame in time (hang guard)");
+            assert!(got > 0, "the ws face closed");
+            self.buf.extend_from_slice(&chunk[..got]);
+        }
+        self.buf.drain(..n).collect()
+    }
+
+    /// Text frames until one matches `want`.
+    fn until(&mut self, want: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+        loop {
+            let h = self.read(2);
+            let mut n = usize::from(h[1] & 0x7F);
+            if n == 126 {
+                let l = self.read(2);
+                n = usize::from(u16::from_be_bytes([l[0], l[1]]));
+            } else if n == 127 {
+                let l = self.read(8);
+                n = usize::try_from(u64::from_be_bytes(l.try_into().unwrap())).unwrap();
+            }
+            let body = self.read(n);
+            match h[0] & 0x0F {
+                0x1 => {
+                    let f: serde_json::Value = serde_json::from_slice(&body).expect("json");
+                    if want(&f) {
+                        return f;
+                    }
+                }
+                0x9 => {
+                    use std::io::Write;
+                    let mut pong = vec![0x8Au8, 0x80 | body.len() as u8, 0, 0, 0, 0];
+                    pong.extend_from_slice(&body);
+                    self.sock.write_all(&pong).unwrap();
+                }
+                0x8 => panic!("the ws face closed"),
+                _ => {}
+            }
+        }
+    }
+
+    /// The settle of the call `pid` on the watched leg: `{type, re, status, data}`.
+    fn settle(&mut self, pid: &serde_json::Value) -> serde_json::Value {
+        let pid = pid.clone();
+        self.until(|f| f["type"] == "event" && f["payload"]["type"] == "settle" && f["payload"]["re"] == pid)["payload"].clone()
+    }
+}
+
 fn post_rest(port: u16, path: &str, execution_id: &str, body: &str) -> String {
     use std::io::{Read, Write};
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -1159,6 +1274,19 @@ fn a_daemon_with_a_store_stops_cleanly_and_releases_its_lock() {
             "can={\"kernel_state\": {\"call\": [\"*\"]}}",
         ],
     );
+    // the ws face a client follows the REST leg's settles on (#795)
+    run_cli(
+        tmp.path(),
+        &[
+            "kernel_state",
+            "create_agent",
+            "parent_id=web",
+            "handler_module=web_ws.tools",
+            "id=ws",
+            "ingress_rule=allow_all_ingress",
+            "can={\"rest\": {\"call\": [\"*\"]}}",
+        ],
+    );
 
     let mut child = sys::stoppable(&mut Command::new(fantastic_bin()))
         .current_dir(tmp.path())
@@ -1172,6 +1300,8 @@ fn a_daemon_with_a_store_stops_cleanly_and_releases_its_lock() {
         .expect("the daemon must print [kernel] up within 10s");
     assert_eq!(up, "[kernel] up");
 
+    // the leg's settles, watched BEFORE the POST (its ws face, watching `rest`)
+    let mut watcher = LegWatch::open(port, "rest");
     let execution_id = "probe_last_exec";
     let reply = post_rest(
         port,
@@ -1179,10 +1309,17 @@ fn a_daemon_with_a_store_stops_cleanly_and_releases_its_lock() {
         execution_id,
         "{\"type\":\"reflect\",\"tree\":\"ids\"}",
     );
+    // THE POST ANSWERS ITS ACK (#795); the call's result is its settle, told on the
+    // REST leg's own stream — read over the ws face, watching the leg
     assert!(
-        reply.contains("\"tree\""),
-        "the live REST call must settle: {reply}"
+        reply.contains("\"status\":\"accepted\""),
+        "the live REST call must be accepted: {reply}"
     );
+    let ack: serde_json::Value =
+        serde_json::from_str(reply.split("\r\n\r\n").nth(1).unwrap_or("")).expect("a JSON ack");
+    let settle = watcher.settle(&ack["pid"]);
+    assert_eq!(settle["status"], "completed", "the live REST call must settle: {settle}");
+    assert!(settle["data"]["tree"].is_array(), "{settle}");
 
     sys::stop(&child);
     let out = child

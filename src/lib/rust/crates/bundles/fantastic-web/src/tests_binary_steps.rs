@@ -345,7 +345,8 @@ async fn a_literal_key_crosses_a_ws_bridge_forward_both_ways() {
     assert_eq!(out.body, Some(Blob::key("x.y", RAW.to_vec())));
     assert_eq!(
         binary_paths(&heads),
-        vec![json!(["payload", "a.b"]), json!(["data", "x.y"])]
+        // the call's body, then its SETTLE's (#795): at `["payload", "data", "x.y"]`
+        vec![json!(["payload", "a.b"]), json!(["payload", "data", "x.y"])]
     );
     let h = heads.lock().unwrap().clone();
     assert_eq!(
@@ -354,7 +355,7 @@ async fn a_literal_key_crosses_a_ws_bridge_forward_both_ways() {
         "the null sits at the literal key, the nested twin untouched"
     );
     assert_eq!(
-        h[1]["data"],
+        h[1]["payload"]["data"],
         json!({"keys": ["a", "a.b", "type"], "x.y": null, "x": {"y": "kept"}})
     );
     stop(&kb, &b_web).await;
@@ -441,7 +442,8 @@ async fn web_rest_literal_binding_stays_literal_across_a_bridge() {
     );
     assert_eq!(
         binary_paths(&heads),
-        vec![json!(["payload", "a.b"]), json!(["data", "x.y"])]
+        // the call's body, then its SETTLE's (#795): at `["payload", "data", "x.y"]`
+        vec![json!(["payload", "a.b"]), json!(["payload", "data", "x.y"])]
     );
     stop(&kh, &h_web).await;
 }

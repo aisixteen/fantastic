@@ -239,8 +239,12 @@ async fn a_web_ws_route_leg_beside_a_catch_all_leg_gets_its_own_url() {
         tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/z_page_ws/ws"))
             .await
             .expect("ws connect");
-    let (text, _) = round_trip(&mut ws, TMessage::Text(reflect("z_page_ws", "r1"))).await;
-    let reply = text.iter().find(|v| v["id"] == "r1").expect("a reply");
+    {
+        use futures_util::SinkExt;
+        ws.send(TMessage::Text(reflect("z_page_ws", "r1"))).await.expect("send");
+    }
+    // its result is the settle after the ack (#795)
+    let (reply, _, _) = super::ws_answer(&mut ws, &json!("r1")).await;
     assert_eq!(reply["data"]["id"], "z_page_ws", "{reply}");
     // the host label is the URL's first segment, as the catch-all would capture
     fantastic_kernel::send::as_operator(kernel
@@ -259,8 +263,12 @@ async fn a_web_ws_route_leg_beside_a_catch_all_leg_gets_its_own_url() {
     let (mut ws2, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/a_ws/ws"))
         .await
         .expect("ws connect");
-    let (text, _) = round_trip(&mut ws2, TMessage::Text(reflect("a_ws", "r2"))).await;
-    let reply = text.iter().find(|v| v["id"] == "r2").expect("a reply");
+    {
+        use futures_util::SinkExt;
+        ws2.send(TMessage::Text(reflect("a_ws", "r2"))).await.expect("send");
+    }
+    // its result is the settle after the ack (#795)
+    let (reply, _, _) = super::ws_answer(&mut ws2, &json!("r2")).await;
     assert_eq!(reply["data"]["id"], "a_ws", "{reply}");
     stop(&kernel, web_id).await;
 }

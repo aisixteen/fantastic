@@ -22,6 +22,7 @@
 use fantastic_user_home_store::secrets::{Mode, Secrets};
 use serde_json::{json, Map, Value};
 
+use crate::kern::cps::Done;
 use crate::kern::host::Host;
 
 /// The credential store's id.
@@ -65,10 +66,29 @@ fn refs_of(meta: &Map<String, Value>) -> Map<String, Value> {
 
 /// The store's record, as the user's key mode says: its backend set to the
 /// mode's, and every ref the user's home remembers made known to it. With no
-/// mode chosen there is nothing to set. The store itself is the blueprint's.
-pub async fn ensure_store(h: &Host) -> Result<(), String> {
+/// mode chosen there is nothing to set. The store itself is the blueprint's. The
+/// `update_agent` is a call (#795): `done` gets the answer with its settle.
+pub async fn ensure_store(h: &Host, done: Done<Result<(), String>>) {
+    match store_update(h) {
+        Ok(Some(payload)) => {
+            h.operator_then("kernel", payload, move |out| async move {
+                done(match out.result.get("error").and_then(Value::as_str) {
+                    Some(e) => Err(format!("the credential store: {e}")),
+                    None => Ok(()),
+                })
+                .await;
+            })
+            .await;
+        }
+        Ok(None) => done(Ok(())).await,
+        Err(e) => done(Err(e)).await,
+    }
+}
+
+/// The `update_agent` that sets the store's record as the key mode says; `None` with no mode.
+fn store_update(h: &Host) -> Result<Option<Value>, String> {
     let s = secrets();
-    let Some(m) = s.mode()? else { return Ok(()) };
+    let Some(m) = s.mode()? else { return Ok(None) };
     // the store's `file` must be ABSOLUTE; a relative FANTASTIC_HOME is made so here
     let home = std::path::absolute(s.home()?).map_err(|e| format!("the user's home: {e}"))?;
     let mut fields = m.store(&home).as_object().cloned().unwrap_or_default();
@@ -86,63 +106,113 @@ pub async fn ensure_store(h: &Host) -> Result<(), String> {
     }
     let mut payload = json!({"type": "update_agent", "id": STORE});
     payload.as_object_mut().expect("an object").extend(fields);
-    let r = h.operator("kernel", payload).await.result;
-    match r.get("error").and_then(Value::as_str) {
-        Some(e) => Err(format!("the credential store: {e}")),
-        None => Ok(()),
-    }
+    Ok(Some(payload))
 }
 
-/// Choose (or change) where keys are kept. Refused while keys are stored in
-/// another mode: they cannot move, and would be left behind.
-pub async fn set_mode(h: &Host, m: Mode) -> Result<String, String> {
+/// Choose (or change) where keys are kept; `done` gets where they are, in words. Refused
+/// while keys are stored in another mode: they cannot move, and would be left behind.
+pub async fn set_mode(h: &Host, m: Mode, done: Done<Result<String, String>>) {
     let s = secrets();
-    let now = s.mode()?;
+    let now = match s.mode() {
+        Ok(n) => n,
+        Err(e) => return done(Err(e)).await,
+    };
     if now.is_some_and(|n| n != m) {
-        let n = s.refs()?.len();
-        if n > 0 {
-            return Err(format!(
-                "{n} key(s) are kept {} — they cannot move to another mode; forget them first",
-                s.describe(now)
-            ));
+        match s.refs() {
+            Ok(refs) if !refs.is_empty() => {
+                return done(Err(format!(
+                    "{} key(s) are kept {} — they cannot move to another mode; forget them first",
+                    refs.len(),
+                    s.describe(now)
+                )))
+                .await;
+            }
+            Ok(_) => {}
+            Err(e) => return done(Err(e)).await,
         }
     }
-    s.set_mode(m)?;
-    ensure_store(h).await?;
-    Ok(s.describe(Some(m)))
+    if let Err(e) = s.set_mode(m) {
+        return done(Err(e)).await;
+    }
+    ensure_store(
+        h,
+        crate::kern::cps::done(move |r: Result<(), String>| async move {
+            done(r.map(|()| secrets().describe(Some(m)))).await;
+        }),
+    )
+    .await;
 }
 
 /// Declare ref `r` bound to `host` on the store's record, keeping every other
 /// ref: `refs` is written whole, by the operator.
-async fn declare(h: &Host, r: &str, host: &str) -> Result<(), String> {
+async fn declare(h: &Host, r: &str, host: &str, done: Done<Result<(), String>>) {
     let mut refs = store_meta(h).map(|m| refs_of(&m)).unwrap_or_default();
     let e = refs.entry(r.to_string()).or_insert_with(|| json!({}));
     if let Some(o) = e.as_object_mut() {
         o.insert("host".into(), json!(host));
         o.entry("fields").or_insert(json!([FIELD]));
     }
-    let out = h.operator("kernel", json!({"type": "update_agent", "id": STORE, "refs": refs})).await.result;
-    match out.get("error").and_then(Value::as_str) {
-        Some(e) => Err(format!("the key's ref {r} could not be declared: {e}")),
-        None => Ok(()),
-    }
+    let r = r.to_string();
+    h.operator_then("kernel", json!({"type": "update_agent", "id": STORE, "refs": refs}), move |out| async move {
+        done(match out.result.get("error").and_then(Value::as_str) {
+            Some(e) => Err(format!("the key's ref {r} could not be declared: {e}")),
+            None => Ok(()),
+        })
+        .await;
+    })
+    .await;
 }
 
-/// Store `secret` as the key for `module` at `endpoint`. Returns the ref.
-pub async fn store(h: &Host, module: &str, endpoint: &str, secret: &str) -> Result<String, String> {
+/// Store `secret` as the key for `module` at `endpoint`; `done` gets the ref. Three calls in a
+/// chain, each sent when the one before settled: the store's record, the ref's declaration
+/// (`set` never creates one), the value.
+pub async fn store(h: &Host, module: &str, endpoint: &str, secret: &str, done: Done<Result<String, String>>) {
     let s = secrets();
-    let m = s.mode()?.ok_or("choose where keys are kept first — plain or secure")?;
-    let r = ref_for(module, endpoint)?;
-    ensure_store(h).await?;
-    // the ref is DECLARED first, on the store's record (`set` never creates one)
-    declare(h, &r, &host_of(endpoint).unwrap_or_default()).await?;
-    let out = h.operator_secret(STORE, json!({"type": "set", "ref": r, "fields": {FIELD: secret}}), &["fields.api_key"]).await.result;
-    if let Some(e) = out.get("error").and_then(Value::as_str) {
-        return Err(format!("the key was not stored: {e}"));
+    match s.mode() {
+        Ok(Some(_)) => {}
+        Ok(None) => return done(Err("choose where keys are kept first — plain or secure".to_string())).await,
+        Err(e) => return done(Err(e)).await,
     }
-    s.remember_ref(&r, &host_of(endpoint).unwrap_or_default())?;
-    let _ = m;
-    Ok(r)
+    let r = match ref_for(module, endpoint) {
+        Ok(r) => r,
+        Err(e) => return done(Err(e)).await,
+    };
+    let (h2, secret, endpoint) = (h.clone(), secret.to_string(), endpoint.to_string());
+    ensure_store(
+        h,
+        crate::kern::cps::done(move |res: Result<(), String>| async move {
+            if let Err(e) = res {
+                return done(Err(e)).await;
+            }
+            let host = host_of(&endpoint).unwrap_or_default();
+            let h3 = h2.clone();
+            declare(
+                &h2,
+                &r.clone(),
+                &host.clone(),
+                crate::kern::cps::done(move |res: Result<(), String>| async move {
+                    if let Err(e) = res {
+                        return done(Err(e)).await;
+                    }
+                    let (remember, hostname) = (r.clone(), host);
+                    h3.operator_secret_then(
+                        STORE,
+                        json!({"type": "set", "ref": r, "fields": {FIELD: secret}}),
+                        &["fields.api_key"],
+                        move |out| async move {
+                            if let Some(e) = out.result.get("error").and_then(Value::as_str) {
+                                return done(Err(format!("the key was not stored: {e}"))).await;
+                            }
+                            done(secrets().remember_ref(&remember, &hostname).map(|()| remember)).await;
+                        },
+                    )
+                    .await;
+                }),
+            )
+            .await;
+        }),
+    )
+    .await;
 }
 
 /// Every key the user's home remembers: `(ref, host)` — metadata only, never

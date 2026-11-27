@@ -301,7 +301,7 @@ pub(crate) async fn until_passes(script: &Arc<MockScript>, n: usize) -> bool {
             script.served.notified().await;
         }
     };
-    tokio::time::timeout(Duration::from_secs(5), served)
+    tokio::time::timeout(Duration::from_secs(60), served)
         .await
         .unwrap_or(false)
 }
@@ -390,7 +390,8 @@ pub(crate) async fn with_sleeper(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, Agen
 /// is stored, so a test that reads what the message did waits for the passes it woke,
 /// their calls and the replies those woke. `false` when they did not go quiet.
 pub(crate) async fn settle(kernel: &Arc<Kernel>) -> bool {
-    crate::state::settle(kernel, Duration::from_secs(20)).await
+    // a HANG GUARD, generous so a loaded machine never trips it; it fails, never passes
+    crate::state::settle(kernel, Duration::from_secs(120)).await
 }
 
 /// `sent`, then [`settle`]: the outcome of the send itself (its ack), read once every

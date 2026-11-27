@@ -667,6 +667,8 @@ impl App {
             Ev::Link(l) => self.on_link(l),
             Ev::Got(g) => self.on_got(g),
             Ev::Note(n) => self.note(n),
+            // said by the ViewModel, which owns the boot flags
+            Ev::Boot { .. } => {}
         }
     }
 

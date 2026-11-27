@@ -181,15 +181,16 @@ async fn one() -> One {
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// Send a TEXT call frame; return the raw reply message for `fid` (an
-/// auto-watch `event` may precede it).
+/// Send a TEXT call frame; return the raw SETTLE message for `fid` (#795) — its ack
+/// `reply` read first (an auto-watch `event` may precede either).
 async fn ws_call(ws: &mut Ws, fid: &str, payload: Value) -> TMessage {
     let frame = json!({"type": "call", "id": fid, "target": "probe", "payload": payload});
     ws.send(TMessage::Text(frame.to_string()))
         .await
         .expect("send");
+    let mut acked = false;
     for _ in 0..12 {
-        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        let msg = tokio::time::timeout(Duration::from_secs(30), ws.next())
             .await
             .expect("a frame in time")
             .expect("open")
@@ -200,10 +201,15 @@ async fn ws_call(ws: &mut Ws, fid: &str, payload: Value) -> TMessage {
             _ => continue,
         };
         if head["type"] == "reply" && head["id"] == fid {
+            assert_eq!(head["data"]["status"], "accepted", "the reply is the ack: {head}");
+            acked = true;
+        }
+        if head["type"] == "event" && head["payload"]["type"] == "settle" && head["payload"]["re"] == fid {
+            assert!(acked, "the settle came before its ack");
             return msg;
         }
     }
-    panic!("no reply for {fid}");
+    panic!("no settle for {fid}");
 }
 
 async fn ws_open(o: &One) -> Ws {
@@ -218,12 +224,12 @@ async fn a_web_ws_custom_verb_text_call_gets_a_binary_reply_frame() {
     let o = one().await;
     let mut ws = ws_open(&o).await;
     let TMessage::Binary(wire) = ws_call(&mut ws, "e1", json!({"type": "events"})).await else {
-        panic!("a text call to a verb whose reply holds bytes answers a BINARY frame");
+        panic!("a text call to a verb whose reply holds bytes settles as a BINARY frame");
     };
     let (head, body) = split(&wire);
     assert_eq!(
         head,
-        r#"{"type": "reply", "id": "e1", "data": {"seq": 3, "chunk": null}, "_binary_path": ["data", "chunk"]}"#
+        r#"{"type": "event", "payload": {"type": "settle", "re": "e1", "status": "completed", "data": {"seq": 3, "chunk": null}}, "_binary_path": ["payload", "data", "chunk"]}"#
     );
     assert_eq!(body, CHUNK);
 
@@ -231,7 +237,7 @@ async fn a_web_ws_custom_verb_text_call_gets_a_binary_reply_frame() {
     let TMessage::Text(text) = ws_call(&mut ws, "e2", json!({"type": "idle"})).await else {
         panic!("a reply with no bytes is a TEXT frame");
     };
-    assert_eq!(text, r#"{"type": "reply", "id": "e2", "data": {"seq": 3}}"#);
+    assert_eq!(text, r#"{"type": "event", "payload": {"type": "settle", "re": "e2", "status": "completed", "data": {"seq": 3}}}"#);
     assert_eq!(asked(&o.calls), ["events", "idle"]);
     stop(&o.kernel, &o.web).await;
 }
@@ -254,7 +260,7 @@ async fn ws_carries_bytes_at_depth(verb: &str, head: &str) {
 async fn e_web_ws_carries_bytes_at_a_nested_key() {
     ws_carries_bytes_at_depth(
         "nested",
-        r#"{"type": "reply", "id": "n1", "data": {"seq": 3, "out": {"chunk": null}}, "_binary_path": ["data", "out", "chunk"]}"#,
+        r#"{"type": "event", "payload": {"type": "settle", "re": "n1", "status": "completed", "data": {"seq": 3, "out": {"chunk": null}}}, "_binary_path": ["payload", "data", "out", "chunk"]}"#,
     )
     .await;
 }
@@ -263,7 +269,7 @@ async fn e_web_ws_carries_bytes_at_a_nested_key() {
 async fn e_web_ws_carries_bytes_inside_a_list() {
     ws_carries_bytes_at_depth(
         "listed",
-        r#"{"type": "reply", "id": "n1", "data": {"events": [{"n": 0}, {"n": 1, "bytes": null}]}, "_binary_path": ["data", "events", 1, "bytes"]}"#,
+        r#"{"type": "event", "payload": {"type": "settle", "re": "n1", "status": "completed", "data": {"events": [{"n": 0}, {"n": 1, "bytes": null}]}}, "_binary_path": ["payload", "data", "events", 1, "bytes"]}"#,
     )
     .await;
 }
@@ -277,57 +283,56 @@ async fn rest_post(o: &One, payload: Value) -> reqwest::Response {
         .expect("post")
 }
 
+/// (b) over web_rest: the POST answers its ack as JSON, and the reply's bytes ride
+/// the leg's settle at their slot of `data` (#795); a reply with no bytes settles
+/// with no body.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn b_web_rest_custom_verb_json_call_gets_an_octet_reply() {
+async fn b_web_rest_custom_verb_json_call_settles_with_its_bytes() {
     let o = one().await;
+    let mut settles = super::RestSettles::new(&o.kernel, &o.rest).await;
     let r = rest_post(&o, json!({"type": "events"})).await;
     assert_eq!(r.status().as_u16(), 200);
-    assert_eq!(r.headers()["content-type"], "application/octet-stream");
-    assert_eq!(r.headers()["x-fantastic-bytes-field"], "chunk");
-    assert_eq!(r.headers()["x-fantastic-payload"], r#"{"seq": 3}"#);
-    assert_eq!(&r.bytes().await.unwrap()[..], CHUNK);
-
-    // no bytes in the reply ⇒ plain JSON, no octet headers
-    let r = rest_post(&o, json!({"type": "idle"})).await;
-    assert_eq!(r.status().as_u16(), 200);
     assert_eq!(r.headers()["content-type"], "application/json");
-    assert!(r.headers().get("x-fantastic-bytes-field").is_none());
-    assert!(r.headers().get("x-fantastic-payload").is_none());
-    assert_eq!(r.json::<Value>().await.unwrap(), json!({"seq": 3}));
+    let (data, body) = settles.of(&r.json::<Value>().await.unwrap()).await;
+    assert_eq!(data, json!({"seq": 3, "chunk": null}));
+    let body = body.expect("the bytes ride the settle");
+    assert_eq!(body.path, vec![fantastic_kernel::Step::from("chunk")]);
+    assert_eq!(&body.bytes[..], CHUNK);
+
+    // no bytes in the reply ⇒ no body
+    let r = rest_post(&o, json!({"type": "idle"})).await;
+    let (data, body) = settles.of(&r.json::<Value>().await.unwrap()).await;
+    assert_eq!(data, json!({"seq": 3}));
+    assert!(body.is_none());
     assert_eq!(asked(&o.calls), ["events", "idle"]);
     stop(&o.kernel, &o.web).await;
 }
 
-/// (e) over web_rest. The octet reply names ONE top-level field
-/// (`X-Fantastic-Bytes-Field` is a literal key, never a path), so bytes below
-/// the top level cannot ride it, and JSON has no bytes: the leg answers its
-/// stated transport refusal — after dispatching the verb once.
-async fn rest_has_no_form_for_bytes_below_the_top_level(verb: &str) {
+/// (e) over web_rest: the settle carries bytes at ANY depth of the reply (a nested
+/// key, a list item) — the slot's full path — after dispatching the verb once.
+async fn rest_settles_bytes_below_the_top_level(verb: &str, path: Vec<fantastic_kernel::Step>) {
     let o = one().await;
+    let mut settles = super::RestSettles::new(&o.kernel, &o.rest).await;
     let r = rest_post(&o, json!({"type": verb})).await;
-    assert_eq!(r.status().as_u16(), 500, "{verb}");
-    assert_eq!(r.headers()["content-type"], "application/json", "{verb}");
-    assert_eq!(
-        r.json::<Value>().await.unwrap(),
-        json!({
-            "error": "web_rest: the reply has no JSON representation on this leg",
-            "reason": "transport_error",
-            "hint": "this verb answers with in-process objects; call it in-process, not over HTTP",
-        }),
-        "{verb}"
-    );
+    assert_eq!(r.status().as_u16(), 200, "{verb}");
+    let (_, body) = settles.of(&r.json::<Value>().await.unwrap()).await;
+    let body = body.unwrap_or_else(|| panic!("{verb}: the bytes ride the settle"));
+    assert_eq!(body.path, path, "{verb}");
+    assert_eq!(&body.bytes[..], CHUNK, "{verb}");
     assert_eq!(asked(&o.calls), [verb], "dispatched once");
     stop(&o.kernel, &o.web).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn e_web_rest_bytes_at_a_nested_key_have_no_rest_form() {
-    rest_has_no_form_for_bytes_below_the_top_level("nested").await;
+async fn e_web_rest_bytes_at_a_nested_key_ride_the_settle() {
+    use fantastic_kernel::Step;
+    rest_settles_bytes_below_the_top_level("nested", vec![Step::from("out"), Step::from("chunk")]).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn e_web_rest_bytes_inside_a_list_have_no_rest_form() {
-    rest_has_no_form_for_bytes_below_the_top_level("listed").await;
+async fn e_web_rest_bytes_inside_a_list_ride_the_settle() {
+    use fantastic_kernel::Step;
+    rest_settles_bytes_below_the_top_level("listed", vec![Step::from("events"), Step::Index(1), Step::from("bytes")]).await;
 }
 
 // ─── two kernels ─────────────────────────────────────────────────────────────
@@ -403,25 +408,27 @@ async fn ws_end(port: u16, web_id: &str, half: Arc<dyn BridgeTransport>) -> Cros
     wire
 }
 
-/// The call/reply frames that crossed (auto-watch events and hellos aside).
+/// The call, ack and settle frames that crossed (auto-watch events and hellos aside).
 fn calls_and_replies(wire: &Crossed) -> Vec<(&'static str, &'static str, Value, Vec<u8>)> {
     wire.lock()
         .unwrap()
         .iter()
-        .filter(|(_, _, head, _)| matches!(head["type"].as_str(), Some("call" | "reply")))
+        .filter(|(_, _, head, _)| {
+            matches!(head["type"].as_str(), Some("call" | "reply")) || head["payload"]["type"] == "settle"
+        })
         .cloned()
         .collect()
 }
 
-/// The reply head both bridge cases expect: the body at `["data", "chunk"]`.
+/// The settle head both bridge cases expect (#795): the body at `["payload", "data",
+/// "chunk"]`.
 fn assert_binary_reply(head: &Value, body: &[u8], call_id: &Value) {
     assert_eq!(
         serde_json::to_string(head).unwrap(),
         serde_json::to_string(&json!({
-            "type": "reply",
-            "id": call_id,
-            "data": {"seq": 3, "chunk": null},
-            "_binary_path": ["data", "chunk"],
+            "type": "event",
+            "payload": {"type": "settle", "re": call_id, "status": "completed", "data": {"seq": 3, "chunk": null}},
+            "_binary_path": ["payload", "data", "chunk"],
         }))
         .unwrap()
     );
@@ -480,12 +487,13 @@ async fn c_a_ws_bridge_forward_text_call_binary_reply() {
             .iter()
             .map(|(d, k, _, _)| (*d, *k))
             .collect::<Vec<_>>(),
-        [("in", "text"), ("out", "binary")]
+        [("in", "text"), ("out", "text"), ("out", "binary")]
     );
     let call = &crossed[0].2;
     assert_eq!(call["target"], "probe");
     assert_eq!(call["payload"], json!({"type": "events"}));
-    assert_binary_reply(&crossed[1].2, &crossed[1].3, &call["id"]);
+    assert_eq!(crossed[1].2["data"]["status"], "accepted", "the ack first: {}", crossed[1].2);
+    assert_binary_reply(&crossed[2].2, &crossed[2].3, &call["id"]);
     assert_eq!(asked(&calls), ["events"]);
     stop(&kb, &b_web).await;
 }

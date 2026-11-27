@@ -29,10 +29,13 @@ async def leg_call(port: int, path: str, target: str, payload: dict) -> dict:
     frame = {"type": "call", "target": target, "payload": payload, "id": secrets.token_hex(6)}
     async with websockets.connect(f"ws://127.0.0.1:{port}{path}", origin=f"http://127.0.0.1:{port}") as ws:
         await ws.send(json.dumps(frame))
+        from helpers.host.ws import call_answer
+
+        # the `reply` is the ACK (#795): the answer is the settle after it
         while True:
-            m = json.loads(await asyncio.wait_for(ws.recv(), 10))
-            if m.get("type") in ("reply", "error") and m.get("id") == frame["id"]:
-                return m.get("data", m)
+            done, answer = call_answer(json.loads(await asyncio.wait_for(ws.recv(), 10)), frame["id"])
+            if done:
+                return answer
 
 
 def main() -> bool:

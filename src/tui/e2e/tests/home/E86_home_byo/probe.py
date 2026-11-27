@@ -40,10 +40,13 @@ async def native_call(port: int, target: str, payload: dict) -> dict:
              "payload": {"type": "forward", "target": target, "payload": payload}}
     async with websockets.connect(f"ws://127.0.0.1:{port}/user/ws") as ws:
         await ws.send(json.dumps(frame))
+        from helpers.host.ws import call_answer
+
+        # the `reply` is the ACK (#795): the answer is the settle after it
         while True:
-            m = json.loads(await asyncio.wait_for(ws.recv(), 10))
-            if m.get("type") in ("reply", "error") and m.get("id") == frame["id"]:
-                return m.get("data", m)
+            done, answer = call_answer(json.loads(await asyncio.wait_for(ws.recv(), 10)), frame["id"])
+            if done:
+                return answer
 
 
 async def upgrade_status(port: int, origin: str) -> int | str:

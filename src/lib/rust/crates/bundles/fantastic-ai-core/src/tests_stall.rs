@@ -81,16 +81,23 @@ async fn events_until(
     seen: &mut Vec<Value>,
     mut done: impl FnMut(&[Value]) -> bool,
 ) {
-    for _ in 0..500 {
-        while let Some(v) = rx.try_recv() {
-            seen.push(v.payload);
+    // EVENT-DRIVEN: each event wakes the check; the bound only FAILS a hang
+    let wait = async {
+        loop {
+            while let Some(v) = rx.try_recv() {
+                seen.push(v.payload);
+            }
+            if done(seen) {
+                return true;
+            }
+            match rx.recv().await {
+                Some(v) => seen.push(v.payload),
+                None => return done(seen),
+            }
         }
-        if done(seen) {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("the expected status never arrived: {seen:#?}");
+    };
+    let got = tokio::time::timeout(Duration::from_secs(60), wait).await.unwrap_or(false);
+    assert!(got, "the expected status never arrived: {seen:#?}");
 }
 
 fn status_of<'a>(events: &'a [Value], client: &str, phase: &str) -> Option<&'a Value> {
@@ -267,7 +274,9 @@ async fn a_failed_provider_pass_emits_failed_error_once() {
         status_of(ev, "probe", "failed").is_some()
     })
     .await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // the agent is quiet (`settled`): every status its one pass emitted is queued
+    // already, so a second `failed` would be here now
+    assert!(crate::tests::settle(&kernel).await, "the agent never went quiet");
     while let Some(v) = rx.try_recv() {
         seen.push(v.payload);
     }

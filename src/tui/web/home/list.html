@@ -10,7 +10,9 @@
   file:// or another origin is refused by the host's Origin rule.
 
     ws://<host>/user/ws   the calls: {type:"call", target:"user", id,
-                          payload:{type:"forward", target:"home", payload:{type, …}}}
+                          payload:{type:"forward", target:"home", payload:{type, …}}};
+                          the `reply` is the ACK, the result comes after it as
+                          {type:"event", payload:{type:"settle", re:<id>, data}}
     ws://<host>/home/ws   the events: {type:"event", payload}; this page keeps `state` only
 
   1. `reflect` first: run only against protocol "fantastic.home".
@@ -117,11 +119,17 @@
   calls.addEventListener("message", (ev) => {
     let frame;
     try { frame = JSON.parse(ev.data); } catch { return; }
-    if (frame.type !== "reply" && frame.type !== "error") return;
-    const done = pending.get(frame.id);
+    // a call's RESULT is its settle, told to this connection after the ack
+    const settle = frame.type === "event" && frame.payload && frame.payload.type === "settle";
+    if (!settle && frame.type !== "reply" && frame.type !== "error") return;
+    const id = settle ? frame.payload.re : frame.id;
+    const done = pending.get(id);
     if (!done) return; // a frame naming no call of ours: the refused auto-watch
-    pending.delete(frame.id);
-    done(frame.type === "error" ? frame : frame.data);
+    const data = settle ? frame.payload.data : frame.data;
+    // the ACK: launched, the settle follows
+    if (frame.type === "reply" && data && data.status === "accepted" && data.error === undefined) return;
+    pending.delete(id);
+    done(frame.type === "error" ? frame : data);
   });
   calls.addEventListener("close", () => say("disconnected — reload to reconnect"));
 

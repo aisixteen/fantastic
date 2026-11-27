@@ -18,6 +18,49 @@ use tempfile::TempDir;
 /// Build a kernel with the bridge + file bundles registered and a
 /// root agent. Each test gets its own tempdir so the global
 /// `BRIDGES` map can carry concurrent test agents without id clashes.
+/// THE ANSWER to a call frame a test sent as the far side (#795): the leg's `reply`
+/// carries the ACK and is skipped (a refusal at launch is the whole answer, returned as
+/// it came); the result is the `settle` event that follows, returned re-rooted as
+/// `{type: "settle", id: <re>, status, data, secret?}` — a binary one with its body at
+/// `["data", …]`. A settle whose ack did not come first fails. Any other frame (a
+/// watched agent's event) passes through as it came.
+pub(crate) async fn answer(peer: &dyn BridgeTransport) -> Result<crate::transport::Frame, TransportError> {
+    use crate::transport::Frame;
+    // the acks seen on THIS link, across reads: a watched agent's event may come
+    // between a call's ack and its settle
+    static ACKED: std::sync::Mutex<Vec<(usize, Value)>> = std::sync::Mutex::new(Vec::new());
+    let link = std::ptr::from_ref(peer).cast::<()>() as usize;
+    loop {
+        let frame = peer.recv_frame().await?;
+        let (head, body) = match &frame {
+            Frame::Text(v) => (v.clone(), None),
+            Frame::Binary(h, b) => (h.clone(), Some(b.clone())),
+        };
+        if head["type"] == "reply" && head.get("data").is_some_and(fantastic_io_bridge::inbound::is_ack) {
+            ACKED.lock().unwrap().push((link, head["id"].clone()));
+            continue;
+        }
+        let p = &head["payload"];
+        if head["type"] == "event" && head.get("src").is_none() && p["type"] == "settle" {
+            let seen = {
+                let mut a = ACKED.lock().unwrap();
+                let at = a.iter().position(|(l, id)| *l == link && id == &p["re"]);
+                at.map(|i| a.remove(i))
+            };
+            assert!(seen.is_some(), "a settle before its ack: {head}");
+            let mut out = json!({"type": "settle", "id": p["re"], "status": p["status"], "data": p["data"]});
+            if let Some(m) = p.get("secret") {
+                out["secret"] = m.clone();
+            }
+            return Ok(match body {
+                None => Frame::Text(out),
+                Some(b) => Frame::Binary(out, Blob::new(b.path.get(1..).unwrap_or_default().to_vec(), b.bytes)),
+            });
+        }
+        return Ok(frame);
+    }
+}
+
 async fn mk_kernel(tmp: &TempDir) -> Arc<Kernel> {
     let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
         state_dir: tmp.path().join(".fantastic"),
@@ -773,7 +816,7 @@ async fn deny_inbound_refuses_inbound_call() {
     }))
     .await
     .unwrap();
-    let reply = peer.recv_frame().await.expect("a reply frame").into_value();
+    let reply = answer(&*peer).await.expect("a reply frame").into_value();
     assert_eq!(reply["type"], "reply");
     assert_eq!(reply["id"], "c1");
     assert_eq!(reply["data"]["reason"], "unauthorized", "reply: {reply}");
@@ -834,8 +877,8 @@ async fn binary_call_round_trips_raw_bytes_over_the_bridge() {
     )
     .await
     .unwrap();
-    let w = peer.recv_frame().await.expect("write reply").into_value();
-    assert_eq!(w["type"], "reply");
+    let w = answer(&*peer).await.expect("write reply").into_value();
+    assert_eq!(w["type"], "settle", "the write's result is its settle: {w}");
     assert_eq!(w["data"]["written"], payload.len(), "write reply: {w}");
 
     // read_stream (a stream verb, so the binary channel even from a text
@@ -844,7 +887,7 @@ async fn binary_call_round_trips_raw_bytes_over_the_bridge() {
                            "payload":{"type":"read_stream","path":"blob.bin"}}))
         .await
         .unwrap();
-    match peer.recv_frame().await.expect("read reply") {
+    match answer(&*peer).await.expect("read reply") {
         crate::transport::Frame::Binary(header, body) => {
             assert_eq!(header["id"], "r1");
             assert_eq!(header["data"]["eof"], true);
@@ -868,8 +911,7 @@ async fn binary_call_round_trips_raw_bytes_over_the_bridge() {
     )
     .await
     .unwrap();
-    let again = peer
-        .recv_frame()
+    let again = answer(&*peer)
         .await
         .expect("replayed reply")
         .into_value();
@@ -948,7 +990,7 @@ async fn deny_inbound_default_refuses_inbound_call() {
     }))
     .await
     .unwrap();
-    let reply = peer.recv_frame().await.expect("a reply frame").into_value();
+    let reply = answer(&*peer).await.expect("a reply frame").into_value();
     assert_eq!(reply["type"], "reply");
     assert_eq!(
         reply["data"]["reason"], "unauthorized",
@@ -1016,7 +1058,7 @@ async fn password_gate_checks_inbound_and_presents_on_forward() {
     }))
     .await
     .unwrap();
-    let good = peer.recv_frame().await.expect("a reply frame").into_value();
+    let good = answer(&*peer).await.expect("a reply frame").into_value();
     assert_eq!(
         good["data"]["id"], "kernel_state",
         "valid token should dispatch: {good}"
@@ -1029,7 +1071,7 @@ async fn password_gate_checks_inbound_and_presents_on_forward() {
     }))
     .await
     .unwrap();
-    let bad = peer.recv_frame().await.expect("a reply frame").into_value();
+    let bad = answer(&*peer).await.expect("a reply frame").into_value();
     assert_eq!(bad["data"]["reason"], "unauthorized", "wrong token: {bad}");
 
     // (3) the leg PRESENTS its group token on its own outbound forward (envelope,
@@ -1129,7 +1171,7 @@ async fn asymmetric_ingress_egress_via_engine() {
     }))
     .await
     .unwrap();
-    let denied = peer.recv_frame().await.expect("a reply frame").into_value();
+    let denied = answer(&*peer).await.expect("a reply frame").into_value();
     assert_eq!(
         denied["data"]["reason"], "unauthorized",
         "deny inbound: {denied}"
@@ -1334,7 +1376,7 @@ async fn an_inbound_call_is_gated_as_the_leg_not_the_operator() {
     peer.send_frame(json!({"type":"call","id":"i1","target":target,"payload":{"type":"reflect"}}))
         .await
         .unwrap();
-    let reply = peer.recv_frame().await.expect("reply").into_value();
+    let reply = answer(&*peer).await.expect("reply").into_value();
     assert_eq!(reply["id"], "i1");
     assert_eq!(
         reply["data"]["reason"], "unknown_agent",
@@ -1351,7 +1393,7 @@ async fn an_inbound_call_is_gated_as_the_leg_not_the_operator() {
     peer.send_frame(json!({"type":"call","id":"i2","target":target,"payload":{"type":"reflect"}}))
         .await
         .unwrap();
-    let ok = peer.recv_frame().await.expect("reply").into_value();
+    let ok = answer(&*peer).await.expect("reply").into_value();
     assert_eq!(ok["data"]["id"], target, "granted edge refused: {ok}");
 
     let _ = kernel.operator_send(vec![Item::new(
@@ -2556,7 +2598,7 @@ async fn a_malformed_rule_on_the_record_seals_the_leg() {
     }))
     .await
     .unwrap();
-    let reply = peer.recv_frame().await.expect("a reply frame").into_value();
+    let reply = answer(&*peer).await.expect("a reply frame").into_value();
     assert_eq!(reply["id"], "c7");
     assert_eq!(reply["data"]["error"], "edge sealed by policy");
     assert_eq!(reply["data"]["reason"], "unauthorized");

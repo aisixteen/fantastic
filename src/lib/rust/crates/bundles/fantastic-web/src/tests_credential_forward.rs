@@ -5,7 +5,7 @@
 
 use super::binary_steps::{create, kernel_with, op, serve, tag};
 use super::*;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::SinkExt;
 use std::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message as TMessage;
 
@@ -45,25 +45,17 @@ async fn serve_store(kb: &Arc<Kernel>) -> (u16, String, String) {
     (port, web, ws)
 }
 
-/// One text frame out, the first `reply` with `id` back.
+/// One text frame out, its ANSWER back (#795): the settle, re-rooted `{type, id,
+/// status, data, secret?}` (`secret` as the settle frame carries it).
 async fn ws_call(port: u16, web: &str, frame: Value) -> Value {
-    let (ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/{web}/ws"))
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/{web}/ws"))
         .await
         .expect("ws connect");
-    let (mut sink, mut source) = ws.split();
     let id = frame["id"].clone();
-    sink.send(TMessage::Text(frame.to_string()))
+    ws.send(TMessage::Text(frame.to_string()))
         .await
         .expect("send");
-    while let Some(Ok(msg)) = source.next().await {
-        if let TMessage::Text(t) = msg {
-            let v: Value = serde_json::from_str(&t).expect("json frame");
-            if v["type"] == "reply" && v["id"] == id {
-                return v;
-            }
-        }
-    }
-    panic!("no reply");
+    super::ws_answer(&mut ws, &id).await.0
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

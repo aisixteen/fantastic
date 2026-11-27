@@ -14,6 +14,7 @@
 
 use serde_json::{json, Value};
 
+use crate::kern::cps::Done;
 use crate::kern::host::Host;
 
 /// The bridge the leg writes through.
@@ -21,15 +22,19 @@ pub const BRIDGE: &str = "mcp_config";
 /// The file, in the bridge's own folder.
 pub const FILE: &str = ".mcp.json";
 
-/// The leg's `mcp_config_error` after its boot, as an `Err`, when the write failed.
-pub async fn check(h: &Host) -> Result<(), String> {
+/// The leg's `mcp_config_error` after its boot, as an `Err`, when the write failed: its
+/// `reflect` is a call (#795), and `done` gets the answer with the settle.
+pub async fn check(h: &Host, done: Done<Result<(), String>>) {
     let leg = crate::mcp::LEG;
     if !h.kernel.exists(leg) || !h.kernel.exists(BRIDGE) {
-        return Err(format!("`{leg}` or its bridge `{BRIDGE}` is not in the tree"));
+        return done(Err(format!("`{leg}` or its bridge `{BRIDGE}` is not in the tree"))).await;
     }
-    let r = h.operator(leg, json!({"type": "reflect", "tree": "none"})).await.result;
-    match r.get("mcp_config_error").and_then(Value::as_str) {
-        Some(e) => Err(format!("{FILE}: {e}")),
-        None => Ok(()),
-    }
+    h.operator_then(leg, json!({"type": "reflect", "tree": "none"}), move |out| async move {
+        done(match out.result.get("mcp_config_error").and_then(Value::as_str) {
+            Some(e) => Err(format!("{FILE}: {e}")),
+            None => Ok(()),
+        })
+        .await;
+    })
+    .await;
 }

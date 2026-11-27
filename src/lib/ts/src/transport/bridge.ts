@@ -11,7 +11,10 @@ import type { Envelope } from "./frame.ts";
 // dialect.
 //
 // A call frame is `{type:"call", target, payload, id}` in BOTH directions; the
-// reply is `{type:"reply", id, data}`. A frame names no caller: the kernel that
+// reply is `{type:"reply", id, data}`. A call to the HOST is async (#795): its
+// reply carries the ACK (`data`: `{pid, status: "accepted"}`, or the refusal at
+// launch), and its result comes after as `{type:"event", payload:{type:"settle",
+// re: <id>, status, data}}` — `call()` resolves on that. A frame names no caller: the kernel that
 // receives a call judges it as the LEG it arrived through. Nothing here logs or
 // keeps a frame.
 //
@@ -91,6 +94,28 @@ interface Pending {
   /** Who and what the call was for, kept only to say what a drop cut off. */
   target: string;
   verb: string;
+}
+
+/** Is a reply's `data` an ACK — `{pid, status: "accepted"}`, a call launched whose
+ *  result comes later as a `settle` event? */
+function isAck(data: Json): boolean {
+  return (
+    data !== null &&
+    typeof data === "object" &&
+    !Array.isArray(data) &&
+    data["status"] === "accepted" &&
+    data["error"] === undefined
+  );
+}
+
+/** Is an event payload a call's `settle` (`{type: "settle", re, status, data}`)? */
+function isSettle(payload: unknown): boolean {
+  return (
+    payload !== null &&
+    typeof payload === "object" &&
+    !Array.isArray(payload) &&
+    (payload as Record<string, unknown>)["type"] === "settle"
+  );
 }
 
 /** One auto-reconnecting socket to `/<endpoint>/ws`; its events are `endpoint`'s. */
@@ -232,9 +257,22 @@ class Conn {
     if (type === "reply" || type === "error") {
       const p = this.pending.get(String(msg["id"]));
       if (p === undefined) return;
+      const data = (msg["data"] ?? null) as Json;
+      // THE ACK (#795): the call was launched; its result is the `settle` event
+      // that follows. Only a refusal at launch answers here.
+      if (type === "reply" && isAck(data)) return;
       this.pending.delete(String(msg["id"]));
       if (type === "error") p.reject(new Error(String(msg["error"] ?? "error")));
-      else p.resolve((msg["data"] ?? null) as Json);
+      else p.resolve(data);
+    } else if (type === "event" && msg["src"] === undefined && isSettle(msg["payload"])) {
+      // A CALL'S SETTLE, told to this connection: it resolves the call it names.
+      // It is no agent's event, so it is not emitted on the endpoint.
+      const settle = msg["payload"] as Payload;
+      const re = String(settle["re"]);
+      const p = this.pending.get(re);
+      if (p === undefined) return;
+      this.pending.delete(re);
+      p.resolve((settle["data"] ?? null) as Json);
     } else if (type === "call") {
       // a HOST calling one of THIS kernel's agents (only on the peer conn)
       this.onCall?.(msg);

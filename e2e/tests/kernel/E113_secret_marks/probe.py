@@ -32,8 +32,6 @@ import sys
 import tempfile
 import threading
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 import yaml
@@ -42,7 +40,7 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 
 from helpers import memory
-from helpers.host.driver import HostKernel, ensure_runtime, runtime
+from helpers.host.driver import HostKernel, ensure_runtime, is_ack, runtime
 from helpers.host.ws import StateWatcher, WSWatcher
 from helpers.verdict import verdict
 
@@ -61,17 +59,10 @@ EB = "eb"  # an exec_bridge: its declared `env` map is where a nested secret pat
 # ─── wire helpers (local: the driver's `send` carries no secret header) ──
 
 
-def post(port: int, target: str, payload: dict, headers: dict | None = None) -> dict:
-    req = urllib.request.Request(
-        f"http://127.0.0.1:{port}/rest/{target}",
-        data=json.dumps(payload).encode(),
-        headers={"content-type": "application/json", **(headers or {})},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            return json.loads(r.read() or b"null") or {}
-    except urllib.error.HTTPError as e:
-        return {"error": f"HTTP {e.code}", "body": e.read().decode()[:300]}
+def post(hk: HostKernel, target: str, payload: dict, headers: dict | None = None) -> dict:
+    """One REST call carrying extra headers (the driver's `send` with them): the
+    ACK, then the call's result off the leg's settle stream (#795)."""
+    return hk.send(target, payload, timeout=60, headers=headers) or {}
 
 
 class WSCaller(WSWatcher):
@@ -96,6 +87,8 @@ class WSCaller(WSWatcher):
         self.agent_id = saved
 
     async def call(self, frame: dict, timeout: float = 30) -> dict:
+        """The call's RESULT (#795): its `reply` is the ACK (a refusal at launch is
+        the answer then), and the result is the `settle` event that follows."""
         await self._send(json.dumps(frame))
 
         async def _reply():
@@ -109,8 +102,15 @@ class WSCaller(WSWatcher):
                     f = json.loads(raw)
                 except json.JSONDecodeError:
                     continue
-                if isinstance(f, dict) and f.get("type") == "reply" and f.get("id") == frame["id"]:
-                    return f.get("data") or {}
+                if not isinstance(f, dict):
+                    continue
+                if f.get("type") == "reply" and f.get("id") == frame["id"]:
+                    data = f.get("data") or {}
+                    if not is_ack(data):
+                        return data
+                p = f.get("payload") or {}
+                if f.get("type") == "event" and p.get("type") == "settle" and p.get("re") == frame["id"]:
+                    return p.get("data") or {}
 
         return await asyncio.wait_for(_reply(), timeout)
 
@@ -244,7 +244,7 @@ def main() -> int:
         need(bool(warm), f"state stream + inbox watch of {FB} are live (errors: {taps.errors})")
 
         # 1 · REST header — the handler gets the clear value
-        r = post(port, FB, {"type": "write", "path": "rest.txt", "bytes": S_REST},
+        r = post(hk, FB, {"type": "write", "path": "rest.txt", "bytes": S_REST},
                  {"X-Fantastic-Secret": "bytes"})
         need("error" not in r, f"REST marked write accepted: {str(r)[:200]}")
         need((served / "rest.txt").exists() and (served / "rest.txt").read_text() == S_REST,
@@ -259,7 +259,7 @@ def main() -> int:
              "the file on disk holds the CLEAR value (ws)")
 
         # 3 · a NESTED mark on update_agent — stored clear, sibling untouched
-        r = post(port, root, {"type": "update_agent", "id": EB,
+        r = post(hk, root, {"type": "update_agent", "id": EB,
                               "env": {"x": S_NEST, "y": "plain"}},
                  {"X-Fantastic-Secret": "env.x"})
         need("error" not in r, f"marked update_agent accepted: {str(r)[:200]}")
@@ -334,13 +334,13 @@ def main() -> int:
         need(S_REST in json.dumps(rb), f"read-back returns the CLEAR value: {str(rb)[:160]}")
 
         # 6 · a mark naming nothing is skipped
-        r = post(port, FB, {"type": "write", "path": "skip.txt", "bytes": "x"},
+        r = post(hk, FB, {"type": "write", "path": "skip.txt", "bytes": "x"},
                  {"X-Fantastic-Secret": "nosuch.path"})
         need("error" not in r and (served / "skip.txt").exists(),
              f"a mark naming nothing is skipped, the call runs: {str(r)[:160]}")
 
         # 7 · malformed / `type` — bad_arg secret, and the write never ran
-        r = post(port, FB, {"type": "write", "path": "bad1.txt", "bytes": S_BAD},
+        r = post(hk, FB, {"type": "write", "path": "bad1.txt", "bytes": S_BAD},
                  {"X-Fantastic-Secret": "a..b"})
         need(r.get("reason") == "bad_arg" and r.get("arg") == "secret",
              f"header `a..b` → bad_arg secret: {str(r)[:200]}")
@@ -349,7 +349,7 @@ def main() -> int:
                           "secret": "bytes"})
         need(r.get("reason") == "bad_arg" and r.get("arg") == "secret",
              f"ws `secret` not a list → bad_arg secret: {str(r)[:200]}")
-        r = post(port, FB, {"type": "write", "path": "bad3.txt", "bytes": S_BAD},
+        r = post(hk, FB, {"type": "write", "path": "bad3.txt", "bytes": S_BAD},
                  {"X-Fantastic-Secret": "type"})
         need(r.get("reason") == "bad_arg" and r.get("arg") == "secret",
              f"marking `type` → bad_arg secret: {str(r)[:200]}")

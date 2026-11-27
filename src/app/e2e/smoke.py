@@ -225,8 +225,16 @@ def ws_call(port: int, target: str, payload: dict, timeout: float = 10) -> dict:
                 if b0 & 0x80:
                     m = json.loads(message)
                     message = b""
+                    # the `reply` is the ACK (#795): the answer is the `settle`
+                    # event after it, or a refusal at launch
+                    p = m.get("payload") or {}
+                    if m.get("type") == "event" and p.get("type") == "settle" and p.get("re") == call_id:
+                        return p.get("data")
                     if m.get("type") in ("reply", "error") and m.get("id") == call_id:
-                        return m.get("data", m)
+                        d = m.get("data", m)
+                        if not (m.get("type") == "reply" and isinstance(d, dict)
+                                and d.get("status") == "accepted" and "error" not in d):
+                            return d
             elif b0 & 0x0F == 0x8:
                 raise OSError("the socket closed")
 

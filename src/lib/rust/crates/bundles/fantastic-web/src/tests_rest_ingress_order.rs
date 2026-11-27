@@ -205,6 +205,7 @@ async fn a_wrong_credential_is_refused_before_reading_the_body() {
         assert_eq!(status, 403, "{token:?} {out}");
         assert_eq!(out["reason"], "unauthorized", "{token:?} {out}");
     }
+    let mut settles = super::RestSettles::new(&kernel, "pw").await;
     let (status, out) = post_whole(
         port,
         "/pw/kernel_state",
@@ -213,6 +214,7 @@ async fn a_wrong_credential_is_refused_before_reading_the_body() {
     )
     .await;
     assert_eq!(status, 200, "{out}");
+    let (out, _) = settles.of(&out).await;
     assert_eq!(out["id"], "kernel_state", "{out}");
     stop(&kernel, "web_order_pw").await;
 }
@@ -290,8 +292,10 @@ async fn an_undeclared_oversize_body_stops_at_the_bound() {
     let got = answer(&mut joined, 5.0).await;
     assert_eq!(got, Some((413, too_large(max))));
     let ok = br#"{"type": "reflect", "tree": "none"}"#;
+    let mut settles = super::RestSettles::new(&kernel, "ro").await;
     let (status, out) = post_whole(port, "/ro/kernel_state", &[], ok).await;
     assert_eq!(status, 200, "{out}");
+    let (out, _) = settles.of(&out).await;
     assert_eq!(out["id"], "kernel_state", "{out}");
     stop(&kernel, "web_order_chunked").await;
 }

@@ -18,9 +18,14 @@
 //! an agent's rows is therefore a `read` on the store, made as the operator — the
 //! store's admin.
 //!
-//! IDENTITY COMES ONLY FROM DISPATCH. THE SHELL IS THE OPERATOR: every send it
-//! makes goes through `Kernel::operator_send` (ungated). A send made inside a
-//! bundle's handler is that agent's.
+//! IDENTITY COMES ONLY FROM DISPATCH. THE SHELL IS THE OPERATOR: every call it
+//! makes goes through [`Host::operator_then`] (ungated): the ack at once, the rest of
+//! the work in the continuation that runs with the settle (#795, `kern/cps`). A call
+//! made inside a bundle's handler is that agent's ([`Host::agent_then`]) or its
+//! asker's ([`Host::asker_then`]). THE ONE EXCEPTION is the kernel's own lifecycle: the
+//! boot's fields set before the listeners boot (`set_web_field`, the root's fields) and
+//! the shutdown's page stop (`stop_pages`) run directly through `Kernel::operator_send`,
+//! because the boot and the drain are sequences the kernel itself runs in order.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,6 +45,7 @@ use fantastic_kernel::{
 use serde_json::{json, Value};
 
 use crate::env::{ClientCfg, Paths};
+use crate::kern::cps::Done;
 use crate::kern::model::{AgentId as MyId, KernelErr, Record, Row, Task, TreeNode};
 
 /// The ledger cap: calls kept before the kernel prunes its store (owner 2026-10-09).
@@ -48,7 +54,9 @@ pub const LEDGER_CAP: usize = 100_000;
 /// The one shared persistent AI store's id (the blueprint's).
 pub const AI_STORE: &str = "memory";
 
-/// The kernel, plus who this terminal is when it speaks.
+/// The kernel, plus who this terminal is when it speaks. Cheap to clone: a flow's
+/// continuations each hold one.
+#[derive(Clone)]
 pub struct Host {
     pub kernel: Arc<Kernel>,
     pub cfg: ClientCfg,
@@ -56,6 +64,108 @@ pub struct Host {
     /// rather than assumed, because the same shell should not lie on a runtime
     /// whose root is named something else.
     pub root: MyId,
+}
+
+/// The handlers whose agents keep an AI conversation: the five backends and the chat.
+const AI_HANDLERS: [&str; 7] = [
+    "anthropic_backend.tools",
+    "ollama_backend.tools",
+    "openai_backend.tools",
+    "responses_backend.tools",
+    "vllm_backend.tools",
+    "foundation_models_backend.tools",
+    "ai_chat.tools",
+];
+
+/// The ids of the agents whose handler — or the base of the role they are — is one of
+/// `modules`: read off the kernel's own index, which is what `reflect`'s
+/// `handler_modules` filter lists for the operator. No call.
+pub(crate) fn agents_of(kernel: &Kernel, modules: &[&str]) -> Vec<String> {
+    kernel
+        .agent_ids()
+        .into_iter()
+        .filter(|id| {
+            kernel.resolve_target(id.as_str()).and_then(|a| a.record().handler_module.clone()).is_some_and(|h| {
+                let base = kernel.bundles.base_of(&h);
+                modules.iter().any(|m| *m == h || *m == base)
+            })
+        })
+        .map(|id| id.0)
+        .collect()
+}
+
+/// One agent's rows being read ([`Host::rows`]): the pages merged so far.
+struct RowsRead {
+    host: Host,
+    agent: String,
+    after: Option<i64>,
+    store: String,
+    by: std::collections::BTreeMap<i64, Value>,
+    loaded: Option<bool>,
+}
+
+impl RowsRead {
+    /// The agent's own `rows` from `cursor`; its settle merges the page and asks for the
+    /// next one, or reads the store.
+    fn page(self, cursor: Option<i64>, done: Done<(Vec<Row>, Option<bool>)>) -> futures_util::future::BoxFuture<'static, ()> {
+        Box::pin(async move {
+            let mut q = json!({"type": "rows"});
+            if let Some(a) = cursor {
+                q["after"] = json!(a);
+            }
+            let host = self.host.clone();
+            let agent = self.agent.clone();
+            host.operator_then(&agent, q, move |out| async move {
+                let mut st = self;
+                let page = out.result;
+                st.loaded = page.get("loaded").and_then(Value::as_bool).or(st.loaded);
+                for mut r in page["rows"].as_array().cloned().unwrap_or_default() {
+                    if r.get("agent").is_none() {
+                        r["agent"] = json!(st.agent);
+                    }
+                    if let Some(id) = r.get("id").and_then(Value::as_i64) {
+                        st.by.insert(id, r);
+                    }
+                }
+                match page.get("next").and_then(Value::as_i64) {
+                    Some(n) if Some(n) != cursor => RowsRead::page(st, Some(n), done).await,
+                    _ => RowsRead::store(st, done).await,
+                }
+            })
+            .await;
+        })
+    }
+
+    /// The kernel's execution rows about the agent: the store's, then the RAM ones.
+    fn store(self, done: Done<(Vec<Row>, Option<bool>)>) -> futures_util::future::BoxFuture<'static, ()> {
+        Box::pin(async move {
+            let mut q = json!({"type": "read", "match": {"agent": self.agent}});
+            if let Some(a) = self.after {
+                q["after"] = json!(a);
+            }
+            let host = self.host.clone();
+            let store = self.store.clone();
+            host.operator_then(&store, q, move |out| async move {
+                let mut st = self;
+                let exec = out.result;
+                let ram = st.host.kernel.rows.all().into_iter().map(Value::Object);
+                for r in exec["rows"].as_array().cloned().unwrap_or_default().into_iter().chain(ram) {
+                    if r.get("agent").and_then(Value::as_str) != Some(st.agent.as_str()) {
+                        continue;
+                    }
+                    if let Some(id) = r.get("id").and_then(Value::as_i64) {
+                        if st.after.is_some_and(|a| id <= a) {
+                            continue;
+                        }
+                        st.by.insert(id, r);
+                    }
+                }
+                let rows = st.by.into_values().filter_map(|v| serde_json::from_value(v).ok()).collect();
+                done((rows, st.loaded)).await;
+            })
+            .await;
+        })
+    }
 }
 
 /// Every bundle this shell's roster can name. Deliberately short: the set of
@@ -212,20 +322,8 @@ pub(crate) fn boot_order(kernel: &Kernel) -> Vec<AgentId> {
 /// goes on.
 async fn boot_the_rest(kernel: &Arc<Kernel>, done: &[String], web_port: Option<u16>, web_bind: Option<&str>) -> Vec<String> {
     let mut notes = Vec::new();
-    // the `web` hosts, by handler: one reflect of the tree
-    let mut web: Vec<String> = Vec::new();
-    let found = kernel
-        .operator_send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({"type": "reflect", "tree": "ids", "handler_modules": [fantastic_web::HANDLER_MODULE]}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    match found.get("tree").and_then(Value::as_array) {
-        Some(ids) if found.get("error").is_none() => web = ids.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
-        _ => notes.push(format!("the web hosts could not be listed: {}", found.get("error").and_then(Value::as_str).unwrap_or("no tree"))),
-    }
+    // the `web` hosts, by handler: read off the tree (no call)
+    let web: Vec<String> = agents_of(kernel, &[fantastic_web::HANDLER_MODULE]);
     for id in boot_order(kernel) {
         if done.contains(&id.0) {
             continue;
@@ -354,18 +452,21 @@ impl Host {
             root,
         };
         // THE PROJECT'S SYSTEM BLOCK: `prompt.md` in the state folder, its file
-        // written when missing, read by every AI through its view (`kern/prompt`)
+        // written when missing, read by every AI through its view (`kern/prompt`).
+        // What the steps below call (#795) says its trouble when the call settles:
+        // boot waits for none of it.
         match crate::kern::prompt::ensure(&host).await {
-            Ok(()) => {
-                notes.extend(crate::kern::prompt::stamp_all(&host).await);
-            }
+            Ok(()) => crate::kern::prompt::stamp_all(&host).await,
             Err(e) => notes.push(e),
         }
         // THE PROJECT'S `.mcp.json`: written by the `mcp` leg's boot, through its
         // bridge (`kern/mcp_config`) — its write error, if any
-        if let Err(e) = crate::kern::mcp_config::check(&host).await {
-            notes.push(e);
-        }
+        crate::kern::mcp_config::check(&host, crate::kern::cps::done(|r: Result<(), String>| async move {
+            if let Err(e) = r {
+                tracing::warn!("{e}");
+            }
+        }))
+        .await;
         // the state folder's readme, rewritten from the live values
         match (host.kernel.state_dir(), host.kernel.work_dir()) {
             (Ok(state), Ok(work)) => {
@@ -381,9 +482,12 @@ impl Host {
             tracing::warn!("{n}");
         }
         // The credential store's backend, as the user's key mode says (none until chosen).
-        if let Err(e) = crate::kern::keys::ensure_store(&host).await {
-            tracing::warn!("{e}");
-        }
+        crate::kern::keys::ensure_store(&host, crate::kern::cps::done(|r: Result<(), String>| async move {
+            if let Err(e) = r {
+                tracing::warn!("{e}");
+            }
+        }))
+        .await;
         Ok(host)
     }
 
@@ -408,80 +512,69 @@ impl Host {
         }
     }
 
-    /// The AI agents in the tree: the ids `reflect` lists for the handlers of the
-    /// five backends and `ai_chat.tools`, and the agents of roles over them.
-    pub async fn ai_agents(&self) -> Vec<String> {
-        let r = self
-            .operator(
-                "kernel",
-                json!({"type": "reflect", "tree": "ids", "handler_modules": [
-                    "anthropic_backend.tools", "ollama_backend.tools", "openai_backend.tools", "responses_backend.tools",
-                    "vllm_backend.tools", "foundation_models_backend.tools", "ai_chat.tools"]}),
-            )
-            .await
-            .result;
-        if let Some(e) = r.get("error").and_then(Value::as_str) {
-            tracing::warn!("ai_agents: reflect refused: {e}");
-            return Vec::new();
-        }
-        r.get("tree").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default()
+    /// The AI agents in the tree: the agents of the five backends and `ai_chat.tools`, and
+    /// of the roles over them.
+    pub fn ai_agents(&self) -> Vec<String> {
+        agents_of(&self.kernel, &AI_HANDLERS)
     }
 
     // ── acting ───────────────────────────────────────────────────────────
 
-    /// THE OPERATOR'S SEND (the shell is the operator): ungated, through
-    /// `Kernel::operator_send`. For the shell's own code only: inside a bundle's handler
-    /// the sender stays that agent, so code there says whose send it makes with
-    /// [`Host::agent_send`] (the agent's own) or [`Host::asker_send`] (its asker's).
-    pub async fn operator(&self, target: &str, payload: Value) -> Outcome {
-        let k = Arc::clone(&self.kernel);
-        let item = Item::new(AgentId::from(target), payload);
-        k.operator_send(vec![item]).await.remove(0)
-    }
-
-    /// THE OPERATOR'S CALL (#795): [`Host::operator`]'s call made async — the ack at once
-    /// (`accepted` with the pid, or the launch's refusal, for which `then` never runs),
-    /// and `then` runs with the settle when it comes, as a message to the shell. Nothing
-    /// waits for it.
-    pub async fn operator_call<F, Fut>(&self, target: &str, payload: Value, then: F) -> Outcome
+    /// THE OPERATOR'S CALL (#795; the shell is the operator, ungated): the ack comes at
+    /// once and `then` runs EXACTLY ONCE — with the settle, or at once with the launch's
+    /// refusal. Nothing waits for it. For the shell's own code only: inside a bundle's
+    /// handler the sender stays that agent, so code there says whose call it makes with
+    /// [`Host::agent_then`] (the agent's own) or [`Host::asker_then`] (its asker's).
+    pub async fn operator_then<F, Fut>(&self, target: &str, payload: Value, then: F)
     where
         F: FnOnce(Outcome) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         let item = Item::new(AgentId::from(target), payload);
-        fantastic_kernel::send::as_operator(self.kernel.call(item, then)).await
+        fantastic_kernel::send::as_operator(self.kernel.call_then(item, then)).await;
     }
 
-    /// THE SEND OF THE AGENT WHOSE CODE RUNS HERE: inside a bundle's handler (or a task it
-    /// spawned with its identity) that agent's own send, checked against its own lines like
-    /// every send made there; in the shell's operator scope (origin none set explicitly, no
-    /// dispatch running) the operator's. With no origin scope at all (a bare spawn) it is
-    /// nobody's, and refused as [`Kernel::send`] refuses it: lost identity is never the operator.
-    pub async fn agent_send(&self, target: &str, payload: Value) -> Outcome {
-        let item = Item::new(AgentId::from(target), payload);
-        let operator = matches!(fantastic_kernel::send::origin_scope(), Some(None)) && fantastic_kernel::current_sender().is_none();
-        if operator {
-            self.kernel.operator_send(vec![item]).await.remove(0)
-        } else {
-            self.kernel.send(vec![item]).await.remove(0)
-        }
-    }
-
-    /// THE ASKER'S SEND, for a handler acting for whoever asked for the running verb
-    /// (`Kernel::send_as_caller`): checked as that asker (the operator when the asker is the
-    /// operator); refused with no origin at all.
-    pub async fn asker_send(&self, target: &str, payload: Value) -> Outcome {
-        let item = Item::new(AgentId::from(target), payload);
-        self.kernel.send_as_caller(vec![item]).await.remove(0)
-    }
-
-    /// [`Host::operator`] with SECRET MARKS (`secret`, paths into `payload`): the
+    /// [`Host::operator_then`] with SECRET MARKS (`secret`, paths into `payload`): the
     /// values reach the target's handler and show as `[secret]` in every row,
     /// event and mirror.
-    pub async fn operator_secret(&self, target: &str, payload: Value, secret: &[&str]) -> Outcome {
-        let k = Arc::clone(&self.kernel);
+    pub async fn operator_secret_then<F, Fut>(&self, target: &str, payload: Value, secret: &[&str], then: F)
+    where
+        F: FnOnce(Outcome) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
         let item = Item::new(AgentId::from(target), payload).with_secret(secret.iter().map(|m| (*m).to_string()));
-        k.operator_send(vec![item]).await.remove(0)
+        fantastic_kernel::send::as_operator(self.kernel.call_then(item, then)).await;
+    }
+
+    /// THE CALL OF THE AGENT WHOSE CODE RUNS HERE: inside a bundle's handler (or a
+    /// continuation run under the handler's captured identity, `Inherited::scope`) that
+    /// agent's own call, checked against its own lines like every call made there. With
+    /// no origin scope at all (a bare spawn) it is nobody's, and refused as
+    /// [`Kernel::call`] refuses it: lost identity is never the operator. `then` runs
+    /// exactly once, as for [`Host::operator_then`].
+    pub async fn agent_then<F, Fut>(&self, target: &str, payload: Value, then: F)
+    where
+        F: FnOnce(Outcome) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let item = Item::new(AgentId::from(target), payload);
+        self.kernel.call_then(item, then).await;
+    }
+
+    /// THE ASKER'S CALL, for a handler acting for whoever asked for the running verb
+    /// (`asker` is [`fantastic_kernel::Asker::current`], taken when the verb began):
+    /// checked as that asker (the operator when the asker is the operator). With no
+    /// asker at all the launch is refused: `then` runs at once with the refusal.
+    pub async fn asker_then<F, Fut>(&self, asker: &Option<fantastic_kernel::Asker>, target: &str, payload: Value, then: F)
+    where
+        F: FnOnce(Outcome) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let item = Item::new(AgentId::from(target), payload);
+        match asker {
+            Some(a) => self.kernel.call_for_then(a, item, then).await,
+            None => then(Outcome::refused(fantastic_kernel::unknown_agent(target))).await,
+        }
     }
 
     /// An outcome as this shell reads it: the reply, or the refusal as data.
@@ -505,72 +598,28 @@ impl Host {
     /// kernel's execution rows ABOUT it — flushed ones read back from the store
     /// under the operator's own key, the rest still in RAM.
     /// `after`: only rows with a larger id (the caller's cursor); `None` = all.
-    pub async fn rows(&self, agent: &str, after: Option<i64>) -> (Vec<Row>, Option<bool>) {
+    ///
+    /// A CHAIN OF CONTINUATIONS (#795): each page's call goes out when the page before
+    /// it settled, the store's `read` after the last page, and `done` gets the rows
+    /// from the last settle. Nothing waits.
+    pub async fn rows(&self, agent: &str, after: Option<i64>, done: Done<(Vec<Row>, Option<bool>)>) {
         let Ok(store) = self.kernel_store() else {
-            return (Vec::new(), None);
+            return done((Vec::new(), None)).await;
         };
-        let mut by: std::collections::BTreeMap<i64, Value> = std::collections::BTreeMap::new();
         // an AI agent: its record's handler, or the base of its role, is a backend or
         // `ai_chat.tools` (the root's is not: it keeps the project's rows through the
         // kernel store)
         let handler = self.kernel.resolve_target(agent).and_then(|a| a.record().handler_module.clone());
         let keeps_rows = handler.is_some_and(|h| {
             let base = self.kernel.bundles.base_of(&h);
-            [h.as_str(), base.as_str()].iter().any(|n| {
-                matches!(
-                    *n,
-                    "anthropic_backend.tools"
-                        | "ollama_backend.tools"
-                        | "openai_backend.tools"
-                        | "responses_backend.tools"
-                        | "vllm_backend.tools"
-                        | "foundation_models_backend.tools"
-                        | "ai_chat.tools"
-                )
-            })
+            [h.as_str(), base.as_str()].iter().any(|n| AI_HANDLERS.contains(n))
         });
-        let mut loaded = None;
+        let st = RowsRead { host: self.clone(), agent: agent.to_string(), after, store, by: Default::default(), loaded: None };
         if keeps_rows {
-            let mut cursor = after;
-            loop {
-                let mut q = json!({"type": "rows"});
-                if let Some(a) = cursor {
-                    q["after"] = json!(a);
-                }
-                let page = self.operator(agent, q).await.result;
-                loaded = page.get("loaded").and_then(Value::as_bool).or(loaded);
-                for mut r in page["rows"].as_array().cloned().unwrap_or_default() {
-                    if r.get("agent").is_none() {
-                        r["agent"] = json!(agent);
-                    }
-                    if let Some(id) = r.get("id").and_then(Value::as_i64) {
-                        by.insert(id, r);
-                    }
-                }
-                match page.get("next").and_then(Value::as_i64) {
-                    Some(n) if Some(n) != cursor => cursor = Some(n),
-                    _ => break,
-                }
-            }
+            RowsRead::page(st, after, done).await;
+        } else {
+            RowsRead::store(st, done).await;
         }
-        let mut q = json!({"type": "read", "match": {"agent": agent}});
-        if let Some(a) = after {
-            q["after"] = json!(a);
-        }
-        let exec = self.operator(&store, q).await.result;
-        let ram = self.kernel.rows.all().into_iter().map(Value::Object);
-        for r in exec["rows"].as_array().cloned().unwrap_or_default().into_iter().chain(ram) {
-            if r.get("agent").and_then(Value::as_str) != Some(agent) {
-                continue;
-            }
-            if let Some(id) = r.get("id").and_then(Value::as_i64) {
-                if after.is_some_and(|a| id <= a) {
-                    continue;
-                }
-                by.insert(id, r);
-            }
-        }
-        (by.into_values().filter_map(|v| serde_json::from_value(v).ok()).collect(), loaded)
     }
 
     /// What is running right now.
@@ -712,11 +761,7 @@ pub async fn boot_all(
     let asked = web_port.is_some() || web_bind.is_some();
     let bind = web_bind.clone();
     let host = Arc::new(Host::boot(paths, extras, web_port, web_bind).await.map_err(|e| format!("{e}"))?);
-    let web = host
-        .operator("kernel", json!({"type": "reflect", "tree": "ids", "handler_modules": [fantastic_web::HANDLER_MODULE]}))
-        .await
-        .result;
-    let has_web = web.get("tree").and_then(Value::as_array).is_some_and(|t| !t.is_empty());
+    let has_web = !agents_of(&host.kernel, &[fantastic_web::HANDLER_MODULE]).is_empty();
     if asked && !canvas && !has_web {
         stop(&host.kernel).await;
         return Err("--port/--host: the folder has no `web` record to set them on".into());
@@ -1165,7 +1210,7 @@ mod tests {
             assert_eq!(made["id"], id, "{made}");
         }
         let host = Host { kernel, cfg: crate::env::ClientCfg::here(), root: "kernel".to_string() };
-        assert_eq!(host.ai_agents().await, vec!["chat".to_string(), "vllm".to_string(), "chat2".to_string()]);
+        assert_eq!(host.ai_agents(), vec!["chat".to_string(), "vllm".to_string(), "chat2".to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1251,9 +1296,9 @@ mod tests {
             assert_eq!(made["id"], id, "{made}");
         }
         let host = Host { kernel, cfg: crate::env::ClientCfg::here(), root: "kernel".to_string() };
-        let (w, _) = host.rows("w", None).await;
+        let (w, _) = crate::kern::cps::run(|d| host.rows("w", None, d)).await;
         assert!(w.iter().any(|r| r.id == 900001), "{w:?}");
-        let (p, _) = host.rows("p", None).await;
+        let (p, _) = crate::kern::cps::run(|d| host.rows("p", None, d)).await;
         assert!(p.iter().all(|r| r.id != 900001), "{p:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1586,7 +1631,7 @@ mod set_web_field_tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let h = harness(&dir);
-        h.operator(
+        crate::kern::cps::op(&h,
             "kernel",
             json!({"type": "create_agent", "parent_id": "kernel", "id": "web",
                 "handler_module": fantastic_core::HANDLER_MODULE, "port": 8088}),
@@ -1641,7 +1686,7 @@ mod set_web_bind_tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let h = harness(&dir);
-        h.operator(
+        crate::kern::cps::op(&h,
             "kernel",
             json!({"type": "create_agent", "parent_id": "kernel", "id": "web",
                 "handler_module": fantastic_core::HANDLER_MODULE, "port": 8088}),
@@ -1667,7 +1712,7 @@ mod set_web_bind_tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let h = harness(&dir);
-        h.operator(
+        crate::kern::cps::op(&h,
             "kernel",
             json!({"type": "create_agent", "parent_id": "kernel", "id": "web",
                 "handler_module": fantastic_core::HANDLER_MODULE, "port": 8088}),
@@ -1689,6 +1734,77 @@ mod set_web_bind_tests {
         set_web_bind(&h.kernel, &web, "0.0.0.0", &mut notes).await;
         assert!(notes.is_empty(), "{notes:?}");
         assert_eq!(field_of(&h, "web", "host"), Some(json!("127.0.0.1")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// THE CALLS (#795): `then` runs with the settle, or — exactly once — with the launch's
+/// refusal; nothing waits for it.
+#[cfg(test)]
+mod call_tests {
+    use super::*;
+    use crate::kern::cps;
+    use crate::kern::web::canvas_tree_tests::harness;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("fc-host-calls-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn the_continuation_gets_the_settle_of_the_call() {
+        let dir = scratch("settle");
+        let h = harness(&dir);
+        let ran = Arc::new(AtomicUsize::new(0));
+        let n = Arc::clone(&ran);
+        let out = cps::run(|d| h.operator_then("kernel", json!({"type": "reflect", "tree": "none"}), move |o| async move {
+            n.fetch_add(1, Ordering::SeqCst);
+            d(o).await;
+        }))
+        .await;
+        assert_eq!(out.status, fantastic_kernel::Status::Completed, "{:?}", out.result);
+        assert!(out.result.get("error").is_none(), "{:?}", out.result);
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_launch_refusal_reaches_the_same_continuation_once() {
+        let dir = scratch("refused");
+        let h = harness(&dir);
+        let ran = Arc::new(AtomicUsize::new(0));
+        let n = Arc::clone(&ran);
+        let out = cps::run(|d| h.operator_then("nobody", json!({"type": "reflect"}), move |o| async move {
+            n.fetch_add(1, Ordering::SeqCst);
+            d(o).await;
+        }))
+        .await;
+        assert!(fantastic_kernel::is_refused(&out.result), "{:?}", out.result);
+        assert_eq!(ran.load(Ordering::SeqCst), 1, "the continuation ran once");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_asker_call_with_no_asker_is_refused_at_launch_and_the_continuation_still_runs() {
+        let dir = scratch("asker");
+        let h = harness(&dir);
+        let out = cps::asker_op(&h, &None, "kernel", json!({"type": "reflect", "tree": "none"})).await;
+        assert!(fantastic_kernel::is_refused(&out.result), "{:?}", out.result);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_secret_call_marks_its_value_in_the_rows() {
+        let dir = scratch("secret");
+        let h = harness(&dir);
+        let out = cps::run(|d| h.operator_secret_then("kernel", json!({"type": "reflect", "tree": "none", "probe": "s3cr3t"}), &["probe"], move |o| async move { d(o).await })).await;
+        // the verb refuses the unknown argument; the value is in no row either way
+        assert!(fantastic_kernel::is_refused(&out.result), "{:?}", out.result);
+        let rows = serde_json::to_string(&h.kernel.rows.all()).unwrap();
+        assert!(!rows.contains("s3cr3t"), "a marked value shows in no row");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

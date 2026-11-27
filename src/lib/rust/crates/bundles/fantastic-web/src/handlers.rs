@@ -407,14 +407,13 @@ async fn rest_post(
             ],
             body,
         );
-        let out = fantastic_io_bridge::inbound::hand_in(
-            &state.kernel,
+        return rest_call(
+            &state,
             &owner,
             inbound_call(&target, payload, execution_id, secret),
             Some(body),
         )
         .await;
-        return octet_or_json(out.result, out.body);
     }
 
     // ── JSON leg ────────────────────────────────────────────────────
@@ -451,14 +450,40 @@ async fn rest_post(
             "web_rest: body must be a JSON object",
         );
     }
-    let out = fantastic_io_bridge::inbound::hand_in(
-        &state.kernel,
+    rest_call(
+        &state,
         &owner,
         inbound_call(&target, payload, execution_id, secret),
         None,
     )
+    .await
+}
+
+/// THE REST CALL IS ASYNC (#795, owner 2026-11-27): the admitted call is handed to
+/// the leg, and the POST answers only its ACK — `{pid, status: "accepted"}`, or the
+/// refusal at launch. The leg's settle is told on the leg's OWN watch stream as
+/// `{type: "settle", re: <pid>, status, data}` (a reply body rides as a binary
+/// event, at its slot of `data`); a client watches the leg (over its ws face) and
+/// reads it there. Emitted QUIET: the settle reaches the leg's watchers and not the
+/// state stream. It rides the leg's drop-oldest inbox, and every watcher of the leg
+/// sees it (the owner's accepted caveat).
+async fn rest_call(state: &AppState, owner: &AgentId, hand: Value, body: Option<Blob>) -> Response {
+    let (kernel, leg) = (Arc::clone(&state.kernel), owner.clone());
+    let ack = fantastic_io_bridge::inbound::hand_in(&state.kernel, owner, hand, body, move |out| async move {
+        let mut payload =
+            fantastic_io_bridge::inbound::settle_payload(json!(out.pid.map(|p| p.get())), &out);
+        let item = match out.body {
+            None => fantastic_kernel::inbox::InboxItem::text(payload),
+            Some(b) => {
+                let at = Blob::new(b.nested_in("data"), b.bytes);
+                let _ = at.place(&mut payload, Value::Null);
+                fantastic_kernel::inbox::InboxItem::binary(payload, at)
+            }
+        };
+        kernel.emit_item_quiet(&leg, item).await;
+    })
     .await;
-    octet_or_json(out.result, out.body)
+    json_reply(fantastic_io_bridge::inbound::ack_value(&ack))
 }
 
 /// The hand-in of one admitted REST call: `{type: inbound_call, item: {target,
@@ -481,60 +506,6 @@ fn inbound_call(
     json!({"type": "inbound_call", "item": Value::Object(item)})
 }
 
-/// The ONE reply-shape decision, shared by both REST legs — python's
-/// `_first_bytes_field`: a reply whose chunk sits at a TOP-LEVEL key is octet (a
-/// 0-byte chunk included — an empty file is still a file), the header naming
-/// THAT key (`bytes` for a `read_stream`, `x.y` for a peer's reply that put it
-/// there); a reply with no chunk is JSON — decided by the chunk's presence,
-/// never by its length, and never assuming `bytes`.
-fn octet_or_json(reply: Value, body: Option<Blob>) -> Response {
-    let Some(body) = body else {
-        return json_reply(reply);
-    };
-    let field = match (body.path.as_slice(), reply.is_object()) {
-        ([fantastic_kernel::Step::Key(k)], true) => k.clone(),
-        // python: no top-level bytes field ⇒ `JSONResponse(reply)`, which cannot
-        // render bytes nested inside the reply.
-        _ => return no_json_form(),
-    };
-    // The bytes value never travels twice: `X-Fantastic-Payload` is the reply
-    // MINUS the field, and `X-Fantastic-Bytes-Field` names it.
-    let mut head = reply;
-    if let Some(m) = head.as_object_mut() {
-        // SHIFT, not swap: `Map::remove` moves the LAST key into the hole, so
-        // dropping the field reordered the header python writes in place.
-        m.shift_remove(&field);
-    }
-    routes::respond(
-        StatusCode::OK,
-        &[
-            (
-                header::HeaderName::from_static(PAYLOAD_HEADER),
-                py_json_dumps(&head, true, None),
-            ),
-            (header::HeaderName::from_static(BYTES_FIELD_HEADER), field),
-        ],
-        Some(OCTET_CT),
-        body.bytes,
-    )
-}
-
-/// python `_json_reply`'s refusal: a reply holding bytes anywhere but a
-/// top-level key has no JSON form on this leg — a stated `transport_error`, 500.
-fn no_json_form() -> Response {
-    let r = fantastic_kernel::refusal::refusal_hint(
-        fantastic_kernel::refusal::TRANSPORT_ERROR,
-        "web_rest: the reply has no JSON representation on this leg",
-        "this verb answers with in-process objects; call it in-process, not over HTTP",
-    );
-    routes::respond(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        &[],
-        Some("application/json"),
-        r.to_string().into_bytes(),
-    )
-}
-
 // ─── `GET /<rest_id>/_reflect[/{target_id}]` ────────────────────────
 
 /// python `_reflect_target` / `_reflect_kernel` — the browser-pastable reflect
@@ -554,14 +525,29 @@ async fn rest_reflect(
         return denial;
     }
     let target = AgentId::from(target_id.as_str());
-    let reply = fantastic_io_bridge::inbound::hand_in(
+    // A BROWSER'S GET, like the file proxy's chunk (`read_chunk`): the hand-in acks,
+    // and its settle — a message to this route — is the HTTP response the browser
+    // reads (a refusal at launch is the answer at once). Only a POST is the async
+    // verb channel (`rest_call`).
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let ack = fantastic_io_bridge::inbound::hand_in(
         &state.kernel,
         &owner,
         inbound_call(&target, payload, None, None),
         None,
+        move |out| async move {
+            let _ = tx.send(out);
+        },
     )
-    .await
-    .result;
+    .await;
+    let reply = if ack.status == fantastic_kernel::Status::Accepted {
+        match rx.await {
+            Ok(o) => o.result,
+            Err(_) => Value::Null,
+        }
+    } else {
+        ack.result
+    };
     if reply.is_null() {
         return routes::respond(StatusCode::NOT_FOUND, &[], None, Vec::new());
     }

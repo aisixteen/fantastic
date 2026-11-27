@@ -355,8 +355,8 @@ fn fresh_id() -> String {
 }
 
 /// Send `payload` to `target` the way a page does: `user.forward` over
-/// `ws://127.0.0.1:<port>/user/ws`, with no `Origin` header. The reply's data,
-/// or why there is none.
+/// `ws://127.0.0.1:<port>/user/ws`, with no `Origin` header. The result — the
+/// call's `settle` event after its ack (#795) — or why there is none.
 pub async fn forward(
     port: u16,
     target: &str,
@@ -401,6 +401,19 @@ async fn forward_once(port: u16, target: &str, payload: Value) -> Result<Value, 
         let Ok(frame) = serde_json::from_str::<Value>(&text) else {
             continue;
         };
+        // THE RESULT IS THE SETTLE (#795): `{type: event, payload: {type: settle,
+        // re: <this call's id>, data}}`, after the `reply` that carried the ack.
+        if frame.get("type").and_then(Value::as_str) == Some("event") {
+            let p = &frame["payload"];
+            if p.get("type").and_then(Value::as_str) == Some("settle") && p.get("re").and_then(Value::as_str) == Some(id.as_str()) {
+                let data = p.get("data").cloned().unwrap_or(Value::Null);
+                break match data.get("error").and_then(Value::as_str) {
+                    Some(error) => Err(with_hint(error, &data)),
+                    None => Ok(data),
+                };
+            }
+            continue;
+        }
         if frame.get("id").and_then(Value::as_str) != Some(id.as_str()) {
             continue;
         }
@@ -414,6 +427,10 @@ async fn forward_once(port: u16, target: &str, payload: Value) -> Result<Value, 
             }
             Some("reply") => {
                 let data = frame.get("data").cloned().unwrap_or(Value::Null);
+                // the ACK: the call was launched, its settle follows
+                if data.get("status").and_then(Value::as_str) == Some("accepted") && data.get("error").is_none() {
+                    continue;
+                }
                 break match data.get("error").and_then(Value::as_str) {
                     Some(error) => Err(with_hint(error, &data)),
                     None => Ok(data),

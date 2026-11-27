@@ -55,7 +55,7 @@ sys.path.insert(0, str(E2E))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import helpers.host.driver as drv
-from helpers.host.driver import HostKernel, ensure_runtime, excluded, runtime
+from helpers.host.driver import HostKernel, ensure_runtime, excluded, is_ack, runtime
 from helpers.host.ws import WSWatcher
 from helpers.verdict import verdict
 from stub_relay import StubRelay
@@ -120,7 +120,9 @@ class WsCall(WSWatcher):
             raise ConnectionError(f"ws upgrade refused: {head[:120]!r}")
 
     async def call_binary(self, envelope: dict, path: list, body: bytes) -> dict:
-        """One binary frame `[4B BE len | JSON header | raw body]`; the reply."""
+        """One binary frame `[4B BE len | JSON header | raw body]`; its answer: the
+        `settle` event after the ack (#795), or a refusal (a refused frame, a
+        refusal at launch in the `reply`)."""
         header = json.dumps({**envelope, "_binary_path": path}).encode()
         await self._send(struct.pack(">I", len(header)) + header + body, opcode=0x2)
         end = time.monotonic() + 60
@@ -135,9 +137,14 @@ class WsCall(WSWatcher):
                 f = json.loads(raw)
                 if f.get("type") == "error" and f.get("id") is None:
                     return f  # the frame itself was refused
+                p = f.get("payload") or {}
+                if f.get("type") == "event" and p.get("type") == "settle" and p.get("re") == envelope["id"]:
+                    return p
                 if f.get("id") == envelope["id"] and f.get("type") in ("reply", "error"):
+                    if f.get("type") == "reply" and is_ack(f.get("data")):
+                        continue  # launched: the settle follows
                     return f
-        return {"error": "no reply within 60s"}
+        return {"error": "no settle within 60s"}
 
 
 def ws_binary_call(port: int, envelope: dict, path: list, body: bytes) -> dict:

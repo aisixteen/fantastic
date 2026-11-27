@@ -54,7 +54,11 @@ class HostSocket implements WebSocketLike {
         reply = { bundles: [...this.folders.keys()].sort().map(row) };
       }
     }
-    setTimeout(() => this.onmessage?.({ data: encodeFrame({ type: "reply", id: env["id"], data: reply }).data }), 0);
+    // the ACK, then the SETTLE event (#795)
+    setTimeout(() => {
+      this.onmessage?.({ data: encodeFrame({ type: "reply", id: env["id"], data: { pid: 1, status: "accepted" } }).data });
+      this.onmessage?.({ data: encodeFrame({ type: "event", payload: { type: "settle", re: env["id"], status: "completed", data: reply } }).data });
+    }, 0);
   }
   close(): void {}
 }

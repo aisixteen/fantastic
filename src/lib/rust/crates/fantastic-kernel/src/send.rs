@@ -1741,6 +1741,12 @@ impl Kernel {
             .await;
     }
 
+    /// [`Self::emit_quiet`] for a payload that may carry raw bytes: a wire leg's
+    /// `settle` for its watchers (a reply body included), kept off the state stream.
+    pub async fn emit_item_quiet(self: &Arc<Self>, target_id: &AgentId, item: crate::inbox::InboxItem) {
+        self.emit_item_with(target_id, item, false).await;
+    }
+
     async fn emit_item_with(
         self: &Arc<Self>,
         target_id: &AgentId,

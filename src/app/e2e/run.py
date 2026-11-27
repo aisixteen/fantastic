@@ -208,10 +208,18 @@ async def host_call(port: int, target: str, payload: dict) -> dict:
     frame = {"type": "call", "target": "user", "payload": body, "id": secrets.token_hex(6)}
     async with websockets.connect(f"ws://127.0.0.1:{port}/user/ws", origin=f"http://127.0.0.1:{port}") as ws:
         await ws.send(json.dumps(frame))
+        # the `reply` is the ACK (#795): the answer is the `settle` event after it, or
+        # a refusal at launch
         while True:
             m = json.loads(await asyncio.wait_for(ws.recv(), 10))
+            p = m.get("payload") or {}
+            if m.get("type") == "event" and p.get("type") == "settle" and p.get("re") == frame["id"]:
+                return p.get("data")
             if m.get("type") in ("reply", "error") and m.get("id") == frame["id"]:
-                return m.get("data", m)
+                d = m.get("data", m)
+                if m.get("type") == "reply" and isinstance(d, dict) and d.get("status") == "accepted" and "error" not in d:
+                    continue
+                return d
 
 
 class Run:

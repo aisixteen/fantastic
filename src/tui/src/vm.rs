@@ -31,7 +31,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::app::{App, Link};
 use crate::env::Paths;
-use crate::ev::{Cmd, Ev};
+use crate::ev::{BootStep, Cmd, Ev};
 use crate::kern::host::Host;
 
 /// 60 Hz: the most often a CHANGE is drawn (requests between ticks coalesce).
@@ -112,6 +112,28 @@ pub static FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 
 fn failed() {
     FAILED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// A boot step the command line asked for (`ai BACKEND …`, `run COMMAND…`) ended: said on
+/// the announce line and in the notes; one that cannot be done is a loud stop, like no page.
+fn booted(app: &mut App, boot: &Boot, ev: &Ev) {
+    let Ev::Boot { step, result } = ev else { return };
+    let what = match step {
+        BootStep::Ai => "ai",
+        BootStep::Run => "run",
+    };
+    match result {
+        Ok(said) => {
+            boot.say(&format!("fantastic: {said}"));
+            app.note(said.clone());
+        }
+        Err(e) => {
+            boot.say(&format!("fantastic: {what}: {e}"));
+            app.note(format!("{what}: {e}"));
+            failed();
+            app.quit = true;
+        }
+    }
 }
 
 /// Set when the stop was cut (a hang past `STOP_GRACE`, or a second stop
@@ -215,46 +237,59 @@ async fn run(
                         if let Err(e) = crate::kern::web::write_run_file(&paths.store, &urls) {
                             app.note(format!("the run file: {e}"));
                         }
-                        if let Err(e) = crate::kern::user_store::set_canvas(&h, &urls.canvas).await {
-                            app.note(e);
-                        }
+                        // told to `home` (a call): its refusal comes back as a note
+                        let tx2 = tx.clone();
+                        crate::kern::user_store::set_canvas(
+                            &h,
+                            &urls.canvas,
+                            crate::kern::cps::done(move |r: Result<(), String>| async move {
+                                if let Err(e) = r {
+                                    let _ = tx2.send(Ev::Note(e)).await;
+                                }
+                            }),
+                        )
+                        .await;
                     }
                     // `ai BACKEND …` and `run COMMAND…`: with or without the canvas. One
                     // that cannot be done is a loud stop, like no page.
+                    // each says how it ended when its calls settled (an `Ev::Boot`, said below)
                     if let Some(b) = &boot.ai {
-                        match crate::kern::root_ai::run(&h, b).await {
-                            Ok(said) => {
-                                boot.say(&format!("fantastic: {said}"));
-                                app.note(said);
-                            }
-                            Err(e) => {
-                                boot.say(&format!("fantastic: ai: {e}"));
-                                app.note(format!("ai: {e}"));
-                                failed();
-                                app.quit = true;
-                            }
-                        }
+                        let tx2 = tx.clone();
+                        crate::kern::root_ai::run(
+                            &h,
+                            b,
+                            crate::kern::cps::done(move |result: Result<String, String>| async move {
+                                let _ = tx2.send(Ev::Boot { step: BootStep::Ai, result }).await;
+                            }),
+                        )
+                        .await;
                     }
                     if let Some(argv) = &boot.run {
-                        let r = if boot.canvas {
-                            crate::kern::terminal::canvas_cell(&h, argv).await.map(|c| match c {
-                                Some(cell) => format!("`{}` runs in the canvas cell `{cell}`", argv.join(" ")),
-                                None => "the canvas has no view yet — open it once and run again".to_string(),
-                            })
+                        let tx2 = tx.clone();
+                        let line = argv.join(" ");
+                        if boot.canvas {
+                            crate::kern::terminal::canvas_cell(
+                                &h,
+                                argv,
+                                crate::kern::cps::done(move |r: Result<Option<String>, String>| async move {
+                                    let result = r.map(|c| match c {
+                                        Some(cell) => format!("`{line}` runs in the canvas cell `{cell}`"),
+                                        None => "the canvas has no view yet — open it once and run again".to_string(),
+                                    });
+                                    let _ = tx2.send(Ev::Boot { step: BootStep::Run, result }).await;
+                                }),
+                            )
+                            .await;
                         } else {
-                            crate::kern::terminal::prepare_run(&h, argv).await.map(|()| format!("`{}` runs in the terminal", argv.join(" ")))
-                        };
-                        match r {
-                            Ok(said) => {
-                                boot.say(&format!("fantastic: {said}"));
-                                app.note(said);
-                            }
-                            Err(e) => {
-                                boot.say(&format!("fantastic: run: {e}"));
-                                app.note(format!("run: {e}"));
-                                failed();
-                                app.quit = true;
-                            }
+                            crate::kern::terminal::prepare_run(
+                                &h,
+                                argv,
+                                crate::kern::cps::done(move |r: Result<(), String>| async move {
+                                    let result = r.map(|()| format!("`{line}` runs in the terminal"));
+                                    let _ = tx2.send(Ev::Boot { step: BootStep::Run, result }).await;
+                                }),
+                            )
+                            .await;
                         }
                     }
                     // HEADLESS: the kernel's message stream is the whole output.
@@ -390,8 +425,10 @@ async fn run(
             },
 
             Some(ev) = rx.recv() => {
+                booted(&mut app, &boot, &ev);
                 app.apply(ev);
                 while let Ok(more) = rx.try_recv() {
+                    booted(&mut app, &boot, &more);
                     app.apply(more);
                 }
                 // what those events made due is read now — only for a View to
@@ -486,8 +523,8 @@ fn spawn_stream(h: Arc<Host>, boot: Boot) {
     let w = fantastic_kernel::AgentId::from(format!("{}#stream", h.cfg.user).as_str());
     let mut rx = h.kernel.ensure_inbox(&w);
     tokio::spawn(async move {
-        for ai in h.ai_agents().await {
-            let _ = h.operator(&ai, serde_json::json!({"type": "watch", "watcher": w.0})).await;
+        for ai in h.ai_agents() {
+            h.operator_then(&ai, serde_json::json!({"type": "watch", "watcher": w.0}), |_| async {}).await;
         }
         while let Some(item) = rx.recv().await {
             let p = &item.payload;

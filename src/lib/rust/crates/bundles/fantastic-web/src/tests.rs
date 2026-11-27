@@ -147,7 +147,7 @@ async fn web_alone_has_no_ws_endpoint() {
 /// `web` + `web_ws` child: WS endpoint live at `/<web_id>/ws` after boot.
 #[tokio::test]
 async fn web_with_ws_child_serves_ws() {
-    use futures_util::{SinkExt, StreamExt};
+    use futures_util::SinkExt;
     use tokio_tungstenite::tungstenite::Message as TMessage;
 
     let tmp = TempDir::new().unwrap();
@@ -205,19 +205,11 @@ async fn web_with_ws_child_serves_ws() {
     ws.send(TMessage::Text(frame.to_string()))
         .await
         .expect("ws send");
-    let reply = tokio::time::timeout(Duration::from_secs(2), ws.next())
-        .await
-        .expect("reply within 2s")
-        .expect("ws stream open")
-        .expect("ws msg ok");
-    let text = match reply {
-        TMessage::Text(t) => t,
-        other => panic!("expected text reply, got {other:?}"),
-    };
-    let v: Value = serde_json::from_str(&text).expect("reply json");
-    assert_eq!(v["type"], "reply");
+    // the ack, then the settle (#795)
+    let (v, _, _) = ws_answer(&mut ws, &json!("x1")).await;
+    assert_eq!(v["type"], "settle", "{v}");
     assert_eq!(v["id"], "x1");
-    assert!(v["data"]["tree"].is_array());
+    assert!(v["data"]["tree"].is_array(), "{v}");
 
     let _ = kernel.operator_send(vec![Item::new(
             AgentId::from(web_id),
@@ -279,6 +271,12 @@ async fn web_with_rest_child_serves_rest() {
     assert_eq!(boot_reply["running"], true, "boot: {boot_reply}");
     wait_until_port_accepts(port).await;
 
+    // A WATCHER OF THE LEG, before the POST: the settle is told there (#795)
+    let reader = AgentId::from("rest_settle_reader");
+    let mut inbox = kernel.ensure_inbox(&reader);
+    let w = fantastic_kernel::send::as_operator(kernel.watch(&AgentId::from(rest_id), reader.clone())).await;
+    assert!(w.is_none(), "watch the leg: {w:?}");
+
     let url = format!("http://127.0.0.1:{port}/{rest_id}/kernel_state");
     let resp = reqwest::Client::new()
         .post(&url)
@@ -288,8 +286,30 @@ async fn web_with_rest_child_serves_rest() {
         .await
         .expect("http post");
     assert!(resp.status().is_success(), "status: {}", resp.status());
-    let body: Value = resp.json().await.expect("body json");
-    assert!(body["tree"].is_array(), "body: {body}");
+    // THE POST ANSWERS ITS ACK only
+    let ack: Value = resp.json().await.expect("body json");
+    assert_eq!(ack["status"], "accepted", "the POST's body is the ack: {ack}");
+    let pid = ack["pid"].as_i64().unwrap_or_else(|| panic!("the ack names its pid: {ack}"));
+    assert!(ack.get("tree").is_none(), "no result in the ack: {ack}");
+    // THE SETTLE rides the leg's own stream, naming the pid
+    let settle = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let it = inbox.recv().await.expect("the reader is open");
+            if it.payload["type"] == "settle" {
+                return it.payload;
+            }
+        }
+    })
+    .await
+    .expect("the settle in time (hang guard)");
+    assert_eq!(settle["re"], json!(pid), "{settle}");
+    assert_eq!(settle["status"], "completed", "{settle}");
+    assert!(settle["data"]["tree"].is_array(), "the result: {settle}");
+    assert_eq!(
+        settle.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["type", "re", "status", "data"],
+        "the settle's shape"
+    );
 
     let _ = kernel.operator_send(vec![Item::new(
             AgentId::from(web_id),
@@ -412,6 +432,122 @@ async fn drain_frames(ws: &mut TestWs, window_ms: u64) -> (Vec<Value>, Vec<Vec<u
     (text, binary)
 }
 
+/// A WS CALL'S ANSWER (#795): frames read until the one that answers the call `id` —
+/// its `settle` event (`{type: "event", payload: {type: "settle", re: <id>, …}}`), whose
+/// `reply` (the ACK) must have come first, or a `reply`/`error` that is not an ack (a
+/// refusal at launch answers alone). Returns that frame RE-ROOTED as `{type:
+/// "settle"|"reply"|"error", id, status?, data, secret?}`, the body of a binary settle
+/// with its path from `data`, and every other frame read before it (text heads). The
+/// bound is a hang guard: it fails.
+pub(crate) async fn ws_answer(ws: &mut TestWs, id: &Value) -> (Value, Option<fantastic_kernel::Blob>, Vec<Value>) {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message as TMessage;
+    let mut before = Vec::new();
+    let mut acked = false;
+    let read = async {
+        loop {
+            let (head, body) = match ws.next().await {
+                Some(Ok(TMessage::Text(t))) => (serde_json::from_str::<Value>(&t).expect("json frame"), None),
+                Some(Ok(TMessage::Binary(b))) => {
+                    let f = fantastic_io_bridge::codec::decode_binary_frame(&b).expect("a binary frame");
+                    (f.head, f.path.map(|p| fantastic_kernel::Blob::new(p, f.body)))
+                }
+                Some(Ok(_)) => continue,
+                other => panic!("the socket ended before the answer: {other:?} after {before:?}"),
+            };
+            let p = &head["payload"];
+            if head["type"] == "event" && head.get("src").is_none() && p["type"] == "settle" && &p["re"] == id {
+                assert!(acked, "the settle came before its ack: {head} after {before:?}");
+                let mut out = json!({"type": "settle", "id": id, "status": p["status"], "data": p["data"]});
+                if let Some(m) = p.get("secret") {
+                    out["secret"] = m.clone();
+                }
+                let body = body.and_then(|b| b.under("payload")).and_then(|b| b.under("data"));
+                return (out, body, before);
+            }
+            if matches!(head["type"].as_str(), Some("reply" | "error")) && &head["id"] == id {
+                if head["type"] == "reply" && head.get("data").is_some_and(fantastic_io_bridge::inbound::is_ack) {
+                    acked = true;
+                    continue;
+                }
+                let body = body.and_then(|b| b.under("data"));
+                return (head, body, before);
+            }
+            before.push(head);
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(30), read).await.expect("the call's answer in time (hang guard)")
+}
+
+/// The raw BINARY settle frame of the WS call `id`, as it crossed the wire (its ack
+/// read first). The bound is a hang guard: it fails.
+pub(crate) async fn ws_binary_settle(ws: &mut TestWs, id: &Value) -> Vec<u8> {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message as TMessage;
+    let read = async {
+        let mut acked = false;
+        loop {
+            match ws.next().await {
+                Some(Ok(TMessage::Text(t))) => {
+                    let f: Value = serde_json::from_str(&t).expect("json");
+                    if f["type"] == "reply" && &f["id"] == id {
+                        assert!(f.get("data").is_some_and(fantastic_io_bridge::inbound::is_ack), "not an ack: {f}");
+                        acked = true;
+                    }
+                }
+                Some(Ok(TMessage::Binary(b))) => {
+                    let h = wire_head(&b);
+                    if h["payload"]["type"] == "settle" && &h["payload"]["re"] == id {
+                        assert!(acked, "the settle came before its ack");
+                        return b;
+                    }
+                }
+                Some(Ok(_)) => {}
+                other => panic!("the socket ended: {other:?}"),
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(30), read).await.expect("the binary settle in time (hang guard)")
+}
+
+/// THE REST LEG'S SETTLES, watched in process (#795): a POST answers its ACK, and
+/// the leg tells the call's result on its own watch stream as `{type: "settle", re:
+/// <pid>, status, data}` (a reply body rides with it, at its slot of `data`). Made
+/// BEFORE the POST, so no settle is missed.
+pub(crate) struct RestSettles {
+    inbox: fantastic_kernel::inbox::InboxReceiver,
+}
+
+impl RestSettles {
+    pub(crate) async fn new(kernel: &Arc<Kernel>, leg: &str) -> Self {
+        let reader = AgentId::from(format!("rest_settles_{leg}").as_str());
+        let inbox = kernel.ensure_inbox(&reader);
+        let w = fantastic_kernel::send::as_operator(kernel.watch(&AgentId::from(leg), reader)).await;
+        assert!(w.is_none(), "watch the REST leg {leg}: {w:?}");
+        Self { inbox }
+    }
+
+    /// The settle of the call `ack` acked (a POST's body): `(data, body at its slot
+    /// of data)`. A refusal at launch (no pid) is its own answer. The bound is a hang
+    /// guard: it fails.
+    pub(crate) async fn of(&mut self, ack: &Value) -> (Value, Option<fantastic_kernel::Blob>) {
+        if !fantastic_io_bridge::inbound::is_ack(ack) {
+            return (ack.clone(), None);
+        }
+        let pid = ack["pid"].clone();
+        let read = async {
+            loop {
+                let it = self.inbox.recv().await.expect("the reader is open");
+                if it.payload["type"] == "settle" && it.payload["re"] == pid {
+                    let body = it.body.and_then(|b| b.under("data"));
+                    return (it.payload["data"].clone(), body);
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(30), read).await.expect("the settle in time (hang guard)")
+    }
+}
+
 /// Send a raw WS message and drain what comes back.
 async fn round_trip(
     ws: &mut TestWs,
@@ -481,11 +617,11 @@ async fn a_text_write_stream_keeps_the_clients_bytes_value() {
         "type": "call", "target": "fb_txt", "id": "s1",
         "payload": {"type": "write_stream", "path": "t.txt", "offset": 0, "bytes": "xyz"},
     });
-    let (text, _) = round_trip(&mut ws, TMessage::Text(frame.to_string())).await;
-    let reply = text
-        .iter()
-        .find(|f| f["id"] == "s1")
-        .unwrap_or_else(|| panic!("no reply for s1: {text:?}"));
+    {
+        use futures_util::SinkExt;
+        ws.send(TMessage::Text(frame.to_string())).await.expect("send");
+    }
+    let (reply, _, _) = ws_answer(&mut ws, &json!("s1")).await;
     assert_eq!(
         reply["data"]["error"], "write_stream: unknown argument 'bytes'",
         "{reply}"
@@ -499,11 +635,11 @@ async fn a_text_write_stream_keeps_the_clients_bytes_value() {
         "type": "call", "target": "fb_txt", "id": "s2",
         "payload": {"type": "write_stream", "path": "t2.txt", "offset": 0},
     });
-    let (text, _) = round_trip(&mut ws, TMessage::Text(frame.to_string())).await;
-    let reply = text
-        .iter()
-        .find(|f| f["id"] == "s2")
-        .unwrap_or_else(|| panic!("no reply for s2: {text:?}"));
+    {
+        use futures_util::SinkExt;
+        ws.send(TMessage::Text(frame.to_string())).await.expect("send");
+    }
+    let (reply, _, _) = ws_answer(&mut ws, &json!("s2")).await;
     assert_eq!(reply["data"]["written"], 0, "{reply}");
     assert_eq!(reply["data"]["size"], 0, "{reply}");
 
@@ -535,16 +671,12 @@ async fn binary_ws_frame_routes_like_a_text_call() {
         "payload": {"type": "write_stream", "path": "x.bin", "truncate": true},
         "_binary_path": ["payload", "bytes"],
     });
-    let (text, _) = round_trip(
-        &mut ws,
-        TMessage::Binary(build_binary_frame(&header, &blob)),
-    )
-    .await;
-    let reply = text
-        .iter()
-        .find(|f| f["id"] == "w1")
-        .unwrap_or_else(|| panic!("no reply for w1: {text:?}"));
-    assert_eq!(reply["type"], "reply", "{reply}");
+    {
+        use futures_util::SinkExt;
+        ws.send(TMessage::Binary(build_binary_frame(&header, &blob)),).await.expect("send");
+    }
+    let (reply, _, _) = ws_answer(&mut ws, &json!("w1")).await;
+    assert_eq!(reply["type"], "settle", "{reply}");
     assert_eq!(reply["data"]["written"], 10_240, "{reply}");
     assert_eq!(
         std::fs::read(files.join("x.bin")).expect("the blob landed"),
@@ -557,17 +689,22 @@ async fn binary_ws_frame_routes_like_a_text_call() {
         "type": "call", "target": "fb_bin", "id": "r1",
         "payload": {"type": "read_stream", "path": "x.bin", "offset": 0, "length": 4096},
     });
-    let (_, bins) = round_trip(&mut ws, TMessage::Text(frame.to_string())).await;
-    let wire = bins.first().expect("a binary reply frame");
+    {
+        use futures_util::SinkExt;
+        ws.send(TMessage::Text(frame.to_string())).await.expect("send");
+    }
+    // its SETTLE is the binary frame (#795), the body at `["payload", "data", "bytes"]`
+    let wire = ws_binary_settle(&mut ws, &json!("r1")).await;
+    let wire = &wire;
     let head = wire_head(wire);
-    assert_eq!(head["type"], "reply");
-    assert_eq!(head["id"], "r1");
-    assert_eq!(head["_binary_path"], json!(["data", "bytes"]));
-    assert_eq!(head["data"]["bytes"], Value::Null);
+    assert_eq!(head["type"], "event");
+    assert_eq!(head["payload"]["re"], "r1");
+    assert_eq!(head["_binary_path"], json!(["payload", "data", "bytes"]));
+    assert_eq!(head["payload"]["data"]["bytes"], Value::Null);
     let body = fantastic_io_bridge::codec::decode_binary_frame(wire)
         .expect("well-formed")
         .body;
-    let keys: Vec<&str> = head["data"]
+    let keys: Vec<&str> = head["payload"]["data"]
         .as_object()
         .expect("data is an object")
         .keys()
@@ -681,11 +818,11 @@ async fn sealed_leg_denies_the_call_and_leaks_no_telemetry() {
 
     let frame =
         json!({"type": "call", "target": "kernel", "id": "c1", "payload": {"type": "reflect"}});
-    let (t, _) = round_trip(&mut ws, TMessage::Text(frame.to_string())).await;
-    let reply = t
-        .iter()
-        .find(|f| f["id"] == "c1")
-        .unwrap_or_else(|| panic!("no reply: {t:?}"));
+    {
+        use futures_util::SinkExt;
+        ws.send(TMessage::Text(frame.to_string())).await.expect("send");
+    }
+    let (reply, _, _) = ws_answer(&mut ws, &json!("c1")).await;
     assert_eq!(reply["type"], "reply");
     assert_eq!(reply["data"]["reason"], "unauthorized", "{reply}");
     assert_eq!(reply["data"]["error"], "edge sealed by policy", "{reply}");
@@ -776,11 +913,11 @@ async fn open_leg_autowatches_and_calls_run_as_the_leg() {
     );
 
     let frame = json!({"type": "call", "target": "private_one", "id": "p1", "payload": {"type": "reflect"}});
-    let (t, _) = round_trip(&mut ws, TMessage::Text(frame.to_string())).await;
-    let reply = t
-        .iter()
-        .find(|f| f["id"] == "p1")
-        .unwrap_or_else(|| panic!("no reply: {t:?}"));
+    {
+        use futures_util::SinkExt;
+        ws.send(TMessage::Text(frame.to_string())).await.expect("send");
+    }
+    let (reply, _, _) = ws_answer(&mut ws, &json!("p1")).await;
     // a denial is the unknown answer
     assert_eq!(
         reply["data"]["reason"], "unknown_agent",
@@ -806,11 +943,12 @@ async fn call_frame_without_id_or_payload_replies_like_python() {
 
     // No target at all: python sends `""`, which the kernel refuses — the URL
     // host is NEVER substituted.
-    let (t, _) = round_trip(&mut ws, TMessage::Text(json!({"type": "call"}).to_string())).await;
-    let reply = t
-        .iter()
-        .find(|f| f["type"] == "reply")
-        .unwrap_or_else(|| panic!("no reply: {t:?}"));
+    {
+        use futures_util::SinkExt;
+        ws.send(TMessage::Text(json!({"type": "call"}).to_string())).await.expect("send");
+    }
+    // the ack echoes the absent id as `""`, and the leg's refusal is the settle
+    let (reply, _, _) = ws_answer(&mut ws, &json!("")).await;
     assert_eq!(reply["id"], "", "an absent id echoes as the empty string");
     assert!(
         reply["data"]["error"]
@@ -822,17 +960,61 @@ async fn call_frame_without_id_or_payload_replies_like_python() {
     // A non-string id is echoed VERBATIM and names no execution.
     let frame =
         json!({"type": "call", "target": "kernel", "id": 7, "payload": {"type": "reflect"}});
-    let (t, _) = round_trip(&mut ws, TMessage::Text(frame.to_string())).await;
-    let reply = t
-        .iter()
-        .find(|f| f["id"] == 7)
-        .unwrap_or_else(|| panic!("the raw id was not echoed: {t:?}"));
-    assert_eq!(reply["type"], "reply", "{reply}");
+    {
+        use futures_util::SinkExt;
+        ws.send(TMessage::Text(frame.to_string())).await.expect("send");
+    }
+    // the ack echoes the raw id, and the settle names it as its `re`
+    let (reply, _, _) = ws_answer(&mut ws, &json!(7)).await;
+    assert_eq!(reply["type"], "settle", "{reply}");
     assert!(
-        reply["data"].is_object(),
+        reply["data"]["id"].is_string(),
         "a non-string id must still dispatch: {reply}"
     );
 
+    stop(&kernel, web_id).await;
+}
+
+/// A CALL FRAME IS ASYNC (#795): its `reply` carries the ACK `{pid, status:
+/// "accepted"}`, and its result follows as `{type: "event", payload: {type: "settle",
+/// re: <frame id>, status, data}}` on this connection — never before the ack.
+#[tokio::test]
+async fn a_call_frame_answers_its_ack_then_its_settle_event() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message as TMessage;
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let web_id = "web_ack_settle";
+    let kernel = stage_web_with_ws(&tmp, port, web_id).await;
+    let url = format!("ws://127.0.0.1:{port}/{web_id}/ws");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("ws connect");
+    let frame = json!({"type": "call", "target": "kernel", "id": "as-1", "payload": {"type": "reflect", "tree": "ids"}});
+    ws.send(TMessage::Text(frame.to_string())).await.expect("send");
+    let mut seen: Vec<Value> = Vec::new();
+    let settle = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let Some(Ok(TMessage::Text(t))) = ws.next().await else { continue };
+            let f: Value = serde_json::from_str(&t).expect("json");
+            seen.push(f.clone());
+            if f["type"] == "event" && f["payload"]["type"] == "settle" && f["payload"]["re"] == "as-1" {
+                return f;
+            }
+        }
+    })
+    .await
+    .expect("the settle in time (hang guard)");
+    let ack_at = seen
+        .iter()
+        .position(|f| f["type"] == "reply" && f["id"] == "as-1")
+        .unwrap_or_else(|| panic!("no ack: {seen:?}"));
+    assert!(ack_at < seen.len() - 1, "the ack comes before the settle: {seen:?}");
+    let ack = &seen[ack_at]["data"];
+    assert_eq!(ack["status"], "accepted", "{ack}");
+    assert!(ack["pid"].is_i64(), "{ack}");
+    let p = &settle["payload"];
+    assert_eq!(p["status"], "completed", "{settle}");
+    assert!(p["data"]["tree"].is_array(), "the result rides the settle: {settle}");
+    assert!(settle.get("src").is_none(), "a settle is told to the connection, not an agent's event: {settle}");
     stop(&kernel, web_id).await;
 }
 
@@ -938,6 +1120,7 @@ async fn web_rest_octet_leg_edit_and_read_stream() {
 
     let url = format!("http://127.0.0.1:{port}/{rest_id}/{fb_id}");
     let client = reqwest::Client::new();
+    let mut settles = RestSettles::new(&kernel, rest_id).await;
 
     // ── edit: the patch rides the raw octet body ─────────────────────────
     let patch = "<<<<<<< SEARCH\nhello world\n=======\ngoodbye world\n>>>>>>> REPLACE\n";
@@ -957,7 +1140,7 @@ async fn web_rest_octet_leg_edit_and_read_stream() {
         "patch status: {}",
         resp.status()
     );
-    // A verb with no bytes in its reply comes back as JSON.
+    // The POST answers its ACK as JSON; the result is the leg's settle (#795).
     let ct = resp
         .headers()
         .get("content-type")
@@ -965,11 +1148,13 @@ async fn web_rest_octet_leg_edit_and_read_stream() {
         .unwrap_or("")
         .to_string();
     assert!(ct.starts_with("application/json"), "patch reply ct: {ct}");
-    let pbody: Value = resp.json().await.expect("patch reply json");
+    let ack: Value = resp.json().await.expect("patch ack json");
+    let (pbody, none) = settles.of(&ack).await;
+    assert!(none.is_none(), "an edit answers no bytes");
     assert_eq!(pbody["edited"], true, "patch reply: {pbody}");
     assert_eq!(pbody["edits"][0]["hunks"], 1, "patch reply: {pbody}");
 
-    // ── read_stream: reply is an OCTET body = the raw (patched) file bytes ─
+    // ── read_stream: its settle carries the raw (patched) file bytes ──────
     let resp = client
         .post(&url)
         .header("Content-Type", "application/octet-stream")
@@ -982,35 +1167,15 @@ async fn web_rest_octet_leg_edit_and_read_stream() {
         .await
         .expect("octet read_stream post");
     assert!(resp.status().is_success(), "read status: {}", resp.status());
-    let ct = resp
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-    assert!(
-        ct.starts_with("application/octet-stream"),
-        "read reply ct: {ct}"
-    );
-    // Envelope rides the header; the ONE bytes field is named by the header.
-    let env_raw = resp
-        .headers()
-        .get("x-fantastic-payload")
-        .and_then(|v| v.to_str().ok())
-        .expect("X-Fantastic-Payload on octet reply")
-        .to_string();
-    let field = resp
-        .headers()
-        .get("x-fantastic-bytes-field")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-    assert_eq!(field, "bytes", "bytes-field header");
-    let env: Value = serde_json::from_str(&env_raw).expect("payload header is JSON");
+    let ack: Value = resp.json().await.expect("read ack json");
+    let (env, body) = settles.of(&ack).await;
+    // the envelope is the settle's data; the ONE bytes field rides beside it, raw
+    let body = body.expect("the settle carries the read's bytes");
+    assert_eq!(body.path, vec![fantastic_kernel::Step::from("bytes")], "the bytes field");
     assert_eq!(env["path"], "greeting.txt", "reply envelope: {env}");
+    assert_eq!(env["bytes"], Value::Null, "the slot holds no copy: {env}");
     // The body is the raw file bytes — reflects the applied patch, never base64.
-    let raw = resp.bytes().await.expect("octet reply body");
-    assert_eq!(&raw[..], b"goodbye world\n", "read_stream body");
+    assert_eq!(&body.bytes[..], b"goodbye world\n", "read_stream body");
 
     let _ = kernel.operator_send(vec![Item::new(
             AgentId::from(web_id),
@@ -1477,6 +1642,7 @@ async fn post_to_reflect_literal_dispatches_to_that_target() {
     let port = free_port();
     let kernel = stage_host(&tmp, port, "web_ord", "rest", "fb_ord").await;
     let client = reqwest::Client::new();
+    let mut settles = RestSettles::new(&kernel, "rest").await;
 
     let resp = client
         .post(format!("http://127.0.0.1:{port}/rest/_reflect"))
@@ -1490,7 +1656,8 @@ async fn post_to_reflect_literal_dispatches_to_that_target() {
         200,
         "python dispatches to target `_reflect`"
     );
-    let body: Value = resp.json().await.expect("json");
+    let ack: Value = resp.json().await.expect("json");
+    let (body, _) = settles.of(&ack).await;
     assert_eq!(
         body["reason"], "unknown_agent",
         "the target named `_reflect` does not exist: {body}"
@@ -1533,6 +1700,7 @@ async fn rest_post_accepts_bodies_over_2mb() {
     let tmp = TempDir::new().unwrap();
     let port = free_port();
     let kernel = stage_host(&tmp, port, "web_big", "rest", "fb_big").await;
+    let mut settles = RestSettles::new(&kernel, "rest").await;
     let blob = vec![b'x'; 3_000_000];
     let resp = reqwest::Client::new()
         .post(format!("http://127.0.0.1:{port}/rest/fb_big"))
@@ -1546,7 +1714,8 @@ async fn rest_post_accepts_bodies_over_2mb() {
         .await
         .expect("post");
     assert_eq!(resp.status().as_u16(), 200);
-    let body: Value = resp.json().await.expect("json");
+    let ack: Value = resp.json().await.expect("json");
+    let (body, _) = settles.of(&ack).await;
     assert_eq!(body["written"], 3_000_000, "body: {body}");
     stop(&kernel, "web_big").await;
 }
@@ -1624,8 +1793,8 @@ async fn rest_response_header_order_matches_python() {
         ["date", "server", "allow", "content-length", "content-type"]
     );
 
-    // octet: date, server, x-fantastic-payload, x-fantastic-bytes-field,
-    // content-length, content-type.
+    // an octet REQUEST is answered with its JSON ack too (#795: a reply's bytes ride
+    // the settle on the leg's stream): date, server, content-length, content-type.
     let (status, names) = header_names(
         port,
         &format!(
@@ -1634,17 +1803,7 @@ async fn rest_response_header_order_matches_python() {
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200"), "{status}");
-    assert_eq!(
-        names,
-        [
-            "date",
-            "server",
-            "x-fantastic-payload",
-            "x-fantastic-bytes-field",
-            "content-length",
-            "content-type"
-        ]
-    );
+    assert_eq!(names, ["date", "server", "content-length", "content-type"]);
     stop(&kernel, "web_hdr").await;
 }
 
@@ -1667,10 +1826,11 @@ async fn octet_leg_header_contract_matches_python() {
     let port = free_port();
     let kernel = stage_host(&tmp, port, "web_oct", "rest", "fb_oct").await;
     let client = reqwest::Client::new();
+    let mut settles = RestSettles::new(&kernel, "rest").await;
     let url = format!("http://127.0.0.1:{port}/rest/fb_oct");
 
-    // The reply header is `json.dumps(rest)`: `, `/`: ` separators and
-    // ensure_ascii, so `naïve` leaves as `naïve`, never raw UTF-8.
+    // An octet read: the POST answers its ack; the settle carries the envelope as
+    // `data` and the chunk raw beside it, at `bytes` (#795).
     let resp = client
         .post(&url)
         .header("content-type", "application/octet-stream")
@@ -1682,12 +1842,13 @@ async fn octet_leg_header_contract_matches_python() {
         .await
         .expect("post");
     assert_eq!(resp.status().as_u16(), 200);
-    assert_eq!(
-        resp.headers()["x-fantastic-payload"],
-        r#"{"path": "na\u00efve.txt", "offset": 0, "next_offset": 7, "eof": true, "size": 7, "origin": "fb_oct na\u00efve.txt bytes 0-7 of 7 \u2014 read_stream {path: na\u00efve.txt, offset: 0, length: 7}"}"#
-    );
-    assert_eq!(resp.headers()["x-fantastic-bytes-field"], "bytes");
-    assert_eq!(resp.bytes().await.unwrap().as_ref(), b"naive!\n");
+    let ack: Value = resp.json().await.expect("json");
+    let (env, chunk) = settles.of(&ack).await;
+    assert_eq!(env["path"], "na\u{ef}ve.txt", "{env}");
+    assert_eq!((env["offset"].clone(), env["next_offset"].clone(), env["eof"].clone(), env["size"].clone()), (json!(0), json!(7), json!(true), json!(7)), "{env}");
+    let chunk = chunk.expect("the chunk rides the settle");
+    assert_eq!(chunk.path, vec![fantastic_kernel::Step::from("bytes")]);
+    assert_eq!(chunk.bytes, b"naive!\n");
 
     // An EMPTY payload header parses as `{}` (`headers.get(...) or "{}"`),
     // so the dispatch is a typeless send, not a 400.
@@ -1703,7 +1864,8 @@ async fn octet_leg_header_contract_matches_python() {
         200,
         "an empty header is an empty envelope"
     );
-    let body: Value = resp.json().await.expect("json");
+    let ack: Value = resp.json().await.expect("json");
+    let (body, _) = settles.of(&ack).await;
     // The envelope reached the target as `{}` — a 400 would mean the leg had
     // treated the empty value as a parse failure. (python's refusal TEXT here
     // is `send: payload.type required`.)
@@ -1724,7 +1886,8 @@ async fn octet_leg_header_contract_matches_python() {
         .await
         .expect("post");
     assert_eq!(resp.status().as_u16(), 200);
-    let body: Value = resp.json().await.expect("json");
+    let ack: Value = resp.json().await.expect("json");
+    let (body, _) = settles.of(&ack).await;
     assert_eq!(
         body["reason"], "not_found",
         "latin-1 mangles the path: {body}"
@@ -1751,7 +1914,8 @@ async fn octet_leg_header_contract_matches_python() {
         .send()
         .await
         .expect("post");
-    let body: Value = resp.json().await.expect("json");
+    let ack: Value = resp.json().await.expect("json");
+    let (body, _) = settles.of(&ack).await;
     assert_eq!(body["written"], 6, "body: {body}");
     // ...any OTHER name leaves the target with no chunk at all (`written: 0`)...
     let resp = client
@@ -1766,7 +1930,8 @@ async fn octet_leg_header_contract_matches_python() {
         .send()
         .await
         .expect("post");
-    let body: Value = resp.json().await.expect("json");
+    let ack: Value = resp.json().await.expect("json");
+    let (body, _) = settles.of(&ack).await;
     assert_eq!(
         body["written"], 0,
         "a foreign field name writes nothing: {body}"
@@ -1788,7 +1953,8 @@ async fn octet_leg_header_contract_matches_python() {
         .send()
         .await
         .expect("post");
-    let body: Value = resp.json().await.expect("json");
+    let ack: Value = resp.json().await.expect("json");
+    let (body, _) = settles.of(&ack).await;
     assert_eq!(body["reason"], "bad_arg", "body: {body}");
     assert_eq!(
         body["error"],
@@ -2525,56 +2691,40 @@ async fn ws_watcher_gets_a_binary_frame_for_a_bytes_payload() {
 
 // ─── The REST legs ride the batch ───────────────────
 
-/// A reply that HOLDS a chunk is octet on the JSON leg too, a 0-byte
-/// chunk included. Rust answered `application/json` with the bytes as a JSON
-/// string, and gated octet on `!body.is_empty()`, so an empty file came back as
-/// JSON and a caller could not tell it from a refusal.
+/// A reply that HOLDS a chunk carries it on its settle (#795), a 0-byte chunk
+/// included: the chunk's presence, never its length, tells a chunk from none — an
+/// empty file is still a file, and a refusal carries no chunk.
 #[tokio::test]
-async fn json_leg_read_stream_answers_octet_including_empty_chunk() {
+async fn json_leg_read_stream_settles_with_its_chunk_including_an_empty_one() {
     let tmp = TempDir::new().unwrap();
     let port = free_port();
     let kernel = stage_host(&tmp, port, "web_jsonoct", "rest", "fb_jsonoct").await;
     let client = reqwest::Client::new();
+    let mut settles = RestSettles::new(&kernel, "rest").await;
     let url = format!("http://127.0.0.1:{port}/rest/fb_jsonoct");
+    let read = |path: &'static str| {
+        client.post(&url).json(&json!({"type": "read_stream", "path": path})).send()
+    };
 
-    let resp = client
-        .post(&url)
-        .json(&json!({"type": "read_stream", "path": "hello.txt"}))
-        .send()
-        .await
-        .expect("post");
+    let resp = read("hello.txt").await.expect("post");
     assert_eq!(resp.status().as_u16(), 200);
-    assert_eq!(resp.headers()["content-type"], "application/octet-stream");
-    assert_eq!(resp.headers()["x-fantastic-bytes-field"], "bytes");
-    assert_eq!(
-        resp.headers()["x-fantastic-payload"],
-        r#"{"path": "hello.txt", "offset": 0, "next_offset": 12, "eof": true, "size": 12, "origin": "fb_jsonoct hello.txt bytes 0-12 of 12 \u2014 read_stream {path: hello.txt, offset: 0, length: 12}"}"#
-    );
-    assert_eq!(resp.bytes().await.unwrap().as_ref(), b"hello world\n");
+    assert_eq!(resp.headers()["content-type"], "application/json", "the POST answers its ack");
+    let (env, chunk) = settles.of(&resp.json::<Value>().await.unwrap()).await;
+    let chunk = chunk.expect("a chunk");
+    assert_eq!(chunk.path, vec![fantastic_kernel::Step::from("bytes")]);
+    assert_eq!(chunk.bytes, b"hello world\n");
+    assert_eq!((env["path"].clone(), env["size"].clone(), env["eof"].clone()), (json!("hello.txt"), json!(12), json!(true)), "{env}");
 
-    // AN EMPTY FILE IS STILL A FILE: octet, content-length 0.
-    let resp = client
-        .post(&url)
-        .json(&json!({"type": "read_stream", "path": "empty.txt"}))
-        .send()
-        .await
-        .expect("post");
-    assert_eq!(resp.status().as_u16(), 200);
-    assert_eq!(resp.headers()["content-type"], "application/octet-stream");
-    assert_eq!(resp.headers()["content-length"], "0");
-    assert!(resp.bytes().await.unwrap().is_empty());
+    // AN EMPTY FILE IS STILL A FILE: a chunk, 0 bytes.
+    let resp = read("empty.txt").await.expect("post");
+    let (_, chunk) = settles.of(&resp.json::<Value>().await.unwrap()).await;
+    assert!(chunk.expect("an empty chunk is a chunk").bytes.is_empty());
 
-    // A REFUSAL stays JSON — it carries no chunk.
-    let resp = client
-        .post(&url)
-        .json(&json!({"type": "read_stream", "path": "nope.txt"}))
-        .send()
-        .await
-        .expect("post");
-    assert_eq!(resp.status().as_u16(), 200);
-    assert_eq!(resp.headers()["content-type"], "application/json");
-    let body: Value = resp.json().await.unwrap();
+    // A REFUSAL carries no chunk.
+    let resp = read("nope.txt").await.expect("post");
+    let (body, chunk) = settles.of(&resp.json::<Value>().await.unwrap()).await;
     assert_eq!(body["reason"], "not_found", "{body}");
+    assert!(chunk.is_none(), "a refusal carries no chunk");
 
     stop(&kernel, "web_jsonoct").await;
 }
@@ -2588,6 +2738,7 @@ async fn json_leg_write_stream_string_bytes_is_bad_arg() {
     let port = free_port();
     let kernel = stage_host(&tmp, port, "web_jsonwr", "rest", "fb_jsonwr").await;
     let client = reqwest::Client::new();
+    let mut settles = RestSettles::new(&kernel, "rest").await;
     let url = format!("http://127.0.0.1:{port}/rest/fb_jsonwr");
 
     let resp = client
@@ -2597,7 +2748,7 @@ async fn json_leg_write_stream_string_bytes_is_bad_arg() {
         .await
         .expect("post");
     assert_eq!(resp.status().as_u16(), 200);
-    let body: Value = resp.json().await.unwrap();
+    let (body, _) = settles.of(&resp.json::<Value>().await.unwrap()).await;
     assert_eq!(body["reason"], "bad_arg", "{body}");
     assert_eq!(
         body["error"], "write_stream: unknown argument 'bytes'",
@@ -2621,6 +2772,7 @@ async fn octet_leg_names_executions_and_validates_type() {
     let port = free_port();
     let kernel = stage_host(&tmp, port, "web_octid", "rest", "fb_octid").await;
     let client = reqwest::Client::new();
+    let mut settles = RestSettles::new(&kernel, "rest").await;
     let url = format!("http://127.0.0.1:{port}/rest/fb_octid");
     let post = |payload: &str, id: &str, body: &'static [u8]| {
         client
@@ -2640,6 +2792,8 @@ async fn octet_leg_names_executions_and_validates_type() {
     .await
     .expect("post");
     assert_eq!(first.status().as_u16(), 200);
+    let (wrote, _) = settles.of(&first.json::<Value>().await.unwrap()).await;
+    assert_eq!(wrote["written"], 3, "{wrote}");
     // THE SAME ID REPLAYS the recorded outcome: the file keeps `one`.
     let again = post(
         r#"{"type":"write_stream","path":"oe1.bin","truncate":true}"#,
@@ -2649,6 +2803,8 @@ async fn octet_leg_names_executions_and_validates_type() {
     .await
     .expect("post");
     assert_eq!(again.status().as_u16(), 200);
+    let (replayed, _) = settles.of(&again.json::<Value>().await.unwrap()).await;
+    assert_eq!(replayed["written"], 3, "the recorded outcome: {replayed}");
     assert_eq!(
         std::fs::read(tmp.path().join("served").join("oe1.bin")).unwrap(),
         b"one",
@@ -2675,7 +2831,8 @@ async fn octet_leg_names_executions_and_validates_type() {
         .send()
         .await
         .expect("post");
-    let body: Value = other.json().await.unwrap();
+    let ack: Value = other.json().await.unwrap();
+    let (body, _) = settles.of(&ack).await;
     assert!(
         body.get("error").is_some(),
         "an id bound to another target dispatched: {body}"
@@ -2998,10 +3155,12 @@ async fn the_watch_event_always_precedes_its_reply() {
             let v: Value = serde_json::from_str(&t).expect("json frame");
             match v["type"].as_str() {
                 Some("event") if v["payload"]["type"] == json!("reflect") => seen_event = true,
-                Some("reply") if v["id"] == json!(id) => {
+                // the call's RESULT is its settle (#795): it never overtakes the
+                // watch event the call produced
+                Some("event") if v["payload"]["type"] == json!("settle") && v["payload"]["re"] == json!(id) => {
                     assert!(
                         seen_event,
-                        "iteration {n}: the reply overtook the watch event"
+                        "iteration {n}: the settle overtook the watch event"
                     );
                     break;
                 }

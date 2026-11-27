@@ -8,7 +8,7 @@
 //! exactly as it does in python, and a body under a foreign key is not its body.
 
 use super::*;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::SinkExt;
 use tokio_tungstenite::tungstenite::Message as TMessage;
 
 /// Answers what reached it: the body's path and length, and the header the
@@ -156,21 +156,10 @@ fn call_frame(id: &str, target: &str, mut payload: Value, at: &[&str], body: &[u
     ))
 }
 
-/// The `reply` frame answering `id`, within 5 s.
+/// The ANSWER to the call `id` (#795): its settle's `data` after the ack (a refusal
+/// at launch: the reply's `data`).
 async fn reply_of(ws: &mut TestWs, id: &str) -> Value {
-    loop {
-        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
-            .await
-            .expect("a frame in time")
-            .expect("stream open")
-            .expect("frame ok");
-        if let TMessage::Text(t) = msg {
-            let v: Value = serde_json::from_str(&t).expect("json frame");
-            if v["type"] == "reply" && v["id"] == id {
-                return v["data"].clone();
-            }
-        }
-    }
+    super::ws_answer(ws, &json!(id)).await.0["data"].clone()
 }
 
 /// `paste_image` over the BINARY channel, from both wire legs: the image is the
@@ -250,7 +239,8 @@ async fn paste_image_reads_its_body_at_data_over_ws_and_rest() {
         "{r}"
     );
 
-    // REST: the octet body bound under the NAMED field
+    // REST: the octet body bound under the NAMED field; the result is the settle
+    let mut settles = super::RestSettles::new(&kernel, &format!("{web}_rest")).await;
     let rest_png: &[u8] = b"\x89PNG\r\n\x1a\n-rest-";
     let resp = reqwest::Client::new()
         .post(format!("http://127.0.0.1:{port}/{web}_rest/term"))
@@ -265,7 +255,7 @@ async fn paste_image_reads_its_body_at_data_over_ws_and_rest() {
         .await
         .expect("post");
     assert_eq!(resp.status().as_u16(), 200);
-    let r: Value = resp.json().await.expect("json");
+    let (r, _) = settles.of(&resp.json::<Value>().await.expect("json")).await;
     assert_eq!(r["bytes"], json!(rest_png.len()), "{r}");
     assert_eq!(
         std::fs::read(r["path"].as_str().unwrap()).unwrap(),
@@ -322,6 +312,7 @@ async fn a_body_reaches_its_handler_at_the_path_the_wire_named() {
         json!({"channel": "binary", "path": ["a.b"], "len": 2,
                "header": {"type": "take", "a": {"b": "kept"}}})
     );
+    let mut settles = super::RestSettles::new(&kernel, &format!("{web}_rest")).await;
     let resp = reqwest::Client::new()
         .post(format!("http://127.0.0.1:{port}/{web}_rest/cap"))
         .header("content-type", "application/octet-stream")
@@ -331,7 +322,7 @@ async fn a_body_reaches_its_handler_at_the_path_the_wire_named() {
         .send()
         .await
         .expect("post");
-    let r: Value = resp.json().await.expect("json");
+    let (r, _) = settles.of(&resp.json::<Value>().await.expect("json")).await;
     assert_eq!(
         r,
         json!({"channel": "binary", "path": ["data"], "len": 4,
@@ -354,6 +345,8 @@ async fn the_bytes_field_header_names_a_literal_top_level_key() {
     let port = free_port();
     let web = "web_bp_literal";
     let kernel = stage(&tmp, port, web).await;
+    let mut settles = super::RestSettles::new(&kernel, &format!("{web}_rest")).await;
+    // the POST's ACK; its result is read off the leg's settle (#795)
     let post = |payload: Value, field: Option<&str>| {
         let mut req = reqwest::Client::new()
             .post(format!("http://127.0.0.1:{port}/{web}_rest/cap"))
@@ -369,7 +362,7 @@ async fn the_bytes_field_header_names_a_literal_top_level_key() {
         }
     };
     assert_eq!(
-        post(json!({"type": "take", "a": {"b": "kept"}}), Some("a.b")).await,
+        settles.of(&post(json!({"type": "take", "a": {"b": "kept"}}), Some("a.b")).await).await.0,
         json!({"channel": "binary", "path": ["a.b"], "len": 3,
                "header": {"type": "take", "a": {"b": "kept"}}})
     );
@@ -385,12 +378,12 @@ async fn the_bytes_field_header_names_a_literal_top_level_key() {
         "the body sits at the literal key, the nested `a.b` untouched"
     );
     assert_eq!(
-        post(json!({"type": "take"}), Some("a.b")).await,
+        settles.of(&post(json!({"type": "take"}), Some("a.b")).await).await.0,
         json!({"channel": "binary", "path": ["a.b"], "len": 3, "header": {"type": "take"}}),
         "no `a` in the envelope is no refusal — the key is literal"
     );
     assert_eq!(
-        post(json!({"type": "take"}), None).await,
+        settles.of(&post(json!({"type": "take"}), None).await).await.0,
         json!({"channel": "binary", "path": ["bytes"], "len": 3, "header": {"type": "take"}})
     );
     stop(&kernel, web).await;

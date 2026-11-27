@@ -29,6 +29,18 @@ pub enum Ev {
     /// runner could not attribute. It lands in the note list like any other
     /// failure.
     Note(String),
+    /// A boot step the command line asked for (`ai BACKEND …`, `run COMMAND…`) came to its
+    /// end: said by the ViewModel, which stops the run when it failed.
+    Boot { step: BootStep, result: Result<String, String> },
+}
+
+/// Which boot step a [`Ev::Boot`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootStep {
+    /// `ai BACKEND …`: the root AI.
+    Ai,
+    /// `run COMMAND…`: the command in the terminal or a canvas cell.
+    Run,
 }
 
 /// What the kernel pushes at this shell while it runs. Both of these are FACTS

@@ -17,6 +17,7 @@
 
 use serde_json::{json, Value};
 
+use crate::kern::cps::{done, Done};
 use crate::kern::host::Host;
 
 /// The file, in the state folder (the `store` bridge's root), the view's own `path`.
@@ -47,10 +48,11 @@ pub async fn ensure(h: &Host) -> Result<(), String> {
 }
 
 /// Name the file on AI `id`'s record — unless it names a file, or a bridge, of
-/// its own (a bridge alone means the default block: left as it is).
-pub async fn stamp(h: &Host, id: &str) -> Result<(), String> {
+/// its own (a bridge alone means the default block: left as it is). The update is a
+/// call (#795): `done` gets its answer with the settle; nothing to stamp is `Ok` at once.
+pub async fn stamp(h: &Host, id: &str, done: Done<Result<(), String>>) {
     if !h.kernel.exists(BRIDGE) {
-        return Ok(());
+        return done(Ok(())).await;
     }
     // None: not a chat (or gone): nothing to stamp. Some(own): names a file or bridge already.
     let own = h.kernel.resolve_target(id).and_then(|a| {
@@ -58,25 +60,34 @@ pub async fn stamp(h: &Host, id: &str) -> Result<(), String> {
         (r.handler_module.as_deref() == Some(fantastic_ai_core::chat_bundle::HANDLER_MODULE)).then(|| ["system_prompt_file", "file_bridge_id"].iter().any(|k| r.meta.get(*k).is_some_and(|v| !v.is_null())))
     });
     if own != Some(false) {
-        return Ok(());
+        return done(Ok(())).await;
     }
-    let r = h
-        .operator("kernel", json!({"type": "update_agent", "id": id, "file_bridge_id": BRIDGE, "system_prompt_file": FILE}))
-        .await
-        .result;
-    err_of(&r).map_or(Ok(()), |e| Err(format!("{id}: system_prompt_file: {e}")))
+    let who = id.to_string();
+    h.operator_then(
+        "kernel",
+        json!({"type": "update_agent", "id": id, "file_bridge_id": BRIDGE, "system_prompt_file": FILE}),
+        move |out| async move {
+            done(err_of(&out.result).map_or(Ok(()), |e| Err(format!("{who}: system_prompt_file: {e}")))).await;
+        },
+    )
+    .await;
 }
 
-/// [`stamp`] every AI agent now.
-pub async fn stamp_all(h: &Host) -> Vec<String> {
+/// [`stamp`] every AI agent now; each one's trouble is logged when its call settles.
+pub async fn stamp_all(h: &Host) {
     let ids: Vec<String> = h.kernel.agent_ids().into_iter().filter_map(|aid| h.kernel.resolve_target(aid.as_str())).map(|a| a.id.0.clone()).collect();
-    let mut notes = Vec::new();
     for id in ids {
-        if let Err(e) = stamp(h, &id).await {
-            notes.push(e);
-        }
+        stamp(
+            h,
+            &id,
+            done(|r: Result<(), String>| async move {
+                if let Err(e) = r {
+                    tracing::warn!("{e}");
+                }
+            }),
+        )
+        .await;
     }
-    notes
 }
 
 #[cfg(test)]
@@ -123,7 +134,7 @@ mod tests {
         put("chat", "ai_chat.tools", json!({"memory_store_id": "m"}));
         let h = Host { kernel, cfg: crate::env::ClientCfg::here(), root: "kernel".to_string() };
         for id in ["backend", "py", "chat"] {
-            stamp(&h, id).await.unwrap();
+            crate::kern::cps::run(|d| stamp(&h, id, d)).await.unwrap();
         }
         let file = |id: &str| {
             h.kernel.resolve_target(id).unwrap().record().meta.get("system_prompt_file").cloned()

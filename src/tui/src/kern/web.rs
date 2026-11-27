@@ -37,6 +37,7 @@
 
 use serde_json::{json, Map, Value};
 
+use crate::kern::cps::Done;
 use crate::kern::host::Host;
 
 pub const WEB_ID: &str = "web";
@@ -58,17 +59,19 @@ fn meta(h: &Host, id: &str) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
-async fn create(h: &Host, spec: Value) -> Result<(), String> {
+async fn create(h: &Host, spec: Value, done: Done<Result<(), String>>) {
     let id = spec["id"].as_str().unwrap_or("?").to_string();
-    let r = h.operator("kernel", fantastic_kernel::verbs::call("create_agent", spec)).await.result;
-    fantastic_kernel::refusal::error_text(&r).map_or(Ok(()), |e| Err(format!("could not create `{id}`: {e}")))
+    h.operator_then("kernel", fantastic_kernel::verbs::call("create_agent", spec), move |out| async move {
+        done(fantastic_kernel::refusal::error_text(&out.result).map_or(Ok(()), |e| Err(format!("could not create `{id}`: {e}")))).await;
+    })
+    .await;
 }
 
 /// A CHILD CANVAS (phase 4): a `canvas.tools` node under `parent` (the canvas that
 /// spawned it) — its own page kernel (the page records under `loader`, rooted at
 /// `root`), its own cells' backends as its children. `main` is declarative only:
 /// the page opens the main canvas first and lists it on top. Creates what is
-/// missing (`create_agent` boots each).
+/// missing (`create_agent` boots each), the loader after the node settled (#795).
 pub async fn ensure_canvas(
     h: &Host,
     parent: &str,
@@ -76,21 +79,49 @@ pub async fn ensure_canvas(
     loader: &str,
     root: &str,
     main: bool,
-) -> Result<(), String> {
+    done: Done<Result<(), String>>,
+) {
     if !h.kernel.exists(node) {
-        create(
+        let (h2, loader, node2, root) = (h.clone(), loader.to_string(), node.to_string(), root.to_string());
+        return create(
             h,
             json!({"parent_id": parent, "id": node,
             "handler_module": crate::kern::backend::HANDLER_MODULE, "main": main}),
+            crate::kern::cps::done(move |r: Result<(), String>| async move {
+                match r {
+                    Ok(()) => canvas_loader(h2, node2, loader, root, done).await,
+                    Err(e) => done(Err(e)).await,
+                }
+            }),
         )
-        .await?;
+        .await;
     }
-    if !h.kernel.exists(loader) {
-        create(h, json!({"parent_id": node, "id": loader, "handler_module": fantastic_core::HANDLER_MODULE,
-            "root": root, "watch": false})).await?;
+    canvas_loader(h.clone(), node.to_string(), loader.to_string(), root.to_string(), done).await;
+}
+
+/// The loader under `node` when missing, then the page bundles folder.
+async fn canvas_loader(h: Host, node: String, loader: String, root: String, done: Done<Result<(), String>>) {
+    if !h.kernel.exists(&loader) {
+        let h2 = h.clone();
+        return create(
+            &h,
+            json!({"parent_id": node, "id": loader, "handler_module": fantastic_core::HANDLER_MODULE,
+            "root": root, "watch": false}),
+            crate::kern::cps::done(move |r: Result<(), String>| async move {
+                match r {
+                    Ok(()) => done(bundles_folder(&h2, &root)).await,
+                    Err(e) => done(Err(e)).await,
+                }
+            }),
+        )
+        .await;
     }
-    // its page bundles' folder exists (no watching), so the page's bundles
-    // have a place to be put (the folder is the loader's `root` under the kernel's one rule)
+    done(bundles_folder(&h, &root)).await;
+}
+
+/// Its page bundles' folder exists (no watching), so the page's bundles
+/// have a place to be put (the folder is the loader's `root` under the kernel's one rule).
+fn bundles_folder(h: &Host, root: &str) -> Result<(), String> {
     let (base, rel) = h.kernel.record_root(root, std::path::Path::new(""))?;
     let bundles = base.join(rel).join("bundles");
     if let Err(e) = std::fs::create_dir_all(&bundles) {
@@ -144,7 +175,19 @@ pub fn child_records_root(parent_root: &str, node: &str) -> String {
 /// `new_canvas {name}` (`canvas.tools`, sent to the canvas `parent`): a CHILD
 /// canvas `canvas_<name>` of `parent`, its page records nested under the parent's
 /// records dir. Returns its node id. A name taken anywhere is refused.
-pub async fn new_canvas(h: &Host, parent: &str, name: &str) -> Result<String, String> {
+pub async fn new_canvas(h: &Host, parent: &str, name: &str, done: Done<Result<String, String>>) {
+    match canvas_plan(h, parent, name) {
+        Err(e) => done(Err(e)).await,
+        Ok((node, loader, root)) => {
+            // `create_agent` boots each as it makes it
+            let n = node.clone();
+            ensure_canvas(h, parent, &node, &loader, &root, false, crate::kern::cps::done(move |r: Result<(), String>| async move { done(r.map(|()| n)).await })).await;
+        }
+    }
+}
+
+/// The node, loader and records root of the child canvas `canvas_<name>` of `parent`.
+fn canvas_plan(h: &Host, parent: &str, name: &str) -> Result<(String, String, String), String> {
     let canvas_parent = h
         .kernel.resolve_target(parent)
         .is_some_and(|a| {
@@ -166,17 +209,8 @@ pub async fn new_canvas(h: &Host, parent: &str, name: &str) -> Result<String, St
         .map(str::to_string)
         .ok_or_else(|| format!("new_canvas: the page loader of `{parent}` has no root"))?;
     let loader = format!("{node}_loader");
-    // `create_agent` boots each as it makes it
-    ensure_canvas(
-        h,
-        parent,
-        &node,
-        &loader,
-        &child_records_root(&parent_root, &node),
-        false,
-    )
-    .await?;
-    Ok(node)
+    let root = child_records_root(&parent_root, &node);
+    Ok((node, loader, root))
 }
 
 /// A port free on this machine now (the OS picks it), for the first run that names none.
@@ -405,16 +439,17 @@ pub(crate) mod canvas_tree_tests {
             json!({"parent_id": "kernel", "id": crate::env::HUMAN, "handler_module": "user.tools"}),
             json!({"parent_id": "kernel", "id": CANVAS_PAGE_ID, "handler_module": "canvas_page.tools"}),
         ] {
-            create(&h, spec).await.unwrap();
+            crate::kern::cps::run(|d| create(&h, spec, d)).await.unwrap();
         }
-        ensure_canvas(
+        crate::kern::cps::run(|d| ensure_canvas(
             &h,
             crate::env::HUMAN,
             CANVAS_NODE_ID,
             CANVAS_LOADER_ID,
             "@state/web",
             true,
-        )
+            d,
+        ))
         .await
         .unwrap();
         h
@@ -437,7 +472,7 @@ pub(crate) mod canvas_tree_tests {
     async fn a_canvas_makes_its_new_canvas_as_its_child_with_records_nested_under_its_own() {
         let dir = scratch("nested");
         let h = canvas_world(&dir).await;
-        let node = new_canvas(&h, CANVAS_NODE_ID, "research").await.unwrap();
+        let node = crate::kern::cps::run(|d| new_canvas(&h, CANVAS_NODE_ID, "research", d)).await.unwrap();
         assert_eq!(node, "canvas_research");
         assert_eq!(
             parent_of(&h, &node).as_deref(),
@@ -460,7 +495,7 @@ pub(crate) mod canvas_tree_tests {
             "its bundles folder exists"
         );
         // a canvas made by that child nests one level deeper, under the child's records
-        let deeper = new_canvas(&h, &node, "deeper").await.unwrap();
+        let deeper = crate::kern::cps::run(|d| new_canvas(&h, &node, "deeper", d)).await.unwrap();
         assert_eq!(parent_of(&h, &deeper).as_deref(), Some("canvas_research"));
         assert_eq!(
             records_root_of(&h, &loader_of(&h, &deeper).unwrap()),
@@ -473,17 +508,16 @@ pub(crate) mod canvas_tree_tests {
     async fn a_name_taken_anywhere_in_the_tree_is_refused_and_nothing_is_made() {
         let dir = scratch("clash");
         let h = canvas_world(&dir).await;
-        new_canvas(&h, CANVAS_NODE_ID, "research").await.unwrap();
+        crate::kern::cps::run(|d| new_canvas(&h, CANVAS_NODE_ID, "research", d)).await.unwrap();
         // the same name under the same canvas
-        let err = new_canvas(&h, CANVAS_NODE_ID, "research")
-            .await
+        let err = crate::kern::cps::run(|d| new_canvas(&h, CANVAS_NODE_ID, "research", d)).await
             .unwrap_err();
         assert!(
             err.contains("canvas_research") && err.contains("already exists"),
             "{err}"
         );
         // a name the main canvas already holds, asked from a nested canvas
-        let err = new_canvas(&h, "canvas_research", "root").await.unwrap_err();
+        let err = crate::kern::cps::run(|d| new_canvas(&h, "canvas_research", "root", d)).await.unwrap_err();
         assert!(
             err.contains("canvas_root") && err.contains("already exists"),
             "{err}"
@@ -504,7 +538,7 @@ pub(crate) mod canvas_tree_tests {
         for (k, v) in extra.as_object().cloned().unwrap_or_default() {
             spec[k] = v;
         }
-        create(h, spec).await.unwrap();
+        crate::kern::cps::run(|d| create(h, spec, d)).await.unwrap();
     }
 
     #[tokio::test]
@@ -548,7 +582,7 @@ pub(crate) mod canvas_tree_tests {
     async fn only_a_canvas_spawns_a_canvas_and_a_name_is_required() {
         let dir = scratch("refuse");
         let h = canvas_world(&dir).await;
-        let err = new_canvas(&h, CANVAS_PAGE_ID, "x").await.unwrap_err();
+        let err = crate::kern::cps::run(|d| new_canvas(&h, CANVAS_PAGE_ID, "x", d)).await.unwrap_err();
         assert!(err.contains("is not a canvas"), "{err}");
         assert!(!h.kernel.exists(KernelId::from("canvas_x").as_str()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -558,12 +592,10 @@ pub(crate) mod canvas_tree_tests {
     async fn deleting_a_canvas_deletes_the_canvases_it_spawned() {
         let dir = scratch("cascade");
         let h = canvas_world(&dir).await;
-        let node = new_canvas(&h, CANVAS_NODE_ID, "research").await.unwrap();
-        let deeper = new_canvas(&h, &node, "deeper").await.unwrap();
+        let node = crate::kern::cps::run(|d| new_canvas(&h, CANVAS_NODE_ID, "research", d)).await.unwrap();
+        let deeper = crate::kern::cps::run(|d| new_canvas(&h, &node, "deeper", d)).await.unwrap();
         let (loader, deeper_loader) = (format!("{node}_loader"), format!("{deeper}_loader"));
-        let out = h
-            .operator("kernel", json!({"type": "delete_agent", "id": node}))
-            .await;
+        let out = crate::kern::cps::op(&h, "kernel", json!({"type": "delete_agent", "id": node})).await;
         assert!(out.result.get("error").is_none(), "{:?}", out.result);
         for gone in [&node, &loader, &deeper, &deeper_loader] {
             assert!(
@@ -586,8 +618,8 @@ pub(crate) mod canvas_tree_tests {
     async fn the_listing_reaches_the_main_canvas_and_every_nested_one() {
         let dir = scratch("listing");
         let h = canvas_world(&dir).await;
-        let nested = new_canvas(&h, CANVAS_NODE_ID, "research").await.unwrap();
-        let nested_deeper = new_canvas(&h, &nested, "deeper").await.unwrap();
+        let nested = crate::kern::cps::run(|d| new_canvas(&h, CANVAS_NODE_ID, "research", d)).await.unwrap();
+        let nested_deeper = crate::kern::cps::run(|d| new_canvas(&h, &nested, "deeper", d)).await.unwrap();
         let listed = canvases(&h);
         let expect = vec![
             (CANVAS_NODE_ID.to_string(), CANVAS_LOADER_ID.to_string()),
@@ -624,8 +656,8 @@ pub(crate) mod canvas_tree_tests {
         let dir = scratch("unlisted");
         let h = canvas_world(&dir).await;
         // a canvas.tools node under the operator's own user, not under any canvas
-        create(&h, json!({"parent_id": "kernel", "id": "stray", "handler_module": crate::kern::backend::HANDLER_MODULE})).await.unwrap();
-        create(&h, json!({"parent_id": "stray", "id": "stray_loader", "handler_module": fantastic_core::HANDLER_MODULE, "root": "x", "watch": false})).await.unwrap();
+        crate::kern::cps::run(|d| create(&h, json!({"parent_id": "kernel", "id": "stray", "handler_module": crate::kern::backend::HANDLER_MODULE}), d)).await.unwrap();
+        crate::kern::cps::run(|d| create(&h, json!({"parent_id": "stray", "id": "stray_loader", "handler_module": fantastic_core::HANDLER_MODULE, "root": "x", "watch": false}), d)).await.unwrap();
         assert!(!canvases(&h).iter().any(|(n, _)| n == "stray"));
         let _ = std::fs::remove_dir_all(&dir);
     }

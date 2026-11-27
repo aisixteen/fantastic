@@ -8,8 +8,10 @@
 
 use super::*;
 
+/// The next frame from the leg — a call's ANSWER as [`super::answer`] reads it (the
+/// ack skipped, the settle re-rooted), any other frame as it came.
 async fn next(peer: &Arc<dyn BridgeTransport>) -> Value {
-    tokio::time::timeout(std::time::Duration::from_secs(2), peer.recv_frame())
+    tokio::time::timeout(std::time::Duration::from_secs(30), super::answer(&**peer))
         .await
         .expect("a frame in time")
         .expect("a frame")
@@ -149,7 +151,7 @@ async fn an_inbound_watch_is_gated_then_streams_until_unwatch() {
     .await
     .unwrap();
     let reply = next(&peer).await;
-    assert_eq!(reply["type"], "reply", "{reply}");
+    assert_eq!(reply["type"], "settle", "{reply}");
     assert!(!kernel.has_watchers(&AgentId::from(notes.as_str())).await);
     fantastic_kernel::send::as_operator(kernel
         .emit(
@@ -164,7 +166,7 @@ async fn an_inbound_watch_is_gated_then_streams_until_unwatch() {
     let reply = next(&peer).await;
     assert_eq!(
         (&reply["type"], &reply["id"]),
-        (&json!("reply"), &json!("after-ping")),
+        (&json!("settle"), &json!("after-ping")),
         "{reply}"
     );
 }
@@ -188,7 +190,8 @@ async fn a_reply_follows_the_events_its_call_produced() {
     let mut before = Vec::new();
     loop {
         let f = next(&peer).await;
-        if f["type"] == "reply" {
+        // the call's SETTLE comes after the events it produced (its ack, first, skipped)
+        if f["type"] == "settle" {
             assert_eq!(f["id"], "c1", "{f}");
             break;
         }
