@@ -28,7 +28,7 @@ async fn kernel(tmp: &tempfile::TempDir, allow: Value) -> Arc<Kernel> {
     );
     fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(root);
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE,
                    "id": "fb", "root": tmp.path().join("served").display().to_string(), "allow": allow}),
@@ -41,7 +41,7 @@ async fn kernel(tmp: &tempfile::TempDir, allow: Value) -> Arc<Kernel> {
 }
 
 async fn call(kernel: &Arc<Kernel>, payload: Value) -> Value {
-    kernel.operator_send(vec![Item::new(AgentId::from("fb"), payload)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from("fb"), payload)])
         .await
         .remove(0)
         .result

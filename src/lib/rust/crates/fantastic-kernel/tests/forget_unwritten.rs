@@ -128,8 +128,7 @@ fn kernel_at(store: &Path, deletes: &Arc<Mutex<Vec<String>>>) -> Arc<Kernel> {
 }
 
 async fn kernel_verb(kernel: &Arc<Kernel>, payload: Value) {
-    let out = kernel
-        .operator_send(vec![Item::new(AgentId::from("kernel"), payload.clone())])
+    let out = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from("kernel"), payload.clone())])
         .await;
     assert!(
         out[0].result.get("error").is_none(),

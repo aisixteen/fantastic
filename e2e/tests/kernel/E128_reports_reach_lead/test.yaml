@@ -1,0 +1,12 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: scripted OpenAI-compatible servers
+# play the model of a lead and three workers (the kernel's own AI agents: ai_chat.tools
+# chats over vllm_backend providers, #521), driven over web_rest.
+id: reports_reach_lead
+group: kernel
+title: "three workers report to a lead (#795, await_set removed): each report is a send acked at once and a message of its own on the lead, read once by the lead's next pass (coalesced, no wake without news, nothing held); a worker's ack wakes nothing; nothing is left in ps"
+runner: probe.py
+runtimes: [rust]
+costs: free
+limits:
+  idle_seconds: 120
+  turn_seconds: 300

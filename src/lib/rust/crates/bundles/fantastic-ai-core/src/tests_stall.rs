@@ -40,7 +40,7 @@ async fn a_failed_pass_stores_an_error_row_and_the_queue_moves_on() {
         ],
         Duration::ZERO,
     );
-    let first = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(
+    let first = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "one", "client_id": "probe"}),
         )]))
@@ -62,7 +62,7 @@ async fn a_failed_pass_stores_an_error_row_and_the_queue_moves_on() {
         "{rows:#?}"
     );
     // the next message runs its own pass, and it reads the error row
-    let second = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(
+    let second = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "two", "client_id": "probe"}),
         )]))
@@ -137,7 +137,7 @@ async fn a_queued_send_waits_behind_a_stalled_turn_and_runs_when_the_window_ends
     let k = Arc::clone(&kernel);
     let b = backend.clone();
     let first = tokio::spawn(async move {
-        crate::tests::settled(&k, k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             b,
             json!({"type": "send", "text": "one", "client_id": "probe_a"}),
         )]))
@@ -149,7 +149,7 @@ async fn a_queued_send_waits_behind_a_stalled_turn_and_runs_when_the_window_ends
     let k = Arc::clone(&kernel);
     let b = backend.clone();
     let second = tokio::spawn(async move {
-        crate::tests::settled(&k, k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             b,
             json!({"type": "send", "text": "two", "client_id": "probe_b"}),
         )]))
@@ -213,7 +213,7 @@ async fn a_timed_out_pass_says_timeout_and_is_not_retried() {
     );
     let mut rx = rebind_backend_inbox(&kernel, &backend);
     let mut seen: Vec<Value> = Vec::new();
-    let out = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(
+    let out = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
         )]))
@@ -257,7 +257,7 @@ async fn a_failed_provider_pass_emits_failed_error_once() {
     );
     let mut rx = rebind_backend_inbox(&kernel, &backend);
     let mut seen: Vec<Value> = Vec::new();
-    let out = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(
+    let out = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
         )]))
@@ -311,7 +311,7 @@ async fn a_message_during_a_timed_out_pass_is_read_by_the_next_pass() {
     );
     let (k, b) = (Arc::clone(&kernel), backend.clone());
     let first = tokio::spawn(async move {
-        crate::tests::settled(&k, k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             b,
             json!({"type": "send", "text": "one", "client_id": "o"}),
         )]))
@@ -322,7 +322,7 @@ async fn a_message_during_a_timed_out_pass_is_read_by_the_next_pass() {
     assert!(until_passes(&s, 1).await, "the first pass never started");
     let (k, b) = (Arc::clone(&kernel), backend.clone());
     let second = tokio::spawn(async move {
-        crate::tests::settled(&k, k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             b,
             json!({"type": "send", "text": "two", "client_id": "t"}),
         )]))
@@ -378,7 +378,7 @@ async fn a_parent_sending_to_a_child_that_times_out_gets_its_ack_at_once() {
         ],
         Duration::ZERO,
     );
-    let _ = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(
+    let _ = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             parent.clone(),
             json!({"type": "send", "text": "go"}),
         )]))
@@ -418,7 +418,7 @@ async fn a_message_during_a_failed_pass_is_read_by_the_next_pass() {
     );
     let (k, b) = (Arc::clone(&kernel), backend.clone());
     let first = tokio::spawn(async move {
-        crate::tests::settled(&k, k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             b,
             json!({"type": "send", "text": "one", "client_id": "o"}),
         )]))
@@ -429,7 +429,7 @@ async fn a_message_during_a_failed_pass_is_read_by_the_next_pass() {
     assert!(until_passes(&s, 1).await, "the first pass never started");
     let (k, b) = (Arc::clone(&kernel), backend.clone());
     let second = tokio::spawn(async move {
-        crate::tests::settled(&k, k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             b,
             json!({"type": "send", "text": "two", "client_id": "t"}),
         )]))
@@ -480,7 +480,7 @@ async fn a_failed_pass_ends_with_its_error_row_and_no_turn_of_its_own() {
     );
     let mut rx = rebind_backend_inbox(&kernel, &backend);
     let mut seen: Vec<Value> = Vec::new();
-    let out = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(
+    let out = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
         )]))
@@ -518,7 +518,7 @@ async fn a_pass_cut_at_max_tokens_fails_naming_the_cut() {
         )]],
         Duration::ZERO,
     );
-    let out = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(
+    let out = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
         )]))
@@ -553,7 +553,7 @@ async fn a_cancelled_turn_is_not_retried() {
     );
     let (k, b) = (Arc::clone(&kernel), backend.clone());
     let first = tokio::spawn(async move {
-        crate::tests::settled(&k, k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             b,
             json!({"type": "send", "text": "go", "client_id": "probe"}),
         )]))
@@ -562,7 +562,7 @@ async fn a_cancelled_turn_is_not_retried() {
         .result
     });
     assert!(until_passes(&s, 1).await, "the pass never started");
-    let _ = kernel.operator_send(vec![Item::new(backend.clone(), json!({"type": "stop"}))])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(backend.clone(), json!({"type": "stop"}))])
         .await;
     let _ = first.await;
     tokio::time::sleep(Duration::from_millis(900)).await;
@@ -588,7 +588,7 @@ async fn a_held_message_is_answered_after_the_failed_pass() {
     );
     let (k, b) = (Arc::clone(&kernel), backend.clone());
     let first = tokio::spawn(async move {
-        crate::tests::settled(&k, k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             b,
             json!({"type": "send", "text": "one", "client_id": "probe_a"}),
         )]))
@@ -599,7 +599,7 @@ async fn a_held_message_is_answered_after_the_failed_pass() {
     assert!(until_passes(&s, 1).await, "the first pass never started");
     let (k, b) = (Arc::clone(&kernel), backend.clone());
     let second = tokio::spawn(async move {
-        crate::tests::settled(&k, k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             b,
             json!({"type": "send", "text": "two", "client_id": "probe_b"}),
         )]))

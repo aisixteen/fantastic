@@ -35,8 +35,7 @@ fn read_call() -> String {
 }
 
 async fn say(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) {
-    let _ = crate::tests::settled(kernel, kernel
-        .operator_send(vec![Item::new(
+    let _ = crate::tests::settled(kernel, fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             agent.clone(),
             json!({"type": "send", "text": text, "client_id": "probe"}),
         )]))
@@ -44,8 +43,7 @@ async fn say(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) {
 }
 
 async fn verb(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    let out = crate::tests::settled(kernel, kernel
-        .operator_send(vec![Item::new(agent.clone(), payload)]))
+    let out = crate::tests::settled(kernel, fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(agent.clone(), payload)]))
         .await
         .remove(0);
     assert_eq!(out.status.as_str(), "completed", "{:?}", out.result);

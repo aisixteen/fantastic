@@ -257,14 +257,13 @@ pub(crate) async fn default_system_content(
 /// [`crate::steps::own_reflect`]).
 #[cfg(test)]
 pub(crate) async fn self_reflect(self_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
-    kernel
-        .send(vec![fantastic_kernel::Item::new(
-            self_id.clone(),
-            json!({"type": "reflect", "tree": "none"}),
-        )])
-        .await
-        .remove(0)
-        .result
+    fantastic_kernel::test_support::settled(
+        kernel,
+        vec![fantastic_kernel::Item::new(self_id.clone(), json!({"type": "reflect", "tree": "none"}))],
+    )
+    .await
+    .remove(0)
+    .result
 }
 
 /// TESTS: the prompt file brought current, driven to its end

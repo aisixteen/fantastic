@@ -10,6 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _lib.canvas_live import Rig, html_cell, verdict  # noqa: E402
+from _lib.mcp_session import result_of  # noqa: E402
 
 SRC = "(id)=>document.querySelector('.agent-frame[data-id='+JSON.stringify(id)+'] iframe')?.srcdoc||''"
 
@@ -28,12 +29,8 @@ def main() -> bool:
         rig.init(cells=cells)
 
         def send(target: str, payload: dict) -> dict:
-            p = subprocess.run([str(rig.binary), "send", json.dumps({"target": target, "payload": payload})],
-                               cwd=rig.proj, env=rig.env(), capture_output=True, text=True, timeout=60)
-            try:
-                return json.loads(p.stdout).get("result") or {}
-            except ValueError:
-                return {"error": (p.stdout + p.stderr)[-300:]}
+            # the ack, then the result from the session's settle notification (#795)
+            return result_of(rig.proj / ".fantastic", target, payload)
 
         async def run() -> None:
             async with rig.page(1400, 900) as pg:

@@ -843,7 +843,7 @@ async fn a_reply_secret_from_a_is_secret_in_bs_records() {
             tap.lock().unwrap().push(ev.clone());
         }));
         let out =
-            p.kb.operator_send(vec![Item::new(
+            fantastic_kernel::test_support::send_settled(&p.kb, vec![Item::new(
                 p.remote("creds"),
                 json!({"type": "get", "ref": REF}),
             )

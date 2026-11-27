@@ -12,7 +12,7 @@ On the packaged rust artifact:
      seeded record store, a minted `guid`, `tree` nesting `web` and `records`) and
      nothing that says how to call (`emits`, `cancel`, `kernel_verbs`);
   5. THE KERNEL VERBS: the operator's one-shot `kernel reflect part=docs` lists
-     the twelve; `rest` (a `call: [reflect]` line on the root, a `create` line on
+     the ten; `rest` (a `call: [reflect]` line on the root, a `create` line on
      its own tree) sees in its own `reflect kernel part=docs` exactly the tree
      verbs that `create` line gives (`TREE_VERBS`) and none of the others;
   6. `reflect rest bundles: "all"` (the leg's own tree: the whole catalog) lists
@@ -67,10 +67,10 @@ ROOT_KEYS = {
 OPERATOR_FRAME = {"runtime", "env", "version", "peers", "guid"}
 #: A reflect says what an agent IS, never how to call it.
 NEVER_ON_REFLECT = {"emits", "cancel", "more", "kernel_verbs"}
-#: The kernel verbs, exactly twelve.
+#: The kernel verbs, exactly ten (`await_set`/`await_cancel` removed, #795 Q1).
 KERNEL_VERBS = {"create_agent", "update_agent", "delete_agent", "ps", "ledger",
                 "ack_deadletter", "kernel_start", "cancel", "shutdown_agents",
-                "kernel_stop", "await_set", "await_cancel"}
+                "kernel_stop"}
 #: The root's tree verbs: the kernel gate judges each on its operand, so a viewer
 #: holding a `create` line sees them in the root's docs (reflect.rs `may_tree_verb`).
 TREE_VERBS = {"create_agent", "update_agent", "delete_agent"}

@@ -272,26 +272,49 @@ async fn read_chunk(
             "length": CHUNK,
         }),
     );
-    // THE CALL IS ASYNC (#795): it acks, and its settle — a message to this route —
-    // hands the chunk to the HTTP response, the transport the browser reads
-    // (a refusal at launch is the answer at once)
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let ack = kernel
-        .call(item, move |out| async move {
-            let _ = tx.send(out);
-        })
-        .await;
-    let out = if ack.status == fantastic_kernel::Status::Accepted {
-        match rx.await {
-            Ok(o) => o,
-            Err(_) => return (Value::Null, None),
-        }
-    } else {
-        ack
+    // THE CALL IS ASYNC (#795): it acks, and its settle hands the chunk to the HTTP
+    // response the browser reads — the one HTTP boundary ([`browser_read`])
+    let Some(out) = browser_read(|then| kernel.call(item, then)).await else {
+        return (Value::Null, None);
     };
     // python takes the chunk at the reply's `bytes` key; one anywhere else is
     // not a chunk
     (out.result, out.body.and_then(|b| b.into_at("bytes")))
+}
+
+/// A continuation handed to a browser read's call.
+type BrowserThen = Box<
+    dyn FnOnce(fantastic_kernel::Outcome) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send,
+>;
+
+/// THE ONE HTTP BOUNDARY (#795): a browser's GET — a pasted `/_reflect` URL, an `<img>`,
+/// `<script src>` or iframe the file proxy serves — is answered only by the response to
+/// the request it made. A browser is not an agent: it has no `reply` verb and no session a
+/// later message could be pushed on, and an HTTP/1.1 response cannot come after its
+/// request ended. So THIS ROUTE — a transport task the server spawned per request, no
+/// agent's step, no kernel task, holding no lock — keeps the request open until the
+/// call's settle reaches its continuation. The call itself is async like every call
+/// (`call` makes it with the continuation it is handed): an ack, a call row, a settle row.
+/// A launch refusal is the answer at once; `None` when the settle never came (the
+/// kernel stopped). A POST is not this: the REST verb channel answers its ack, and the
+/// settle rides the leg's watch stream.
+async fn browser_read<C, Fut>(call: C) -> Option<fantastic_kernel::Outcome>
+where
+    C: FnOnce(BrowserThen) -> Fut,
+    Fut: std::future::Future<Output = fantastic_kernel::Outcome>,
+{
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let then: BrowserThen = Box::new(move |out| {
+        Box::pin(async move {
+            let _ = tx.send(out);
+        })
+    });
+    let ack = call(then).await;
+    if ack.status != fantastic_kernel::Status::Accepted {
+        return Some(ack);
+    }
+    rx.await.ok()
 }
 
 // ─── `POST /<rest_id>/{target_id}` ──────────────────────────────────
@@ -526,28 +549,12 @@ async fn rest_reflect(
     }
     let target = AgentId::from(target_id.as_str());
     // A BROWSER'S GET, like the file proxy's chunk (`read_chunk`): the hand-in acks,
-    // and its settle — a message to this route — is the HTTP response the browser
-    // reads (a refusal at launch is the answer at once). Only a POST is the async
-    // verb channel (`rest_call`).
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let ack = fantastic_io_bridge::inbound::hand_in(
-        &state.kernel,
-        &owner,
-        inbound_call(&target, payload, None, None),
-        None,
-        move |out| async move {
-            let _ = tx.send(out);
-        },
-    )
-    .await;
-    let reply = if ack.status == fantastic_kernel::Status::Accepted {
-        match rx.await {
-            Ok(o) => o.result,
-            Err(_) => Value::Null,
-        }
-    } else {
-        ack.result
-    };
+    // and its settle is the HTTP response the browser reads — the one HTTP boundary
+    // ([`browser_read`]). Only a POST is the async verb channel (`rest_call`).
+    let hand_in = inbound_call(&target, payload, None, None);
+    let reply = browser_read(|then| fantastic_io_bridge::inbound::hand_in(&state.kernel, &owner, hand_in, None, then))
+        .await
+        .map_or(Value::Null, |o| o.result);
     if reply.is_null() {
         return routes::respond(StatusCode::NOT_FOUND, &[], None, Vec::new());
     }

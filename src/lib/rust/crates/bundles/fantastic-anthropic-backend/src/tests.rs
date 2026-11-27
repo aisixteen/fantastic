@@ -596,7 +596,7 @@ async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
     } else {
         AgentId::from(target)
     };
-    kernel.operator_send(vec![Item::new(to, payload)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(to, payload)])
         .await
         .remove(0)
         .result
@@ -2812,7 +2812,7 @@ async fn a_capabilities_setting_in_the_params_store_overrides_the_static_entry()
     let kept =
         json!({"claude-opus-4-1": {"images": false}, "tiny": {"images": true, "max_images": 1}});
     let r = fantastic_kernel::test_support::as_agent(AgentId::from(id).clone(), async {
-        kernel.operator_send(vec![Item::new(
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from(store.as_str()),
                 json!({"type": "append", "rows": [{"kind": "setting", "name": "capabilities", "value": kept}]}),
             )])
@@ -2858,7 +2858,7 @@ async fn image_bytes_on_the_binary_path_reach_the_wire_as_base64() {
         json!({"type": "complete", "rid": rid, "image": {"ref": "5", "media_type": "image/png"}}),
     )
     .with_binary_key("data", vec![0xff, 0x00, 0x10]);
-    let r = kernel.operator_send(vec![item]).await.remove(0).result;
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![item]).await.remove(0).result;
     assert_eq!(r["bytes"], json!(3), "{r}");
     assert!(srv.received_requests().await.unwrap_or_default().is_empty());
     let r = call(
@@ -2911,7 +2911,7 @@ async fn send_image(kernel: &Arc<Kernel>, agent: &str, rid: &str) {
         json!({"type": "complete", "rid": rid, "image": {"ref": "5", "media_type": "image/png"}}),
     )
     .with_binary_key("data", vec![1, 2, 3]);
-    let r = kernel.operator_send(vec![item]).await.remove(0).result;
+    let r = fantastic_kernel::test_support::send_settled(kernel, vec![item]).await.remove(0).result;
     assert_eq!(r["bytes"], json!(3), "{r}");
     assert!(stashed(agent, rid));
 }
@@ -2989,7 +2989,7 @@ fn an_entry_whose_complete_never_comes_is_dropped_after_the_request_timeout() {
 async fn an_image_item_without_bytes_or_media_type_is_refused() {
     let tmp = TempDir::new().unwrap();
     let kernel = mk_with_id(&tmp, "http://unused.test/v1/messages", json!({}), "img2").await;
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("img2"),
             json!({"type": "complete", "rid": "c~1", "image": {"ref": "1", "media_type": "image/png"}}),
         )
@@ -2998,7 +2998,7 @@ async fn an_image_item_without_bytes_or_media_type_is_refused() {
         .remove(0)
         .result;
     assert_eq!(r["reason"], json!("missing_arg"), "{r}");
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("img2"),
             json!({"type": "complete", "rid": "c~1", "image": {"ref": "1"}}),
         )

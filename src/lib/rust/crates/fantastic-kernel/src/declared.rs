@@ -76,15 +76,6 @@ pub enum HandIn {
     Other,
 }
 
-/// The schema of a positive number of seconds, or none.
-fn positive_seconds(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-    serde_json::from_value(serde_json::json!({
-        "type": ["number", "null"],
-        "exclusiveMinimum": 0,
-    }))
-    .expect("a number schema")
-}
-
 /// The tier of a reflect's verb docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -261,29 +252,6 @@ pub mod kernel {
     #[serde(deny_unknown_fields)]
     pub struct KernelStop {}
 
-    /// Waits for EVERY named agent to send YOU a message of type 'report' (its `state` and `result`); a report from a named agent is HELD for the one combined message, not delivered as its own turn. Returns at once {wait_id, label, ids, timeout_s}; later ONE message reaches you — {wait_id, label, done:[{id, state, result}], missing:[ids], timed_out} — when all have reported or `timeout_s` passes. Refuses a missing or empty `ids`, an id that names no agent (unknown_agent), yourself, a non-positive `timeout_s` and a non-string `label`. The wait is a row: it survives a restart.
-    #[derive(Debug, Deserialize, JsonSchema)]
-    #[serde(deny_unknown_fields)]
-    pub struct AwaitSet {
-        /// The agent ids to wait for.
-        #[schemars(length(min = 1))]
-        pub ids: Vec<String>,
-        /// A positive number of seconds after which the wait ends as timed out.
-        #[schemars(schema_with = "positive_seconds")]
-        #[serde(default)]
-        pub timeout_s: Option<f64>,
-        /// A name for the wait, echoed in the combined message.
-        pub label: Option<String>,
-    }
-
-    /// Drops YOUR wait; the reports it held are then delivered one by one, each as its own message. Returns {cancelled:bool, wait_id, released:int}. A wait that is unknown or not yours ⇒ {cancelled:false}.
-    #[derive(Debug, Deserialize, JsonSchema)]
-    #[serde(deny_unknown_fields)]
-    pub struct AwaitCancel {
-        /// The `wait_id` `await_set` returned.
-        pub wait_id: i64,
-    }
-
     crate::verbs! {
         @own
         "create_agent" => CreateAgent,
@@ -296,8 +264,6 @@ pub mod kernel {
         "cancel" => Cancel,
         "shutdown_agents" => ShutdownAgents,
         "kernel_stop" => KernelStop,
-        "await_set" => AwaitSet,
-        "await_cancel" => AwaitCancel,
     }
 }
 

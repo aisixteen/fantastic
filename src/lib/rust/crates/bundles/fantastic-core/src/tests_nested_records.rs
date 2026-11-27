@@ -62,7 +62,7 @@ fn web_root(tmp: &TempDir) -> std::path::PathBuf {
 }
 
 async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    k.operator_send(vec![Item::new(AgentId::from(target), payload)])
+    fantastic_kernel::test_support::send_settled(k, vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -71,7 +71,7 @@ async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
 async fn call_as(k: &Arc<Kernel>, who: &str, target: &str, payload: Value) -> Value {
     as_agent(
         AgentId::from(who),
-        k.operator_send(vec![Item::new(AgentId::from(target), payload)]),
+        fantastic_kernel::test_support::send_settled(k, vec![Item::new(AgentId::from(target), payload)]),
     )
     .await
     .remove(0)

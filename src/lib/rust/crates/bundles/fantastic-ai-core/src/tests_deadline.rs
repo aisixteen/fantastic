@@ -66,7 +66,7 @@ fn spawn_send(
         if let Some(s) = timeout {
             item = item.with_timeout(s);
         }
-        k.operator_send(vec![item]).await.remove(0)
+        fantastic_kernel::test_support::send_settled(&k, vec![item]).await.remove(0)
     })
 }
 
@@ -107,7 +107,7 @@ async fn a_slow_call_past_its_deadline_tells_the_sender_its_dead_letter_and_can_
         vec![pass(send_call("sleeper", "ping", None)), pass(DONE)],
         Duration::ZERO,
     );
-    let _ = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(
+    let _ = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "o"}),
         )]))
@@ -123,7 +123,7 @@ async fn a_slow_call_past_its_deadline_tells_the_sender_its_dead_letter_and_can_
     assert!(!pid.is_empty(), "{req}");
     let acked = as_agent(
         backend.clone(),
-        kernel.send(vec![Item::new(
+        fantastic_kernel::test_support::settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "ack_deadletter", "id": pid.parse::<i64>().unwrap()}),
         )]),
@@ -134,7 +134,7 @@ async fn a_slow_call_past_its_deadline_tells_the_sender_its_dead_letter_and_can_
     assert_eq!(acked["acked"], json!(true), "{acked}");
     let resent = as_agent(
         backend.clone(),
-        kernel.send(vec![Item::new(
+        fantastic_kernel::test_support::settled(&kernel, vec![Item::new(
             AgentId::from("sleeper"),
             json!({"type": "send", "text": "ping", "ms": 10}),
         )
@@ -159,7 +159,7 @@ async fn status_answers_at_once_and_an_unread_message_gets_one_next_pass() {
     assert!(until_passes(&s, 1).await);
     let two = as_agent(
         peer.clone(),
-        kernel.send(vec![Item::new(
+        fantastic_kernel::test_support::settled(&kernel, vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "two", "client_id": "pc"}),
         )]),
@@ -169,7 +169,7 @@ async fn status_answers_at_once_and_an_unread_message_gets_one_next_pass() {
     .result;
     assert_eq!(two["accepted"], json!(true), "{two}");
     let t = std::time::Instant::now();
-    let bare = kernel.operator_send(vec![Item::new(backend.clone(), json!({"type": "status"}))])
+    let bare = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(backend.clone(), json!({"type": "status"}))])
         .await
         .remove(0)
         .result;
@@ -231,7 +231,7 @@ async fn a_send_reply_states_its_deadline_and_a_per_call_timeout_overrides_it() 
         ))],
         Duration::ZERO,
     );
-    let _ = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(
+    let _ = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "o"}),
         )]))
@@ -248,7 +248,7 @@ async fn a_send_reply_states_its_deadline_and_a_per_call_timeout_overrides_it() 
 }
 
 async fn status_reply(kernel: &Arc<Kernel>, to: &AgentId, payload: Value) -> Value {
-    kernel.operator_send(vec![Item::new(to.clone(), payload)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(to.clone(), payload)])
         .await
         .remove(0)
         .result
@@ -261,8 +261,8 @@ async fn ask_inquiry(kernel: &Arc<Kernel>, to: &AgentId, from: Option<&AgentId>)
         json!({"type": "inquiry", "text": "ship?"}),
     )];
     let out = match from {
-        Some(f) => as_agent(f.clone(), kernel.operator_send(item)).await,
-        None => kernel.operator_send(item).await,
+        Some(f) => as_agent(f.clone(), fantastic_kernel::test_support::send_settled(kernel, item)).await,
+        None => fantastic_kernel::test_support::send_settled(kernel, item).await,
     };
     assert_eq!(
         out[0].result["accepted"],

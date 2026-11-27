@@ -145,18 +145,18 @@ fn boot(dir: &Path) -> Arc<Kernel> {
 }
 
 async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Outcome {
-    k.operator_send(vec![Item::new(AgentId::from(target), payload)]).await.remove(0)
+    fantastic_kernel::test_support::send_settled(k, vec![Item::new(AgentId::from(target), payload)]).await.remove(0)
 }
 
 async fn call_as(k: &Arc<Kernel>, who: &str, target: &str, payload: Value) -> Value {
-    as_agent(AgentId::from(who), k.operator_send(vec![Item::new(AgentId::from(target), payload)]))
+    as_agent(AgentId::from(who), fantastic_kernel::test_support::send_settled(k, vec![Item::new(AgentId::from(target), payload)]))
         .await
         .remove(0)
         .result
 }
 
 async fn call_named(k: &Arc<Kernel>, target: &str, payload: Value, name: &str) -> Outcome {
-    k.operator_send(vec![Item::new(AgentId::from(target), payload).with_id(name)]).await.remove(0)
+    fantastic_kernel::test_support::send_settled(k, vec![Item::new(AgentId::from(target), payload).with_id(name)]).await.remove(0)
 }
 
 fn root_id(k: &Arc<Kernel>) -> String {

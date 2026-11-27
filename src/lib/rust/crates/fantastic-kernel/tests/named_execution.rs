@@ -72,8 +72,7 @@ fn mk() -> (TempDir, Arc<Kernel>) {
 }
 
 async fn seed(kernel: &Arc<Kernel>, id: &str) {
-    kernel
-        .operator_send(vec![Item::new(
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "create_agent", "parent_id": "kernel_state", "id": id,
                    "handler_module": "slow.tools"}),
@@ -87,7 +86,7 @@ async fn a_named_execution_is_registered_under_its_own_id() {
     seed(&kernel, "w").await;
     let k = Arc::clone(&kernel);
     let running = tokio::spawn(async move {
-        k.operator_send(vec![
+        fantastic_kernel::test_support::send_settled(&k, vec![
             Item::new(AgentId::from("w"), json!({"type": "work"})).with_id("job-1")
         ])
         .await
@@ -95,8 +94,7 @@ async fn a_named_execution_is_registered_under_its_own_id() {
     });
     // Let it register.
     tokio::time::sleep(Duration::from_millis(150)).await;
-    let ps = kernel
-        .operator_send(vec![Item::new(
+    let ps = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "ps"}),
         )])
@@ -118,8 +116,7 @@ async fn a_named_execution_is_registered_under_its_own_id() {
     );
 
     // …and CANCEL by that same id reaches it.
-    let c = kernel
-        .operator_send(vec![Item::new(
+    let c = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "cancel", "task_id": "job-1"}),
         )])
@@ -144,8 +141,7 @@ async fn a_named_execution_is_registered_under_its_own_id() {
 async fn an_unnamed_execution_still_mints_a_pid() {
     let (_t, kernel) = mk();
     seed(&kernel, "w").await;
-    let out = kernel
-        .operator_send(vec![Item::new(AgentId::from("w"), json!({"type": "ping"}))])
+    let out = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("w"), json!({"type": "ping"}))])
         .await
         .remove(0);
     let pid = out.pid.expect("an unnamed item still gets a minted pid");

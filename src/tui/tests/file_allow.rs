@@ -70,14 +70,14 @@ async fn boot(dir: &std::path::Path) -> std::sync::Arc<Kernel> {
     )
     .expect("boots");
     let kernel = std::sync::Arc::clone(&booted.kernel);
-    kernel.operator_send(vec![Item::new(
+    fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"update_agent","id":bootstrap::DEFAULT_ROOT_ID,"memory_store_id":"memory"}),
         )])
         .await;
     assert_eq!(kernel.start(false).await["started"], json!(true));
     for id in &booted.loaded {
-        kernel.operator_send(vec![Item::new(id.clone(), json!({"type":"boot"}))]).await;
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(id.clone(), json!({"type":"boot"}))]).await;
     }
     kernel
 }
@@ -87,7 +87,7 @@ async fn boot(dir: &std::path::Path) -> std::sync::Arc<Kernel> {
 async fn call(kernel: &std::sync::Arc<Kernel>, from: &str, payload: Value) -> Value {
     let k = std::sync::Arc::clone(kernel);
     let item = Item::new(AgentId::from("docs"), payload);
-    fantastic_kernel::test_support::as_agent(AgentId::from(from), k.send(vec![item])).await.remove(0).result
+    fantastic_kernel::test_support::as_agent(AgentId::from(from), fantastic_kernel::test_support::settled(&k, vec![item])).await.remove(0).result
 }
 
 fn refused(v: &Value) -> bool {
@@ -96,7 +96,7 @@ fn refused(v: &Value) -> bool {
 
 /// The operator sets `docs`'s allow list (the record's, written from above).
 async fn expose(kernel: &std::sync::Arc<Kernel>, allow: Value) {
-    let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel"), json!({"type":"update_agent","id":"docs","allow":allow}))])
+    let r = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from("kernel"), json!({"type":"update_agent","id":"docs","allow":allow}))])
         .await
         .remove(0)
         .result;

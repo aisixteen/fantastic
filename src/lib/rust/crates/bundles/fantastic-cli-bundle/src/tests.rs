@@ -35,7 +35,7 @@ async fn rig() -> Arc<Kernel> {
 
 async fn dispatch(payload: Value) -> Value {
     let kernel = rig().await;
-    kernel.operator_send(vec![Item::new(AgentId::from("cli"), payload)])
+    fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("cli"), payload)])
         .await
         .remove(0)
         .result

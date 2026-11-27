@@ -91,7 +91,7 @@ fn python() -> PathBuf {
 }
 
 async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    k.operator_send(vec![Item::new(AgentId::from(target), payload)])
+    fantastic_kernel::test_support::send_settled(k, vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result

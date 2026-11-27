@@ -301,8 +301,7 @@ async fn ram_store(kernel: &Arc<Kernel>, id: &str) {
 }
 
 async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    kernel
-        .operator_send(vec![Item::new(AgentId::from(target), payload)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -458,7 +457,7 @@ async fn stop_during_a_stalled_stream_clears_generating() {
     let k = Arc::clone(&kernel);
     let target = ai.clone();
     let turn = tokio::spawn(async move {
-        crate::tests::settled(&k, k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             target,
             json!({"type": "send", "text": "go", "client_id": "tab"}),
         )]))
@@ -468,7 +467,7 @@ async fn stop_during_a_stalled_stream_clears_generating() {
     until_requests(&fp, 1).await;
     let before = as_agent(
         "rx",
-        kernel.operator_send(vec![Item::new(ai.clone(), json!({"type": "status"}))]),
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(ai.clone(), json!({"type": "status"}))]),
     )
     .await
     .remove(0)
@@ -476,14 +475,14 @@ async fn stop_during_a_stalled_stream_clears_generating() {
     assert_eq!(before["generating"], json!(true), "{before}");
     let out = as_agent(
         "rx",
-        kernel.operator_send(vec![Item::new(ai.clone(), json!({"type": "stop"}))]),
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(ai.clone(), json!({"type": "stop"}))]),
     )
     .await
     .remove(0);
     assert_eq!(out.result, json!({"stopped": true}), "{:?}", out.result);
     let after = as_agent(
         "rx",
-        kernel.operator_send(vec![Item::new(ai.clone(), json!({"type": "status"}))]),
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(ai.clone(), json!({"type": "status"}))]),
     )
     .await
     .remove(0)
@@ -549,7 +548,7 @@ async fn stop_closes_a_stalled_turn_the_kernel_cancel_did_not_reach() {
     let k = Arc::clone(&kernel);
     let target = ai.clone();
     let turn = tokio::spawn(async move {
-        crate::tests::settled(&k, k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             target,
             json!({"type": "send", "text": "go", "client_id": "tab"}),
         )]))
@@ -559,14 +558,14 @@ async fn stop_closes_a_stalled_turn_the_kernel_cancel_did_not_reach() {
     until_requests(&fp, 1).await;
     let out = as_agent(
         "rx",
-        kernel.operator_send(vec![Item::new(ai.clone(), json!({"type": "stop"}))]),
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(ai.clone(), json!({"type": "stop"}))]),
     )
     .await
     .remove(0);
     assert_eq!(out.result, json!({"stopped": true}), "{:?}", out.result);
     let after = as_agent(
         "rx",
-        kernel.operator_send(vec![Item::new(ai.clone(), json!({"type": "status"}))]),
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(ai.clone(), json!({"type": "status"}))]),
     )
     .await
     .remove(0)
@@ -584,7 +583,7 @@ async fn stop_closes_a_stalled_turn_the_kernel_cancel_did_not_reach() {
     *fp.step.lock().unwrap() = Duration::ZERO;
     let next = as_agent(
         "rx",
-        kernel.operator_send(vec![Item::new(
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             ai.clone(),
             json!({"type": "send", "text": "after", "client_id": "tab"}),
         )]),
@@ -627,14 +626,14 @@ async fn stop_reaches_a_reply_woken_turn() {
     until_requests(&fp, 1).await;
     let out = as_agent(
         "rx",
-        kernel.operator_send(vec![Item::new(ai.clone(), json!({"type": "stop"}))]),
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(ai.clone(), json!({"type": "stop"}))]),
     )
     .await
     .remove(0);
     assert_eq!(out.result, json!({"stopped": true}), "{:?}", out.result);
     let after = as_agent(
         "rx",
-        kernel.operator_send(vec![Item::new(ai.clone(), json!({"type": "status"}))]),
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(ai.clone(), json!({"type": "status"}))]),
     )
     .await
     .remove(0)
@@ -651,7 +650,7 @@ async fn stop_reaches_a_reply_woken_turn() {
     *fp.step.lock().unwrap() = Duration::ZERO;
     let next = as_agent(
         "rx",
-        kernel.operator_send(vec![Item::new(
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             ai.clone(),
             json!({"type": "send", "text": "after", "client_id": "tab"}),
         )]),
@@ -681,7 +680,7 @@ async fn stop_aborts_a_send_the_kernel_cancel_does_not_find() {
     let k = Arc::clone(&kernel);
     let target = ai.clone();
     let turn = tokio::spawn(async move {
-        crate::tests::settled(&k, k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             target,
             json!({"type": "send", "text": "go", "client_id": "tab"}),
         )]))
@@ -698,7 +697,7 @@ async fn stop_aborts_a_send_the_kernel_cancel_does_not_find() {
     }
     let out = as_agent(
         "rx",
-        kernel.operator_send(vec![Item::new(ai.clone(), json!({"type": "stop"}))]),
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(ai.clone(), json!({"type": "stop"}))]),
     )
     .await
     .remove(0);
@@ -708,7 +707,7 @@ async fn stop_aborts_a_send_the_kernel_cancel_does_not_find() {
     assert_eq!(turn_out.result["accepted"], json!(true), "{:?}", turn_out.result);
     let after = as_agent(
         "rx",
-        kernel.operator_send(vec![Item::new(ai.clone(), json!({"type": "status"}))]),
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(ai.clone(), json!({"type": "status"}))]),
     )
     .await
     .remove(0)
@@ -725,7 +724,7 @@ async fn stop_aborts_a_send_the_kernel_cancel_does_not_find() {
     *fp.step.lock().unwrap() = Duration::ZERO;
     let next = as_agent(
         "rx",
-        kernel.operator_send(vec![Item::new(
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             ai.clone(),
             json!({"type": "send", "text": "after", "client_id": "tab"}),
         )]),
@@ -752,7 +751,7 @@ async fn a_receiver_stops_the_stream_and_the_turn_keeps_a_marker() {
     let k = Arc::clone(&kernel);
     let target = ai.clone();
     let turn = tokio::spawn(async move {
-        crate::tests::settled(&k, k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             target,
             json!({"type": "send", "text": "go", "client_id": "tab"}),
         )]))
@@ -763,7 +762,7 @@ async fn a_receiver_stops_the_stream_and_the_turn_keeps_a_marker() {
     tokio::time::sleep(Duration::from_millis(200)).await; // some text has streamed
     let out = as_agent(
         "rx",
-        kernel.operator_send(vec![Item::new(ai.clone(), json!({"type": "stop"}))]),
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(ai.clone(), json!({"type": "stop"}))]),
     )
     .await
     .remove(0);
@@ -820,7 +819,7 @@ async fn rows_is_a_view_of_what_the_agent_holds() {
         let k = Arc::clone(&kernel);
         let target = ai.clone();
         async move {
-            as_agent("viewer", k.operator_send(vec![Item::new(target, payload)]))
+            as_agent("viewer", fantastic_kernel::test_support::send_settled(&k, vec![Item::new(target, payload)]))
                 .await
                 .remove(0)
                 .result
@@ -867,7 +866,7 @@ async fn rows_is_a_view_of_what_the_agent_holds() {
     ram_store(&kernel, "stranger").await;
     let out = as_agent(
         "stranger",
-        kernel.operator_send(vec![Item::new(ai.clone(), json!({"type": "rows"}))]),
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(ai.clone(), json!({"type": "rows"}))]),
     )
     .await
     .remove(0);
@@ -1004,7 +1003,7 @@ async fn status_during_a_stream_is_json() {
     let k = Arc::clone(&kernel);
     let target = ai.clone();
     let turn = tokio::spawn(async move {
-        crate::tests::settled(&k, k.operator_send(vec![Item::new(
+        crate::tests::settled(&k, fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             target,
             json!({"type": "send", "text": "go"}),
         )]))

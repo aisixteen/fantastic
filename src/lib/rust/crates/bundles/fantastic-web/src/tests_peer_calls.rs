@@ -78,7 +78,7 @@ fn send_to_page(kernel: &Arc<Kernel>, payload: Value) -> tokio::task::JoinHandle
 
 fn send_item(kernel: &Arc<Kernel>, item: Item) -> tokio::task::JoinHandle<Outcome> {
     let k = Arc::clone(kernel);
-    tokio::spawn(async move { k.operator_send(vec![item]).await.remove(0) })
+    tokio::spawn(async move { fantastic_kernel::test_support::send_settled(&k, vec![item]).await.remove(0) })
 }
 
 async fn settled(h: tokio::task::JoinHandle<Outcome>) -> Outcome {

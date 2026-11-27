@@ -79,7 +79,7 @@ async fn two_folder_kernel(tmp: &tempfile::TempDir, roots: &[(&str, &str)]) -> A
     fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(root);
     for (name, root) in roots {
-        let r = kernel.operator_send(vec![Item::new(
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({"type": "create_agent", "parent_id": "kernel",
                        "handler_module": HANDLER_MODULE, "id": name, "root": root, "allow": ["."]}),
@@ -93,7 +93,7 @@ async fn two_folder_kernel(tmp: &tempfile::TempDir, roots: &[(&str, &str)]) -> A
 }
 
 async fn ask(kernel: &Arc<Kernel>, to: &str, payload: Value) -> Value {
-    kernel.operator_send(vec![Item::new(AgentId::from(to), payload)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from(to), payload)])
         .await
         .remove(0)
         .result

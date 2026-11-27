@@ -86,7 +86,7 @@ async fn mk_kernel_with(
 
     let backend_id = backend_id_for(tmp, tag);
     let file_id = format!("ff_{}", backend_id);
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent",
@@ -120,7 +120,7 @@ async fn mk_kernel_with(
     {
         create[k] = v;
     }
-    let _ = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), create)])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), create)])
         .await
         .remove(0)
         .result;
@@ -244,7 +244,7 @@ async fn an_envelope_dispatches_and_streams_verbatim() {
     // the model's calls are the chat's: the chat holds its own line on the leg
     let chat = pair_chat(&kernel, &backend).await;
     fantastic_kernel::test_support::grant(&kernel, chat.as_str(), &format!("ff_{backend}"), json!({"call": ["*"]}));
-    let reply = kernel.operator_send(vec![Item::new(
+    let reply = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             chat,
             json!({"type": "send", "text": "go", "client_id": client_id}),
         )])
@@ -341,7 +341,7 @@ async fn thinking_streams_wrapped_and_persists_stripped() {
         last_answer(&kernel, &backend).await,
         "ack <call name=\"done\"></call>"
     );
-    let h = kernel.operator_send(vec![Item::new(
+    let h = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             pair_chat(&kernel, &backend).await,
             json!({"type": "history"}),
         )])
@@ -357,7 +357,7 @@ async fn chat_knobs(kernel: &Arc<Kernel>, backend: &AgentId, knobs: Value) {
     let chat = pair_chat(kernel, backend).await;
     let mut payload = json!({"type": "update_agent", "id": chat.as_str()});
     payload.as_object_mut().unwrap().extend(knobs.as_object().cloned().unwrap_or_default());
-    let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), payload)])
+    let r = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from("kernel_state"), payload)])
         .await
         .remove(0)
         .result;
@@ -439,7 +439,7 @@ async fn list_models_is_unknown_type() {
     let tmp = TempDir::new().unwrap();
     let server = MockServer::start().await;
     let (kernel, backend) = mk_kernel(&tmp, "lm", &server.uri()).await;
-    let reply = kernel.operator_send(vec![Item::new(
+    let reply = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             backend.clone(),
             json!({"type": "list_models"}),
         )])
@@ -455,7 +455,7 @@ async fn list_models_is_unknown_type() {
     assert_eq!(reply["reason"], json!("unhandled"));
     assert!(reply.get("models").is_none());
     // And it is gone from the verb menu the model reads.
-    let reflect = kernel.operator_send(vec![Item::new(backend, json!({"type": "reflect"}))])
+    let reflect = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(backend, json!({"type": "reflect"}))])
         .await
         .remove(0)
         .result;
@@ -483,7 +483,7 @@ async fn history_persists_and_round_trips() {
     let chat_id = pair_chat(&kernel, &backend).await;
     let mut rx = rebind_backend_inbox(&kernel, &chat_id);
     let client_id = "browser_hist";
-    let _reply = kernel.operator_send(vec![Item::new(
+    let _reply = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             pair_chat(&kernel, &backend).await,
             json!({"type": "send", "text": "ping", "client_id": client_id}),
         )])
@@ -525,7 +525,7 @@ async fn history_persists_and_round_trips() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 
-    let h = kernel.operator_send(vec![Item::new(
+    let h = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             pair_chat(&kernel, &backend).await,
             json!({"type": "history"}),
         )])
@@ -631,7 +631,7 @@ async fn reflect_extras_match_python() {
     let tmp = TempDir::new().unwrap();
     let server = MockServer::start().await;
     let (kernel, backend) = mk_kernel(&tmp, "rx", &server.uri()).await;
-    let r = kernel.operator_send(vec![Item::new(backend.clone(), json!({"type": "reflect"}))])
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(backend.clone(), json!({"type": "reflect"}))])
         .await
         .remove(0)
         .result;
@@ -661,13 +661,13 @@ async fn reflect_extras_match_python() {
     assert_eq!(r["think"], Value::Null);
 
     // Set them: what the record names is shown as it is.
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": backend.as_str(),
                    "num_ctx": 4096, "think": false}),
         )])
         .await;
-    let r = kernel.operator_send(vec![Item::new(backend, json!({"type": "reflect"}))])
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(backend, json!({"type": "reflect"}))])
         .await
         .remove(0)
         .result;
@@ -686,14 +686,14 @@ async fn unknown_type_is_pythons_repr_and_shutdown_is_unknown() {
     for (verb, want) in [
         ("garbage", "unknown verb 'garbage'; "),
     ] {
-        let r = kernel.operator_send(vec![Item::new(agent.clone(), json!({"type": verb}))])
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(agent.clone(), json!({"type": verb}))])
             .await
             .remove(0)
             .result;
         assert!(r["error"].as_str().is_some_and(|e| e.starts_with(want)), "{r}");
     }
     // `shutdown` is no verb of this bundle: refused like any unknown one
-    let r = kernel.operator_send(vec![Item::new(agent.clone(), json!({"type": "shutdown"}))])
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(agent.clone(), json!({"type": "shutdown"}))])
         .await
         .remove(0)
         .result;
@@ -829,7 +829,7 @@ fn full_response(content_type: &str, body: &str) -> (Vec<u8>, bool) {
 /// Send one message, wait until every agent is quiet, and return the ack.
 async fn send_once(kernel: &Arc<Kernel>, backend: &AgentId, client: &str) -> Value {
     let chat = pair_chat(kernel, backend).await;
-    let ack = kernel.operator_send(vec![Item::new(
+    let ack = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             chat,
             json!({"type": "send", "text": "hi", "client_id": client}),
         )])
@@ -847,7 +847,7 @@ async fn send_once(kernel: &Arc<Kernel>, backend: &AgentId, client: &str) -> Val
 /// The chat's conversation rows, as it holds them.
 async fn chat_rows(kernel: &Arc<Kernel>, backend: &AgentId) -> Vec<Value> {
     let chat = pair_chat(kernel, backend).await;
-    let r = kernel.operator_send(vec![Item::new(chat, json!({"type": "rows"}))])
+    let r = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(chat, json!({"type": "rows"}))])
         .await
         .remove(0)
         .result;
@@ -955,7 +955,7 @@ async fn a_final_ndjson_line_without_a_newline_still_counts() {
 async fn unknown_type_wire_shape_is_byte_exact() {
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_kernel(&tmp, "unkw", "http://127.0.0.1:1").await;
-    let r = kernel.operator_send(vec![Item::new(agent, json!({"type": "frob"}))])
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(agent, json!({"type": "frob"}))])
         .await
         .remove(0)
         .result;
@@ -1005,7 +1005,7 @@ async fn a_bad_system_prompt_is_refused_at_the_write() {
         let kernel = Arc::clone(&kernel);
         let id = chat.as_str().to_string();
         async move {
-            kernel.operator_send(vec![Item::new(
+            fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                     AgentId::from("kernel_state"),
                     json!({"type": "update_agent", "id": id, "system_prompt": v}),
                 )])

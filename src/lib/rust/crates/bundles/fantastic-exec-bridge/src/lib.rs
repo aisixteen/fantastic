@@ -464,6 +464,8 @@ pub mod relay;
 pub mod spawn;
 mod started;
 mod sys;
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub mod test_support;
 mod tail;
 pub mod verbs;

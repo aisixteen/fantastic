@@ -46,6 +46,10 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Threading",
 ] }
 
+[features]
+# the test fixtures a dependent crate's tests build on (`test_support`); nothing ships them
+test-support = ["fantastic-kernel/test-support"]
+
 [dev-dependencies]
 fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 # The ROOT LOADER bundle — tests need it registered so the root answers the

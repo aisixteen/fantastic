@@ -101,8 +101,8 @@ fn connect(k: &Arc<Kernel>, calls: &Calls, reply: Option<Value>) -> Arc<PeerRout
 async fn send(k: &Arc<Kernel>, target: &str, payload: Value, as_: Option<&str>) -> Outcome {
     let item = vec![Item::new(AgentId::from(target), payload)];
     match as_ {
-        None => k.operator_send(item).await.remove(0),
-        Some(s) => fantastic_kernel::test_support::as_agent(AgentId::from(s), k.operator_send(item))
+        None => fantastic_kernel::test_support::send_settled(k, item).await.remove(0),
+        Some(s) => fantastic_kernel::test_support::as_agent(AgentId::from(s), fantastic_kernel::test_support::send_settled(k, item))
             .await
             .remove(0),
     }

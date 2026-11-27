@@ -20,8 +20,7 @@ async fn a_relative_state_folder_finds_its_store_and_persists() {
         bootstrap::bootstrap(reg, BootstrapOptions::daemon(".fantastic", ".")).expect("boot");
     let kernel = booted.kernel;
     test_support::boot_root(&kernel).await;
-    let made = kernel
-        .operator_send(vec![Item::new(
+    let made = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",

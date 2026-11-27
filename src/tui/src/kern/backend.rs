@@ -1426,7 +1426,7 @@ pub(crate) mod create_tests {
             let h = &h;
             async move {
                 let item = fantastic_kernel::Item::new(AgentId::from("canvas_root"), p);
-                fantastic_kernel::test_support::as_agent(who, h.kernel.send(vec![item])).await.remove(0).result
+                fantastic_kernel::test_support::as_agent(who, fantastic_kernel::test_support::settled(&h.kernel, vec![item])).await.remove(0).result
             }
         };
         // a call line on the canvas node, no create line: the create is refused, nothing is made
@@ -1488,7 +1488,7 @@ pub(crate) mod create_tests {
             let h = &h;
             async move {
                 let item = fantastic_kernel::Item::new(AgentId::from(node), json!({"type": "create", "record": record}));
-                fantastic_kernel::test_support::as_agent(who, h.kernel.send(vec![item])).await.remove(0).result
+                fantastic_kernel::test_support::as_agent(who, fantastic_kernel::test_support::settled(&h.kernel, vec![item])).await.remove(0).result
             }
         };
         // both allow it: made by the garage, its forced `can` over the child, the asked field kept

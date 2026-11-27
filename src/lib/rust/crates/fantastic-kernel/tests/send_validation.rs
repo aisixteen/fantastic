@@ -69,8 +69,7 @@ async fn create(kernel: &Arc<Kernel>, id: &str, extra: Value) -> Value {
             p[k] = v.clone();
         }
     }
-    kernel
-        .operator_send(vec![Item::new(AgentId::from("kernel"), p)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from("kernel"), p)])
         .await
         .remove(0)
         .result
@@ -82,8 +81,7 @@ async fn missing_type_is_missing_arg_before_gate() {
     create(&kernel, "a", json!({})).await;
     create(&kernel, "b", json!({})).await; // no edge a→b: the gate WOULD refuse
     let out = fantastic_kernel::test_support::as_agent(AgentId::from("a"), async {
-        kernel
-            .operator_send(vec![Item::new(AgentId::from("b"), json!({}))])
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("b"), json!({}))])
             .await
             .remove(0)
     })
@@ -111,8 +109,7 @@ async fn non_string_type_is_bad_arg() {
         (json!(""), "''"),
         (json!(null), "NoneType"),
     ] {
-        let out = kernel
-            .operator_send(vec![Item::new(AgentId::from("a"), json!({"type": bad}))])
+        let out = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("a"), json!({"type": bad}))])
             .await
             .remove(0);
         assert_eq!(out.result["reason"], "bad_arg", "{bad}: {}", out.result);
@@ -133,8 +130,7 @@ async fn a_body_sent_as_type_is_refused_by_its_type() {
     let (_t, kernel) = mk();
     create(&kernel, "a", json!({})).await;
     for payload in [json!({"type": null}), json!({})] {
-        let out = kernel
-            .operator_send(vec![
+        let out = fantastic_kernel::test_support::send_settled(&kernel, vec![
                 Item::new(AgentId::from("a"), payload).with_binary_key("type", vec![0u8; 4096])
             ])
             .await
@@ -151,8 +147,7 @@ async fn a_body_sent_as_type_is_refused_by_its_type() {
 async fn empty_id_is_refused_bad_arg() {
     let (_t, kernel) = mk();
     create(&kernel, "a", json!({})).await;
-    let out = kernel
-        .operator_send(vec![
+    let out = fantastic_kernel::test_support::send_settled(&kernel, vec![
             Item::new(AgentId::from("a"), json!({"type": "poke"})).with_id("")
         ])
         .await
@@ -163,8 +158,7 @@ async fn empty_id_is_refused_bad_arg() {
     // AND NOTHING ELSE IS REFUSED. There is no minted namespace to trespass in
     // any more: a caller supplies a NAME, the kernel supplies every id, so a
     // name that happens to look like an old pid runs like any other.
-    let out = kernel
-        .operator_send(vec![
+    let out = fantastic_kernel::test_support::send_settled(&kernel, vec![
             Item::new(AgentId::from("a"), json!({"type": "poke"})).with_id("a:deadbeef")
         ])
         .await
@@ -178,8 +172,7 @@ async fn empty_target_is_missing_arg() {
     // `unknown_agent` (the empty string is not a candidate id to suggest
     // corrections against). Also true for a binary item.
     let (_t, kernel) = mk();
-    let out = kernel
-        .operator_send(vec![Item::new(AgentId::from(""), json!({"type": "poke"}))])
+    let out = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from(""), json!({"type": "poke"}))])
         .await
         .remove(0);
     assert!(out.pid.is_none(), "{out:?}");
@@ -187,8 +180,7 @@ async fn empty_target_is_missing_arg() {
     assert_eq!(out.result["arg"], "target");
     assert_eq!(out.result["error"], "send: target required");
 
-    let out = kernel
-        .operator_send(vec![Item::new(AgentId::from(""), json!({"type": "poke"}))
+    let out = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from(""), json!({"type": "poke"}))
             .with_binary_key("bytes", vec![1, 2, 3])])
         .await
         .remove(0);
@@ -206,8 +198,7 @@ async fn draining_refuses_before_resolving_the_target() {
     let (_t, kernel) = mk();
     let _ = kernel.shutdown_agents().await;
     assert!(kernel.draining());
-    let out = kernel
-        .operator_send(vec![Item::new(
+    let out = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("no-such-agent"),
             json!({"type": "poke"}),
         )])
@@ -225,8 +216,7 @@ async fn a_send_from_a_killed_task_does_not_dispatch() {
     let killed = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let out = fantastic_kernel::tasks::CURRENT_KILLED
         .scope(killed, async {
-            kernel
-                .operator_send(vec![Item::new(AgentId::from("a"), json!({"type": "poke"}))])
+            fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("a"), json!({"type": "poke"}))])
                 .await
                 .remove(0)
         })

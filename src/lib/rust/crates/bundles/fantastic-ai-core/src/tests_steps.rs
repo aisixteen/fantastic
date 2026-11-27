@@ -275,8 +275,7 @@ impl Handler for Probe {
 }
 
 async fn create(kernel: &Arc<Kernel>, create: Value) {
-    let r = kernel
-        .operator_send(vec![Item::new(AgentId::from("kernel_state"), create)])
+    let r = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from("kernel_state"), create)])
         .await
         .remove(0)
         .result;
@@ -351,7 +350,7 @@ fn send_bg(kernel: &Arc<Kernel>, agent: &str, text: &str) -> tokio::task::JoinHa
         Arc::clone(kernel),
         Item::new(AgentId::from(agent), json!({"type": "send", "text": text, "client_id": "steps"})),
     );
-    tokio::spawn(async move { k.operator_send(vec![item]).await.remove(0) })
+    tokio::spawn(async move { fantastic_kernel::test_support::send_settled(&k, vec![item]).await.remove(0) })
 }
 
 /// While the pass's HISTORY READ is held at the store, the pass holds no task of its
@@ -451,9 +450,9 @@ async fn an_answers_calls_go_out_once_its_row_is_stored() {
     assert!(until(|| pings("steps_t4_probe") == 1).await, "the answer's call never went out");
 }
 
-/// A message the KERNEL HANDS OVER (bookkeeping: an `await_set` wake, run inside the
-/// dispatch whose report completed the set) answers no call: nothing is deferred or
-/// settled, the row is stored by its steps, and the pass it wakes reads it.
+/// A message the KERNEL HANDS OVER (bookkeeping, as it runs a delivered settle's `reply`
+/// verb) answers no call: nothing is deferred or settled, the row is stored by its
+/// steps, and the pass it wakes reads it.
 #[tokio::test]
 async fn a_message_the_kernel_hands_over_is_stored_and_read() {
     let tmp = TempDir::new().unwrap();
@@ -475,7 +474,7 @@ async fn a_message_the_kernel_hands_over_is_stored_and_read() {
 /// A call to `agent` from the operator, its settle to come.
 fn call_bg(kernel: &Arc<Kernel>, agent: &str, payload: Value) -> tokio::task::JoinHandle<fantastic_kernel::Outcome> {
     let (k, item) = (Arc::clone(kernel), Item::new(AgentId::from(agent), payload));
-    tokio::spawn(async move { k.operator_send(vec![item]).await.remove(0) })
+    tokio::spawn(async move { fantastic_kernel::test_support::send_settled(&k, vec![item]).await.remove(0) })
 }
 
 /// A MEMORY VERB IS ANSWERED BY ITS STEPS (#795): its handler defers and sends its store

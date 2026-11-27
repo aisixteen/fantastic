@@ -273,10 +273,10 @@ impl HomeKernel {
             if done.contains(&id.0) || !kernel.advertises(&id, "boot").await {
                 continue;
             }
-            let out = Arc::clone(kernel)
-                .send(vec![Item::new(id.clone(), json!({"type": "boot"}))])
-                .await
-                .remove(0);
+            // the home's boot (Q2, the lifecycle boundary): each boot settles first
+            let out = kernel
+                .lifecycle_call(Item::new(id.clone(), json!({"type": "boot"})))
+                .await;
             if let Some(e) = refused(&out.result) {
                 return Err(e);
             }

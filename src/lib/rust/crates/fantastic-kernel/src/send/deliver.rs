@@ -25,12 +25,12 @@
 //! [`Kernel::settle_deferred`] gives the outcome. One that comes after the
 //! execution already ended (its deadline, a cancel) is late and wakes nothing.
 
-use super::{current_sender, origin_scope, Launched, CURRENT_ORIGIN, CURRENT_SENDER};
+use super::{current_sender, origin_scope, CURRENT_ORIGIN, CURRENT_SENDER};
 use crate::agent::AgentId;
 use crate::kernel::Kernel;
 use crate::outcome::{Item, Outcome, Status};
 use crate::rows::Row;
-use crate::tasks::{current_task, Inherited, TaskId, CURRENT_TASK};
+use crate::tasks::{current_task, TaskId};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -137,42 +137,15 @@ impl Kernel {
         F: FnOnce(Outcome) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
-        if origin_scope().is_none() {
-            return Outcome::refused(crate::refusal::unknown_agent(item.target.as_str()));
-        }
-        let caller = current_sender();
-        if self.store_id().is_some() && item.id.is_some() {
-            if let Err(e) = self.recall_executions(std::slice::from_ref(&item)).await {
-                return Outcome::refused(crate::executions::raised("RuntimeError", &e));
-            }
-        }
-        let launched = self.launch(item, caller.clone());
-        let pid = match &launched {
-            Launched::Settled(o) => return o.clone(),
-            Launched::Recorded(o) => o.pid,
-            Launched::Dispatched(d) => Some(d.task_id),
-            Launched::Joining(j) => Some(TaskId(j.execution_id)),
-            Launched::KernelReflectFast(_) => None,
-        };
         let then: Then = Box::new(move |o| Box::pin(then(o)));
-        let kernel = Arc::clone(self);
-        // the handler is a child of the dispatch that called, as for any send
-        let parent = current_task();
-        tokio::spawn(Inherited::capture().scope(async move {
-            let run = kernel.settle_core(launched, true);
-            let (out, owed) = match parent {
-                Some(p) => CURRENT_TASK.scope(p, run).await,
-                None => run.await,
-            };
-            kernel.finish(owed, &out, Some(then), caller).await;
-        }));
-        Outcome::accepted(pid)
+        self.launch_all(vec![(item, Some(then))]).await.remove(0)
     }
 
     /// THE ASKER'S CALL: [`Self::call`] sent for `asker` — with sender and origin both
-    /// the agent that asked for the verb whose dispatch captured it ([`Asker::current`]),
-    /// as [`Self::send_as_caller`] sends — so a later step of that verb still acts for
-    /// its asker, checked as it. The continuation runs as the agent that makes this
+    /// the agent that asked for the verb whose dispatch captured it ([`Asker::current`])
+    /// — so a later step of that verb still acts for its asker, checked as it (a verb
+    /// that acts for an asker: `fork`, `import_subtree`, the canvas `create`,
+    /// `export_subtree`). The continuation runs as the agent that makes this
     /// call, as for [`Self::call`].
     pub async fn call_for<F, Fut>(self: &Arc<Self>, asker: &Asker, item: Item, then: F) -> Outcome
     where
@@ -214,6 +187,32 @@ impl Kernel {
         if ack.status != Status::Accepted {
             run_once(slot, ack).await;
         }
+    }
+
+    /// THE LIFECYCLE BOUNDARY (#795, Q2): one call made by a HOST'S OWN BOOT OR
+    /// SHUTDOWN — the in-process shell setting its records before the kernel
+    /// starts, a home building its tree before its page serves, the pages' last
+    /// flush before the drain — whose settle that boot or shutdown must know before
+    /// it goes on. It is a call like any other, as the operator: a pid, a call row,
+    /// a settle row. What waits for its settle is the host's boot or shutdown
+    /// sequence, which is no agent and runs no step: so nothing an agent runs may
+    /// use it — an agent's code calls with [`Self::call`] and continues on the
+    /// settle. A launch refusal is the answer at once.
+    pub async fn lifecycle_call(self: &Arc<Self>, item: Item) -> Outcome {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let ack = super::as_operator(self.call(item, move |out| async move {
+            let _ = tx.send(out);
+        }))
+        .await;
+        if ack.status != Status::Accepted {
+            return ack;
+        }
+        rx.await.unwrap_or_else(|_| {
+            Outcome::refused(crate::refusal::refusal(
+                crate::refusal::TRANSPORT_ERROR,
+                "lifecycle_call: the settle was never delivered",
+            ))
+        })
     }
 
     /// DEFER this dispatch's settle: called by a handler whose answer comes from
@@ -290,7 +289,7 @@ impl Kernel {
             run_then(then, out.clone(), caller).await;
         } else if let Some(o) = &owed {
             if let Some(r) = &o.recipient {
-                self.deliver_reply(r, o.pid, &o.target, &o.verb, out).await;
+                self.deliver_reply(r, Some(o.pid), &o.target, &o.verb, out).await;
             }
         }
         if let Some(o) = owed {
@@ -304,7 +303,7 @@ impl Kernel {
     async fn deliver_reply(
         self: &Arc<Self>,
         recipient: &AgentId,
-        pid: i64,
+        pid: Option<i64>,
         target: &AgentId,
         verb: &str,
         out: &Outcome,
@@ -327,11 +326,91 @@ impl Kernel {
         let r = self.bookkeeping(&agent, payload, body).await;
         if r.status != Status::Completed {
             eprintln!(
-                "  [kernel] the settle of {pid} was not taken by {}: {} {}",
+                "  [kernel] the settle of {} was not taken by {}: {} {}",
+                pid.map_or_else(|| "-".to_string(), |p| p.to_string()),
                 recipient,
                 r.status.as_str(),
                 r.result
             );
+        }
+    }
+
+    /// DELIVER one settle that owes no `delivered` row — a joiner's, a recorded
+    /// outcome's, the unnamed `kernel` reflect's: to `then` when given, else to
+    /// `recipient`'s `reply` verb when its bundle declares one, else nowhere.
+    #[allow(clippy::too_many_arguments)] // one settle, as `deliver_reply` takes it
+    pub(crate) async fn deliver_to(
+        self: &Arc<Self>,
+        then: Option<Then>,
+        recipient: Option<AgentId>,
+        pid: Option<i64>,
+        target: &AgentId,
+        verb: &str,
+        out: Outcome,
+        caller: Option<AgentId>,
+    ) {
+        if let Some(then) = then {
+            run_then(then, out, caller).await;
+        } else if let Some(r) = recipient.filter(|r| self.declares_reply(r)) {
+            self.deliver_reply(&r, pid, target, verb, &out).await;
+        }
+    }
+
+    /// JOIN an execution in flight: its settle is delivered to this joiner too
+    /// (`then`, else the joiner's `reply_to`), once the execution settles. Nothing
+    /// waits for it. The joiner's own `timeout` bounds only ITS delivery: past it
+    /// the joiner gets `timed_out` and the execution KEEPS RUNNING, because a
+    /// joiner does not own it and killing another caller's work would be a
+    /// surprise.
+    pub(super) fn join(self: &Arc<Self>, j: super::Joiner, then: Option<Then>, caller: Option<AgentId>) {
+        let super::Joiner {
+            timeout,
+            execution_id,
+            target,
+            verb,
+            recipient,
+        } = j;
+        let kernel = Arc::clone(self);
+        let inherited = crate::tasks::Inherited::capture();
+        let deliver: crate::ledger::Joined = Box::new(move |out: Outcome| {
+            let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
+            rt.spawn(inherited.scope(async move {
+                kernel
+                    .deliver_to(then, recipient, Some(execution_id), &target, &verb, out, caller)
+                    .await;
+            }));
+        });
+        match self.ledger.join(execution_id, deliver) {
+            Ok(token) => {
+                let Some(d) = timeout else { return };
+                let kernel = Arc::clone(self);
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs_f64(d.secs)).await;
+                    if let Some(deliver) = kernel.ledger.unjoin(execution_id, token) {
+                        // PYTHON'S PROSE, verbatim: the JOINED execution's id (not
+                        // this joiner's own dispatch, which never gets one) — bare
+                        // digits, python's `{int!r}`. The execution itself keeps
+                        // running; only this caller's delivery gave up.
+                        let mut r = crate::refusal::refusal(
+                            crate::refusal::TIMEOUT,
+                            format!(
+                                "send: joined execution {execution_id} did not settle \
+                                 within this caller's {}s wait; the execution itself \
+                                 keeps running",
+                                d.shown(),
+                            ),
+                        );
+                        crate::refusal::with(&mut r, "task_id", json!(execution_id));
+                        deliver(Outcome::new(None, Status::TimedOut, r));
+                    }
+                });
+            }
+            // it settled between the launch and now: that outcome is the settle
+            Err((deliver, Some(out))) => deliver(*out),
+            Err((deliver, None)) => deliver(Outcome::refused(crate::refusal::refusal(
+                crate::refusal::TRANSPORT_ERROR,
+                "the execution being joined went away",
+            ))),
         }
     }
 
@@ -434,7 +513,7 @@ impl Kernel {
             );
             let verb = call.get("verb").and_then(Value::as_str).unwrap_or("").to_string();
             let out = recorded_outcome(pid, &row);
-            self.deliver_reply(&recipient, pid, &target, &verb, &out).await;
+            self.deliver_reply(&recipient, Some(pid), &target, &verb, &out).await;
             self.append_delivered(pid, sid);
         }
     }

@@ -285,7 +285,7 @@ async fn hydrate(sc: &Scenario) -> Hydration {
             can.entry(lid.clone())
                 .or_insert_with(|| json!({"create": {"who": ["*"], "what": "*"}}));
         }
-        let rec = kernel.operator_send(vec![Item::new(AgentId::from(ROOT), payload)])
+        let rec = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from(ROOT), payload)])
             .await
             .remove(0)
             .result;
@@ -375,7 +375,7 @@ async fn dispatch_item(
                 .expect("an item id is text or an integer"),
         );
     }
-    let mut out = k.operator_send(vec![item]).await.remove(0);
+    let mut out = fantastic_kernel::test_support::send_settled(k, vec![item]).await.remove(0);
     if let Some(body) = out.body.take() {
         // the chunk, as text, at its own slot of the reply
         let text = Value::String(String::from_utf8_lossy(&body.bytes).into_owned());
@@ -675,9 +675,9 @@ async fn run_steps(h: &Hydration, sc: &Scenario, pinned: &mut BTreeMap<String, u
                 as_agent(AgentId::from(from.as_str()), async move {
                     let item = vec![Item::new(AgentId::from(to.as_str()), send)];
                     let out = if gated {
-                        k.send(item).await.remove(0)
+                        fantastic_kernel::test_support::settled(&k, item).await.remove(0)
                     } else {
-                        k.operator_send(item).await.remove(0)
+                        fantastic_kernel::test_support::send_settled(&k, item).await.remove(0)
                     };
                     json!({"pid": out.pid.map(|p| p.0), "status": format!("{:?}", out.status).to_lowercase(), "result": out.result})
                 })

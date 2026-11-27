@@ -87,8 +87,7 @@ fn bootstrap_hydrates_persisted_children() {
             // store persists ITSELF through itself, as python's does.
             boot_root(&kernel).await;
             crate::test_support::wire_fake_store(&kernel, &store_root).await;
-            let _ = kernel
-                .operator_send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"child_a"}))])
+            let _ = crate::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"child_a"}))])
                 .await.remove(0).result;
             kernel.flush_records().await;
         });
@@ -170,8 +169,7 @@ fn edit_can_persists_every_line_across_a_restart() {
         rt.block_on(async {
             boot_root(&kernel).await;
             crate::test_support::wire_fake_store(&kernel, &store_root).await;
-            let _ = kernel
-                .operator_send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"child_m"}))])
+            let _ = crate::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"child_m"}))])
                 .await.remove(0).result;
             let id = AgentId::from("child_m");
             // settle the create's own write, so only the edits can make the record dirty again
@@ -311,8 +309,7 @@ fn concurrent_edit_can_persists_every_line_across_a_restart() {
             boot_root(&kernel).await;
             crate::test_support::wire_fake_store(&kernel, &store_root).await;
             for round in 0..ROUNDS {
-                let _ = kernel
-                    .operator_send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":format!("child_{round}")}))])
+                let _ = crate::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":format!("child_{round}")}))])
                     .await.remove(0).result;
             }
             // settle the creates' own writes, so only the edits can make the records dirty again
@@ -780,8 +777,7 @@ fn the_root_records_children_dir_places_the_whole_tree() {
     assert_eq!(web.root_path, fantastic.join("host_agents/web"));
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let r = kernel
-            .operator_send(vec![Item::new(
+        let r = crate::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel"),
                 json!({"type": "create_agent", "parent_id": "web", "id": "leaf",
                        "handler_module": "noop.tools"}),
@@ -818,8 +814,7 @@ fn daemon_keeps_lock_records_and_store_in_the_state_dir_given() {
     rt.block_on(async {
         boot_root(&kernel).await;
         // a RELATIVE store root resolves against the workdir: `.` IS the state dir
-        let _ = kernel
-            .operator_send(vec![Item::new(
+        let _ = crate::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({
                     "type": "create_agent", "parent_id": "kernel",
@@ -832,8 +827,7 @@ fn daemon_keeps_lock_records_and_store_in_the_state_dir_given() {
             crate::persistence::find_store(&kernel),
             Some(AgentId::from("store"))
         );
-        let _ = kernel
-            .operator_send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"child_a"}))])
+        let _ = crate::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"child_a"}))])
             .await;
         kernel.flush_records().await;
     });

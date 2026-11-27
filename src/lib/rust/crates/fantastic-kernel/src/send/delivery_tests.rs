@@ -351,7 +351,7 @@ async fn a_timed_out_call_delivers_its_dead_letter() {
     let k = mk(&seen);
     agent(&k, "a", Value::Null).await;
     agent(&k, "b", Value::Null).await;
-    let out = crate::send::as_operator(k.send(vec![Item::new(
+    let ack = crate::send::as_operator(k.send(vec![Item::new(
         AgentId::from("b"),
         json!({"type": "work", "ms": 5000}),
     )
@@ -359,13 +359,14 @@ async fn a_timed_out_call_delivers_its_dead_letter() {
     .with_reply_to(ReplyTo::Agent(AgentId::from("a")))]))
     .await
     .remove(0);
-    assert_eq!(out.status, Status::TimedOut);
+    // the send acks; the dead letter is a later message to `a`
+    assert_eq!(ack.status, Status::Accepted);
     assert!(until(|| !seen.replies().is_empty()).await);
     let replies = seen.replies();
     assert_eq!(replies.len(), 1, "{replies:?}");
     assert_eq!(replies[0].0, "a");
     assert_eq!(replies[0].1["status"], json!("timed_out"));
-    assert_eq!(replies[0].1["re"], json!(out.pid.unwrap().0));
+    assert_eq!(replies[0].1["re"], json!(ack.pid.unwrap().0));
     assert!(
         replies[0].1["result"]["error"].as_str().unwrap_or("").contains("timeout"),
         "{:?}",
@@ -557,7 +558,7 @@ async fn a_call_for_the_asker_is_gated_as_it_and_continues_as_the_caller() {
     agent(&k, "y", json!({"a": {"call": ["*"]}})).await;
     let ack = as_agent(
         AgentId::from("x"),
-        k.send(vec![Item::new(AgentId::from("a"), json!({"type": "ask_for", "to": "b"}))]),
+        crate::test_support::settled(&k, vec![Item::new(AgentId::from("a"), json!({"type": "ask_for", "to": "b"}))]),
     )
     .await
     .remove(0)
@@ -571,7 +572,7 @@ async fn a_call_for_the_asker_is_gated_as_it_and_continues_as_the_caller() {
     // y may call a, not b: the call for y is refused at launch
     let refused = as_agent(
         AgentId::from("y"),
-        k.send(vec![Item::new(AgentId::from("a"), json!({"type": "ask_for", "to": "b"}))]),
+        crate::test_support::settled(&k, vec![Item::new(AgentId::from("a"), json!({"type": "ask_for", "to": "b"}))]),
     )
     .await
     .remove(0)
@@ -649,4 +650,147 @@ async fn write_own_hands_its_reply_to_its_continuation() {
     let r = got.lock().unwrap()[1].clone();
     assert!(crate::refusal::is_refused(&r), "{r}");
     assert_eq!(k.resolve_target("b").unwrap().parent_id, parent, "the record is untouched");
+}
+
+/// THE FLIP (#795): `send` returns the ACK of every item before any handler runs —
+/// pids minted and call rows written in item order — and each settle is a later
+/// message to the item's `reply_to`, never a return value.
+#[tokio::test]
+async fn a_send_returns_its_acks_before_the_handlers_run() {
+    let seen = Arc::new(Seen::default());
+    let k = mk(&seen);
+    agent(&k, "a", Value::Null).await;
+    agent(&k, "b", Value::Null).await;
+    let to_a = || {
+        Item::new(AgentId::from("b"), json!({"type": "gate"}))
+            .with_reply_to(ReplyTo::Agent(AgentId::from("a")))
+    };
+    let acks = crate::send::as_operator(k.send(vec![to_a(), to_a()])).await;
+    assert_eq!(acks.len(), 2);
+    assert!(acks.iter().all(|a| a.status == Status::Accepted), "{acks:?}");
+    let pids: Vec<i64> = acks.iter().map(|a| a.pid.expect("an ack carries its pid").0).collect();
+    assert!(pids[0] < pids[1], "minted in item order: {pids:?}");
+    for pid in &pids {
+        assert!(
+            k.rows.get_one(*pid).is_some_and(|r| r["kind"] == json!("call")),
+            "the call row is written with the ack"
+        );
+        assert!(settles(&k, *pid).is_empty(), "nothing settled yet");
+    }
+    assert!(seen.replies().is_empty(), "no settle is delivered while the handlers are held");
+    // release both held handlers, however late each one starts waiting
+    assert!(
+        until(|| {
+            seen.gate.notify_waiters();
+            seen.replies().len() == 2
+        })
+        .await,
+        "{:?}",
+        seen.replies()
+    );
+    let mut res: Vec<i64> = seen.replies().iter().map(|r| r.1["re"].as_i64().unwrap()).collect();
+    res.sort_unstable();
+    assert_eq!(res, pids, "each settle reaches `a` once, by its pid");
+    assert!(seen.replies().iter().all(|r| r.1["result"] == json!({"opened": true})));
+}
+
+/// A launch refusal is the ack itself: no pid, nothing runs, nothing is delivered.
+#[tokio::test]
+async fn a_send_refused_at_launch_acks_the_refusal() {
+    let seen = Arc::new(Seen::default());
+    let k = mk(&seen);
+    agent(&k, "a", Value::Null).await;
+    let out = crate::send::as_operator(k.send(vec![Item::new(AgentId::from("nobody"), json!({"type": "work"}))]))
+        .await
+        .remove(0);
+    assert_ne!(out.status, Status::Accepted);
+    assert!(out.pid.is_none());
+    assert_eq!(out.result, crate::refusal::unknown_agent("nobody"));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(seen.runs(), 0);
+    assert!(seen.replies().is_empty());
+}
+
+/// A JOINER BY `send`: the named re-send of an execution in flight acks the same pid,
+/// runs nothing, and its settle is delivered to the joiner's own `reply_to` — no task
+/// waits for it.
+#[tokio::test]
+async fn a_joiner_of_a_send_is_delivered_the_settle() {
+    let seen = Arc::new(Seen::default());
+    let k = mk(&seen);
+    agent(&k, "a", Value::Null).await;
+    agent(&k, "b", Value::Null).await;
+    agent(&k, "c", Value::Null).await;
+    let named = |to: &str| {
+        Item::new(AgentId::from("b"), json!({"type": "work", "ms": 100}))
+            .with_id("job-s")
+            .with_reply_to(ReplyTo::Agent(AgentId::from(to)))
+    };
+    let first = crate::send::as_operator(k.send(vec![named("a")])).await.remove(0);
+    let joiner = crate::send::as_operator(k.send(vec![named("c")])).await.remove(0);
+    assert_eq!(first.status, Status::Accepted);
+    assert_eq!(joiner.status, Status::Accepted);
+    assert_eq!(first.pid, joiner.pid, "the joiner acks the same pid");
+    assert!(until(|| seen.replies().len() == 2).await, "{:?}", seen.replies());
+    let mut to: Vec<String> = seen.replies().iter().map(|r| r.0.clone()).collect();
+    to.sort();
+    assert_eq!(to, vec!["a", "c"], "the owner's receiver and the joiner's both get it");
+    assert!(seen.replies().iter().all(|r| r.1["re"] == json!(first.pid.unwrap().0)));
+    assert_eq!(seen.runs(), 1, "one execution");
+    // a send of the settled name: its recorded outcome is delivered, nothing runs
+    let again = crate::send::as_operator(k.send(vec![named("c")])).await.remove(0);
+    assert_eq!(again.pid, first.pid);
+    assert!(until(|| seen.replies().len() == 3).await);
+    assert_eq!(seen.replies()[2].1["result"], json!({"done": true}));
+    assert_eq!(seen.runs(), 1);
+}
+
+/// A joiner's own `timeout` bounds only ITS delivery: it gets `timed_out` naming the
+/// joined execution, and the execution keeps running and settles for its owner.
+#[tokio::test]
+async fn a_joiner_timeout_bounds_only_its_own_delivery() {
+    let seen = Arc::new(Seen::default());
+    let k = mk(&seen);
+    agent(&k, "b", Value::Null).await;
+    let owner = Arc::new(Mutex::new(None));
+    let slot = Arc::clone(&owner);
+    let ack = crate::send::as_operator(k.call(
+        Item::new(AgentId::from("b"), json!({"type": "work", "ms": 300})).with_id("job-t"),
+        move |o| async move { *slot.lock().unwrap() = Some(o) },
+    ))
+    .await;
+    let joined = send_settled(
+        &k,
+        vec![Item::new(AgentId::from("b"), json!({"type": "work", "ms": 300}))
+            .with_id("job-t")
+            .with_timeout(0.05)],
+    )
+    .await
+    .remove(0);
+    assert_eq!(joined.status, Status::TimedOut, "{joined:?}");
+    assert_eq!(joined.result["task_id"], json!(ack.pid.unwrap().0));
+    assert!(owner.lock().unwrap().is_none(), "the execution is still running");
+    assert!(until(|| owner.lock().unwrap().is_some()).await);
+    assert_eq!(owner.lock().unwrap().clone().unwrap().status, Status::Completed);
+    assert_eq!(seen.runs(), 1);
+}
+
+/// THE LIFECYCLE BOUNDARY: `lifecycle_call` is a call like any (a pid, a call row, a
+/// settle row) made as the operator, whose settle a host's boot or shutdown is handed;
+/// a launch refusal is the answer at once.
+#[tokio::test]
+async fn lifecycle_call_hands_the_host_its_settle_and_a_refusal_at_once() {
+    let seen = Arc::new(Seen::default());
+    let k = mk(&seen);
+    agent(&k, "b", Value::Null).await;
+    let out = k.lifecycle_call(Item::new(AgentId::from("b"), json!({"type": "work", "ms": 20}))).await;
+    assert_eq!(out.status, Status::Completed, "{out:?}");
+    assert_eq!(out.result, json!({"done": true}));
+    let pid = out.pid.expect("a call: it has a pid").0;
+    assert!(k.rows.get_one(pid).is_some_and(|r| r["kind"] == json!("call") && r["caller"].is_null()),
+        "a call row, the operator's");
+    assert_eq!(settles(&k, pid).len(), 1, "a settle row");
+    let refused = k.lifecycle_call(Item::new(AgentId::from("nobody"), json!({"type": "work"}))).await;
+    assert_eq!(refused.result, crate::refusal::unknown_agent("nobody"));
+    assert!(refused.pid.is_none());
 }

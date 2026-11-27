@@ -41,8 +41,7 @@ async fn peers(tmp: &TempDir, tag: &str, n: usize) -> (Arc<Kernel>, Vec<AgentId>
                 can[other.as_str()] = json!({"call": ["*"]});
             }
         }
-        let r = kernel
-            .operator_send(vec![Item::new(
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({"type": "update_agent", "id": me.as_str(), "can": can}),
             )])
@@ -107,8 +106,7 @@ async fn ring(tag: &str, n: usize) {
         *s.responder.lock().unwrap() = Some(ring_model(ids[i].as_str(), next.as_str()));
     }
     for id in &ids {
-        let ack = kernel
-            .operator_send(vec![Item::new(id.clone(), json!({"type": "send", "text": "KICK", "client_id": "ring"}))])
+        let ack = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(id.clone(), json!({"type": "send", "text": "KICK", "client_id": "ring"}))])
             .await
             .remove(0)
             .result;
@@ -122,7 +120,7 @@ async fn ring(tag: &str, n: usize) {
     for id in &ids {
         let l = fantastic_kernel::test_support::as_agent(
             id.clone(),
-            kernel.send(vec![Item::new(AgentId::from("kernel"), json!({"type": "ledger"}))]),
+            fantastic_kernel::test_support::settled(&kernel, vec![Item::new(AgentId::from("kernel"), json!({"type": "ledger"}))]),
         )
         .await
         .remove(0)
@@ -163,8 +161,7 @@ async fn ring(tag: &str, n: usize) {
         assert!((2..=3).contains(&passes), "{me}: {passes} passes");
         assert_eq!(passes, answers, "{me}: one answer row per pass");
     }
-    let table = kernel
-        .operator_send(vec![Item::new(AgentId::from("kernel"), json!({"type": "ps"}))])
+    let table = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel"), json!({"type": "ps"}))])
         .await
         .remove(0)
         .result;
@@ -198,7 +195,7 @@ async fn an_answer_with_re_lands_as_a_message_on_the_asker() {
     let sa = script(a, vec![pass(format!("{}{DONE}", send_call(b.as_str(), "QUESTION from a", None))), pass(DONE)], Duration::ZERO);
     let sb = script(b, vec![], Duration::ZERO);
     *sb.responder.lock().unwrap() = Some(ring_model(b.as_str(), a.as_str()));
-    let _ = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "send", "text": "go"}))])).await;
+    let _ = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "send", "text": "go"}))])).await;
     assert_eq!(sa.passes_served(), 2, "the answer woke the asker once");
     let asked = answer_with(&kernel, a, "QUESTION from a").await.expect("the question");
     // the answer is in the asker's next request: after its answer, or above it with the
@@ -216,7 +213,7 @@ async fn an_ack_only_reply_is_stored_and_wakes_nothing() {
     let (a, b) = (&ids[0], &ids[1]);
     let sa = script(a, vec![pass(format!("{}{DONE}", send_call(b.as_str(), "fyi", None)))], Duration::ZERO);
     let _sb = script(b, vec![pass(DONE)], Duration::ZERO);
-    let _ = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "send", "text": "go"}))])).await;
+    let _ = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "send", "text": "go"}))])).await;
     assert_eq!(sa.passes_served(), 1, "an ack woke a pass");
     let replies = reply_rows(&kernel, a).await;
     assert_eq!(replies.len(), 1, "{replies:#?}");
@@ -236,7 +233,7 @@ async fn a_refused_send_in_a_batch_wakes() {
         vec![pass(format!("{}{DONE}", send_call(stranger.as_str(), "hi", None))), pass(DONE)],
         Duration::ZERO,
     );
-    let _ = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "send", "text": "go"}))])).await;
+    let _ = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "send", "text": "go"}))])).await;
     assert_eq!(sa.passes_served(), 2, "the refusal woke the sender");
     let read = Value::Array(sa.request_messages(1)).to_string();
     assert!(read.contains(&format!("{stranger} send")) && read.contains("<error>"), "{read}");
@@ -256,8 +253,7 @@ async fn echo_chat(kernel: &Arc<Kernel>, chat: &str, prov: &str, model: &str) ->
     for (k, v) in memory {
         create[k] = v;
     }
-    let made = kernel
-        .operator_send(vec![Item::new(AgentId::from("kernel_state"), create)])
+    let made = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from("kernel_state"), create)])
         .await
         .remove(0)
         .result;
@@ -275,8 +271,7 @@ async fn echo_kernel(tmp: &TempDir) -> Arc<Kernel> {
 
 /// The `ps` rows of `agent` with `verb`.
 async fn tasks_of(kernel: &Arc<Kernel>, agent: &str, verb: Option<&str>) -> Vec<Value> {
-    kernel
-        .operator_send(vec![Item::new(AgentId::from("kernel"), json!({"type": "ps"}))])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from("kernel"), json!({"type": "ps"}))])
         .await
         .remove(0)
         .result["tasks"]
@@ -304,8 +299,7 @@ async fn a_pass_ends_when_it_sends_complete() {
     let tmp = TempDir::new().unwrap();
     let kernel = echo_kernel(&tmp).await;
     let chat = echo_chat(&kernel, "chat_gated", "prov_gated", "m-gated-ends").await;
-    let ack = kernel
-        .operator_send(vec![Item::new(chat.clone(), json!({"type": "send", "text": "hi"}))])
+    let ack = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(chat.clone(), json!({"type": "send", "text": "hi"}))])
         .await
         .remove(0)
         .result;
@@ -339,8 +333,7 @@ async fn a_cancelled_complete_ends_the_pass() {
     let tmp = TempDir::new().unwrap();
     let kernel = echo_kernel(&tmp).await;
     let chat = echo_chat(&kernel, "chat_cut", "prov_cut", "m-gated-cut").await;
-    let _ = kernel
-        .operator_send(vec![Item::new(chat.clone(), json!({"type": "send", "text": "hi"}))])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(chat.clone(), json!({"type": "send", "text": "hi"}))])
         .await;
     let mut theirs = Vec::new();
     for _ in 0..200 {
@@ -351,8 +344,7 @@ async fn a_cancelled_complete_ends_the_pass() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let pid = theirs.first().and_then(|t| t["id"].as_i64()).expect("the provider's complete in ps");
-    let r = kernel
-        .operator_send(vec![Item::new(AgentId::from("kernel"), json!({"type": "cancel", "task_id": pid}))])
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel"), json!({"type": "cancel", "task_id": pid}))])
         .await
         .remove(0)
         .result;
@@ -372,7 +364,7 @@ async fn a_reask_is_a_second_complete() {
     let tmp = TempDir::new().unwrap();
     let kernel = echo_kernel(&tmp).await;
     let chat = echo_chat(&kernel, "chat_reask", "prov_reask", "m-reask").await;
-    let _ = crate::tests::settled(&kernel, kernel.operator_send(vec![Item::new(chat.clone(), json!({"type": "send", "text": "hi"}))])).await;
+    let _ = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(chat.clone(), json!({"type": "send", "text": "hi"}))])).await;
     assert_eq!(completes(&kernel, "prov_reask"), 2, "the re-ask is a second complete");
     let answers: Vec<String> = history_of(&kernel, &chat)
         .await
@@ -393,8 +385,8 @@ async fn a_message_the_history_read_holds_wakes_no_second_pass() {
     let (kernel, ids) = peers(&tmp, "readby", 1).await;
     let a = &ids[0];
     let sa = script(a, vec![pass(DONE), pass(DONE)], Duration::ZERO);
-    let _ = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "send", "text": "first"}))]).await;
-    let _ = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "send", "text": "second"}))]).await;
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "send", "text": "first"}))]).await;
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "send", "text": "second"}))]).await;
     assert!(settle(&kernel).await);
     let reqs: Vec<String> = (0..sa.passes_served()).map(|i| Value::Array(sa.request_messages(i)).to_string()).collect();
     let reading = reqs.iter().filter(|r| r.contains("second")).count();

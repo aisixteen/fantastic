@@ -175,7 +175,7 @@ async fn mk_probed(
     kernel.set_root(Arc::clone(&root));
     let sch_id = scheduler_id_for(tmp);
     if with_store {
-        let r = kernel.operator_send(vec![Item::new(
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({
                     "type":"create_agent",
@@ -192,7 +192,7 @@ async fn mk_probed(
     }
     let mut can = Map::new();
     for p in probes {
-        let r = kernel.operator_send(vec![Item::new(
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({
                     "type":"create_agent",
@@ -208,7 +208,7 @@ async fn mk_probed(
         can.insert((*p).to_string(), json!({"call": ["*"]}));
     }
     // Nothing to wire: the scheduler persists THROUGH the loader.
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type":"create_agent",
@@ -250,7 +250,7 @@ async fn schedule(
             }
         }
     }
-    kernel.operator_send(vec![Item::new(sch.clone(), payload)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(sch.clone(), payload)])
         .await
         .remove(0)
         .result
@@ -290,7 +290,7 @@ async fn stop_tick(kernel: &Arc<Kernel>, sch: &AgentId) {
 async fn reflect_reports_state() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
-    let r = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "reflect"}))])
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "reflect"}))])
         .await
         .remove(0)
         .result;
@@ -308,12 +308,12 @@ async fn boot_succeeds_without_store_schedule_failfasts() {
     // surfaces the loader's error, and nothing lingers in the cache.
     let tmp = TempDir::new().unwrap();
     let (kernel, sch, _hits) = mk_probed(&tmp, &[], None, false).await;
-    let r = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "boot"}))])
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "boot"}))])
         .await
         .remove(0)
         .result;
     assert_eq!(r["running"], true, "{r}");
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({
                 "type": "schedule",
@@ -328,7 +328,7 @@ async fn boot_succeeds_without_store_schedule_failfasts() {
     let err = r["error"].as_str().unwrap_or_default();
     assert!(err.starts_with("scheduler.schedule:"), "{r}");
     assert!(err.contains("no store"), "{r}");
-    let listed = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "list"}))])
+    let listed = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "list"}))])
         .await
         .remove(0)
         .result;
@@ -339,7 +339,7 @@ async fn boot_succeeds_without_store_schedule_failfasts() {
 async fn schedule_persists_and_lists() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({
                 "type": "schedule",
@@ -356,7 +356,7 @@ async fn schedule_persists_and_lists() {
         .unwrap_or_else(|| panic!("{r}"))
         .to_string();
     assert!(sid.starts_with("sch_"));
-    let listed = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "list"}))])
+    let listed = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "list"}))])
         .await
         .remove(0)
         .result;
@@ -373,7 +373,7 @@ async fn schedule_persists_and_lists() {
 async fn schedule_requires_target_and_payload_type() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({"type": "schedule", "interval_seconds": 5, "payload": {"type": "ping"}}),
         )])
@@ -382,7 +382,7 @@ async fn schedule_requires_target_and_payload_type() {
         .result;
     assert_eq!(r["reason"], "missing_arg", "{r}");
     assert!(r["error"].as_str().unwrap().contains("target"), "{r}");
-    let r2 = kernel.operator_send(vec![Item::new(
+    let r2 = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({"type": "schedule", "target": "kernel_state"}),
         )])
@@ -392,7 +392,7 @@ async fn schedule_requires_target_and_payload_type() {
     assert_eq!(r2["reason"], "missing_arg", "{r2}");
     assert!(r2["error"].as_str().unwrap().contains("payload"), "{r2}");
     // a call without a `type` is refused by name, by the declaration
-    let r3 = kernel.operator_send(vec![Item::new(
+    let r3 = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({"type": "schedule", "target": "kernel_state", "payload": {}}),
         )])
@@ -404,7 +404,7 @@ async fn schedule_requires_target_and_payload_type() {
         "{r3}"
     );
     // an empty `type` is no verb: a rule the type cannot say
-    let r4 = kernel.operator_send(vec![Item::new(
+    let r4 = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({"type": "schedule", "target": "kernel_state", "payload": {"type": ""}}),
         )])
@@ -420,7 +420,7 @@ async fn schedule_rejects_a_bad_timeout() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
     for bad_value in [json!(0), json!(-1), json!("5"), json!(true)] {
-        let r = kernel.operator_send(vec![Item::new(
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 sch.clone(),
                 json!({
                     "type": "schedule",
@@ -435,7 +435,7 @@ async fn schedule_rejects_a_bad_timeout() {
         assert_eq!(r["reason"], "bad_arg", "{r}");
         assert_eq!(r["arg"], "fire_timeout", "{r}");
     }
-    let listed = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "list"}))])
+    let listed = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "list"}))])
         .await
         .remove(0)
         .result;
@@ -446,7 +446,7 @@ async fn schedule_rejects_a_bad_timeout() {
 async fn unschedule_removes() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({
                 "type": "schedule",
@@ -459,7 +459,7 @@ async fn unschedule_removes() {
         .remove(0)
         .result;
     let sid = r["schedule_id"].as_str().unwrap().to_string();
-    let removed = kernel.operator_send(vec![Item::new(
+    let removed = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({"type": "unschedule", "schedule_id": sid}),
         )])
@@ -467,7 +467,7 @@ async fn unschedule_removes() {
         .remove(0)
         .result;
     assert_eq!(removed["removed"], true);
-    let listed = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "list"}))])
+    let listed = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "list"}))])
         .await
         .remove(0)
         .result;
@@ -485,20 +485,20 @@ async fn pause_resume_flips_meta() {
     let _tap = kernel.add_state_subscriber(Arc::new(move |ev, _| {
         sink.lock().unwrap().push(ev.clone());
     }));
-    let _ = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "pause"}))])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "pause"}))])
         .await
         .remove(0)
         .result;
-    let r = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "reflect"}))])
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "reflect"}))])
         .await
         .remove(0)
         .result;
     assert_eq!(r["paused"], true);
-    let _ = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "resume"}))])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "resume"}))])
         .await
         .remove(0)
         .result;
-    let r2 = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "reflect"}))])
+    let r2 = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "reflect"}))])
         .await
         .remove(0)
         .result;
@@ -523,7 +523,7 @@ async fn pause_resume_flips_meta() {
 async fn tick_now_reports_a_refused_fire() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({
                 "type": "schedule",
@@ -536,7 +536,7 @@ async fn tick_now_reports_a_refused_fire() {
         .remove(0)
         .result;
     let sid = r["schedule_id"].as_str().unwrap().to_string();
-    let fired = kernel.operator_send(vec![Item::new(
+    let fired = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({"type": "tick_now", "schedule_id": sid}),
         )])
@@ -559,8 +559,7 @@ async fn tick_now_reports_a_refused_fire() {
 async fn a_fire_to_an_ai_settles_with_its_ack() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch, hits) = mk_probed(&tmp, &["p_ai"], None, true).await;
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({"type": "schedule", "target": "p_ai", "payload": {"type": "send", "text": "tick"},
                    "interval_seconds": 999_999}),
@@ -572,7 +571,7 @@ async fn a_fire_to_an_ai_settles_with_its_ack() {
     let t0 = std::time::Instant::now();
     let fired = tokio::time::timeout(
         Duration::from_secs(5),
-        kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "tick_now", "schedule_id": sid}))]),
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "tick_now", "schedule_id": sid}))]),
     )
     .await
     .expect("tick_now settles with the fire's ack")
@@ -582,8 +581,7 @@ async fn a_fire_to_an_ai_settles_with_its_ack() {
     assert_eq!(fired["fired"], true, "{fired}");
     assert_eq!(fired["result"]["accepted"], true, "{fired}");
     assert!(hits.0.lock().unwrap().contains_key("p_ai"), "the message reached the AI");
-    let hist = kernel
-        .operator_send(vec![Item::new(sch.clone(), json!({"type": "history", "schedule_id": sid}))])
+    let hist = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "history", "schedule_id": sid}))])
         .await
         .remove(0)
         .result;
@@ -598,7 +596,7 @@ async fn a_fire_to_an_ai_settles_with_its_ack() {
 async fn tick_now_fires_immediately_and_appends_history() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({
                 "type": "schedule",
@@ -611,7 +609,7 @@ async fn tick_now_fires_immediately_and_appends_history() {
         .remove(0)
         .result;
     let sid = r["schedule_id"].as_str().unwrap().to_string();
-    let fired = kernel.operator_send(vec![Item::new(
+    let fired = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({"type": "tick_now", "schedule_id": sid}),
         )])
@@ -624,7 +622,7 @@ async fn tick_now_fires_immediately_and_appends_history() {
         fired.get("result").is_some() != fired.get("error").is_some(),
         "{fired}"
     );
-    let hist = kernel.operator_send(vec![Item::new(
+    let hist = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({"type": "history", "limit": 10}),
         )])
@@ -641,7 +639,7 @@ async fn tick_loop_fires_due_schedule() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
     // Schedule with a 0-interval (loop will fire on first tick).
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({
                 "type": "schedule",
@@ -654,14 +652,14 @@ async fn tick_loop_fires_due_schedule() {
         .remove(0)
         .result;
     let sid = r["schedule_id"].as_str().unwrap().to_string();
-    let _ = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "boot"}))])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "boot"}))])
         .await
         .remove(0)
         .result;
     // the loop fires at the schedule's due time → wait ~1.5s for at least one fire.
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     stop_tick(&kernel, &sch).await;
-    let listed = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "list"}))])
+    let listed = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "list"}))])
         .await
         .remove(0)
         .result;
@@ -688,14 +686,14 @@ async fn due_schedules_fire_as_one_concurrent_batch() {
     // BOTH DUE when the loop looks: it fires at each schedule's exact due time (no
     // tick to coalesce on), so the two are made due while the scheduler is paused,
     // and the resume wakes it to one batch.
-    let _ = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "pause"}))])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "pause"}))])
         .await;
     let r1 = schedule(&kernel, &sch, "p_slow", 1, json!({"hit": {"block": 0.3}})).await;
     let r2 = schedule(&kernel, &sch, "p_fast", 1, json!({})).await;
     assert!(r1["schedule_id"].is_string(), "{r1}");
     assert!(r2["schedule_id"].is_string(), "{r2}");
     tokio::time::sleep(Duration::from_millis(1200)).await;
-    let _ = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "resume"}))])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "resume"}))])
         .await;
     let both = wait_for(|| hits.has("p_slow") && hits.has("p_fast"), 3.0).await;
     stop_tick(&kernel, &sch).await;
@@ -705,7 +703,7 @@ async fn due_schedules_fire_as_one_concurrent_batch() {
         gap.abs() < 0.25,
         "not one batch: fast started {gap:.3}s after slow"
     );
-    let listed = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "list"}))])
+    let listed = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "list"}))])
         .await
         .remove(0)
         .result;
@@ -723,7 +721,7 @@ async fn a_slow_fire_does_not_delay_another_due_schedule() {
     let (kernel, sch, hits) = mk_probed(&tmp, &["p_slow", "p_fast"], None, true).await;
     let slow = schedule(&kernel, &sch, "p_slow", 1, json!({"hit": {"block": 5.0}})).await;
     let slow_id = slow["schedule_id"].as_str().unwrap().to_string();
-    let _ = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "boot"}))])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "boot"}))])
         .await;
     assert!(wait_for(|| hits.has("p_slow"), 3.0).await, "the slow probe was never hit");
     // due one second after it is made, while the slow fire is still out
@@ -735,7 +733,7 @@ async fn a_slow_fire_does_not_delay_another_due_schedule() {
         let kernel = Arc::clone(&kernel);
         let sch = sch.clone();
         async move {
-            kernel.operator_send(vec![Item::new(
+            fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                     sch,
                     json!({"type": "history", "schedule_id": sid}),
                 )])
@@ -769,21 +767,21 @@ async fn each_fire_of_one_batch_is_recorded_when_it_settles() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch, hits) = mk_probed(&tmp, &["p_slow", "p_fast"], None, true).await;
     // both made due while paused, so the resume wakes the loop to one batch
-    let _ = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "pause"}))])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "pause"}))])
         .await;
     let slow = schedule(&kernel, &sch, "p_slow", 1, json!({"hit": {"block": 4.0}})).await;
     let fast = schedule(&kernel, &sch, "p_fast", 1, json!({})).await;
     let slow_id = slow["schedule_id"].as_str().unwrap().to_string();
     let fast_id = fast["schedule_id"].as_str().unwrap().to_string();
     tokio::time::sleep(Duration::from_millis(1200)).await;
-    let _ = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "resume"}))])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "resume"}))])
         .await;
     let both = wait_for(|| hits.has("p_slow") && hits.has("p_fast"), 3.0).await;
     let count = |sid: String| {
         let kernel = Arc::clone(&kernel);
         let sch = sch.clone();
         async move {
-            kernel.operator_send(vec![Item::new(
+            fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                     sch,
                     json!({"type": "history", "schedule_id": sid}),
                 )])
@@ -823,7 +821,7 @@ async fn next_run_is_persisted_before_the_fire() {
     let (kernel, sch, hits) = mk_probed(&tmp, &["p_cap"], Some(capture), true).await;
     let r = schedule(&kernel, &sch, "p_cap", 1, json!({})).await;
     let sid = r["schedule_id"].as_str().unwrap().to_string();
-    let _ = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "boot"}))])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "boot"}))])
         .await;
     let hit = wait_for(|| hits.has("p_cap"), 3.0).await;
     stop_tick(&kernel, &sch).await;
@@ -859,7 +857,7 @@ async fn a_schedule_timeout_bounds_its_fire() {
     let sid = r["schedule_id"].as_str().unwrap().to_string();
     assert_eq!(r["schedule"]["fire_timeout"], 0.1, "{r}");
     let t0 = now();
-    let fired = kernel.operator_send(vec![Item::new(
+    let fired = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({"type": "tick_now", "schedule_id": sid}),
         )])
@@ -871,7 +869,7 @@ async fn a_schedule_timeout_bounds_its_fire() {
         now() - t0 < 1.5,
         "fire was not bounded by the schedule timeout"
     );
-    let h = kernel.operator_send(vec![Item::new(
+    let h = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({"type": "history", "schedule_id": sid}),
         )])
@@ -899,7 +897,7 @@ async fn non_int_args_are_bad_arg_refusals() {
         json!(-1),
         json!([60]),
     ] {
-        let r = kernel.operator_send(vec![Item::new(
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 sch.clone(),
                 json!({
                     "type": "schedule", "target": "p_x", "payload": {"type": "hit"},
@@ -913,13 +911,13 @@ async fn non_int_args_are_bad_arg_refusals() {
         assert_eq!(r["arg"], json!("interval_seconds"), "{bad_value}: {r}");
     }
     // Nothing was scheduled by a refused call.
-    let listed = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "list"}))])
+    let listed = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "list"}))])
         .await
         .remove(0)
         .result;
     assert_eq!(listed["schedules"], json!([]), "{listed}");
     // ABSENT still takes the documented default (60s), and is NOT refused.
-    let ok = kernel.operator_send(vec![Item::new(
+    let ok = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({"type": "schedule", "target": "p_x", "payload": {"type": "hit"}}),
         )])
@@ -929,7 +927,7 @@ async fn non_int_args_are_bad_arg_refusals() {
     assert_eq!(ok["schedule"]["interval_seconds"], json!(60), "{ok}");
 
     for bad_value in [json!("100"), json!(2.0), json!(true), json!(null), json!(0), json!(100000)] {
-        let h = kernel.operator_send(vec![Item::new(
+        let h = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 sch.clone(),
                 json!({"type": "history", "limit": bad_value.clone()}),
             )])
@@ -941,7 +939,7 @@ async fn non_int_args_are_bad_arg_refusals() {
     }
     // a `limit` above 500 is refused by the declared maximum (in the loop above).
     // ABSENT `limit` is the default page, not a refusal.
-    let h = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "history"}))])
+    let h = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "history"}))])
         .await
         .remove(0)
         .result;
@@ -957,7 +955,7 @@ async fn schedule_refuses_a_non_object_payload() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch, _hits) = mk_probed(&tmp, &["p_x"], None, true).await;
     for bad_value in [json!([1]), json!("hit"), json!(7)] {
-        let r = kernel.operator_send(vec![Item::new(
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 sch.clone(),
                 json!({"type": "schedule", "target": "p_x", "payload": bad_value.clone()}),
             )])
@@ -976,13 +974,13 @@ async fn an_idle_scheduler_never_wakes_and_a_change_wakes_it() {
     // update_agent, wakes it.
     let tmp = TempDir::new().unwrap();
     let (kernel, sch, hits) = mk_probed(&tmp, &["p_idle"], None, true).await;
-    let _ = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "boot"}))])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "boot"}))])
         .await
         .remove(0)
         .result;
     // no schedule: nothing fires, and nothing is read on a timer
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({"type": "schedule", "target": "p_idle", "payload": {"type": "hit"}, "interval_seconds": 1}),
         )])
@@ -1000,12 +998,12 @@ async fn an_idle_scheduler_never_wakes_and_a_change_wakes_it() {
             json!({"type": "update_agent", "id": sch.as_str(), "paused": paused}),
         )
     };
-    let _ = kernel.operator_send(vec![up(true)]).await;
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![up(true)]).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     hits.clear();
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert!(!hits.has("p_idle"), "fired while paused");
-    let _ = kernel.operator_send(vec![up(false)]).await;
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![up(false)]).await;
     assert!(
         wait_for(|| hits.has("p_idle"), 3.0).await,
         "an update_agent resume woke nothing"
@@ -1020,7 +1018,7 @@ async fn an_idle_scheduler_never_wakes_and_a_change_wakes_it() {
 async fn reflect_renders_every_declared_verb() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
-    let r = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "reflect"}))])
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "reflect"}))])
         .await
         .remove(0)
         .result;
@@ -1062,7 +1060,7 @@ async fn reflect_renders_every_declared_verb() {
 async fn refusal_text_uses_python_repr() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({"type": "tick_now", "schedule_id": "nope"}),
         )])
@@ -1071,7 +1069,7 @@ async fn refusal_text_uses_python_repr() {
         .result;
     assert_eq!(r["error"], "schedule 'nope' not found");
     // A non-string id is refused by name, never coerced.
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({"type": "tick_now", "schedule_id": 7}),
         )])
@@ -1089,7 +1087,7 @@ async fn boot_twice_replies_running_only() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
     for _ in 0..2 {
-        let r = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "boot"}))])
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "boot"}))])
             .await
             .remove(0)
             .result;
@@ -1106,7 +1104,7 @@ async fn schedule_faults_are_named_by_the_declaration() {
     let call = |p: Value| {
         let kernel = Arc::clone(&kernel);
         let sch = sch.clone();
-        async move { kernel.operator_send(vec![Item::new(sch, p)]).await.remove(0).result }
+        async move { fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch, p)]).await.remove(0).result }
     };
     let r = call(json!({"type": "schedule", "interval_seconds": "60",
                         "target": "kernel_state", "payload": {"type": "ping"}}))
@@ -1135,7 +1133,7 @@ async fn schedule_faults_are_named_by_the_declaration() {
 async fn an_int_timeout_stays_an_int() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({"type": "schedule", "target": "kernel_state",
                    "payload": {"type": "list_agents"}, "fire_timeout": 5}),
@@ -1155,7 +1153,7 @@ async fn schedule_id_must_be_text() {
     let call = |p: Value| {
         let kernel = Arc::clone(&kernel);
         let sch = sch.clone();
-        async move { kernel.operator_send(vec![Item::new(sch, p)]).await.remove(0).result }
+        async move { fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch, p)]).await.remove(0).result }
     };
     for verb in ["unschedule", "tick_now", "pause", "resume", "history"] {
         // an explicit `null` is an argument left out: only the required verbs refuse it
@@ -1186,7 +1184,7 @@ async fn schedule_id_must_be_text() {
 async fn paused_record_field_is_a_bool() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": sch.as_str(), "paused": "no"}),
         )])
@@ -1196,7 +1194,7 @@ async fn paused_record_field_is_a_bool() {
     assert_eq!(r["reason"], "bad_arg", "{r}");
     let r = reflect_reply(&sch, &kernel);
     assert_eq!(r["paused"], false, "{r}");
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": sch.as_str(), "paused": true}),
         )])
@@ -1211,7 +1209,7 @@ async fn paused_record_field_is_a_bool() {
 async fn schedules_sidecar_uses_python_yaml_layout() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({"type": "schedule", "target": "córe",
                    "payload": {"type": "list_agents"}}),
@@ -1240,7 +1238,7 @@ async fn schedules_sidecar_uses_python_yaml_layout() {
 async fn recreated_scheduler_drops_the_process_cache() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({"type": "schedule", "target": "kernel_state", "payload": {"type": "list_agents"}}),
         )])
@@ -1249,7 +1247,7 @@ async fn recreated_scheduler_drops_the_process_cache() {
         .result;
     let sid = r["schedule_id"].clone();
     assert!(sid.is_string(), "{r}");
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "delete_agent", "id": sch.as_str()}),
         )])
@@ -1316,7 +1314,7 @@ async fn failed_tick_persist_does_not_refire_next_tick() {
             "paused": false,
         })],
     );
-    let _ = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "boot"}))])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "boot"}))])
         .await
         .remove(0)
         .result;
@@ -1324,7 +1322,7 @@ async fn failed_tick_persist_does_not_refire_next_tick() {
     // Let time go by: the schedule must not re-fire before its interval.
     tokio::time::sleep(Duration::from_millis(600)).await;
     stop_tick(&kernel, &sch).await;
-    let listed = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "list"}))])
+    let listed = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "list"}))])
         .await
         .remove(0)
         .result;
@@ -1358,7 +1356,7 @@ async fn a_failed_persist_rolls_back_tick_now_but_not_pause() {
             "paused": false,
         })],
     );
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({"type": "tick_now", "schedule_id": "sch_rb"}),
         )])
@@ -1371,7 +1369,7 @@ async fn a_failed_persist_rolls_back_tick_now_but_not_pause() {
         0,
         "tick_now must roll its bump back"
     );
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({"type": "pause", "schedule_id": "sch_rb"}),
         )])
@@ -1392,7 +1390,7 @@ async fn a_failed_persist_rolls_back_tick_now_but_not_pause() {
 async fn pause_reply_key_order_matches_python() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({"type": "pause", "schedule_id": "nope"}),
         )])
@@ -1403,7 +1401,7 @@ async fn pause_reply_key_order_matches_python() {
         r.as_object().unwrap().keys().collect::<Vec<_>>(),
         ["paused", "schedule_id"]
     );
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             sch.clone(),
             json!({"type": "resume", "schedule_id": "nope"}),
         )])
@@ -1440,7 +1438,7 @@ async fn a_failed_persist_prints_python_line() {
             "paused": false,
         })],
     );
-    let _ = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "boot"}))])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "boot"}))])
         .await
         .remove(0)
         .result;
@@ -1482,7 +1480,7 @@ fn a_fire_carries_the_stored_timeout() {
 async fn unknown_type_is_refused_by_the_entry() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
-    let r = kernel.operator_send(vec![Item::new(sch.clone(), json!({"type": "frob"}))])
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({"type": "frob"}))])
         .await
         .remove(0)
         .result;
@@ -1500,7 +1498,7 @@ async fn unknown_type_is_refused_by_the_entry() {
     ] {
         assert!(text.contains(verb), "{text}");
     }
-    let r = kernel.operator_send(vec![Item::new(sch.clone(), json!({}))])
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch.clone(), json!({}))])
         .await
         .remove(0)
         .result;
@@ -1517,7 +1515,7 @@ async fn schedule_ids_are_sch_and_token_hex_3() {
     let (kernel, sch) = mk_kernel(&tmp).await;
     let mut seen = std::collections::HashSet::new();
     for _ in 0..8 {
-        let r = kernel.operator_send(vec![Item::new(
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 sch.clone(),
                 json!({"type": "schedule", "target": "kernel_state",
                        "payload": {"type": "list_agents"}, "interval_seconds": 3600}),
@@ -1549,7 +1547,7 @@ async fn two_schedulers_share_nothing_and_delete_frees_only_its_own() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let b = AgentId::from(format!("{}_b", a.as_str()).as_str());
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
                    "handler_module": HANDLER_MODULE, "id": b.as_str()}),
@@ -1561,7 +1559,7 @@ async fn two_schedulers_share_nothing_and_delete_frees_only_its_own() {
     let ask = |who: AgentId, payload: Value| {
         let kernel = Arc::clone(&kernel);
         async move {
-            kernel.operator_send(vec![Item::new(who, payload)])
+            fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(who, payload)])
                 .await
                 .remove(0)
                 .result
@@ -1659,7 +1657,7 @@ async fn schedule_changes_and_runs_are_published_on_its_inbox() {
     let send = |p: Value| {
         let kernel = Arc::clone(&kernel);
         let sch = sch.clone();
-        async move { kernel.operator_send(vec![Item::new(sch, p)]).await.remove(0).result }
+        async move { fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(sch, p)]).await.remove(0).result }
     };
     let made = send(json!({"type": "schedule", "target": "kernel_state", "payload": {"type": "list_agents"}, "interval_seconds": 999_999})).await;
     let sid = made["schedule_id"].as_str().unwrap().to_string();

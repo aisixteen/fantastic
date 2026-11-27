@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 
 async fn op(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
     let item = Item::new(AgentId::from(target), payload);
-    Arc::clone(k).operator_send(vec![item]).await.remove(0).result
+    fantastic_kernel::test_support::send_settled(&Arc::clone(k), vec![item]).await.remove(0).result
 }
 
 const VERBS: [&str; 2] = ["read_stream", "write"];

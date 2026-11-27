@@ -126,8 +126,7 @@ async fn create_then_delete_unregisters_and_calls_hook() {
     crate::test_support::wire_fake_store(&kernel, tmp.path()).await;
 
     // Create one child via the system verb.
-    let v = kernel
-        .operator_send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "counting.tools", "id": "kid_1"}))])
+    let v = crate::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "counting.tools", "id": "kid_1"}))])
         .await.remove(0).result;
     assert_eq!(v["id"], "kid_1");
     assert!(kernel.agents.contains_key(&AgentId::from("kid_1")));
@@ -139,8 +138,7 @@ async fn create_then_delete_unregisters_and_calls_hook() {
     assert!(tmp.path().join("agents/kid_1/agent.yaml").exists());
 
     // Delete it.
-    let v = kernel
-        .operator_send(vec![Item::new(
+    let v = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "delete_agent", "id": "kid_1"}),
         )])
@@ -169,11 +167,9 @@ async fn delete_refuses_locked() {
     );
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
-    let _ = kernel
-        .operator_send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "counting.tools", "id": "locked_1", "delete_lock": true}))])
+    let _ = crate::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "counting.tools", "id": "locked_1", "delete_lock": true}))])
         .await.remove(0).result;
-    let v = kernel
-        .operator_send(vec![Item::new(
+    let v = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "delete_agent", "id": "locked_1"}),
         )])
@@ -200,15 +196,13 @@ async fn cascade_delete_fires_hooks_depth_first() {
     );
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
-    let _ = kernel
-        .operator_send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "counting.tools", "id": "p_1"}))])
+    let _ = crate::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "counting.tools", "id": "p_1"}))])
         .await.remove(0).result;
     // PLACEMENT IS `parent_id`, not the target. The verb is kernel-owned, so
     // these go to the root; the id names the OWNER of the new agent — never the
     // addressed agent implicitly.
     for kid in ["c_1", "c_2"] {
-        let _ = kernel
-            .operator_send(vec![Item::new(
+        let _ = crate::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel"),
                 json!({"type": "create_agent", "parent_id": "p_1",
                        "handler_module": "counting.tools", "id": kid}),
@@ -218,8 +212,7 @@ async fn cascade_delete_fires_hooks_depth_first() {
             .result;
     }
     // Delete parent — both children's hooks must fire too.
-    let _ = kernel
-        .operator_send(vec![Item::new(
+    let _ = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "delete_agent", "id": "p_1"}),
         )])
@@ -259,8 +252,7 @@ async fn a_kernel_verb_at_a_non_root_agent_says_where_to_send_it() {
     // created. Refused in the HANDLER, so gate-denial probes stay valid.
     let tmp = tempfile::TempDir::new().unwrap();
     let kernel = mk_rooted(&tmp);
-    let _ = kernel
-        .operator_send(vec![Item::new(
+    let _ = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "create_agent", "parent_id": "kernel",
                    "handler_module": "counting.tools", "id": "victim"}),
@@ -269,8 +261,7 @@ async fn a_kernel_verb_at_a_non_root_agent_says_where_to_send_it() {
         .remove(0)
         .result;
 
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("victim"),
             json!({"type": "ps"}),
         )])
@@ -290,8 +281,7 @@ async fn create_agent_demands_a_parent_and_resolves_it_like_a_target() {
     let kernel = mk_rooted(&tmp);
 
     // Absent ⇒ missing_arg, and the refusal says what to name.
-    let missing = kernel
-        .operator_send(vec![Item::new(
+    let missing = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "create_agent", "handler_module": "counting.tools", "id": "x"}),
         )])
@@ -305,8 +295,7 @@ async fn create_agent_demands_a_parent_and_resolves_it_like_a_target() {
         .contains("OWN the new one"));
 
     // Unknown ⇒ unknown_agent, carrying no id index.
-    let unknown = kernel
-        .operator_send(vec![Item::new(
+    let unknown = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "create_agent", "parent_id": "nope",
                    "handler_module": "counting.tools", "id": "x"}),
@@ -318,8 +307,7 @@ async fn create_agent_demands_a_parent_and_resolves_it_like_a_target() {
     assert!(unknown.get("agents").is_none(), "{unknown}");
 
     // Named ⇒ the new agent lands THERE, not under whoever was addressed.
-    let _ = kernel
-        .operator_send(vec![Item::new(
+    let _ = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "create_agent", "parent_id": "kernel",
                    "handler_module": "counting.tools", "id": "mid"}),
@@ -327,8 +315,7 @@ async fn create_agent_demands_a_parent_and_resolves_it_like_a_target() {
         .await
         .remove(0)
         .result;
-    let rec = kernel
-        .operator_send(vec![Item::new(
+    let rec = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "create_agent", "parent_id": "mid",
                    "handler_module": "counting.tools", "id": "leaf"}),
@@ -352,8 +339,7 @@ async fn agent_created_reaches_a_parent_at_any_depth() {
     let create = |parent: &'static str, id: &'static str| {
         let kernel = Arc::clone(&kernel);
         async move {
-            kernel
-                .operator_send(vec![Item::new(
+            crate::test_support::send_settled(&kernel, vec![Item::new(
                     AgentId::from("kernel"),
                     json!({"type": "create_agent", "parent_id": parent,
                            "handler_module": "counting.tools", "id": id}),
@@ -451,8 +437,7 @@ async fn a_raised_child_boot_prints_python_line_and_an_errored_one_is_silent() {
 
     // A RAISED boot: the agent exists, its boot broke, and the create still
     // answers the record (surfaced, not fatal).
-    let rec = kernel
-        .operator_send(vec![Item::new(
+    let rec = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent","parent_id":"kernel","handler_module":"booty.tools","id":"raiser_1"}),
         )])
@@ -461,8 +446,7 @@ async fn a_raised_child_boot_prints_python_line_and_an_errored_one_is_silent() {
         .result;
     assert_eq!(rec["id"], json!("raiser_1"));
     // An ERRORED boot is silent and equally non-fatal.
-    let rec = kernel
-        .operator_send(vec![Item::new(
+    let rec = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent","parent_id":"kernel","handler_module":"booty.tools","id":"sealed_1"}),
         )])
@@ -481,16 +465,14 @@ async fn a_raised_child_boot_prints_python_line_and_an_errored_one_is_silent() {
 async fn duplicate_id_refusal_is_python_text() {
     let tmp = tempfile::TempDir::new().unwrap();
     let kernel = mk_rooted(&tmp);
-    let _ = kernel
-        .operator_send(vec![Item::new(
+    let _ = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent","parent_id":"kernel","handler_module":"counting.tools","id":"dup"}),
         )])
         .await
         .remove(0)
         .result;
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent","parent_id":"kernel","handler_module":"counting.tools","id":"dup"}),
         )])
@@ -510,8 +492,7 @@ async fn duplicate_id_refusal_is_python_text() {
 async fn missing_hint_orders_hint_before_arg() {
     let tmp = tempfile::TempDir::new().unwrap();
     let kernel = mk_rooted(&tmp);
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent","handler_module":"counting.tools","id":"x"}),
         )])
@@ -540,8 +521,7 @@ async fn missing_hint_orders_hint_before_arg() {
 async fn empty_required_args_are_refused_by_their_declaration() {
     let tmp = tempfile::TempDir::new().unwrap();
     let kernel = mk_rooted(&tmp);
-    let empty_hm = kernel
-        .operator_send(vec![Item::new(
+    let empty_hm = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent","handler_module":"","parent_id":"kernel","id":"x"}),
         )])
@@ -550,8 +530,7 @@ async fn empty_required_args_are_refused_by_their_declaration() {
         .result;
     assert_eq!(empty_hm["reason"], "bad_arg");
     assert_eq!(empty_hm["arg"], "handler_module");
-    let empty_pid = kernel
-        .operator_send(vec![Item::new(
+    let empty_pid = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent","handler_module":"counting.tools","parent_id":"","id":"x"}),
         )])
@@ -572,8 +551,7 @@ async fn create_refusal_precedence_matches_python() {
 
     // Both handler_module AND parent_id absent -> the first declared REQUIRED argument
     // (handler_module) is refused first, by the shared entry's check of the declaration.
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent"}),
         )])
@@ -582,8 +560,7 @@ async fn create_refusal_precedence_matches_python() {
         .result;
     assert_eq!(r["arg"], "handler_module");
     // parent_id given, handler_module absent -> handler_module.
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent","parent_id":"kernel"}),
         )])
@@ -594,8 +571,7 @@ async fn create_refusal_precedence_matches_python() {
 
     // parent_id present but unresolvable AND a reserved key present -> parent
     // resolution wins (checked before the reserved-key sweep).
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent","handler_module":"counting.tools",
                    "parent_id":"ghost","root_path":"/evil"}),
@@ -608,8 +584,7 @@ async fn create_refusal_precedence_matches_python() {
     // A resolvable parent but TWO reserved keys present -> the alphabetically
     // FIRST of `sorted(RESERVED_RECORD_KEYS)` = ["ctx", "parent", "root_path"]
     // is named, never whichever the payload listed first.
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent","handler_module":"counting.tools",
                    "parent_id":"kernel","root_path":"/evil","parent":"x"}),
@@ -621,8 +596,7 @@ async fn create_refusal_precedence_matches_python() {
 
     // Reserved keys clear but the `can` shape is bad: the target's record entry
     // refuses the field by name (the declared shape: a map of target → one level).
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent","handler_module":"counting.tools",
                    "parent_id":"kernel","can":"*","id":"granted"}),
@@ -636,8 +610,7 @@ async fn create_refusal_precedence_matches_python() {
     // An id that is not one safe path segment (or is all digits) is refused by the
     // declaration of `id`, before any agent exists.
     for bad_id in ["..", "a/b", ".hidden", "a|b", "123"] {
-        let r = kernel
-            .operator_send(vec![Item::new(
+        let r = crate::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel"),
                 json!({"type":"create_agent","handler_module":"counting.tools",
                        "parent_id":"kernel","id":bad_id}),
@@ -658,8 +631,7 @@ async fn update_agent_refuses_substrate_wiring_through_the_targets_bundle() {
     // the sorted reserved keys) before `root_path`.
     let tmp = tempfile::TempDir::new().unwrap();
     let kernel = mk_rooted(&tmp);
-    let made = kernel
-        .operator_send(vec![Item::new(
+    let made = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent","parent_id":"kernel",
                    "handler_module":"counting.tools","id":"wired"}),
@@ -668,8 +640,7 @@ async fn update_agent_refuses_substrate_wiring_through_the_targets_bundle() {
         .remove(0)
         .result;
     assert_eq!(made["id"], "wired", "{made}");
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"update_agent","id":"wired","handler_module":"x.tools"}),
         )])
@@ -679,8 +650,7 @@ async fn update_agent_refuses_substrate_wiring_through_the_targets_bundle() {
     assert_eq!(r["reason"], "bad_arg");
     assert_eq!(r["arg"], "handler_module");
 
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"update_agent","id":"wired","root_path":"/evil","parent":"x"}),
         )])
@@ -691,8 +661,7 @@ async fn update_agent_refuses_substrate_wiring_through_the_targets_bundle() {
     assert_eq!(r["arg"], "parent");
 
     // where an agent sits is the tree's, never its record's
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"update_agent","id":"wired","parent_id":"kernel_state"}),
         )])
@@ -703,8 +672,7 @@ async fn update_agent_refuses_substrate_wiring_through_the_targets_bundle() {
     assert_eq!(r["arg"], "parent_id");
 
     // an agent that is not there is the unknown agent
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"update_agent","id":"ghost","display_name":"x"}),
         )])
@@ -713,8 +681,7 @@ async fn update_agent_refuses_substrate_wiring_through_the_targets_bundle() {
         .result;
     assert_eq!(r["reason"], "unknown_agent");
 
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"update_agent","id":""}),
         )])
@@ -729,8 +696,7 @@ async fn update_agent_refuses_substrate_wiring_through_the_targets_bundle() {
 async fn delete_agent_refuses_the_root_with_python_text() {
     let tmp = tempfile::TempDir::new().unwrap();
     let kernel = mk_rooted(&tmp);
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"delete_agent","id":"kernel_state"}),
         )])
@@ -752,8 +718,7 @@ async fn delete_agent_refuses_the_root_with_python_text() {
 async fn delete_agent_empty_id_is_refused_by_its_declaration() {
     let tmp = tempfile::TempDir::new().unwrap();
     let kernel = mk_rooted(&tmp);
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"delete_agent","id":""}),
         )])
@@ -768,16 +733,14 @@ async fn delete_agent_empty_id_is_refused_by_its_declaration() {
 async fn delete_lock_refusal_is_python_text_and_key_order() {
     let tmp = tempfile::TempDir::new().unwrap();
     let kernel = mk_rooted(&tmp);
-    let _ = kernel
-        .operator_send(vec![Item::new(
+    let _ = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent","parent_id":"kernel","handler_module":"counting.tools","id":"P","delete_lock":true}),
         )])
         .await
         .remove(0)
         .result;
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"delete_agent","id":"P"}),
         )])
@@ -806,8 +769,7 @@ async fn delete_lock_on_a_grandchild_refuses_the_cascade() {
     // cascade, and a number is no lock — it is refused as the wrong type.
     let tmp = tempfile::TempDir::new().unwrap();
     let kernel = mk_rooted(&tmp);
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent","parent_id":"kernel","handler_module":"counting.tools",
                    "id":"N","delete_lock":1}),
@@ -818,8 +780,7 @@ async fn delete_lock_on_a_grandchild_refuses_the_cascade() {
     assert_eq!(r["reason"], "bad_arg", "{r}");
     assert_eq!(r["arg"], "delete_lock", "{r}");
     for (id, parent, lock) in [("P", "kernel", json!(false)), ("C", "P", json!(true))] {
-        let r = kernel
-            .operator_send(vec![Item::new(
+        let r = crate::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel"),
                 json!({"type":"create_agent","parent_id":parent,"handler_module":"counting.tools","id":id,"delete_lock":lock}),
             )])
@@ -828,8 +789,7 @@ async fn delete_lock_on_a_grandchild_refuses_the_cascade() {
             .result;
         assert!(r.get("error").is_none(), "{r}");
     }
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"delete_agent","id":"P"}),
         )])
@@ -851,8 +811,7 @@ async fn lifecycle_events_name_an_empty_display_name_by_id() {
     let _tap = kernel.add_state_subscriber(Arc::new(move |ev, _body| {
         sink.lock().unwrap().push(ev.clone());
     }));
-    let _ = kernel
-        .operator_send(vec![Item::new(
+    let _ = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent","parent_id":"kernel","handler_module":"counting.tools","id":"Q","display_name":""}),
         )])
@@ -860,8 +819,7 @@ async fn lifecycle_events_name_an_empty_display_name_by_id() {
     let snap = kernel.state_snapshot();
     let row = snap.iter().find(|r| r["agent_id"] == "Q").expect("Q row");
     assert_eq!(row["name"], "Q");
-    let _ = kernel
-        .operator_send(vec![Item::new(
+    let _ = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"delete_agent","id":"Q"}),
         )])
@@ -942,8 +900,7 @@ async fn delete_agent_keep_memory_flag_is_scoped_to_one_delete() {
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     for (id, parent) in [("p_1", "kernel"), ("c_1", "p_1"), ("q_1", "kernel")] {
-        let _ = kernel
-            .operator_send(vec![Item::new(
+        let _ = crate::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel"),
                 json!({"type": "create_agent", "parent_id": parent,
                        "handler_module": "keep_probe.tools", "id": id}),
@@ -955,8 +912,7 @@ async fn delete_agent_keep_memory_flag_is_scoped_to_one_delete() {
     let del = |payload: Value| {
         let kernel = Arc::clone(&kernel);
         async move {
-            kernel
-                .operator_send(vec![Item::new(AgentId::from("kernel_state"), payload)])
+            crate::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), payload)])
                 .await
                 .remove(0)
                 .result
@@ -1021,7 +977,7 @@ impl crate::Handler for AskerBundle {
                             "handler_module": "counting.tools", "id": p["id"]});
         let to_kernel = |payload: Value| Item::new(AgentId::from("kernel"), payload);
         Ok(Some(match p["type"].as_str().unwrap_or("") {
-            "make" => k.send_as_caller(vec![to_kernel(create)]).await.remove(0).result,
+            "make" => crate::test_support::settled_for_asker(k, vec![to_kernel(create)]).await.remove(0).result,
             "make_direct" => {
                 let mut fields = create;
                 if let Some(m) = fields.as_object_mut() {
@@ -1034,12 +990,12 @@ impl crate::Handler for AskerBundle {
             }
             "zap" => {
                 let del = json!({"type": "delete_agent", "id": p["id"]});
-                k.send_as_caller(vec![to_kernel(del)]).await.remove(0).result
+                crate::test_support::settled_for_asker(k, vec![to_kernel(del)]).await.remove(0).result
             }
             _ => {
                 let mut upd = json!({"type": "update_agent", "id": p["id"]});
                 upd[p["field"].as_str().unwrap_or("")] = p["value"].clone();
-                k.send_as_caller(vec![to_kernel(upd)]).await.remove(0).result
+                crate::test_support::settled_for_asker(k, vec![to_kernel(upd)]).await.remove(0).result
             }
         }))
     }
@@ -1080,8 +1036,7 @@ async fn op_create(kernel: &Arc<Kernel>, parent: &str, id: &str, bundle: &str, c
     if !can.is_null() {
         p["can"] = can;
     }
-    let r = kernel
-        .operator_send(vec![Item::new(AgentId::from("kernel"), p)])
+    let r = crate::test_support::send_settled(kernel, vec![Item::new(AgentId::from("kernel"), p)])
         .await
         .remove(0)
         .result;
@@ -1093,7 +1048,7 @@ async fn send_as(kernel: &Arc<Kernel>, agent: &str, target: &str, payload: Value
     let k = Arc::clone(kernel);
     let t = AgentId::from(target);
     crate::test_support::as_agent(AgentId::from(agent), async move {
-        k.operator_send(vec![Item::new(t, payload)]).await.remove(0).result
+        crate::test_support::send_settled(&k, vec![Item::new(t, payload)]).await.remove(0).result
     })
     .await
 }
@@ -1213,8 +1168,7 @@ async fn a_forced_field_is_changed_only_by_the_operator() {
         json!({"type": "update_agent", "id": "c1", "temperature": 0.1})).await;
     assert_eq!(r["updated"], true, "{r}");
     // the operator changes the forced one
-    let r = k
-        .operator_send(vec![Item::new(AgentId::from("kernel"), model)])
+    let r = crate::test_support::send_settled(&k, vec![Item::new(AgentId::from("kernel"), model)])
         .await
         .remove(0)
         .result;
@@ -1284,8 +1238,7 @@ async fn an_uninstalled_bundle_and_a_bundle_outside_what_answer_the_same() {
     assert_eq!(named(&uninstalled, "ghost.tools"), named(&outside, "chatlike"));
     assert!(!k.exists("c1"));
     // the operator is told the bundle is not installed
-    let r = k
-        .operator_send(vec![Item::new(AgentId::from("kernel"), mk("ghost.tools"))])
+    let r = crate::test_support::send_settled(&k, vec![Item::new(AgentId::from("kernel"), mk("ghost.tools"))])
         .await
         .remove(0)
         .result;
@@ -1386,8 +1339,7 @@ async fn a_deleted_ids_lines_stay_and_reach_a_reused_id() {
     let k = mk_v9_kernel(&tmp);
     op_create(&k, "kernel", "vault", "asker.tools", Value::Null).await;
     op_create(&k, "kernel", "reader", "counting.tools", json!({"vault": {"call": ["zap"]}})).await;
-    let r = k
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(&k, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "delete_agent", "id": "vault"}),
         )])
@@ -1408,8 +1360,7 @@ async fn a_deleted_ids_lines_stay_and_reach_a_reused_id() {
 async fn a_can_line_outside_the_legal_shape_is_refused_at_write_time() {
     let tmp = tempfile::TempDir::new().unwrap();
     let kernel = mk_rooted(&tmp);
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent","handler_module":"counting.tools",
                    "parent_id":"kernel","id":"hub"}),
@@ -1421,8 +1372,7 @@ async fn a_can_line_outside_the_legal_shape_is_refused_at_write_time() {
     let update = |can: Value| {
         let kernel = Arc::clone(&kernel);
         async move {
-            kernel
-                .operator_send(vec![Item::new(
+            crate::test_support::send_settled(&kernel, vec![Item::new(
                     AgentId::from("kernel"),
                     json!({"type": "update_agent", "id": "hub", "can": can}),
                 )])
@@ -1458,8 +1408,7 @@ async fn a_can_line_outside_the_legal_shape_is_refused_at_write_time() {
 
 /// The operator's `payload` to the root.
 async fn op_send(kernel: &Arc<Kernel>, payload: Value) -> Value {
-    kernel
-        .operator_send(vec![Item::new(AgentId::from("kernel"), payload)])
+    crate::test_support::send_settled(kernel, vec![Item::new(AgentId::from("kernel"), payload)])
         .await
         .remove(0)
         .result
@@ -1984,8 +1933,8 @@ async fn bundle_defaults_can_lines_are_checked_as_the_creators_write() {
     assert_eq!(meta_of(&k, "k2")["can"], json!({"svc": {"call": ["get"]}}));
 }
 
-/// M2/M3: a create sent for "whoever asked" ([`Kernel::send_as_caller`], the one
-/// entry a bundle has) from work with NO ORIGIN SCOPE (a bare `tokio::spawn`) is
+/// M2/M3: a create sent for "whoever asked" ([`Kernel::call_for`], test side
+/// [`crate::test_support::settled_for_asker`]) from work with NO ORIGIN SCOPE (a bare `tokio::spawn`) is
 /// nobody's: the unknown answer, and nothing is created. In the in-process
 /// shell's scope it is the operator's.
 #[tokio::test]
@@ -2001,12 +1950,12 @@ async fn an_asker_create_with_no_origin_scope_creates_nothing() {
     };
     let kk = Arc::clone(&k);
     let item = create();
-    let r = tokio::spawn(async move { kk.send_as_caller(vec![item]).await.remove(0).result })
+    let r = tokio::spawn(async move { crate::test_support::settled_for_asker(&kk, vec![item]).await.remove(0).result })
         .await
         .unwrap();
     assert_eq!(r, crate::refusal::unknown_agent("kernel"));
     assert!(!k.exists("orphan"));
-    let r = crate::send::as_operator(k.send_as_caller(vec![create()]))
+    let r = crate::send::as_operator(crate::test_support::settled_for_asker(&k, vec![create()]))
         .await
         .remove(0)
         .result;
@@ -2040,8 +1989,7 @@ async fn the_asker_check_holds_the_asker_to_its_own_lines_beside_the_creators() 
     let tmp = tempfile::TempDir::new().unwrap();
     let kernel = mk_rooted(&tmp);
     for id in ["canvas", "open", "forcing", "asker", "narrow", "insists", "keys"] {
-        let r = kernel
-            .operator_send(vec![Item::new(
+        let r = crate::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel"),
                 json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "counting.tools", "id": id}),
             )])

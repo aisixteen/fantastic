@@ -44,7 +44,7 @@ fn folder(name: &str) -> PathBuf {
 }
 
 async fn call(k: &Arc<Kernel>, to: &str, payload: Value) -> Value {
-    k.operator_send(vec![Item::new(AgentId::from(to), payload)]).await.remove(0).result
+    fantastic_kernel::test_support::send_settled(k, vec![Item::new(AgentId::from(to), payload)]).await.remove(0).result
 }
 
 /// The phases the sidebar holds once it holds one for `CHAT` (the tap publishes off the call

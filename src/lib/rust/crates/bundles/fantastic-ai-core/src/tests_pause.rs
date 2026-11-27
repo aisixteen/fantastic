@@ -196,7 +196,7 @@ async fn setup_with(tmp: &TempDir, tag: &str, extra: Value) -> (Arc<Kernel>, Age
     for (k, v) in extra.as_object().unwrap() {
         create[k.as_str()] = v.clone();
     }
-    let _ = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), create)])
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), create)])
         .await
         .remove(0)
         .result;
@@ -205,7 +205,7 @@ async fn setup_with(tmp: &TempDir, tag: &str, extra: Value) -> (Arc<Kernel>, Age
 }
 
 async fn send(kernel: &Arc<Kernel>, to: &AgentId, payload: Value) -> Value {
-    kernel.operator_send(vec![Item::new(to.clone(), payload)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(to.clone(), payload)])
         .await
         .remove(0)
         .result
@@ -330,7 +330,7 @@ fn pause_and_resume_are_declared_like_every_other_verb() {
 async fn resume_has_no_registry_gate() {
     let tmp = TempDir::new().unwrap();
     let (kernel, id) = setup_with(&tmp, "nogate", json!({"spawned_by": "reg_nogate"})).await;
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
                    "handler_module": "limit_registry.tools", "id": "reg_nogate"}),

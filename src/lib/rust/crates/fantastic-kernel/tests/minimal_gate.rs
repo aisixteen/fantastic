@@ -25,7 +25,7 @@ static BOOTS: Mutex<Vec<(String, Option<String>)>> = Mutex::new(Vec::new());
 
 /// Answers `{ok: <id>, verb}` for any of its verbs. A leg's `inbound_call` is sent
 /// onward as the leg. At `boot`, a record carrying `boot_create` sends that
-/// `create_agent` for its asker ([`Kernel::send_as_caller`]: at a boot, the agent
+/// `create_agent` for its asker ([`Kernel::call`]: at a boot, the agent
 /// itself); a record carrying `hydrate` creates `<id>_hydrated` under itself, as
 /// itself (the static loader's roster pass).
 struct Probe;
@@ -82,8 +82,7 @@ impl Handler for Probe {
                     .unwrap_or_default();
                 if meta.contains_key("hydrate") {
                     let kid = format!("{}_hydrated", id.0);
-                    let _ = kernel
-                        .send(vec![Item::new(
+                    let _ = fantastic_kernel::test_support::settled(kernel, vec![Item::new(
                             "kernel",
                             json!({"type": "create_agent", "parent_id": id.0,
                                    "handler_module": MOD, "id": kid}),
@@ -92,7 +91,7 @@ impl Handler for Probe {
                 }
                 if let Some(c) = meta.get("boot_create") {
                     let _ = kernel
-                        .send_as_caller(vec![Item::new("kernel", c.clone())])
+                        .call(Item::new("kernel", c.clone()), |_| async {})
                         .await;
                 }
                 None
@@ -105,14 +104,13 @@ impl Handler for Probe {
                 for (k, v) in payload["fields"].as_object().cloned().unwrap_or_default() {
                     p[k] = v;
                 }
-                Some(kernel.send(vec![Item::new("kernel", p)]).await.remove(0).result)
+                Some(fantastic_kernel::test_support::settled(kernel, vec![Item::new("kernel", p)]).await.remove(0).result)
             }
             "inbound_call" => {
                 // the frame's `sender` is never an identity: the leg sends as itself
                 let item = &payload["item"];
                 let target = item["target"].as_str().unwrap_or("");
-                let out = kernel
-                    .send(vec![Item::new(target, item["payload"].clone())])
+                let out = fantastic_kernel::test_support::settled(kernel, vec![Item::new(target, item["payload"].clone())])
                     .await
                     .remove(0);
                 Some(out.result)
@@ -191,8 +189,7 @@ fn mk_v9() -> Arc<Kernel> {
 }
 
 async fn op(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    kernel
-        .operator_send(vec![Item::new(AgentId::from(target), payload)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -202,7 +199,7 @@ async fn as_agent(kernel: &Arc<Kernel>, sender: &str, target: &str, payload: Val
     let k = Arc::clone(kernel);
     let t = target.to_string();
     fantastic_kernel::test_support::as_agent(AgentId::from(sender), async move {
-        k.operator_send(vec![Item::new(AgentId::from(t.as_str()), payload)])
+        fantastic_kernel::test_support::send_settled(&k, vec![Item::new(AgentId::from(t.as_str()), payload)])
             .await
             .remove(0)
     })
@@ -299,7 +296,7 @@ async fn a_send_with_no_origin_scope_is_refused() {
     let k2 = Arc::clone(&k);
     // a bare spawn carries no identity at all, and is never the operator
     let out = tokio::spawn(async move {
-        k2.send(vec![Item::new("a", json!({"type": "ping"}))])
+        fantastic_kernel::test_support::settled(&k2, vec![Item::new("a", json!({"type": "ping"}))])
             .await
             .remove(0)
     })
@@ -312,8 +309,7 @@ async fn a_send_with_no_origin_scope_is_refused() {
 async fn operator_send_is_ungated() {
     let (_t, k) = mk();
     create(&k, "kernel_state", "a", json!({})).await;
-    let out = k
-        .operator_send(vec![Item::new("a", json!({"type": "ping"}))])
+    let out = fantastic_kernel::test_support::send_settled(&k, vec![Item::new("a", json!({"type": "ping"}))])
         .await
         .remove(0);
     assert!(reached(&out, "a"), "{}", out.result);
@@ -367,7 +363,7 @@ async fn only_the_originator_joins_an_execution() {
     create(&k, "kernel_state", "b", json!({"can": {"a": {"call": ["ping"]}}})).await;
     let named = |k: Arc<Kernel>, sender: &'static str| async move {
         fantastic_kernel::test_support::as_agent(AgentId::from(sender), async move {
-            k.operator_send(vec![Item::new("a", json!({"type": "ping"})).with_id("job")])
+            fantastic_kernel::test_support::send_settled(&k, vec![Item::new("a", json!({"type": "ping"})).with_id("job")])
                 .await
                 .remove(0)
         })
@@ -381,8 +377,7 @@ async fn only_the_originator_joins_an_execution() {
     // its originator joins it, and so does the operator
     let again = named(Arc::clone(&k), "a").await;
     assert_eq!(again.result, first.result);
-    let by_op = k
-        .operator_send(vec![Item::new("a", json!({"type": "ping"})).with_id("job")])
+    let by_op = fantastic_kernel::test_support::send_settled(&k, vec![Item::new("a", json!({"type": "ping"})).with_id("job")])
         .await
         .remove(0);
     assert_eq!(by_op.result, first.result);

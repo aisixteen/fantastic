@@ -48,8 +48,7 @@ impl Handler for Echo {
 
 /// The shell: a send from outside every agent.
 async fn op(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    Arc::clone(k)
-        .operator_send(vec![Item::new(AgentId::from(target), payload)])
+    fantastic_kernel::test_support::send_settled(&Arc::clone(k), vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result

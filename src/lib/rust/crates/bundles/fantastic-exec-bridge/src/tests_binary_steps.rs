@@ -253,7 +253,7 @@ async fn a_job_round_trips_a_literal_key_through_the_kernel() {
         json!({"type": "create_agent", "parent_id": "kernel_state", "id": "echo",
                "handler_module": "binpath_echo.tools"}),
     ] {
-        let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), rec)])
+        let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), rec)])
             .await
             .remove(0)
             .result;
@@ -266,7 +266,7 @@ async fn a_job_round_trips_a_literal_key_through_the_kernel() {
         .await
         .is_none());
     let mut rx = inbox(&kernel, &a);
-    let started = kernel.operator_send(vec![Item::new(
+    let started = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             py_start(
                 &py,

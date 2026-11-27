@@ -21,7 +21,7 @@ tokio = { workspace = true }
 
 [features]
 # the test fixtures a dependent crate's tests build on; nothing ships them
-test-support = []
+test-support = ["fantastic-kernel/test-support"]
 
 [dev-dependencies]
 fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }

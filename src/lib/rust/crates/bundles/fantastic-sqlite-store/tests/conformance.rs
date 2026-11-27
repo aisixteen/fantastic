@@ -75,8 +75,8 @@ impl T {
     async fn call(&mut self, payload: Value, as_: Option<&str>) -> Value {
         let item = Item::new(AgentId::from("mem"), payload);
         let out = match as_ {
-            None => self.k.operator_send(vec![item]).await.remove(0).result,
-            Some(who) => as_agent(AgentId::from(who), self.k.operator_send(vec![item])).await.remove(0).result,
+            None => fantastic_kernel::test_support::send_settled(&self.k, vec![item]).await.remove(0).result,
+            Some(who) => as_agent(AgentId::from(who), fantastic_kernel::test_support::send_settled(&self.k, vec![item])).await.remove(0).result,
         };
         self.log.push(out.clone());
         out
@@ -88,7 +88,7 @@ impl T {
         if let Some(b) = bytes {
             item = item.with_binary_key("data", b.to_vec());
         }
-        let out = as_agent(AgentId::from(who), self.k.operator_send(vec![item])).await.remove(0);
+        let out = as_agent(AgentId::from(who), fantastic_kernel::test_support::send_settled(&self.k, vec![item])).await.remove(0);
         let body = out.body_bytes().map(<[u8]>::to_vec);
         self.log.push(json!([out.result.clone(), body]));
         (out.result, body)
@@ -427,14 +427,14 @@ async fn s_two_stores_hold_separate_tables(t: &mut T) {
     fantastic_kernel::test_support::register(&t.k, agent("mem2", Some(handler), Some("kernel_state"), meta));
     fantastic_kernel::test_support::grant(&t.k, "alice", "mem2", json!({"call": ["*"]}));
     t.append("alice", json!([{"id": 1, "content": "in mem"}])).await;
-    let read2 = as_agent(AgentId::from("alice"), t.k.operator_send(vec![Item::new(AgentId::from("mem2"), json!({"type": "read"}))]))
+    let read2 = as_agent(AgentId::from("alice"), fantastic_kernel::test_support::send_settled(&t.k, vec![Item::new(AgentId::from("mem2"), json!({"type": "read"}))]))
         .await
         .remove(0)
         .result;
     t.log.push(read2.clone());
     assert_eq!(read2["rows"], json!([]), "mem2 shares nothing with mem: {read2}");
-    let gone = t
-        .k.operator_send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "delete_agent", "id": "mem2"}))])
+    let gone = fantastic_kernel::test_support::send_settled(&t
+        .k, vec![Item::new(AgentId::from("kernel_state"), json!({"type": "delete_agent", "id": "mem2"}))])
         .await
         .remove(0)
         .result;
@@ -523,7 +523,7 @@ async fn reflect_names_the_same_verbs_and_says_durable() {
         assert_eq!(r["rows"], json!(1));
         assert_eq!(r["optional_verbs"], json!(["search"]));
         // the verbs it answers: rendered from the declarations, in declaration order
-        let d = t.k.operator_send(vec![Item::new(AgentId::from("mem"), json!({"type": "reflect", "tier": "oneliners"}))]).await.remove(0).result;
+        let d = fantastic_kernel::test_support::send_settled(&t.k, vec![Item::new(AgentId::from("mem"), json!({"type": "reflect", "tier": "oneliners"}))]).await.remove(0).result;
         let verbs: Vec<&String> = d["verbs"].as_object().unwrap().keys().collect();
         let mut want = vec!["append", "read", "search", "prune", "inject", "dump", "put_bytes", "get_bytes", "copy", "reflect"];
         if h == SQL {

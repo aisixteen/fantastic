@@ -116,153 +116,219 @@ fn load_manifest(agent: &Agent, base: &std::path::Path) -> Result<Vec<Value>, St
     }
 }
 
-/// One tree verb of the hydration (`create_agent`/`update_agent`), sent to the ROOT
-/// as the loader itself: checked against its own lines.
-async fn tree_verb(kernel: &Arc<Kernel>, payload: Value) -> Value {
-    kernel
-        .send(vec![fantastic_kernel::Item::new(
-            fantastic_kernel::AgentId::from("kernel"),
-            payload,
-        )])
-        .await
-        .remove(0)
-        .result
+/// What one manifest entry asks of the root: a tree verb to call, or nothing (an
+/// existing agent whose entry re-applies no field).
+enum Entry {
+    /// `create_agent` of a new child of the loader.
+    Create(Value),
+    /// The entry names an agent of this loader's roster: its declared fields, as an
+    /// `update_agent` (none when there is nothing to re-apply).
+    Reapply(String, Option<Value>),
 }
 
+/// The boot's refusal: `error`, `booted: false`.
+fn refused(error: String) -> Value {
+    json!({ "error": error, "booted": false })
+}
+
+/// Judge one manifest entry against the tree as it stands NOW (an earlier entry's
+/// create is already in it): the call it needs, or the boot's refusal.
+fn entry(agent: &Agent, kernel: &Kernel, spec: &Value) -> Result<Entry, Value> {
+    // an entry without a handler_module is no entry; the value is judged by
+    // `create_agent`.
+    let handler_module = spec.as_object().and_then(|o| o.get("handler_module"));
+    if !handler_module.is_some_and(|h| !h.is_null()) {
+        return Err(refused(format!(
+            "static_loader: each roster entry needs a handler_module: {}",
+            py_repr_value(spec)
+        )));
+    }
+    let obj = spec
+        .as_object()
+        .expect("a spec with a handler_module is a mapping");
+    // An id-less entry cannot be idempotent: the roster is keyed by id, so
+    // nothing matches the agent the LAST boot minted and this boot mints a
+    // SECOND one, which the flush persists — the roster grows by one agent
+    // per restart and the operator is never told. The manifest is truth, so
+    // it must name its agents.
+    let Some(id) = obj
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(refused(format!(
+            "static_loader: roster entry needs an explicit id: {}",
+            py_repr_value(spec)
+        )));
+    };
+    if let Some(live) = kernel.resolve_target(id) {
+        // Only the loader's OWN children are its roster: an id that lives
+        // anywhere else is another agent's, never re-applied from here.
+        if live.parent_id.as_ref() != Some(&agent.id) {
+            return Err(refused(format!(
+                "static_loader: {} exists outside this loader — a manifest \
+                 re-applies only the agents it placed",
+                py_repr(id)
+            )));
+        }
+        // THE MANIFEST IS TRUTH; a store is only a MEDIUM (disk, RAM,
+        // cloud, an API). So an id that already exists is RE-APPLIED
+        // from the manifest, never skipped: an edited grant in the yaml
+        // must take effect, never be silently overridden by the hydrated
+        // record.
+        let declared_hm = obj.get("handler_module").unwrap_or(&Value::Null);
+        if live.handler_module.as_deref() != declared_hm.as_str() {
+            // A bundle cannot be swapped under a live agent (its
+            // in-process state belongs to the old one).
+            return Err(refused(format!(
+                "static_loader: {} exists as {} but the manifest declares \
+                 {} — a handler_module is fixed at create; delete the agent \
+                 to re-declare it",
+                py_repr(id),
+                live.handler_module.as_deref().map_or("None".to_string(), py_repr),
+                py_repr_value(declared_hm)
+            )));
+        }
+        let mut patch = obj.clone();
+        patch.shift_remove("id");
+        patch.shift_remove("handler_module");
+        patch.shift_remove("parent_id");
+        if patch.is_empty() {
+            return Ok(Entry::Reapply(id.to_string(), None));
+        }
+        // the verb is set AFTER the declared fields: a declared `type` key can
+        // never change which verb is called.
+        let mut call = Map::new();
+        call.insert("id".to_string(), json!(id));
+        for (k, v) in patch {
+            call.insert(k, v);
+        }
+        call.insert("type".to_string(), json!("update_agent"));
+        return Ok(Entry::Reapply(id.to_string(), Some(Value::Object(call))));
+    }
+    // The declared agent becomes THIS loader's child ($parent = the loader),
+    // but placement is stated by `parent_id`, not by who is addressed:
+    // `create_agent` is kernel-owned and answered by the ROOT alone. The
+    // manifest's `can` rides as written (checked as lines the loader hands
+    // out); the child boots inside create_agent.
+    // The verb and `parent_id` land AFTER the spread: an entry cannot change the
+    // verb, and one naming its own parent cannot place the agent outside the
+    // loader's subtree.
+    let mut payload = obj.clone();
+    payload.insert("type".to_string(), json!("create_agent"));
+    payload.insert("parent_id".to_string(), json!(agent.id.0));
+    Ok(Entry::Create(Value::Object(payload)))
+}
+
+/// Where a hydration stands: the entries still to judge, what it made so far, and
+/// where its answer goes.
+struct Hydration {
+    agent: Arc<Agent>,
+    kernel: Arc<Kernel>,
+    todo: std::collections::VecDeque<Value>,
+    created: Vec<String>,
+    reapplied: Vec<String>,
+    /// The boot's own call, when the boot was one: its settle is the answer.
+    deferred: Option<fantastic_kernel::Deferred>,
+}
+
+impl Hydration {
+    /// The hydration is over with `reply`: it settles the boot's call, or — a boot
+    /// the kernel ran directly, which answered at once — a refusal is said.
+    fn end(self, reply: Value) {
+        match self.deferred {
+            Some(d) => {
+                let out = fantastic_kernel::Outcome::of_reply(Some(d.pid()), reply);
+                self.kernel.settle_deferred(d.pid(), out);
+            }
+            None => {
+                if let Some(e) = fantastic_kernel::refusal::error_text(&reply) {
+                    println!("  [static_loader] {} boot: {e}", self.agent.id);
+                }
+            }
+        }
+    }
+}
+
+/// THE HYDRATION, one entry after the other: each tree verb is a call sent to the
+/// ROOT as the loader itself (checked against its own lines), and the next entry is
+/// judged once it settled (#795) — an entry may name what an earlier one made.
+fn hydrate(mut h: Hydration) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async move {
+        loop {
+            let Some(spec) = h.todo.pop_front() else {
+                let reply = json!({ "booted": true, "created": h.created, "reapplied": h.reapplied });
+                return h.end(reply);
+            };
+            let (payload, made) = match entry(&h.agent, &h.kernel, &spec) {
+                Err(refusal) => return h.end(refusal),
+                Ok(Entry::Reapply(id, None)) => {
+                    h.reapplied.push(id);
+                    continue;
+                }
+                Ok(Entry::Reapply(id, Some(call))) => (call, Err(id)),
+                Ok(Entry::Create(payload)) => (payload, Ok(spec)),
+            };
+            let kernel = Arc::clone(&h.kernel);
+            let item = fantastic_kernel::Item::new(AgentId::from("kernel"), payload);
+            return kernel
+                .call_then(item, move |out| async move {
+                    let r = out.result;
+                    match made {
+                        Err(id) => {
+                            if let Some(e) = fantastic_kernel::refusal::error_text(&r) {
+                                let why = format!("static_loader: re-applying {}: {}", py_repr(&id), e);
+                                return h.end(refused(why));
+                            }
+                            h.reapplied.push(id);
+                        }
+                        Ok(spec) => match r.get("id").and_then(Value::as_str) {
+                            Some(id) => h.created.push(id.to_string()),
+                            None => {
+                                let why = format!(
+                                    "static_loader: create failed for {}: {}",
+                                    py_repr_value(&spec),
+                                    fantastic_kernel::refusal::error_text(&r).unwrap_or_else(|| r.to_string())
+                                );
+                                return h.end(refused(why));
+                            }
+                        },
+                    }
+                    hydrate(h).await;
+                })
+                .await;
+        }
+    })
+}
+
+/// `boot`: read the manifest and hydrate it. A boot that is a call DEFERS: its settle
+/// is `{booted, created, reapplied}` (or the refusal) once the last tree verb settled.
+/// A boot the kernel runs directly (its create, `kernel_start`) answers
+/// `{booted: true}` at once, and the hydration goes on as calls.
 async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
     let agents = match kernel
         .state_dir()
         .and_then(|base| load_manifest(agent, &base))
     {
         Ok(a) => a,
-        Err(e) => return json!({ "error": e, "booted": false }),
+        Err(e) => return refused(e),
     };
-    let mut created: Vec<String> = Vec::new();
-    let mut reapplied: Vec<String> = Vec::new();
-    for spec in agents {
-        // an entry without a handler_module is no entry; the value is judged by
-        // `create_agent`.
-        let handler_module = spec.as_object().and_then(|o| o.get("handler_module"));
-        if !handler_module.is_some_and(|h| !h.is_null()) {
-            return json!({
-                "error": format!(
-                    "static_loader: each roster entry needs a handler_module: {}",
-                    py_repr_value(&spec)
-                ),
-                "booted": false,
-            });
-        }
-        let obj = spec
-            .as_object()
-            .expect("a spec with a handler_module is a mapping");
-        // An id-less entry cannot be idempotent: the roster is keyed by id, so
-        // nothing matches the agent the LAST boot minted and this boot mints a
-        // SECOND one, which the flush persists — the roster grows by one agent
-        // per restart and the operator is never told. The manifest is truth, so
-        // it must name its agents.
-        let Some(id) = obj
-            .get("id")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-        else {
-            return json!({
-                "error": format!(
-                    "static_loader: roster entry needs an explicit id: {}",
-                    py_repr_value(&spec)
-                ),
-                "booted": false,
-            });
-        };
-        if let Some(live) = kernel.resolve_target(id) {
-            // Only the loader's OWN children are its roster: an id that lives
-            // anywhere else is another agent's, never re-applied from here.
-            if live.parent_id.as_ref() != Some(&agent.id) {
-                return json!({
-                    "error": format!(
-                        "static_loader: {} exists outside this loader — a manifest \
-                         re-applies only the agents it placed",
-                        py_repr(id)
-                    ),
-                    "booted": false,
-                });
-            }
-            // THE MANIFEST IS TRUTH; a store is only a MEDIUM (disk, RAM,
-            // cloud, an API). So an id that already exists is RE-APPLIED
-            // from the manifest, never skipped: an edited grant in the yaml
-            // must take effect, never be silently overridden by the hydrated
-            // record.
-            let declared_hm = obj.get("handler_module").unwrap_or(&Value::Null);
-            if live.handler_module.as_deref() != declared_hm.as_str() {
-                // A bundle cannot be swapped under a live agent (its
-                // in-process state belongs to the old one).
-                return json!({
-                    "error": format!(
-                        "static_loader: {} exists as {} but the manifest declares \
-                         {} — a handler_module is fixed at create; delete the agent \
-                         to re-declare it",
-                        py_repr(id),
-                        live.handler_module.as_deref().map_or("None".to_string(), py_repr),
-                        py_repr_value(declared_hm)
-                    ),
-                    "booted": false,
-                });
-            }
-            drop(live);
-            let mut patch = obj.clone();
-            patch.shift_remove("id");
-            patch.shift_remove("handler_module");
-            patch.shift_remove("parent_id");
-            if !patch.is_empty() {
-                // the verb is set AFTER the declared fields: a declared `type` key can
-                // never change which verb is called.
-                let mut call = Map::new();
-                call.insert("id".to_string(), json!(id));
-                for (k, v) in patch {
-                    call.insert(k, v);
-                }
-                call.insert("type".to_string(), json!("update_agent"));
-                let r = tree_verb(kernel, Value::Object(call)).await;
-                if let Some(e) = fantastic_kernel::refusal::error_text(&r) {
-                    return json!({
-                        "error": format!(
-                            "static_loader: re-applying {}: {}",
-                            py_repr(id),
-                            e
-                        ),
-                        "booted": false,
-                    });
-                }
-            }
-            reapplied.push(id.to_string());
-            continue;
-        }
-        // The declared agent becomes THIS loader's child ($parent = the loader),
-        // but placement is stated by `parent_id`, not by who is addressed:
-        // `create_agent` is kernel-owned and answered by the ROOT alone. The
-        // manifest's `can` rides as written (checked as lines the loader hands
-        // out); the child boots inside create_agent.
-        // The verb and `parent_id` land AFTER the spread: an entry cannot change the
-        // verb, and one naming its own parent cannot place the agent outside the
-        // loader's subtree.
-        let mut payload = obj.clone();
-        payload.insert("type".to_string(), json!("create_agent"));
-        payload.insert("parent_id".to_string(), json!(agent.id.0));
-        let rec = tree_verb(kernel, Value::Object(payload)).await;
-        match rec.get("id").and_then(Value::as_str) {
-            Some(id) => created.push(id.to_string()),
-            None => {
-                return json!({
-                    "error": format!(
-                        "static_loader: create failed for {}: {}",
-                        py_repr_value(&spec),
-                        fantastic_kernel::refusal::error_text(&rec).unwrap_or_else(|| rec.to_string())
-                    ),
-                    "booted": false,
-                })
-            }
-        }
+    let deferred = kernel.defer().ok();
+    let direct = deferred.is_none();
+    hydrate(Hydration {
+        agent: Arc::clone(agent),
+        kernel: Arc::clone(kernel),
+        todo: agents.into(),
+        created: Vec::new(),
+        reapplied: Vec::new(),
+        deferred,
+    })
+    .await;
+    if direct {
+        json!({ "booted": true })
+    } else {
+        Value::Null
     }
-    json!({ "booted": true, "created": created, "reapplied": reapplied })
 }
 
 fn reflect_reply(agent: &Agent) -> Value {

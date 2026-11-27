@@ -134,14 +134,13 @@ impl Handler for Relay {
             return Ok(Some(json!({"id": id.as_str(), "sentence": "a leg"})));
         };
         let item = Item::new(AgentId::from(r.to.as_str()), r.inner);
-        Ok(Some(Arc::clone(k).send(vec![item]).await.remove(0).result))
+        Ok(Some(fantastic_kernel::test_support::settled(&Arc::clone(k), vec![item]).await.remove(0).result))
     }
 }
 
 /// The shell: a send from outside every agent (ungated).
 async fn op(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    Arc::clone(k)
-        .operator_send(vec![Item::new(AgentId::from(target), payload)])
+    fantastic_kernel::test_support::send_settled(&Arc::clone(k), vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -311,7 +310,7 @@ async fn the_page_loader_under_user_is_reached_whole_and_writable() {
         async move {
             fantastic_kernel::test_support::as_agent(
                 AgentId::from("user"),
-                k.send(vec![Item::new(AgentId::from("loader"), p)]),
+                fantastic_kernel::test_support::settled(&k, vec![Item::new(AgentId::from("loader"), p)]),
             )
             .await
             .remove(0)

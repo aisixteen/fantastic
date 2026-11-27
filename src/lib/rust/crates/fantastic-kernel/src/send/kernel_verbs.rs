@@ -66,12 +66,6 @@ pub(super) async fn handle_kernel_verb(
             json!({ "executions": rows, "next": next })
         }
         K::AckDeadletter(args) => ack_deadletter(kernel, &args.id).await?,
-        K::AwaitSet(args) => {
-            crate::await_set::await_set(kernel, crate::send::current_origin(), &args).await
-        }
-        K::AwaitCancel(args) => {
-            crate::await_set::await_cancel(kernel, crate::send::current_origin(), &args).await
-        }
         // The live TASK TABLE: one row per in-flight dispatch, `parent` chaining
         // them into the send tree. `ps` shows its own row too — it IS a dispatch.
         // It needs no line. The operator sees every row; an agent sees the rows of

@@ -507,12 +507,11 @@ pub fn register_root_loader(reg: &mut BundleRegistry) {
 /// record writer and mints the guid.
 pub async fn boot_root(kernel: &Arc<Kernel>) {
     let Some(root) = kernel.root() else { return };
-    let _ = kernel
-        .operator_send(vec![crate::outcome::Item::new(
-            root.id.clone(),
-            json!({"type": "boot"}),
-        )])
-        .await;
+    let _ = send_settled(
+        kernel,
+        vec![crate::outcome::Item::new(root.id.clone(), json!({"type": "boot"}))],
+    )
+    .await;
 }
 
 /// Register the fake `file_bridge` provider (rooted at `store_root`) into a
@@ -530,8 +529,9 @@ pub fn register_fake_store(reg: &mut BundleRegistry, store_root: &Path) {
 /// `store_root`, THROUGH the real `create_agent` verb (so `find_store` discovers
 /// it exactly as in production). The bundle must already be registered.
 pub async fn wire_fake_store(kernel: &Arc<Kernel>, store_root: &Path) {
-    kernel
-        .operator_send(vec![crate::outcome::Item::new(
+    send_settled(
+        kernel,
+        vec![crate::outcome::Item::new(
             "kernel",
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -539,8 +539,9 @@ pub async fn wire_fake_store(kernel: &Arc<Kernel>, store_root: &Path) {
                 "id": "store",
                 "root": store_root.to_string_lossy(),
             }),
-        )])
-        .await;
+        )],
+    )
+    .await;
 }
 
 /// The execution rows still in RAM that are ABOUT `agent` (its `agent` field), in
@@ -643,23 +644,35 @@ pub async fn as_agent<F: std::future::Future>(agent: impl Into<AgentId>, work: F
         .await
 }
 
-/// THE OPERATOR WATCHING THE SETTLES, test side: each item is called as the
-/// operator ([`Kernel::call`]) and its settle, delivered to a continuation, is
-/// handed back in item order. A launch refusal comes back as the ack that carried
-/// it. A test driver, never a product path: product code gets acks and later
-/// messages.
+/// THE OPERATOR WATCHING THE SETTLES, test side: the batch is launched as the
+/// operator in one synchronous phase, as [`Kernel::send`] launches it (pids minted
+/// and call rows written in item order), each item with a continuation; the
+/// settles are handed back in item order. A launch refusal comes back as the ack
+/// that carried it. A test driver, never a product path: product code gets acks
+/// and later messages.
 pub async fn send_settled(kernel: &Arc<Kernel>, items: Vec<crate::outcome::Item>) -> Vec<crate::outcome::Outcome> {
+    crate::send::as_operator(settled(kernel, items)).await
+}
+
+/// [`send_settled`] in the scope it runs in, not the operator's: inside a test
+/// stand-in's dispatch (or [`as_agent`]) the items are that agent's calls. With no
+/// origin scope at all every item gets the unknown answer, as from any send.
+pub async fn settled(kernel: &Arc<Kernel>, items: Vec<crate::outcome::Item>) -> Vec<crate::outcome::Outcome> {
     let mut waits = Vec::with_capacity(items.len());
+    let mut batch: Vec<(crate::outcome::Item, Option<crate::send::deliver::Then>)> = Vec::with_capacity(items.len());
     for item in items {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let ack = crate::send::as_operator(kernel.call(item, move |o| async move {
-            let _ = tx.send(o);
-        }))
-        .await;
-        waits.push((ack, rx));
+        let then: crate::send::deliver::Then = Box::new(move |o| {
+            Box::pin(async move {
+                let _ = tx.send(o);
+            })
+        });
+        batch.push((item, Some(then)));
+        waits.push(rx);
     }
-    let mut out = Vec::with_capacity(waits.len());
-    for (ack, rx) in waits {
+    let acks = kernel.launch_all(batch).await;
+    let mut out = Vec::with_capacity(acks.len());
+    for (ack, rx) in acks.into_iter().zip(waits) {
         if ack.status != crate::outcome::Status::Accepted {
             out.push(ack);
             continue;
@@ -669,6 +682,19 @@ pub async fn send_settled(kernel: &Arc<Kernel>, items: Vec<crate::outcome::Item>
         }));
     }
     out
+}
+
+/// [`settled`] as the ASKER of the running dispatch — sender and origin both its
+/// `current_origin()` (the operator when that is `None`), as [`Kernel::call_for`]
+/// sends: a test stand-in that acts for whoever asked it. With no origin scope at
+/// all every item gets the unknown answer.
+pub async fn settled_for_asker(kernel: &Arc<Kernel>, items: Vec<crate::outcome::Item>) -> Vec<crate::outcome::Outcome> {
+    let Some(asker) = crate::send::origin_scope() else {
+        return settled(kernel, items).await;
+    };
+    crate::send::CURRENT_ORIGIN
+        .scope(asker.clone(), crate::send::CURRENT_SENDER.scope(asker, settled(kernel, items)))
+        .await
 }
 
 /// A symlink at `link` pointing at `target`, on every OS — the fixture a test of

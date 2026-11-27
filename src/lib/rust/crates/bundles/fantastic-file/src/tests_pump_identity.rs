@@ -15,9 +15,9 @@ const DATA: &[u8] = b"G-DATA";
 async fn op(k: &Arc<Kernel>, target: &str, payload: Value, as_: Option<&str>) -> Value {
     let item = Item::new(AgentId::from(target), payload);
     match as_ {
-        None => k.operator_send(vec![item]).await.remove(0).result,
+        None => fantastic_kernel::test_support::send_settled(k, vec![item]).await.remove(0).result,
         Some(who) => {
-            fantastic_kernel::test_support::as_agent(AgentId::from(who), k.operator_send(vec![item]))
+            fantastic_kernel::test_support::as_agent(AgentId::from(who), fantastic_kernel::test_support::send_settled(k, vec![item]))
                 .await
                 .remove(0)
                 .result
@@ -77,7 +77,7 @@ async fn wire(tmp: &tempfile::TempDir, f_reaches_g: bool) -> Arc<Kernel> {
         PathBuf::new(),
         false,
     ));
-    let w = k.operator_send(vec![Item::new(
+    let w = fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             AgentId::from("g"),
             json!({"type": "write_stream", "path": "data.txt", "bytes": null, "truncate": true}),
         )

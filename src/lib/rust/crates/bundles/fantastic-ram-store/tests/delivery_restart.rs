@@ -87,7 +87,7 @@ fn registry(seen: &Arc<Seen>) -> BundleRegistry {
 }
 
 async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Outcome {
-    k.operator_send(vec![Item::new(AgentId::from(target), payload)])
+    fantastic_kernel::test_support::send_settled(k, vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
 }
@@ -157,8 +157,13 @@ async fn an_undelivered_settle_is_delivered_after_a_restart() {
     // `a` calls `b`; the settle is owed to `a`'s `reply`, and that delivery never
     // finishes in this process
     let k1 = Arc::clone(&k);
+    // a SEND (#795): it acks, and the settle is delivered to `a`'s `reply` verb
     let _stalled = tokio::spawn(async move {
-        as_agent(AgentId::from("a"), call(&k1, "b", json!({"type": "work"}))).await
+        as_agent(
+            AgentId::from("a"),
+            fantastic_kernel::send::as_operator(k1.send(vec![Item::new(AgentId::from("b"), json!({"type": "work"}))])),
+        )
+        .await
     });
     for _ in 0..300 {
         if !seen1.replies.lock().unwrap().is_empty() {

@@ -282,8 +282,9 @@ pub fn close_socket(cli: &Path) {
     crate::local::close(cli, crate::local::MCP);
 }
 
-/// One MCP connection: JSON-RPC lines in, replies out, until the reader ends —
-/// then what is in flight finishes and the writer closes.
+/// One MCP connection: JSON-RPC lines in, replies and settle notifications out, until
+/// the reader ends — then the writer closes once the last reply is written (a settle
+/// still owed to a gone session is dropped).
 async fn serve_conn<R, W>(served: Arc<Served>, reader: R, writer: W)
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -351,16 +352,26 @@ where
             let rid = msg.get("id").map(|v| v.to_string());
             let map = Arc::clone(&inflight);
             let key = rid.clone();
+            // a tool call answers its ack now; its settle comes later as a
+            // notification on this session, and until then the request names the
+            // call a client's `notifications/cancelled` cancels
+            let (settle_tx, settle_map, settle_key) = (tx.clone(), Arc::clone(&inflight), rid.clone());
             let reply = core
-                .handle(&msg, move |t| {
-                    if let Some(k) = key {
-                        map.lock().expect("inflight poisoned").insert(k, t);
-                    }
-                })
+                .handle(
+                    &msg,
+                    move |t| {
+                        if let Some(k) = key {
+                            map.lock().expect("inflight poisoned").insert(k, t);
+                        }
+                    },
+                    move |note| async move {
+                        if let Some(k) = settle_key {
+                            settle_map.lock().expect("inflight poisoned").remove(&k);
+                        }
+                        let _ = settle_tx.send(note).await;
+                    },
+                )
                 .await;
-            if let Some(k) = rid {
-                inflight.lock().expect("inflight poisoned").remove(&k);
-            }
             if let Some(r) = reply {
                 let _ = tx.send(r).await;
             }

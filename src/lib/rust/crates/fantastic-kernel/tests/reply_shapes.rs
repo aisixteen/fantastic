@@ -65,8 +65,7 @@ fn mk() -> (TempDir, Arc<Kernel>) {
 }
 
 async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    kernel
-        .operator_send(vec![Item::new(AgentId::from(target), payload)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -194,8 +193,7 @@ async fn ledger_rows_carry_no_verb_key() {
     let (_t, kernel) = mk();
     mk_child(&kernel, "kid").await;
     // One NAMED execution, so the row is settled and carries an outcome.
-    let _ = kernel
-        .operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kid"),
             json!({"type": "poke"}),
         )

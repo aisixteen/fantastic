@@ -558,7 +558,7 @@ mod tests {
         // declared verbs, its own record writes are its own calls, and a verb that
         // defers until its write settled answers then (#795)
         k.bundles.register_folder(HANDLER_MODULE, Arc::new(s.clone()), json!({}));
-        k.operator_send(vec![fantastic_kernel::Item::new(id.clone(), p)]).await.remove(0).result
+        fantastic_kernel::test_support::send_settled(k, vec![fantastic_kernel::Item::new(id.clone(), p)]).await.remove(0).result
     }
 
     fn info(h: &Path, folder: &str) -> Option<Value> {

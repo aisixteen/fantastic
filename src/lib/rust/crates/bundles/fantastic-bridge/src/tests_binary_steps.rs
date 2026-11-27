@@ -105,7 +105,7 @@ fn tag() -> String {
 }
 
 async fn op(k: &Arc<Kernel>, target: &str, payload: Value) -> Outcome {
-    k.operator_send(vec![Item::new(AgentId::from(target), payload)])
+    fantastic_kernel::test_support::send_settled(k, vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
 }
@@ -168,7 +168,7 @@ async fn boot_leg(k: &Arc<Kernel>, id: &str) {
 /// The forward python's tests send: `SENT` as the inner payload, its bytes at
 /// the LITERAL key `a.b` beside the nested `a` → `b`.
 async fn forward_sent(k: &Arc<Kernel>, leg: &str) -> Outcome {
-    k.operator_send(vec![Item::new(
+    fantastic_kernel::test_support::send_settled(k, vec![Item::new(
         AgentId::from(leg),
         json!({"type": "forward", "target": "echo",
                "payload": {"type": "take", "a": {"b": "kept"}, "a.b": null}}),

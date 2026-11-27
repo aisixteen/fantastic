@@ -30,7 +30,7 @@ use crate::agent::{Agent, AgentId};
 use crate::kernel::Kernel;
 use crate::outcome::{Item, Outcome, Status};
 use crate::tasks::{
-    current_killed, current_task, TaskHandle, TaskId, CURRENT_KILLED, CURRENT_TASK,
+    current_killed, current_task, Inherited, TaskHandle, TaskId, CURRENT_KILLED, CURRENT_TASK,
 };
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -96,7 +96,7 @@ pub fn current_origin() -> Option<AgentId> {
 }
 
 /// The origin scope as it stands: `Some(origin)` inside a dispatch, an operator
-/// send ([`Kernel::operator_send`]), the shell's [`as_operator`] or kernel
+/// call ([`Kernel::lifecycle_call`]), the shell's [`as_operator`] or kernel
 /// bookkeeping (with `Some(None)` for the operator), and `None` when no scope is
 /// set at all (a bare `tokio::spawn`). The operator is origin `None` set
 /// explicitly, never the absence of an origin: code that acts for "whoever asked"
@@ -108,7 +108,7 @@ pub fn origin_scope() -> Option<Option<AgentId>> {
 /// THE IN-PROCESS SHELL'S SCOPE: `work` runs with origin none set explicitly, so
 /// what it does outside any dispatch (a send, an emit, a watch) is the
 /// operator's. Only the in-process shell, and a test acting as the operator, call
-/// it; [`Kernel::operator_send`] is this around one send. The sender is still the
+/// it; [`Kernel::lifecycle_call`] is this around one call. The sender is still the
 /// running dispatch's when there is one, so code running inside an agent stays
 /// that agent's.
 pub async fn as_operator<F: std::future::Future>(work: F) -> F::Output {
@@ -299,17 +299,18 @@ fn own_deadline_refusal(target: &AgentId, verb: &str, d: &Deadline, task_id: Val
 }
 
 /// A launched batch item: either it settled before ever reaching the task table
-/// (a refusal), or it is a live dispatch to await.
+/// (a refusal), or it is accepted and its settle comes later.
 enum Launched {
     /// Nothing entered the task table — `pid` stays `None`.
     Settled(Outcome),
     /// A named execution that ALREADY SETTLED: its recorded outcome is the answer
-    /// and nothing runs (the dedup contract).
-    Recorded(Outcome),
+    /// and nothing runs (the dedup contract). It is delivered like any settle.
+    Recorded(Outcome, Box<Joiner>),
     /// Boxed because a `Dispatch` is much larger than an `Outcome`, and a fat
     /// enum variant would be paid for on every refusal too.
     Dispatched(Box<Dispatch>),
-    /// Already in flight under this id: wait for ITS outcome, run nothing.
+    /// Already in flight under this id: the item is a JOINER of ITS settle, and
+    /// runs nothing.
     Joining(Box<Joiner>),
     /// The UNNAMED `kernel` reflect fast path — python `_agent.py:846`.
     /// A pure identity read: no ledger entry, no call row, no task-table
@@ -329,6 +330,8 @@ struct FastReflect {
     /// The caller, as the gate judged it: the reflect is cut to what it holds
     /// (`None`: the operator, who sees everything).
     caller: Option<AgentId>,
+    /// Who receives the read's settle (the item's `reply_to`).
+    recipient: Option<AgentId>,
 }
 
 /// One item that passed the gate and is on its way to a handler.
@@ -366,14 +369,19 @@ struct Dispatch {
 }
 
 /// An item that is JOINING an execution someone else is running, or that is
-/// reading one already settled. Neither runs a handler.
+/// reading one already settled. Neither runs a handler: the execution's settle is
+/// delivered to it ([`Kernel::join`]).
 struct Joiner {
-    rx: tokio::sync::watch::Receiver<Option<Outcome>>,
+    /// The joiner's own deadline: it bounds only the joiner's delivery, never the
+    /// execution it joins.
     timeout: Option<Deadline>,
-    /// The id of the execution being JOINED (python `d.pid`) — not this
-    /// joiner's own dispatch, which never gets one. Needed only to render
-    /// the joiner-timeout refusal's `task_id` + pid-in-prose.
+    /// The id of the execution being JOINED (python `d.pid`): the ack's pid.
     execution_id: i64,
+    /// The joined call's target and verb, as its settle names them.
+    target: AgentId,
+    verb: String,
+    /// Who receives the settle (the joiner's own `reply_to`).
+    recipient: Option<AgentId>,
 }
 
 impl Kernel {
@@ -395,38 +403,52 @@ impl Kernel {
         to_root && (is_kernel_verb(verb) || verb == "reflect")
     }
 
-    /// ARRAY-ONLY batch send: `[Item] -> [Outcome]`.
+    /// ARRAY-ONLY batch send: `[Item] -> [Outcome]` — every outcome an ACK.
+    ///
+    /// EVERYTHING ASYNC (#795): `send` returns once every item is LAUNCHED. Each
+    /// outcome is the item's ack — `{pid, status: accepted}` once its pid is minted
+    /// and its call row written — or the launch's refusal (a gate denial, a bad
+    /// item, an unknown target, a draining kernel). The handlers run as their own
+    /// tasks; each settle is a row, then a MESSAGE to the item's `reply_to` (the
+    /// caller by default): its `reply` verb, when its bundle declares one, else the
+    /// row alone. A caller that needs the result as a step of its own uses
+    /// [`Self::call`] (a continuation) instead. Nothing returns a settled result.
     ///
     /// There is deliberately NO single-call form — one shape prevents
-    /// single/batch drift. A single call is
-    /// `kernel.send(vec![Item::new(t.clone(), p)]).await.remove(0).result`.
+    /// single/batch drift. Pids are minted and call rows written in a SYNCHRONOUS
+    /// launch phase, in item order, so the whole batch is visible in `ps` before
+    /// the first handler runs. Every dispatched item is a REGISTERED task (one `ps`
+    /// row, `cancel`-able by the pid its ack carries).
     ///
-    /// Dispatch is CONCURRENT; the returned vec preserves input order. Every
-    /// dispatched item is a REGISTERED task (one `ps` row, `cancel`-able by the
-    /// pid the outcome carries). Pids are minted in a SYNCHRONOUS launch phase,
-    /// so the whole batch is visible in `ps` before the first await.
+    /// `timeout` is per-item seconds and the kernel NEVER defaults it: absent = no
+    /// deadline. On expiry the item is killed through the FRONT DOOR
+    /// (`cancel_task`), so every bundle's `on_cancel` hook runs before the abort,
+    /// and its `timed_out` settle (the dead letter) is delivered like any.
     ///
-    /// `timeout` is per-item seconds and the kernel NEVER defaults it:
-    /// absent = wait forever. On expiry the item is killed through the FRONT
-    /// DOOR (`cancel_task`), so every bundle's `on_cancel` hook runs before the
-    /// abort — a bare task drop would orphan the OS resources those hooks free.
-    ///
-    /// Nothing propagates out of `send`: a handler panic settles as `failed`
-    /// with `raised: true`, a cancel settles as `cancelled`.
-    ///
-    /// Why a batch at all: a model reply that fans out N calls would otherwise
-    /// get its answers spread over the next N replies and re-ask in between. The
-    /// industry shape is the same — all results of one batch return together.
+    /// Nothing propagates out of `send`: a handler panic settles as `failed` with
+    /// `raised: true`, a cancel settles as `cancelled`.
     pub async fn send(self: &Arc<Self>, items: Vec<Item>) -> Vec<Outcome> {
+        self.launch_all(items.into_iter().map(|i| (i, None)).collect())
+            .await
+    }
+
+    /// THE LAUNCH PHASE every call takes ([`Self::send`], [`Self::call`]): resolve,
+    /// gate and register EVERY item before any handler runs, then start each one —
+    /// its settle goes to its continuation (`Some`), else to its `reply_to`. The acks
+    /// come back in item order.
+    pub(crate) async fn launch_all(
+        self: &Arc<Self>,
+        items: Vec<(Item, Option<deliver::Then>)>,
+    ) -> Vec<Outcome> {
         // NO ORIGIN SCOPE, NO SEND. Work spawned with a bare `tokio::spawn` carries
         // no identity at all, and is never taken for the operator: every item gets
         // the unknown answer for its target. The operator sends through
-        // [`Self::operator_send`]; spawned work keeps its identity through
+        // [`as_operator`]; spawned work keeps its identity through
         // `spawn_inherit`.
         if origin_scope().is_none() {
             return items
                 .iter()
-                .map(|it| Outcome::refused(crate::refusal::unknown_agent(it.target.as_str())))
+                .map(|(it, _)| Outcome::refused(crate::refusal::unknown_agent(it.target.as_str())))
                 .collect();
         }
         // THE CALLER: the agent whose dispatch makes this send, or `None` — the
@@ -438,8 +460,7 @@ impl Kernel {
         //
         // A store read that fails RAISES in python (out of `send`, into the
         // caller's handler). `send` never raises here, so every item of the batch
-        // settles `failed` with that raise — the same record python's dispatch
-        // makes of it.
+        // is refused with that raise.
         //
         // TODO(parity, rare failure): python's raise
         // also reaches the WIRE: `web_rest` answers HTTP 500 for the whole request,
@@ -449,53 +470,24 @@ impl Kernel {
         // in-process `Arc<Kernel>` use included) or a separate `try_send` used only
         // by the wire legs (two entry points). Both outcomes are loud and carry the
         // store's error text, so only the response SHAPE differs.
-        if self.store_id().is_some()
-            && items
-                .iter()
-                .any(|it| it.id.is_some())
-        {
-            if let Err(e) = self.recall_executions(&items).await {
+        if self.store_id().is_some() && items.iter().any(|(it, _)| it.id.is_some()) {
+            let named: Vec<Item> = items.iter().map(|(it, _)| it.clone()).collect();
+            if let Err(e) = self.recall_executions(&named).await {
                 let r = crate::executions::raised("RuntimeError", &e);
                 return items.iter().map(|_| Outcome::refused(r.clone())).collect();
             }
         }
         // SYNCHRONOUS launch: resolve, gate and register EVERY item before the
-        // first await, so `ps` shows the whole batch rather than it appearing
-        // one row at a time.
-        let mut launched: Vec<Launched> = Vec::with_capacity(items.len());
-        for item in items {
-            launched.push(self.launch(item, caller.clone()));
+        // first handler runs, so `ps` shows the whole batch rather than it
+        // appearing one row at a time.
+        let mut launched: Vec<(Launched, Option<deliver::Then>)> = Vec::with_capacity(items.len());
+        for (item, then) in items {
+            launched.push((self.launch(item, caller.clone()), then));
         }
-
-        // Concurrent settle. `join_all` over non-spawned futures keeps the
-        // task-locals (`CURRENT_SENDER`/`CURRENT_TASK`/`CURRENT_ORIGIN`) — the
-        // spawn happens INSIDE `run_dispatch`, which re-establishes them by
-        // hand. A `tokio::spawn` here would silently drop all three.
-        futures_util::future::join_all(launched.into_iter().map(|l| self.settle(l))).await
-    }
-
-    /// THE OPERATOR'S SEND: [`Self::send`] with the origin scoped to `None` (the
-    /// operator, set explicitly). Only the in-process shell, and a test acting as
-    /// the operator, call it. The sender is still the running dispatch's when there
-    /// is one, so a call made inside an agent's code stays that agent's.
-    pub async fn operator_send(self: &Arc<Self>, items: Vec<Item>) -> Vec<Outcome> {
-        as_operator(self.send(items)).await
-    }
-
-    /// THE ASKER'S SEND: [`Self::send`] with sender and origin both the
-    /// `current_origin()` of the running dispatch — the agent that asked for the
-    /// verb now running (the operator when that is `None`). A verb that acts for
-    /// an asker (`fork`, `import_subtree`, the canvas `create`, `export_subtree`)
-    /// sends through it, so it is checked as the asker and cannot name another
-    /// identity. With no origin scope at all every item gets the unknown answer,
-    /// as from [`Self::send`].
-    pub async fn send_as_caller(self: &Arc<Self>, items: Vec<Item>) -> Vec<Outcome> {
-        let Some(asker) = origin_scope() else {
-            return self.send(items).await;
-        };
-        CURRENT_ORIGIN
-            .scope(asker.clone(), CURRENT_SENDER.scope(asker, self.send(items)))
-            .await
+        launched
+            .into_iter()
+            .map(|(l, then)| self.start_item(l, then, caller.clone()))
+            .collect()
     }
 
     /// `id` resolution: a NAME opens-or-joins by name; a number JOINS an existing
@@ -769,6 +761,7 @@ impl Kernel {
                 payload: item.payload,
                 timeout,
                 caller,
+                recipient,
             }));
         }
 
@@ -808,19 +801,30 @@ impl Kernel {
                 if let Some(d) = self.join_denial(&caller, execution_id, &target) {
                     return Launched::Settled(Outcome::refused(d));
                 }
-                return Launched::Recorded(*o);
+                return Launched::Recorded(
+                    *o,
+                    Box::new(Joiner {
+                        timeout,
+                        execution_id,
+                        target: target.id.clone(),
+                        verb,
+                        recipient,
+                    }),
+                );
             }
             // IN FLIGHT — join it. A joiner's own `timeout` bounds only ITS
-            // wait: it does not own the execution and must not kill it.
-            crate::ledger::Opened::Join(rx, _) => {
+            // delivery: it does not own the execution and must not kill it.
+            crate::ledger::Opened::Join(_) => {
                 self.tasks.forget(&task_id);
                 if let Some(d) = self.join_denial(&caller, execution_id, &target) {
                     return Launched::Settled(Outcome::refused(d));
                 }
                 return Launched::Joining(Box::new(Joiner {
-                    rx,
                     timeout,
                     execution_id,
+                    target: target.id.clone(),
+                    verb,
+                    recipient,
                 }));
             }
             crate::ledger::Opened::Fresh => {
@@ -898,17 +902,71 @@ impl Kernel {
         }))
     }
 
-    /// One item's ASYNC half.
+    /// START one launched item and answer its ACK: `accepted` with its pid (none
+    /// for the unnamed `kernel` reflect fast path), or the launch's refusal, for
+    /// which nothing runs and `then` is dropped. The item's ASYNC half runs as its
+    /// own task — a child of the dispatch that called — and its settle goes to
+    /// `then` when given, else to the item's `reply_to`.
     ///
-    /// Runs the dispatch, enforces the item's own deadline, and — this is the
-    /// RETRY ENGINE — re-dispatches a terminal `failed`/`timed_out` under the
-    /// SAME id while the budget lasts. Only the FINAL outcome settles the
+    /// The async half runs the dispatch, enforces the item's own deadline, and —
+    /// this is the RETRY ENGINE — re-dispatches a terminal `failed`/`timed_out`
+    /// under the SAME id while the budget lasts. Only the FINAL outcome settles the
     /// ledger, so a joiner or a re-sender never sees an attempt that was later
     /// retried away.
-    async fn settle(self: &Arc<Self>, launched: Launched) -> Outcome {
-        let (out, owed) = self.settle_core(launched, false).await;
-        self.finish(owed, &out, None, None).await;
-        out
+    fn start_item(
+        self: &Arc<Self>,
+        launched: Launched,
+        then: Option<deliver::Then>,
+        caller: Option<AgentId>,
+    ) -> Outcome {
+        let launched = match launched {
+            Launched::Settled(o) => return o,
+            Launched::Joining(j) => {
+                let ack = Outcome::accepted(Some(TaskId(j.execution_id)));
+                self.join(*j, then, caller);
+                return ack;
+            }
+            Launched::Recorded(o, j) => {
+                // the recorded outcome is the settle, delivered as any settle is
+                let ack = Outcome::accepted(Some(TaskId(j.execution_id)));
+                let kernel = Arc::clone(self);
+                tokio::spawn(Inherited::capture().scope(async move {
+                    let Joiner { execution_id, target, verb, recipient, .. } = *j;
+                    kernel
+                        .deliver_to(then, recipient, Some(execution_id), &target, &verb, o, caller)
+                        .await;
+                }));
+                return ack;
+            }
+            other => other,
+        };
+        let (pid, fast) = match &launched {
+            Launched::Dispatched(d) => (Some(d.task_id), None),
+            Launched::KernelReflectFast(fr) => (None, Some((fr.target.id.clone(), fr.recipient.clone()))),
+            Launched::Settled(_) | Launched::Joining(_) | Launched::Recorded(..) => {
+                unreachable!("answered above")
+            }
+        };
+        let has_then = then.is_some();
+        let kernel = Arc::clone(self);
+        // the handler is a child of the dispatch that called, as for any call
+        let parent = current_task();
+        tokio::spawn(Inherited::capture().scope(async move {
+            let run = kernel.settle_core(launched, has_then);
+            let (out, owed) = match parent {
+                Some(p) => CURRENT_TASK.scope(p, run).await,
+                None => run.await,
+            };
+            match (owed, fast) {
+                (None, Some((target, recipient))) => {
+                    kernel
+                        .deliver_to(then, recipient, None, &target, "reflect", out, caller)
+                        .await;
+                }
+                (owed, _) => kernel.finish(owed, &out, then, caller).await,
+            }
+        }));
+        Outcome::accepted(pid)
     }
 
     /// [`Self::settle`]'s run and record: the outcome, and — for an execution
@@ -921,14 +979,24 @@ impl Kernel {
         has_then: bool,
     ) -> (Outcome, Option<deliver::Owed>) {
         let d = match launched {
-            Launched::Settled(o) | Launched::Recorded(o) => return (o, None),
-            Launched::Joining(j) => return (self.join_execution(*j).await, None),
+            // a refusal, a join and a recorded outcome are answered by `start`
+            Launched::Settled(o) | Launched::Recorded(o, _) => return (o, None),
+            Launched::Joining(j) => {
+                return (
+                    Outcome::refused(crate::refusal::refusal(
+                        crate::refusal::BAD_ARG,
+                        format!("send: execution {} is joined, not run", j.execution_id),
+                    )),
+                    None,
+                )
+            }
             Launched::KernelReflectFast(fr) => {
                 let FastReflect {
                     target,
                     payload,
                     timeout,
                     caller,
+                    ..
                 } = *fr;
                 let read = async {
                     // the kernel IS the agent here (the fast path answers `reflect`
@@ -1125,7 +1193,7 @@ impl Kernel {
         // plus the ones the handler noted for a reply it relayed from a connected
         // kernel's store.
         let reply_marks = crate::secret::well_formed(reply_marks, &noted_marks);
-        let out = self.ledger.settle(
+        let (out, joiners) = self.ledger.settle(
             execution_id,
             Outcome::new(pid, status, reply)
                 .with_body(body)
@@ -1137,6 +1205,10 @@ impl Kernel {
         let reply_verb = !has_then && recipient.as_ref().is_some_and(|r| self.declares_reply(r));
         let owes = has_then || reply_verb;
         let settle_row = self.stamp_call(pid, &out, &target.id).await;
+        // every joiner gets the settle once its row is written
+        for j in joiners {
+            j(out.clone());
+        }
         let owed = deliver::Owed {
             pid: execution_id,
             target: target.id.clone(),
@@ -1358,56 +1430,6 @@ impl Kernel {
             row = self.rows_put(&root.id, settle).ok();
         }
         (crate::ledger::is_dead(out.status).then_some(pid), row)
-    }
-
-    /// Wait for an execution someone else owns.
-    ///
-    /// The joiner's `timeout` bounds only its OWN wait — on expiry it settles
-    /// `timed_out` and the execution KEEPS RUNNING, because a joiner does not
-    /// own it and killing another caller's work would be a surprise.
-    async fn join_execution(self: &Arc<Self>, mut j: Joiner) -> Outcome {
-        let wait = async {
-            loop {
-                if let Some(o) = j.rx.borrow_and_update().clone() {
-                    return o;
-                }
-                if j.rx.changed().await.is_err() {
-                    // The owner's row was evicted mid-flight — nothing to join.
-                    return Outcome::refused(crate::refusal::refusal(
-                        crate::refusal::TRANSPORT_ERROR,
-                        "the execution being joined went away",
-                    ));
-                }
-            }
-        };
-        match j.timeout {
-            None => wait.await,
-            Some(d) => {
-                let dur = std::time::Duration::from_secs_f64(d.secs);
-                match tokio::time::timeout(dur, wait).await {
-                    Ok(o) => o,
-                    Err(_) => {
-                        // PYTHON'S PROSE, verbatim: the JOINED
-                        // execution's id (not this joiner's own dispatch,
-                        // which never gets one) — bare digits, python's
-                        // `{int!r}`. The execution itself keeps running; only
-                        // this caller's wait gave up.
-                        let mut r = crate::refusal::refusal(
-                            crate::refusal::TIMEOUT,
-                            format!(
-                                "send: joined execution {} did not settle \
-                                 within this caller's {}s wait; the \
-                                 execution itself keeps running",
-                                j.execution_id,
-                                d.shown(),
-                            ),
-                        );
-                        crate::refusal::with(&mut r, "task_id", json!(j.execution_id));
-                        Outcome::new(None, Status::TimedOut, r)
-                    }
-                }
-            }
-        }
     }
 
     /// Run ONE dispatch as a registered, killable task and await it — the unit
@@ -2175,7 +2197,7 @@ impl Drop for SettleOnDrop {
             return;
         }
         let pid = Some(TaskId(self.execution_id));
-        let out = self.kernel.ledger.settle(
+        let (out, joiners) = self.kernel.ledger.settle(
             self.execution_id,
             Outcome::new(pid, Status::Cancelled, json!({ "cancelled": true })),
         );
@@ -2184,6 +2206,9 @@ impl Drop for SettleOnDrop {
             .take()
             .filter(|r| self.kernel.declares_reply(r));
         let (dead, row) = self.kernel.stamp_call_rows(pid, &out, &self.target);
+        for j in joiners {
+            j(out.clone());
+        }
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             let kernel = Arc::clone(&self.kernel);
             let owed = deliver::Owed {
@@ -2237,18 +2262,6 @@ fn dispatch(
     Box::pin(async move {
         let verb_owned = verb_of(&payload).to_string();
         let verb = verb_owned.as_str();
-        // A `report` from a NAMED agent to a lead that `await_set` waits on is
-        // HELD for the one combined message, not delivered as its own turn.
-        if verb == "report" {
-            if let Some(held) = crate::await_set::hold_report(
-                &kernel,
-                &target.id,
-                current_origin().as_ref(),
-                &payload,
-            ) {
-                return held.map(|h| (h, None));
-            }
-        }
         if is_kernel_verb(verb) {
             // ROOT ONLY. These verbs act on the TREE and the kernel-wide task
             // table, so the agent named is the OPERAND, not the actor. Answered
@@ -2366,7 +2379,7 @@ enum Ran {
     Deferred(Outcome),
 }
 
-mod deliver;
+pub(crate) mod deliver;
 pub use deliver::{Asker, Deferred};
 pub(crate) use deliver::DeferTable;
 pub(crate) mod gate;

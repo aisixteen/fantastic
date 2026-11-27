@@ -80,7 +80,7 @@ async fn rig_on(password: &str, tweak: impl FnOnce(&mut Map<String, Value>), hel
 
     // the login: a ref bound to the local host, holding username and password
     let store = creds::ensure_store(&kernel, tmp.path(), "mail").await;
-    let declared = kernel.operator_send(vec![Item::new(
+    let declared = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "update_agent", "id": store.0, "refs": {"main": {"host": ["127.0.0.1", "localhost"]}}}),
         )])
@@ -88,7 +88,7 @@ async fn rig_on(password: &str, tweak: impl FnOnce(&mut Map<String, Value>), hel
         .remove(0)
         .result;
     assert_eq!(declared["updated"], json!(true), "{declared}");
-    let set = kernel.operator_send(vec![Item::new(store, json!({"type": "set", "ref": "main", "fields": {"username": fake::USER, "password": password}}))])
+    let set = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(store, json!({"type": "set", "ref": "main", "fields": {"username": fake::USER, "password": password}}))])
         .await
         .remove(0)
         .result;
@@ -114,7 +114,7 @@ async fn rig_on(password: &str, tweak: impl FnOnce(&mut Map<String, Value>), hel
 }
 
 async fn send(k: &Arc<Kernel>, payload: Value) -> Outcome {
-    k.operator_send(vec![Item::new(AgentId::from("mail"), payload)]).await.remove(0)
+    fantastic_kernel::test_support::send_settled(k, vec![Item::new(AgentId::from("mail"), payload)]).await.remove(0)
 }
 
 fn reason(o: &Outcome) -> String {
@@ -447,9 +447,8 @@ async fn a_mark_and_a_sent_mail_are_published_on_the_agents_inbox() {
 async fn a_send_whose_call_ended_sends_nothing_on_a_later_yes() {
     let r = rig().await;
     let payload = json!({"type": "send", "to": ["friend@example.org"], "subject": "Hi", "text": "x"});
-    let out = r
-        .kernel
-        .operator_send(vec![Item::new(AgentId::from("mail"), payload).with_timeout(0.3)])
+    let out = fantastic_kernel::test_support::send_settled(&r
+        .kernel, vec![Item::new(AgentId::from("mail"), payload).with_timeout(0.3)])
         .await
         .remove(0);
     assert_eq!(out.status, Status::TimedOut, "{}", out.result);

@@ -299,7 +299,7 @@ async fn rig() -> Rig {
 }
 
 async fn send(k: &Arc<Kernel>, target: &str, payload: Value) -> fantastic_kernel::Outcome {
-    k.operator_send(vec![Item::new(AgentId::from(target), payload)])
+    fantastic_kernel::test_support::send_settled(k, vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
 }
@@ -800,7 +800,7 @@ async fn a_call_past_its_timeout_settles_timed_out() {
         json!({"type": "get_weather", "city": "x"}),
     );
     item.timeout = Some(0.5);
-    let out = r.kernel.operator_send(vec![item]).await.remove(0);
+    let out = fantastic_kernel::test_support::send_settled(&r.kernel, vec![item]).await.remove(0);
     assert_eq!(out.status, Status::TimedOut, "{}", out.result);
 }
 

@@ -267,8 +267,7 @@ fn mk() -> (TempDir, Arc<Kernel>) {
 }
 
 async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    kernel
-        .operator_send(vec![Item::new(AgentId::from(target), payload)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -875,44 +874,6 @@ async fn text_is_a_name_never_a_task_id() {
     }
     let r = call(&k, "kernel", json!({"type": "cancel"})).await;
     assert_eq!(r["reason"], "missing_arg", "{r}");
-    // the wait of `await_cancel` is an integer id
-    let r = call(
-        &k,
-        "kernel",
-        json!({"type": "await_cancel", "wait_id": "5"}),
-    )
-    .await;
-    assert_eq!(r["reason"], "bad_arg", "{r}");
-    assert_eq!(r["arg"], "wait_id", "{r}");
-}
-
-#[tokio::test]
-async fn await_set_takes_its_declared_arguments() {
-    let (_t, k) = with_probe().await;
-    let r = call(
-        &k,
-        "kernel",
-        json!({"type": "await_set", "ids": ["p"], "timeout_s": 0}),
-    )
-    .await;
-    assert_eq!(r["reason"], "bad_arg", "{r}");
-    assert_eq!(r["arg"], "timeout_s", "{r}");
-    let r = call(
-        &k,
-        "kernel",
-        json!({"type": "await_set", "ids": ["p"], "timeout_s": "5"}),
-    )
-    .await;
-    assert_eq!(r["arg"], "timeout_s", "{r}");
-    let r = call(&k, "kernel", json!({"type": "await_set", "ids": "p"})).await;
-    assert_eq!(r["arg"], "ids", "{r}");
-    let r = call(
-        &k,
-        "kernel",
-        json!({"type": "await_set", "ids": ["p"], "label": 4}),
-    )
-    .await;
-    assert_eq!(r["arg"], "label", "{r}");
 }
 
 #[tokio::test]

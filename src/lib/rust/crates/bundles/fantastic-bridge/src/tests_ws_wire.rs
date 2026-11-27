@@ -361,13 +361,13 @@ async fn a_dropped_leg_reflects_down_and_boot_dials_again() {
         let kernel = Arc::clone(&kernel);
         let leg = leg.clone();
         async move {
-            kernel.operator_send(vec![Item::new(AgentId::from(leg.as_str()), payload)])
+            fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from(leg.as_str()), payload)])
                 .await
                 .remove(0)
                 .result
         }
     };
-    let made = kernel.operator_send(vec![Item::new(
+    let made = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel_state",
@@ -423,7 +423,7 @@ async fn a_dropped_leg_reflects_down_and_boot_dials_again() {
 
     // the remote goes away first, so the leg's close finds the socket gone
     server.abort();
-    let _ = kernel.operator_send(vec![Item::new(
+    let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "delete_agent", "id": leg}),
         )])

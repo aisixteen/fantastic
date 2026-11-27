@@ -242,7 +242,7 @@ impl Handler for FakeExec {
 }
 
 async fn create_one(kernel: &Arc<Kernel>, create: Value) {
-    let _ = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), create)])
+    let _ = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from("kernel_state"), create)])
         .await
         .remove(0)
         .result;
@@ -302,7 +302,7 @@ async fn setup(tmp: &TempDir, agents: &[&str], exec: &str) -> Arc<Kernel> {
     // Each agent holds its own line on the exec agent (update REPLACES the field, so
     // every line rides along).
     for id in agents {
-        let _ = kernel.operator_send(vec![Item::new(
+        let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({
                     "type": "update_agent",
@@ -318,7 +318,7 @@ async fn setup(tmp: &TempDir, agents: &[&str], exec: &str) -> Arc<Kernel> {
 }
 
 async fn send(kernel: &Arc<Kernel>, to: &str, payload: Value) -> Value {
-    kernel.operator_send(vec![Item::new(AgentId::from(to), payload)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from(to), payload)])
         .await
         .remove(0)
         .result

@@ -1022,7 +1022,7 @@ async fn create(kernel: &Arc<Kernel>, meta: Value) -> Value {
     for (k, v) in obj(meta) {
         payload[k] = v;
     }
-    kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), payload)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(AgentId::from("kernel_state"), payload)])
         .await
         .remove(0)
         .result
@@ -1059,7 +1059,7 @@ async fn reflect_shows_the_effective_posture_and_the_shared_table() {
     )
     .await;
     assert_eq!(r["id"], json!(id), "{r}");
-    let out = kernel.operator_send(vec![Item::new(
+    let out = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(id.as_str()),
             json!({"type": "reflect"}),
         )])
@@ -1179,7 +1179,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
     )
     .await;
     assert_eq!(r["id"], json!(id), "{r}");
-    let r = kernel.operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from(id.as_str()),
             json!({"type": "frob"}),
         )])
@@ -1227,7 +1227,7 @@ async fn the_last_budget_is_per_agent_and_freed_on_delete() {
     let last = |who: String| {
         let kernel = Arc::clone(&kernel);
         async move {
-            kernel.operator_send(vec![Item::new(
+            fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                     AgentId::from(who.as_str()),
                     json!({"type": "reflect"}),
                 )])
@@ -1238,7 +1238,7 @@ async fn the_last_budget_is_per_agent_and_freed_on_delete() {
         }
     };
     let chat = pair_chat(&kernel, &AgentId::from(id.as_str())).await;
-    let out = kernel.operator_send(vec![Item::new(
+    let out = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             chat.clone(),
             json!({"type": "send", "text": "hi", "client_id": "t"}),
         )])
@@ -1247,7 +1247,7 @@ async fn the_last_budget_is_per_agent_and_freed_on_delete() {
         .result;
     assert_eq!(out["accepted"], json!(true), "{out}");
     assert!(fantastic_ai_core::state::settle(&kernel, std::time::Duration::from_secs(20)).await);
-    let rows = kernel.operator_send(vec![Item::new(chat, json!({"type": "rows"}))])
+    let rows = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(chat, json!({"type": "rows"}))])
         .await
         .remove(0)
         .result;
@@ -1262,7 +1262,7 @@ async fn the_last_budget_is_per_agent_and_freed_on_delete() {
     // budget for the re-created id.
     let mut quiet = 0;
     for _ in 0..500 {
-        let st = kernel.operator_send(vec![Item::new(
+        let st = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
                 pair_chat(&kernel, &AgentId::from(id.as_str())).await,
                 json!({"type": "status"}),
             )])
@@ -1292,7 +1292,7 @@ async fn the_last_budget_is_per_agent_and_freed_on_delete() {
         Value::Null,
         "a sibling shares nothing"
     );
-    let gone = kernel.operator_send(vec![Item::new(
+    let gone = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "delete_agent", "id": id}),
         )])
@@ -1420,7 +1420,7 @@ async fn the_usage_verb_shows_the_counts_reset_zeroes_them_and_delete_drops_them
         let kernel = Arc::clone(&kernel);
         let id = id.clone();
         async move {
-            kernel.operator_send(vec![Item::new(AgentId::from(id.as_str()), payload)])
+            fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from(id.as_str()), payload)])
                 .await
                 .remove(0)
                 .result
@@ -1434,7 +1434,7 @@ async fn the_usage_verb_shows_the_counts_reset_zeroes_them_and_delete_drops_them
     let bad = ask(json!({"type": "usage", "reset": "yes"})).await;
     assert_eq!(bad["arg"], json!("reset"), "{bad}");
     usage_of(&id).lock().unwrap().requests = 9;
-    let gone = kernel.operator_send(vec![Item::new(
+    let gone = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "delete_agent", "id": id}),
         )])

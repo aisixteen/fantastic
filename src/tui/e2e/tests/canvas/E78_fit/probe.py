@@ -10,6 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _lib.canvas_live import Rig, html_cell, verdict  # noqa: E402
+from _lib.mcp_session import result_of  # noqa: E402
 
 BOX = "<div style='width:640px;height:360px;background:#246'>box</div>"
 TEXT = "<p style='margin:0;font:16px sans-serif'>" + "fit to content wraps this paragraph at the width it is given. " * 12 + "</p>"
@@ -37,12 +38,8 @@ def main() -> bool:
         ])
 
         def send(target: str, payload: dict) -> dict:
-            p = subprocess.run([str(rig.binary), "send", json.dumps({"target": target, "payload": payload})],
-                               cwd=rig.proj, env=rig.env(), capture_output=True, text=True, timeout=60)
-            try:
-                return json.loads(p.stdout).get("result") or {}
-            except ValueError:
-                return {"error": (p.stdout + p.stderr)[-300:]}
+            # the ack, then the result from the session's settle notification (#795)
+            return result_of(rig.proj / ".fantastic", target, payload)
 
         async def run() -> None:
             async with rig.page(1800, 1100) as pg:

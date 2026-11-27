@@ -72,7 +72,7 @@ async fn the_reader_reads_the_key_per_request_and_records_none() {
         Ok(Some(KEY2.to_string())),
         "a rotated key is used by the next request"
     );
-    let ledger = k.operator_send(vec![Item::new(
+    let ledger = fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "ledger"}),
         )])
@@ -155,7 +155,7 @@ async fn a_malformed_record_or_a_missing_field_is_named() {
     let store = AgentId::from(creds::STORE);
     let mut refs = k.resolve_target(store.as_str()).unwrap().record().meta["refs"].clone();
     refs["other"] = json!({"host": "api.example.com"});
-    let declared = k.operator_send(vec![Item::new(
+    let declared = fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "update_agent", "id": creds::STORE, "refs": refs}),
         )])
@@ -163,7 +163,7 @@ async fn a_malformed_record_or_a_missing_field_is_named() {
         .remove(0)
         .result;
     assert_eq!(declared["updated"], json!(true), "{declared}");
-    let out = k.operator_send(vec![Item::new(
+    let out = fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             store,
             json!({"type": "set", "ref": "other", "fields": {"token": "t"}}),
         )])
@@ -218,7 +218,7 @@ const APP: &str = "app-made-up-77";
 
 /// Store `fields` on ref `claude` (already declared, bound to `api.example.com`).
 async fn store_fields(k: &Arc<Kernel>, fields: Value) {
-    let out = k.operator_send(vec![Item::new(
+    let out = fantastic_kernel::test_support::send_settled(k, vec![Item::new(
             AgentId::from(creds::STORE),
             json!({"type": "set", "ref": "claude", "fields": fields}),
         )])

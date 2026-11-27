@@ -109,7 +109,8 @@ where
 /// A HANDLER'S DEFERRED SETTLE: the execution `d` settles with `result` — an `Err` is
 /// the raise a handler's error makes (`failed`, `{error, raised}`), a store's refusal
 /// that of its `MemoryStoreError`. `None`: the handler ran as the kernel's bookkeeping
-/// (an `await_set` wake), which answers no call — nothing settles, and an `Err` is said.
+/// (a delivered settle: the kernel runs the `reply` verb directly), which answers no
+/// call — nothing settles, and an `Err` is said.
 pub(crate) fn settle_with<E: Into<BundleError>>(kernel: &Kernel, d: Option<fantastic_kernel::Deferred>, result: Result<Value, E>) {
     let Some(d) = d else {
         if let Err(e) = result {

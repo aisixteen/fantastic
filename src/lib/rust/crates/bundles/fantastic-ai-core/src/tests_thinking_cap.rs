@@ -203,7 +203,7 @@ async fn chat_on_thinker(tmp: &TempDir, id: &str, extra: Value, provider: Value)
     for (k, v) in provider.as_object().unwrap() {
         p[k] = v.clone();
     }
-    let made = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), p)]).await.remove(0).result;
+    let made = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), p)]).await.remove(0).result;
     assert_eq!(made["id"], id, "{made}");
     let memory = fantastic_ram_store::test_support::memory_meta(
         &kernel,
@@ -219,7 +219,7 @@ async fn chat_on_thinker(tmp: &TempDir, id: &str, extra: Value, provider: Value)
     for (k, v) in extra.as_object().unwrap() {
         create[k] = v.clone();
     }
-    let made = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), create)]).await.remove(0).result;
+    let made = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), create)]).await.remove(0).result;
     assert_eq!(made["id"], json!(chat), "{made}");
     (kernel, AgentId::from(chat.as_str()))
 }
@@ -247,8 +247,7 @@ async fn traces(kernel: &Arc<Kernel>, chat: &AgentId, event: &str) -> Vec<Value>
 async fn a_cut_thinking_is_re_asked_once_and_answers() {
     let tmp = TempDir::new().unwrap();
     let (kernel, chat) = chat_on_thinker(&tmp, "thinker_once", json!({"thinking_token_budget": 10}), json!({"runaway": 1})).await;
-    let r = crate::tests::settled(&kernel, kernel
-        .operator_send(vec![Item::new(chat.clone(), json!({"type": "send", "text": "hi"}))]))
+    let r = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(chat.clone(), json!({"type": "send", "text": "hi"}))]))
         .await
         .remove(0)
         .result;
@@ -265,8 +264,7 @@ async fn a_cut_thinking_is_re_asked_once_and_answers() {
 async fn a_second_cut_stops_the_turn() {
     let tmp = TempDir::new().unwrap();
     let (kernel, chat) = chat_on_thinker(&tmp, "thinker_twice", json!({"thinking_token_budget": 10}), json!({"runaway": 99})).await;
-    let r = crate::tests::settled(&kernel, kernel
-        .operator_send(vec![Item::new(chat.clone(), json!({"type": "send", "text": "hi"}))]))
+    let r = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(chat.clone(), json!({"type": "send", "text": "hi"}))]))
         .await
         .remove(0)
         .result;
@@ -284,8 +282,7 @@ async fn a_second_cut_stops_the_turn() {
 async fn an_enforcing_server_is_not_cut() {
     let tmp = TempDir::new().unwrap();
     let (kernel, chat) = chat_on_thinker(&tmp, "thinker_enforced", json!({"thinking_token_budget": 10}), json!({"runaway": 1, "enforces": true})).await;
-    let r = crate::tests::settled(&kernel, kernel
-        .operator_send(vec![Item::new(chat.clone(), json!({"type": "send", "text": "hi"}))]))
+    let r = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(chat.clone(), json!({"type": "send", "text": "hi"}))]))
         .await
         .remove(0)
         .result;

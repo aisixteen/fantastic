@@ -13,11 +13,11 @@ is the parent, `@memory` is a port (an outside reference the importer binds).
 
 from __future__ import annotations
 
-import json
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
+
+from .mcp_session import result_of
 
 PARENT = "team_home"
 STORE = "memory2"
@@ -56,13 +56,10 @@ agents:
 
 
 def send(rig, target: str, payload: dict, timeout: float = 60) -> dict:
-    """One call into the running kernel from the shell (`fantastic send`): the reply's `result`."""
-    r = subprocess.run([str(rig.binary), "send", json.dumps({"target": target, "payload": payload})],
-                       cwd=rig.proj, env=rig.env(), capture_output=True, text=True, timeout=timeout)
-    try:
-        return json.loads(r.stdout).get("result") or {}
-    except ValueError:
-        return {"error": (r.stdout + r.stderr)[-400:]}
+    """One call into the running kernel through its MCP channel, as `fantastic send`
+    makes it, the leg's call: the ack, then the item's `result` from the session's
+    settle notification (#795)."""
+    return result_of(rig.proj / ".fantastic", target, payload, timeout)
 
 
 #: the main canvas: the `mcp` leg (`fantastic send`) holds `create` on its tree

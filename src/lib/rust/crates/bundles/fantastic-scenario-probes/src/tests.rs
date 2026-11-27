@@ -61,7 +61,7 @@ fn agent(kernel: &Arc<Kernel>, id: &str, module: &str, meta: Value) -> AgentId {
 }
 
 async fn call(kernel: &Arc<Kernel>, id: &AgentId, payload: Value) -> Value {
-    kernel.operator_send(vec![Item::new(id.clone(), payload)])
+    fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(id.clone(), payload)])
         .await
         .remove(0)
         .result

@@ -44,7 +44,7 @@ async fn mk(tmp: &tempfile::TempDir, extra: Value) -> Arc<Kernel> {
             create[k] = v.clone();
         }
     }
-    let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), create)])
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel_state"), create)])
         .await
         .remove(0)
         .result;
@@ -53,7 +53,7 @@ async fn mk(tmp: &tempfile::TempDir, extra: Value) -> Arc<Kernel> {
 }
 
 async fn call(k: &Arc<Kernel>, payload: Value) -> Value {
-    k.operator_send(vec![Item::new(AgentId::from("fb"), payload)])
+    fantastic_kernel::test_support::send_settled(k, vec![Item::new(AgentId::from("fb"), payload)])
         .await
         .remove(0)
         .result
@@ -61,7 +61,7 @@ async fn call(k: &Arc<Kernel>, payload: Value) -> Value {
 
 /// On the BINARY channel: the blob IS the `bytes` argument.
 async fn call_bin(k: &Arc<Kernel>, payload: Value, blob: &[u8]) -> Value {
-    k.operator_send(vec![
+    fantastic_kernel::test_support::send_settled(k, vec![
         Item::new(AgentId::from("fb"), payload).with_binary_key("bytes", blob.to_vec())
     ])
     .await
@@ -365,7 +365,7 @@ async fn only_a_caller_with_a_line_edits() {
         async move {
             fantastic_kernel::test_support::as_agent(
                 AgentId::from(who),
-                k.operator_send(vec![Item::new(
+                fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
                     AgentId::from("fb"),
                     json!({"type": "edit", "edits": [{"path": "m.py", "hunks": 1}],
                            "bytes": block("a = 1", "a = 2")}),
@@ -882,7 +882,7 @@ async fn deleting_the_bridge_drops_its_slots() {
     let tmp = tempfile::TempDir::new().unwrap();
     let k = mk(&tmp, json!({})).await;
     seed(&k, "s.txt", "x\n").await;
-    let del = k.operator_send(vec![Item::new(
+    let del = fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "delete_agent", "id": "fb"}),
         )])

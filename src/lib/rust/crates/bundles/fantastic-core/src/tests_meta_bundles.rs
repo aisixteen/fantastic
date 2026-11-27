@@ -50,7 +50,7 @@ async fn an_instance_of_a_meta_bundle_inherits_its_fields_and_runs_its_base() {
     let rec = kernel.resolve_target("n1").unwrap().record();
     assert_eq!(rec.handler_module.as_deref(), Some("notes"), "the kind stays the meta bundle");
     // the base's code answers: the file bridge reads its root
-    let read = kernel.operator_send(vec![Item::new(AgentId::from("n1"), json!({"type": "read", "path": "a.md"}))])
+    let read = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("n1"), json!({"type": "read", "path": "a.md"}))])
         .await
         .remove(0)
         .result;

@@ -51,9 +51,9 @@ fn add_store(k: &Arc<Kernel>, path: &str) {
 async fn call(k: &Arc<Kernel>, target: &str, payload: Value, as_: Option<&str>) -> Value {
     let item = Item::new(AgentId::from(target), payload);
     match as_ {
-        None => k.operator_send(vec![item]).await.remove(0).result,
+        None => fantastic_kernel::test_support::send_settled(k, vec![item]).await.remove(0).result,
         Some(who) => {
-            as_agent(AgentId::from(who), k.operator_send(vec![item]))
+            as_agent(AgentId::from(who), fantastic_kernel::test_support::send_settled(k, vec![item]))
                 .await
                 .remove(0)
                 .result
@@ -322,7 +322,7 @@ async fn stored_bytes_survive_a_reopen_of_the_file() {
             json!({"type": "put_bytes", "ref": "p1", "media_type": "image/png"}),
         )
         .with_binary_key("data", vec![9, 0, 9]);
-        as_agent(AgentId::from("alice"), k.operator_send(vec![item]))
+        as_agent(AgentId::from("alice"), fantastic_kernel::test_support::send_settled(&k, vec![item]))
             .await
             .remove(0)
             .result
@@ -335,7 +335,7 @@ async fn stored_bytes_survive_a_reopen_of_the_file() {
     add_store(&k2, "mem.db");
     let out = as_agent(
         AgentId::from("alice"),
-        k2.send(vec![Item::new(
+        fantastic_kernel::test_support::settled(&k2, vec![Item::new(
             AgentId::from("mem"),
             json!({"type": "get_bytes", "ref": "p1"}),
         )]),
@@ -539,7 +539,7 @@ async fn prune_inject_and_put_bytes_are_published_on_the_stores_inbox() {
     call(&k, "mem", json!({"type": "inject", "tables": one}), Some("alice")).await;
     let item = Item::new(AgentId::from("mem"), json!({"type": "put_bytes", "ref": "p1", "media_type": "image/png"}))
         .with_binary_key("data", vec![9, 0, 9]);
-    as_agent(AgentId::from("alice"), k.operator_send(vec![item])).await;
+    as_agent(AgentId::from("alice"), fantastic_kernel::test_support::send_settled(&k, vec![item])).await;
     let mut got = Vec::new();
     while let Some(item) = rx.try_recv() {
         if matches!(item.payload["type"].as_str(), Some("pruned" | "injected" | "bytes_put")) {

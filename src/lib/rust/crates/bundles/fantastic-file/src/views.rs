@@ -503,13 +503,16 @@ pub(crate) async fn stop(kernel: &Arc<Kernel>, relays: &Relays, view: &AgentId) 
     let st = relays.held.lock().expect("relays").remove(&view.0);
     let Some(st) = st else { return };
     kernel.remove_inbox(&st.inbox);
-    // A LIFECYCLE HOOK (Q2: a direct kernel run): the delete returns once the bridge
-    // let the path go, so no change reaches a view that is gone.
-    let _ = kernel
+    // A LIFECYCLE HOOK (Q2: a direct kernel run) whose onward call is a call like
+    // any (#795): the bridge lets the path go when its `unwatch_path` runs, and its
+    // settle is the row alone. The relay's inbox is already gone, so a change pushed
+    // before then reaches nobody.
+    let _ack = kernel
         .send(vec![Item::new(
             AgentId::from(st.bridge.as_str()),
             fantastic_kernel::verbs::call("unwatch_path", json!({"path": st.path})),
-        )])
+        )
+        .with_reply_to(fantastic_kernel::outcome::ReplyTo::Row)])
         .await;
 }
 

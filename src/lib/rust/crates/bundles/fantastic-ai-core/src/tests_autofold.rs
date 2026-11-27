@@ -18,8 +18,7 @@ async fn rows(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
 
 /// One send to the agent.
 async fn say(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) {
-    let _ = crate::tests::settled(kernel, kernel
-        .operator_send(vec![Item::new(
+    let _ = crate::tests::settled(kernel, fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             agent.clone(),
             json!({"type": "send", "text": text, "client_id": "probe"}),
         )]))
@@ -28,8 +27,7 @@ async fn say(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) {
 
 /// One verb on the agent; its result.
 async fn verb(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    crate::tests::settled(kernel, kernel
-        .operator_send(vec![Item::new(agent.clone(), payload)]))
+    crate::tests::settled(kernel, fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(agent.clone(), payload)]))
         .await
         .remove(0)
         .result
@@ -37,8 +35,7 @@ async fn verb(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
 
 /// A window wide enough that a 16k-token reply is delivered inline.
 async fn widen(kernel: &Arc<Kernel>, agent: &AgentId) {
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": agent.as_str(), "context_window": 1_000_000}),
         )])

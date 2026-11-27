@@ -86,7 +86,7 @@ fn kernel(home: &Path) -> Arc<Kernel> {
 
 async fn call(k: &Arc<Kernel>, from: &str, p: Value) -> Value {
     let item = Item::new(AgentId::from("home"), p);
-    as_agent(AgentId::from(from), k.operator_send(vec![item])).await.remove(0).result
+    as_agent(AgentId::from(from), fantastic_kernel::test_support::send_settled(k, vec![item])).await.remove(0).result
 }
 
 fn err(v: &Value) -> &str {

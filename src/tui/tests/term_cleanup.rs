@@ -77,7 +77,7 @@ fn seed(dir: &std::path::Path) {
 async fn act(kernel: &std::sync::Arc<Kernel>, target: &str, payload: Value) -> Value {
     let k = std::sync::Arc::clone(kernel);
     let item = Item::new(AgentId::from(target), payload);
-    fantastic_kernel::test_support::as_agent(AgentId::from("user"), k.send(vec![item])).await.remove(0).result
+    fantastic_kernel::test_support::as_agent(AgentId::from("user"), fantastic_kernel::test_support::settled(&k, vec![item])).await.remove(0).result
 }
 
 
@@ -102,14 +102,14 @@ async fn shell_with_children(tag: &str) -> (std::sync::Arc<Kernel>, std::path::P
     )
     .expect("boots");
     let kernel = std::sync::Arc::clone(&booted.kernel);
-    kernel.operator_send(vec![Item::new(
+    fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"update_agent","id":bootstrap::DEFAULT_ROOT_ID,"memory_store_id":"memory"}),
         )])
         .await;
     assert_eq!(kernel.start(false).await["started"], json!(true));
     for id in &booted.loaded {
-        kernel.operator_send(vec![Item::new(id.clone(), json!({"type":"boot"}))]).await;
+        fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(id.clone(), json!({"type":"boot"}))]).await;
     }
     let sh = std::env::var("SHELL").expect("SHELL is set");
     // `start` settles when its job EXITS (#795): the shell's job is the one it announced
@@ -158,7 +158,7 @@ async fn survivors(m: &[String; 3]) -> Vec<String> {
 async fn no_process_outlives_its_terminal() {
     // Closing the terminal (`t` again, a canvas frame's close): `delete_agent`.
     let (kernel, _dir, m) = shell_with_children("close").await;
-    let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel"), json!({"type":"delete_agent","id":"exec"}))])
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(AgentId::from("kernel"), json!({"type":"delete_agent","id":"exec"}))])
         .await
         .remove(0)
         .result;

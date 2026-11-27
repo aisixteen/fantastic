@@ -166,8 +166,7 @@ impl Handler for SlowBundle {
             // A nested send — the callee's dispatch becomes a CHILD task of this one.
             "chain" => {
                 let next = AgentId::from(payload.get("next").and_then(Value::as_str).unwrap_or(""));
-                kernel
-                    .operator_send(vec![Item::new(next, json!({"type": "slow"}))])
+                crate::test_support::send_settled(kernel, vec![Item::new(next, json!({"type": "slow"}))])
                     .await
                     .remove(0)
                     .result
@@ -188,8 +187,7 @@ impl Handler for SlowBundle {
             // outlives the `fork` dispatch and is re-parented to THIS task.
             "chain_fork" => {
                 let next = AgentId::from(payload.get("next").and_then(Value::as_str).unwrap_or(""));
-                let r = kernel
-                    .operator_send(vec![Item::new(next, json!({"type": "fork"}))])
+                let r = crate::test_support::send_settled(kernel, vec![Item::new(next, json!({"type": "fork"}))])
                     .await
                     .remove(0)
                     .result;
@@ -200,8 +198,7 @@ impl Handler for SlowBundle {
             // `cancel`. Plain verbs — no bundle coupling.
             "kill" => {
                 let victim = payload.get("victim").and_then(Value::as_str).unwrap_or("");
-                let table = kernel
-                    .operator_send(vec![Item::new(
+                let table = crate::test_support::send_settled(kernel, vec![Item::new(
                         AgentId::from("kernel"),
                         json!({"type": "ps"}),
                     )])
@@ -219,8 +216,7 @@ impl Handler for SlowBundle {
                 match found {
                     None => json!({"error": "no victim task"}),
                     Some(task_id) => {
-                        kernel
-                            .operator_send(vec![Item::new(
+                        crate::test_support::send_settled(kernel, vec![Item::new(
                                 AgentId::from("kernel"),
                                 json!({"type": "cancel", "task_id": task_id}),
                             )])
@@ -298,8 +294,7 @@ pub(crate) async fn mk_agent_grant(kernel: &Arc<Kernel>, id: &str, can: Value) -
     if !can.is_null() {
         payload["can"] = can;
     }
-    let r = kernel
-        .operator_send(vec![Item::new(AgentId::from("kernel_state"), payload)])
+    let r = crate::test_support::send_settled(kernel, vec![Item::new(AgentId::from("kernel_state"), payload)])
         .await
         .remove(0)
         .result;
@@ -309,8 +304,7 @@ pub(crate) async fn mk_agent_grant(kernel: &Arc<Kernel>, id: &str, can: Value) -
 
 /// The `ps` reply rows — through the VERB, like any caller.
 async fn rows(kernel: &Arc<Kernel>) -> Vec<Value> {
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "ps"}),
         )])
@@ -328,8 +322,7 @@ async fn row_for(kernel: &Arc<Kernel>, agent: &AgentId, verb: &str) -> Option<Va
 }
 
 async fn cancel(kernel: &Arc<Kernel>, task_id: i64) -> Value {
-    kernel
-        .operator_send(vec![Item::new(
+    crate::test_support::send_settled(kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "cancel", "task_id": task_id}),
         )])
@@ -375,7 +368,7 @@ async fn ps_shows_the_tree_of_a_nested_send() {
         let k = Arc::clone(&kernel);
         let a = a.clone();
         async move {
-            k.operator_send(vec![Item::new(
+            crate::test_support::send_settled(&k, vec![Item::new(
                 a,
                 json!({"type": "chain", "next": "slow_b"}),
             )])
@@ -433,7 +426,7 @@ async fn cancel_kills_the_whole_subtree() {
         let k = Arc::clone(&kernel);
         let a = a.clone();
         async move {
-            k.operator_send(vec![Item::new(
+            crate::test_support::send_settled(&k, vec![Item::new(
                 a,
                 json!({"type": "chain", "next": "slow_b"}),
             )])
@@ -500,7 +493,7 @@ async fn cancel_unknown_or_finished_task_is_honest() {
         let k = Arc::clone(&kernel);
         let a = a.clone();
         async move {
-            k.operator_send(vec![Item::new(a, json!({"type": "slow"}))])
+            crate::test_support::send_settled(&k, vec![Item::new(a, json!({"type": "slow"}))])
                 .await
                 .remove(0)
                 .result
@@ -519,8 +512,7 @@ async fn cancel_unknown_or_finished_task_is_honest() {
     assert_eq!(again, json!({"cancelled": false, "killed": []}));
 
     // A malformed call fails LOUD; it does not report a phantom success.
-    let bad = kernel
-        .operator_send(vec![Item::new(
+    let bad = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "cancel"}),
         )])
@@ -533,8 +525,7 @@ async fn cancel_unknown_or_finished_task_is_honest() {
     // a float is neither an int nor a string: refused by the declaration (bad_arg,
     // naming the argument), never an honest {cancelled:false}.
     for f in [json!(3.5), json!(3.0)] {
-        let r = kernel
-            .operator_send(vec![Item::new(
+        let r = crate::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel"),
                 json!({"type": "cancel", "task_id": f}),
             )])
@@ -550,8 +541,7 @@ async fn cancel_unknown_or_finished_task_is_honest() {
 
 /// A slow agent created by the operator under `parent`.
 async fn mk_child(kernel: &Arc<Kernel>, id: &str, parent: &str) -> AgentId {
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": parent,
                    "handler_module": "slow.tools", "id": id}),
@@ -567,7 +557,7 @@ async fn mk_child(kernel: &Arc<Kernel>, id: &str, parent: &str) -> AgentId {
 async fn kernel_as(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
     let k = Arc::clone(kernel);
     crate::test_support::as_agent(agent.clone(), async move {
-        k.operator_send(vec![Item::new(AgentId::from("kernel"), payload)])
+        crate::test_support::send_settled(&k, vec![Item::new(AgentId::from("kernel"), payload)])
             .await
             .remove(0)
             .result
@@ -581,7 +571,7 @@ async fn start_slow(kernel: &Arc<Kernel>, agent: &AgentId) -> (tokio::task::Join
         let k = Arc::clone(kernel);
         let v = agent.clone();
         async move {
-            k.operator_send(vec![Item::new(v, json!({"type": "slow"}))])
+            crate::test_support::send_settled(&k, vec![Item::new(v, json!({"type": "slow"}))])
                 .await
                 .remove(0)
                 .result
@@ -601,8 +591,7 @@ async fn ps_and_cancel_reach_own_tasks_and_those_below() {
     let victim = mk_child(&kernel, "slow_victim", "slow_killer").await;
     let (caller, victim_task) = start_slow(&kernel, &victim).await;
 
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(
             killer,
             json!({"type": "kill", "victim": victim.0}),
         )])
@@ -660,7 +649,7 @@ async fn ps_nulls_a_parent_task_of_a_hidden_agent() {
         let k = Arc::clone(&kernel);
         let a = a.clone();
         async move {
-            k.operator_send(vec![Item::new(a, json!({"type": "chain", "next": "slow_b"}))])
+            crate::test_support::send_settled(&k, vec![Item::new(a, json!({"type": "chain", "next": "slow_b"}))])
                 .await
                 .remove(0)
                 .result
@@ -719,7 +708,7 @@ async fn cancel_by_name_resolves_only_names_the_caller_started() {
         let t = target.clone();
         async move {
             crate::test_support::as_agent(other, async move {
-                k.operator_send(vec![Item::new(t, json!({"type": "slow"})).with_id("job-x")])
+                crate::test_support::send_settled(&k, vec![Item::new(t, json!({"type": "slow"})).with_id("job-x")])
                     .await
                     .remove(0)
                     .result
@@ -752,7 +741,7 @@ async fn on_cancel_hook_runs_and_releases_its_resource() {
         let k = Arc::clone(&kernel);
         let a = a.clone();
         async move {
-            k.operator_send(vec![Item::new(a, json!({"type": "slow"}))])
+            crate::test_support::send_settled(&k, vec![Item::new(a, json!({"type": "slow"}))])
                 .await
                 .remove(0)
                 .result
@@ -796,7 +785,7 @@ async fn on_cancel_failure_prints_python_line() {
         let k = Arc::clone(&kernel);
         let a = a.clone();
         async move {
-            k.operator_send(vec![Item::new(a, json!({"type": "slow"}))])
+            crate::test_support::send_settled(&k, vec![Item::new(a, json!({"type": "slow"}))])
                 .await
                 .remove(0)
                 .result
@@ -838,7 +827,7 @@ async fn forked_work_outlives_its_dispatch_and_is_adopted_by_its_grandparent() {
         let k = Arc::clone(&kernel);
         let a = a.clone();
         async move {
-            k.operator_send(vec![Item::new(
+            crate::test_support::send_settled(&k, vec![Item::new(
                 a,
                 json!({"type": "chain_fork", "next": "slow_b"}),
             )])
@@ -890,21 +879,18 @@ async fn kernel_verbs_are_the_roots_verb_docs_only() {
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "slow_a").await;
     for target in [AgentId::from("kernel"), a.clone()] {
-        let r = kernel
-            .operator_send(vec![Item::new(target.clone(), json!({"type": "reflect"}))])
+        let r = crate::test_support::send_settled(&kernel, vec![Item::new(target.clone(), json!({"type": "reflect"}))])
             .await
             .remove(0)
             .result;
         assert!(r.get("kernel_verbs").is_none(), "{target}: {r}");
     }
-    let below = kernel
-        .operator_send(vec![Item::new(a.clone(), json!({"type": "reflect", "part": "docs"}))])
+    let below = crate::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "reflect", "part": "docs"}))])
         .await
         .remove(0)
         .result;
     assert!(below["verbs"].get("cancel").is_none(), "{below}");
-    let one = kernel
-        .operator_send(vec![Item::new(
+    let one = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "reflect", "part": "docs"}),
         )])
@@ -923,8 +909,7 @@ async fn kernel_verbs_are_the_roots_verb_docs_only() {
         one["verbs"].get("get").is_none(),
         "`get` is not a kernel verb"
     );
-    let detailed = kernel
-        .operator_send(vec![Item::new(
+    let detailed = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "reflect", "verb": "cancel", "tier": "detailed"}),
         )])
@@ -964,7 +949,7 @@ async fn shutdown_agents_tells_every_agent_and_then_refuses_new_roots() {
     let peer = mk_agent(&kernel, "sd_peer").await;
     let out = crate::test_support::as_agent(
         AgentId::from("kernel_state"),
-        kernel.operator_send(vec![Item::new(peer, json!({"type": "chain"}))]),
+        crate::test_support::send_settled(&kernel, vec![Item::new(peer, json!({"type": "chain"}))]),
     )
     .await
     .remove(0);
@@ -986,8 +971,7 @@ async fn the_shutdown_agents_verb_tells_a_grandchild() {
     // grandchild would be refused and never told.
     let kernel = mk_kernel(Arc::new(Shared::default()));
     let p = mk_agent(&kernel, "sd_parent").await;
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "create_agent", "parent_id": p.as_str(),
                    "handler_module": "slow.tools", "id": "sd_grandchild"}),
@@ -996,8 +980,7 @@ async fn the_shutdown_agents_verb_tells_a_grandchild() {
         .remove(0)
         .result;
     assert_eq!(r["id"], "sd_grandchild", "{r}");
-    let out = kernel
-        .operator_send(vec![Item::new(
+    let out = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "shutdown_agents"}),
         )])
@@ -1033,8 +1016,7 @@ async fn operator_only_verbs_refuse_every_agent_caller() {
     // anything runs: they are the in-process operator's alone.
     let kernel = mk_kernel(Arc::new(Shared::default()));
     let child = AgentId::from("sd_child");
-    let _ = kernel
-        .operator_send(vec![Item::new(
+    let _ = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel_state",
@@ -1042,8 +1024,7 @@ async fn operator_only_verbs_refuse_every_agent_caller() {
             }),
         )])
         .await;
-    let out = kernel
-        .operator_send(vec![Item::new(
+    let out = crate::test_support::send_settled(&kernel, vec![Item::new(
             child.clone(),
             json!({"type": "shutdown_agents"}),
         )])
@@ -1160,7 +1141,7 @@ async fn the_quiet_phase_still_waits_for_a_real_in_flight_dispatch() {
     let a = mk_agent(&kernel, "sd_hold").await;
     let k = Arc::clone(&kernel);
     let running = tokio::spawn(async move {
-        k.operator_send(vec![Item::new(a, json!({"type": "slow", "hold_ms": 400}))])
+        crate::test_support::send_settled(&k, vec![Item::new(a, json!({"type": "slow", "hold_ms": 400}))])
             .await
             .remove(0)
     });
@@ -1194,8 +1175,7 @@ async fn spawn_task_writes_a_task_row() {
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "forker").await;
-    let r = kernel
-        .operator_send(vec![Item::new(a.clone(), json!({"type": "fork"}))])
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(a.clone(), json!({"type": "fork"}))])
         .await
         .remove(0);
     let forked = r.result["task_id"].as_i64().expect("a forked task id");
@@ -1350,7 +1330,7 @@ async fn verb_docs_of_an_agent_render_its_dynamic_verbs_beside_the_bundles_own()
     let send = |target: &'static str, p: Value| {
         let k = Arc::clone(&kernel);
         async move {
-            k.operator_send(vec![Item::new(AgentId::from(target), p)])
+            crate::test_support::send_settled(&k, vec![Item::new(AgentId::from(target), p)])
                 .await
                 .remove(0)
                 .result

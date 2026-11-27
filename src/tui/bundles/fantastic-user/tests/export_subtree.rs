@@ -47,8 +47,7 @@ impl Handler for Echo {
 
 /// The shell: a send from outside every agent.
 async fn op(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    Arc::clone(k)
-        .operator_send(vec![Item::new(AgentId::from(target), payload)])
+    fantastic_kernel::test_support::send_settled(&Arc::clone(k), vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -187,7 +186,7 @@ async fn export_subtree_refuses_what_the_asker_does_not_hold() {
         AgentId::from("user"),
         json!({"type": "export_subtree", "agent_id": "outside", "path": d.to_str().unwrap()}),
     );
-    let r = fantastic_kernel::test_support::as_agent("x", k.send(vec![item]))
+    let r = fantastic_kernel::test_support::as_agent("x", fantastic_kernel::test_support::settled(&k, vec![item]))
         .await
         .remove(0)
         .result;

@@ -232,18 +232,18 @@ async fn an_inbound_frame_is_decided_only_by_the_legs_lines() {
         )
     };
     // the transport's hand-in: the onward call is the leg's
-    let r = kernel.operator_send(vec![frame("t1")]).await.remove(0).result;
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![frame("t1")]).await.remove(0).result;
     assert!(r.get("error").is_none(), "the leg holds get_routes on t1: {r}");
-    let r = kernel.operator_send(vec![frame("t2")]).await.remove(0).result;
+    let r = fantastic_kernel::test_support::send_settled(&kernel, vec![frame("t2")]).await.remove(0).result;
     assert_eq!(r, fantastic_kernel::refusal::unknown_agent("t2"), "the leg holds nothing on t2");
     // an agent handing a frame in gets only the leg's lines, not its own
-    let r = fantastic_kernel::test_support::as_agent("other", kernel.send(vec![frame("t2")]))
+    let r = fantastic_kernel::test_support::as_agent("other", fantastic_kernel::test_support::settled(&kernel, vec![frame("t2")]))
         .await
         .remove(0)
         .result;
     assert_eq!(r, fantastic_kernel::refusal::unknown_agent("t2"), "{r}");
     let direct = fantastic_kernel::Item::new(AgentId::from("t2"), json!({"type": "get_routes"}));
-    let r = fantastic_kernel::test_support::as_agent("other", kernel.send(vec![direct]))
+    let r = fantastic_kernel::test_support::as_agent("other", fantastic_kernel::test_support::settled(&kernel, vec![direct]))
         .await
         .remove(0)
         .result;
@@ -301,7 +301,7 @@ async fn the_ingress_rule_never_judges_an_in_kernel_caller() {
             async move {
                 fantastic_kernel::test_support::as_agent(
                     AgentId::from(who),
-                    kernel.operator_send(vec![fantastic_kernel::Item::new(
+                    fantastic_kernel::test_support::send_settled(&kernel, vec![fantastic_kernel::Item::new(
                         AgentId::from("ws"),
                         json!({"type": "get_routes"}),
                     )]),

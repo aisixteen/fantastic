@@ -212,8 +212,7 @@ async fn tree_ids_is_paged_and_the_cursor_walks_the_whole_tree() {
     }
 
     // Default is UNCHANGED — everything, no cursor.
-    let all = kernel
-        .operator_send(vec![Item::new(
+    let all = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"reflect","tree":"ids"}),
         )])
@@ -227,8 +226,7 @@ async fn tree_ids_is_paged_and_the_cursor_walks_the_whole_tree() {
     assert!(all.get("tree_next").is_none(), "{all}");
 
     // Bounded, and the cursor names the last id handed over.
-    let p1 = kernel
-        .operator_send(vec![Item::new(
+    let p1 = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"reflect","tree":"ids","limit":2}),
         )])
@@ -248,8 +246,7 @@ async fn tree_ids_is_paged_and_the_cursor_walks_the_whole_tree() {
         .collect();
     let mut cur = cursor.to_string();
     loop {
-        let p = kernel
-            .operator_send(vec![Item::new(
+        let p = crate::test_support::send_settled(&kernel, vec![Item::new(
                 AgentId::from("kernel"),
                 json!({"type":"reflect","tree":"ids","limit":2,"after":cur}),
             )])
@@ -288,8 +285,7 @@ async fn an_agent_can_read_its_own_authority() {
     kernel.register(Arc::clone(&a));
     root.add_child(Arc::clone(&a));
 
-    let own = kernel
-        .operator_send(vec![Item::new(a.id.clone(), json!({"type": "reflect"}))])
+    let own = crate::test_support::send_settled(&kernel, vec![Item::new(a.id.clone(), json!({"type": "reflect"}))])
         .await
         .remove(0)
         .result;
@@ -298,8 +294,7 @@ async fn an_agent_can_read_its_own_authority() {
     // ...and the same `can` key rides every WIRING tree node (`detail:full`), so
     // the whole authorization landscape is readable from ONE root reflect. The
     // distilled roster carries purpose, not posture (python `_PURPOSE_KEYS`).
-    let tree = kernel
-        .operator_send(vec![Item::new(
+    let tree = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "reflect", "detail": "full"}),
         )])
@@ -464,8 +459,7 @@ fn handler_child(
 }
 
 async fn kernel_reflect(kernel: &Arc<Kernel>, payload: Value) -> crate::outcome::Outcome {
-    kernel
-        .operator_send(vec![Item::new(AgentId::from("kernel"), payload)])
+    crate::test_support::send_settled(kernel, vec![Item::new(AgentId::from("kernel"), payload)])
         .await
         .remove(0)
 }
@@ -482,8 +476,7 @@ async fn reflect_carries_the_agents_view() {
         let kernel = Arc::clone(&kernel);
         let id = id.to_string();
         async move {
-            kernel
-                .operator_send(vec![Item::new(
+            crate::test_support::send_settled(&kernel, vec![Item::new(
                     AgentId::from(id),
                     json!({"type": "reflect"}),
                 )])
@@ -528,8 +521,7 @@ async fn reflect_carries_the_declared_verbs_and_no_other_docs() {
     let r = kernel_reflect(&kernel, json!({"type": "reflect"}))
         .await
         .result;
-    let c = kernel
-        .operator_send(vec![Item::new(
+    let c = crate::test_support::send_settled(&kernel, vec![Item::new(
             child.id.clone(),
             json!({"type": "reflect", "tree": "none"}),
         )])
@@ -916,8 +908,7 @@ async fn a_bad_handler_modules_is_refused_bad_arg() {
 #[tokio::test]
 async fn handler_modules_on_a_non_root_target() {
     let (kernel, _root) = handler_tree();
-    let r = kernel
-        .operator_send(vec![Item::new(
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(
             AgentId::from("b"),
             json!({"type": "reflect", "tree": "ids", "handler_modules": ["roster_probe.tools"]}),
         )])
@@ -1081,8 +1072,7 @@ async fn a_probe_registered_bundle_is_absent_from_the_catalog() {
         true,
     );
     kernel.register(Arc::clone(&fixture));
-    let r = kernel
-        .operator_send(vec![Item::new(fixture.id.clone(), json!({"type": "ping"}))])
+    let r = crate::test_support::send_settled(&kernel, vec![Item::new(fixture.id.clone(), json!({"type": "ping"}))])
         .await
         .remove(0)
         .result;
@@ -1124,8 +1114,7 @@ async fn root_with_handler_reflects_identity() {
     );
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
-    let v = kernel
-        .operator_send(vec![crate::Item::new(
+    let v = crate::test_support::send_settled(&kernel, vec![crate::Item::new(
             AgentId::from("kernel"),
             json!({"type": "reflect", "tree": "none"}),
         )])
@@ -1140,14 +1129,12 @@ async fn root_with_handler_reflects_identity() {
     );
     // A NON-root agent of the same bundle does NOT short-circuit — its reflect
     // is its handler's, which the stand-in loader does not answer.
-    let _ = kernel
-        .operator_send(vec![crate::Item::new(
+    let _ = crate::test_support::send_settled(&kernel, vec![crate::Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent","parent_id":"kernel","handler_module":"kernel_state.tools","id":"session"}),
         )])
         .await;
-    let v = kernel
-        .operator_send(vec![crate::Item::new(
+    let v = crate::test_support::send_settled(&kernel, vec![crate::Item::new(
             AgentId::from("session"),
             json!({"type": "reflect"}),
         )])
@@ -1326,7 +1313,7 @@ async fn reflect_as(
 ) -> crate::outcome::Outcome {
     crate::test_support::as_agent(
         AgentId::from(caller),
-        kernel.send(vec![Item::new(AgentId::from(target), payload)]),
+        crate::test_support::settled(kernel, vec![Item::new(AgentId::from(target), payload)]),
     )
     .await
     .remove(0)
@@ -1334,8 +1321,7 @@ async fn reflect_as(
 
 /// The operator sends `payload` to `target`.
 async fn reflect_op(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    kernel
-        .operator_send(vec![Item::new(AgentId::from(target), payload)])
+    crate::test_support::send_settled(kernel, vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result

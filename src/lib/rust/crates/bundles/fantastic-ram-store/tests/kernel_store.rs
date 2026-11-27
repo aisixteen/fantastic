@@ -71,7 +71,7 @@ impl Handler for Probe {
                 self.0.shut.lock().unwrap().push(id.0.clone());
                 // the shutdown dispatch may still use its tools: a nested send
                 // passes the drain
-                let r = kernel.operator_send(vec![Item::new(
+                let r = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
                         AgentId::from("kernel"),
                         json!({"type": "ps"}),
                     )])
@@ -114,13 +114,13 @@ fn seeded() -> (Arc<Kernel>, Arc<ProbeState>) {
 }
 
 async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Outcome {
-    k.operator_send(vec![Item::new(AgentId::from(target), payload)])
+    fantastic_kernel::test_support::send_settled(k, vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
 }
 
 async fn call_named(k: &Arc<Kernel>, target: &str, payload: Value, id: &str) -> Outcome {
-    k.operator_send(vec![Item::new(AgentId::from(target), payload).with_id(id)])
+    fantastic_kernel::test_support::send_settled(k, vec![Item::new(AgentId::from(target), payload).with_id(id)])
         .await
         .remove(0)
 }
@@ -264,7 +264,7 @@ async fn stored_rows_keep_none_and_reduce_bytes_to_a_length() {
     let (k, _) = seeded();
     mk(&k, "probe", json!({})).await;
     with_store(&k, true).await;
-    let out = k.operator_send(vec![Item::new(
+    let out = fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             AgentId::from("probe"),
             json!({"type": "work", "none": null}),
         )

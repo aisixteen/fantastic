@@ -97,6 +97,10 @@ def resolve_bin(argv: list[str]) -> Path:
 
 
 # ── a stdio MCP client, 2025-11-25 ──────────────────────────────────────────
+#: the server notification that carries a tool call's settle (#795)
+SETTLE = "notifications/settle"
+
+
 class Client:
     def __init__(self, binary: Path, argv: list[str], cwd: Path):
         self.proc = subprocess.Popen(
@@ -109,6 +113,9 @@ class Client:
             bufsize=1,
         )
         self.next_id = 0
+        # settle notifications read before they were asked for (#795): a call that
+        # settles at once may have its settle written before its ack
+        self.early: list[dict] = []
         self._stderr: list[str] = []
         self._drain = threading.Thread(target=self._drain_stderr, daemon=True)
         self._drain.start()
@@ -140,8 +147,23 @@ class Client:
         self._write({"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}})
         while True:
             msg = self._read()
+            if msg.get("method") == SETTLE:
+                self.early.append(msg)
+                continue
             if msg.get("id") == rid:
                 return msg  # notifications for other requests are skipped
+
+    def settle(self, re: int) -> dict:
+        """The settle notification naming `re` (#795): its params `{type, re, status, data}`."""
+        for i, msg in enumerate(self.early):
+            if (msg.get("params") or {}).get("re") == re:
+                return self.early.pop(i)["params"]
+        while True:
+            msg = self._read()
+            if msg.get("method") == SETTLE and (msg.get("params") or {}).get("re") == re:
+                return msg["params"]
+            if msg.get("method") == SETTLE:
+                self.early.append(msg)
 
     def notify(self, method: str, params: dict | None = None):
         self._write({"jsonrpc": "2.0", "method": method, "params": params or {}})
@@ -184,6 +206,29 @@ def tool_body(reply: dict) -> tuple[str, object, bool]:
     except Exception:
         body = None
     return text, body, bool(res.get("isError"))
+
+
+def settled_reply(client: "Client", tool: str, reply: dict) -> tuple[dict, list[str]]:
+    """EVERYTHING ASYNC (#795): a tool call answers its ACK — `{pid, status: accepted}`,
+    `isError` false — and its settle comes as the session's notification. The reply the
+    scenario's expectations read is the settled one, as the tool answered it before: the
+    `send` rows (`data.outcomes`), or a `reflect`'s one result bare; `isError` when no row
+    completed. A tool refused before any call (a shape error) is its reply as it is."""
+    _, ack, is_err = tool_body(reply)
+    if not (isinstance(ack, dict) and ack.get("status") == "accepted" and isinstance(ack.get("pid"), int)):
+        return reply, []
+    bad = [] if not is_err else [f"an ack is not an error: {reply}"]
+    p = client.settle(ack["pid"])
+    rows = (p.get("data") or {}).get("outcomes")
+    if p.get("type") != "settle" or not isinstance(rows, list):
+        return reply, bad + [f"the settle carries no rows: {p}"]
+    body = rows[0].get("result") if tool == "reflect" and len(rows) == 1 else rows
+    all_failed = bool(rows) and all(r.get("status") != "completed" for r in rows)
+    text = json.dumps(body, indent=2)
+    res = {"content": [{"type": "text", "text": text}], "isError": all_failed}
+    if isinstance(body, dict):
+        res["structuredContent"] = body
+    return {"jsonrpc": "2.0", "id": reply.get("id"), "result": res}, bad
 
 
 def check(step: dict, reply: dict, state: dict) -> list[str]:
@@ -449,11 +494,13 @@ def main(argv: list[str]) -> int:
                         client.notify(step["notify"], step.get("params"))
                         print(f"  · {label}")
                         continue
+                    acked: list[str] = []
                     if "tool" in step:
                         reply = client.call("tools/call", {"name": step["tool"], "arguments": step.get("args", {})})
+                        reply, acked = settled_reply(client, step["tool"], reply)
                     else:
                         reply = client.call(step["call"], step.get("params"))
-                    bad = check(step, reply, state)
+                    bad = acked + check(step, reply, state)
                 except Exception as e:  # a dead process is a failure, not a crash of the runner
                     bad = [f"{type(e).__name__}: {e}"]
                 mark = "✓" if not bad else "✕"
