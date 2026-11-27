@@ -228,7 +228,15 @@ async fn drop_open(kernel: &Arc<Kernel>, id: &AgentId, re: i64) {
     open.retain(|q| q["re"] != json!(re));
     let mut patch = Map::new();
     patch.insert(inquiry::OPEN_FIELD.to_string(), Value::Array(open));
-    let _ = kernel.write_own(id, patch).await;
+    // a call (#795): nothing waits for it; a refusal is said, the question stays listed
+    let me = id.clone();
+    kernel
+        .write_own(id, patch, move |written| async move {
+            if fantastic_kernel::is_refused(&written) {
+                eprintln!("  [mail] {me}: the answered inquiry {re} stayed open: {written}");
+            }
+        })
+        .await;
 }
 
 

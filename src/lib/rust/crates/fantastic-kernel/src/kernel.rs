@@ -591,20 +591,20 @@ impl Kernel {
     /// Write agent `id`'s fields `patch` with an ordinary `update_agent` send from
     /// the current origin: in an agent's own handler that is the agent itself, so
     /// this is the one path for a bundle's own writes (self-writes are uniform: its
-    /// ordinary fields only, exactly as an `update_agent` call it makes). The reply,
-    /// a refusal included.
-    pub async fn write_own(self: &Arc<Self>, id: &AgentId, patch: Map<String, Value>) -> Value {
+    /// ordinary fields only, exactly as an `update_agent` call it makes). The write
+    /// is a CALL (#795): `then` gets its reply, a refusal included (the launch's at
+    /// once), as a message to the writer; nothing waits for it.
+    pub async fn write_own<F, Fut>(self: &Arc<Self>, id: &AgentId, patch: Map<String, Value>, then: F)
+    where
+        F: FnOnce(Value) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
         let mut payload = Map::new();
         payload.insert("type".to_string(), json!("update_agent"));
         payload.insert("id".to_string(), json!(id.as_str()));
         payload.extend(patch);
-        self.send(vec![crate::outcome::Item::new(
-            AgentId::from("kernel"),
-            Value::Object(payload),
-        )])
-        .await
-        .remove(0)
-        .result
+        let item = crate::outcome::Item::new(AgentId::from("kernel"), Value::Object(payload));
+        self.call_then(item, move |out| then(out.result)).await;
     }
 
     /// Tell one LOADED agent a lifecycle verb (`boot`, `shutdown`) as kernel

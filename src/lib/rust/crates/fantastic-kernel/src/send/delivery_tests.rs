@@ -582,3 +582,71 @@ async fn a_call_for_the_asker_is_gated_as_it_and_continues_as_the_caller() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(seen.thens().len(), 1, "a refused call has no settle");
 }
+
+/// `call_then` runs its continuation EXACTLY ONCE: with the settle of an accepted
+/// call (after the handler, which nothing waited for), and at once with the refusal of
+/// a call refused at its launch.
+#[tokio::test]
+async fn call_then_runs_its_continuation_once_with_the_settle_or_the_refusal() {
+    let seen = Arc::new(Seen::default());
+    let k = mk(&seen);
+    agent(&k, "b", Value::Null).await;
+    let got: Arc<Mutex<Vec<Outcome>>> = Arc::default();
+    let slot = Arc::clone(&got);
+    crate::send::as_operator(k.call_then(Item::new(AgentId::from("b"), json!({"type": "gate"})), move |o| async move {
+        slot.lock().unwrap().push(o);
+    }))
+    .await;
+    assert!(got.lock().unwrap().is_empty(), "the handler is held: nothing settled");
+    seen.gate.notify_one();
+    assert!(until(|| !got.lock().unwrap().is_empty()).await);
+    // refused at launch: the continuation has run before `call_then` returns
+    let slot = Arc::clone(&got);
+    crate::send::as_operator(k.call_then(Item::new(AgentId::from("nobody"), json!({"type": "work"})), move |o| async move {
+        slot.lock().unwrap().push(o);
+    }))
+    .await;
+    let outs = got.lock().unwrap().clone();
+    assert_eq!(outs.len(), 2, "{outs:?}");
+    assert_eq!(outs[0].status, Status::Completed);
+    assert_eq!(outs[0].result, json!({"opened": true}));
+    assert!(crate::refusal::is_refused(&outs[1].result), "{:?}", outs[1]);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(got.lock().unwrap().len(), 2, "each continuation ran once");
+}
+
+/// An agent's own write is a CALL (#795): `write_own` returns before the write is
+/// answered, and its continuation gets the reply — the record changed — or the
+/// refusal of a field the agent may not write, the record untouched.
+#[tokio::test]
+async fn write_own_hands_its_reply_to_its_continuation() {
+    let seen = Arc::new(Seen::default());
+    let k = mk(&seen);
+    agent(&k, "b", Value::Null).await;
+    let got: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let mut patch = Map::new();
+    patch.insert("display_name".into(), json!("Bee"));
+    let slot = Arc::clone(&got);
+    as_agent(AgentId::from("b"), k.write_own(&AgentId::from("b"), patch, move |r| async move {
+        slot.lock().unwrap().push(r);
+    }))
+    .await;
+    assert!(until(|| got.lock().unwrap().len() == 1).await);
+    let r = got.lock().unwrap()[0].clone();
+    assert!(!crate::refusal::is_refused(&r), "{r}");
+    let meta = k.resolve_target("b").unwrap().record().meta;
+    assert_eq!(meta.get("display_name"), Some(&json!("Bee")), "{meta:?}");
+    // a structure field is never the agent's to write
+    let parent = k.resolve_target("b").unwrap().parent_id.clone();
+    let mut patch = Map::new();
+    patch.insert("parent_id".into(), json!("b"));
+    let slot = Arc::clone(&got);
+    as_agent(AgentId::from("b"), k.write_own(&AgentId::from("b"), patch, move |r| async move {
+        slot.lock().unwrap().push(r);
+    }))
+    .await;
+    assert!(until(|| got.lock().unwrap().len() == 2).await);
+    let r = got.lock().unwrap()[1].clone();
+    assert!(crate::refusal::is_refused(&r), "{r}");
+    assert_eq!(k.resolve_target("b").unwrap().parent_id, parent, "the record is untouched");
+}

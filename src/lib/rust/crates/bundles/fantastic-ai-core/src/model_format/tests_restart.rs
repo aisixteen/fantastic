@@ -63,7 +63,7 @@ use super::rules::{load, shipped, type_of, RULES_JSON};
 use super::tests_cache::{conv, decl_of, finish, open, plain, refs, rows_n, run, Count, Opts};
 use super::tests_determinism::{recorded, rendered_history, rules_digest};
 use super::tests_trace::{
-    answered, assembled, chat_on, generate, names, operator, restart, set_model, store,
+    answered, assembled, booted, chat_on, generate, names, operator, restart, set_model, store,
     store_agent, traces, traces_of, verb, Scripted, Step, DONE, FOREIGN, PLAIN, QWEN,
 };
 use super::Renderer;
@@ -81,6 +81,8 @@ const CHILD_ROLE: &str = "FANTASTIC_RS_CHILD_ROLE";
 const CHILD_DIR: &str = "FANTASTIC_RS_CHILD_DIR";
 /// The id bound a child's kernel starts above.
 const CHILD_IDS: &str = "FANTASTIC_RS_CHILD_IDS";
+/// The line an RS7 child prints once its send streams.
+const RS7_READY: &str = "RS7-CHILD-STREAMING";
 /// A bound small enough to evict: 64 KiB.
 const SMALL: usize = 64 * 1024;
 
@@ -140,6 +142,7 @@ pub(super) async fn site(dir: &Path, chat: &str, fields: Value, ids_from: Option
     create["can"] = Value::Object(can);
     let r = operator(&kernel, "kernel_state", create).await;
     assert!(r.get("error").is_none(), "create {chat}: {r}");
+    booted(&AgentId::from(chat)).await;
     Site {
         kernel,
         agent: AgentId::from(chat),
@@ -177,22 +180,22 @@ fn pass_future(site: &Site, p: &Arc<Scripted>, client: &str) -> Pin<Box<dyn Futu
     })
 }
 
-/// Poll `fut` until `reached` holds (at most 5 s), then a little longer so what the
-/// endpoint sent is read; panics when the pass ends first.
-async fn drive<F: Future + Unpin>(fut: &mut F, reached: impl Fn() -> bool, what: &str) {
-    for _ in 0..500 {
-        if reached() {
-            break;
+/// Poll `fut` until `p` has `n` requests AT REST — the last one held at its crash
+/// point, everything it sent read — woken by the endpoint's own events, never a
+/// clock; panics when the pass ends first.
+async fn drive<F: Future + Unpin>(fut: &mut F, p: &Scripted, n: usize, what: &str) {
+    let rested = p.rested();
+    loop {
+        let next = rested.notified();
+        tokio::pin!(next);
+        next.as_mut().enable();
+        if p.at_rest() >= n {
+            return;
         }
         tokio::select! {
             _ = &mut *fut => panic!("{what}: the pass ended before its crash point"),
-            () = tokio::time::sleep(Duration::from_millis(10)) => {}
+            () = next => {}
         }
-    }
-    assert!(reached(), "{what}: the crash point was never reached");
-    tokio::select! {
-        _ = &mut *fut => panic!("{what}: the pass ended at its crash point"),
-        () = tokio::time::sleep(Duration::from_millis(150)) => {}
     }
 }
 
@@ -480,11 +483,10 @@ async fn crash_at(kind: &str, model: &str, steps: Vec<Step>, what: &str, dead: &
     }
     let pre = last(&p);
     let before = store(&s.kernel, &s.agent).await;
-    let (asked, n) = (p.asked().len(), steps.len());
+    let (rested, n) = (p.at_rest(), steps.len());
     p.push(steps);
     let mut fut = pass_future(&s, &p, &format!("{chat}_dead"));
-    let probe = Arc::clone(&p);
-    drive(&mut fut, move || probe.asked().len() >= asked + n, what).await;
+    drive(&mut fut, &p, rested + n, what).await;
     let mid = store(&s.kernel, &s.agent).await;
     assert_eq!(
         mid[..before.len()],
@@ -1027,12 +1029,24 @@ async fn rs7_child(role: &str) {
     tokio::spawn(async move {
         let _ = generate(&k, &a, &pp, "rs7_killed").await;
     });
-    super::tests_trace::until_asked(&p, n).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // every request at rest — the last held mid-stream, its text read — woken by the
+    // endpoint's events, never a clock
+    let rested = p.rested();
+    loop {
+        let next = rested.notified();
+        tokio::pin!(next);
+        next.as_mut().enable();
+        if p.at_rest() >= n {
+            break;
+        }
+        next.await;
+    }
     write_json(
         &dir.join("ready.json"),
         &json!({"ids": s.kernel.rows.id_reserved()}),
     );
+    // the parent reads this line: the event it kills on
+    println!("\n{RS7_READY}");
     futures_util::future::pending::<()>().await;
 }
 
@@ -1052,22 +1066,32 @@ async fn killed_process_recovers() {
         let tmp = TempDir::new().unwrap();
         let log = std::fs::File::create(tmp.path().join("child.log")).expect("log");
         let mut c = child("killed_process_recovers", role, tmp.path(), None, &[]);
-        c.stdout(log.try_clone().expect("log")).stderr(log);
+        c.stdout(std::process::Stdio::piped()).stderr(log);
         let mut kid = c.spawn().expect("the child starts");
+        // THE CHILD SAYS WHEN IT STREAMS: its ready line, read off its stdout (an
+        // event, never a clock); its end of output first means it ended before
+        let out = kid.stdout.take().expect("the child's stdout");
+        let (seen, ready_line) = tokio::task::spawn_blocking(move || {
+            use std::io::BufRead;
+            let mut seen = String::new();
+            for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+                // libtest prints the test's name before its output, on one line
+                if line.contains(RS7_READY) {
+                    return (seen, true);
+                }
+                seen.push_str(&line);
+                seen.push('\n');
+            }
+            (seen, false)
+        })
+        .await
+        .expect("the reader");
+        assert!(
+            ready_line,
+            "{role}: the child ended before it streamed:\n{seen}\n{}",
+            std::fs::read_to_string(tmp.path().join("child.log")).unwrap_or_default()
+        );
         let ready = tmp.path().join("ready.json");
-        for _ in 0..600 {
-            if ready.exists() {
-                break;
-            }
-            if let Some(status) = kid.try_wait().expect("wait") {
-                panic!(
-                    "{role}: the child ended ({status}) before it streamed:\n{}",
-                    std::fs::read_to_string(tmp.path().join("child.log")).unwrap_or_default()
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        assert!(ready.exists(), "{role}: the child never streamed");
         // SIGKILL: no destructor, no flush, no shutdown of anything
         kid.kill().expect("kill -9");
         let _ = kid.wait();

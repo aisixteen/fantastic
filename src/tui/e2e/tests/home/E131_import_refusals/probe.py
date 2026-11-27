@@ -18,7 +18,8 @@ f) a lead holding a line on `credentials` (bound through a port), a line the `mc
    a writer hands out only what it holds), nothing is kept;
 g) an import aimed outside `canvas_root` (under `files`, beside it under `user`): the
    leg's create line is on `canvas_root` only, and the import is checked as the leg
-   (Q39), so the create gets the unknown answer for `files` and nothing is kept."""
+   (Q39), so the create is refused by the grant check (#792: the leg sees `files`, so
+   the refusal names the create it lacks there) and nothing is kept."""
 
 from __future__ import annotations
 
@@ -120,8 +121,9 @@ def main() -> bool:
         g = importing(rig, "withfile", "files", approve=True, allow_code=True)
         info["outside_canvas_root"] = g
         msg = str(g.get("error", ""))
-        r["g1 an import outside canvas_root is refused with the unknown answer, nothing kept"] = (
-            g.get("reason") == "failed" and "was not created" in msg and "no agent 'files'" in msg
+        r["g1 an import outside canvas_root is refused by the grant check, nothing kept"] = (
+            g.get("reason") == "failed" and "was not created" in msg
+            and "'mcp' holds no create of 'ram_store.tools' under 'files'" in msg
             and "nothing was kept" in msg and "imported" not in g)
         # the leg cannot see `files`: the saved records on disk are the whole tree
         # (`x_1`, the import of c, shows the disk listing sees an import)

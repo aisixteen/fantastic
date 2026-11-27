@@ -7,6 +7,9 @@ use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+/// The start's own settle, as the private watcher reads it.
+const SETTLED: &str = "start_settled";
+
 /// `start` `payload` on `agent` AS THE OPERATOR: the `job_started` payload that named
 /// its job (`{type, job_id, command, args}`); the start's own settle (the job's end)
 /// comes later and is let go. A start that settles first — refused, or its job already
@@ -23,18 +26,25 @@ pub async fn start_announced(kernel: &Arc<Kernel>, agent: &AgentId, payload: Val
         kernel.remove_inbox(&watcher);
         return Err(denied);
     }
-    let (k, item) = (Arc::clone(kernel), Item::new(agent.clone(), payload));
-    let mut settle = tokio::spawn(async move { k.operator_send(vec![item]).await.remove(0).result });
+    // THE START IS A CALL (#795): its settle comes as one more message on the private
+    // inbox (`{type: settled, result}`), so one stream of messages says which came first
+    let (k, w, item) = (Arc::clone(kernel), watcher.clone(), Item::new(agent.clone(), payload));
+    fantastic_kernel::send::as_operator(kernel.call_then(item, move |out| async move {
+        if let Some(q) = k.inboxes.get(&w).map(|e| e.clone()) {
+            q.send(fantastic_kernel::inbox::InboxItem::text(json!({"type": SETTLED, "result": out.result})));
+        }
+    }))
+    .await;
     let r = loop {
-        tokio::select! {
-            r = &mut settle => break Err(r.unwrap_or_else(|e| json!({"error": e.to_string()}))),
-            ev = rx.recv() => match ev {
-                Some(v) if v.payload.get("type").and_then(Value::as_str) == Some("job_started") => {
-                    break Ok(v.payload);
-                }
-                Some(_) => {}
-                None => break Err(json!({"error": format!("{agent}: the watch closed before the job started")})),
-            },
+        match rx.recv().await {
+            Some(v) if v.payload.get("type").and_then(Value::as_str) == Some("job_started") => {
+                break Ok(v.payload);
+            }
+            Some(v) if v.payload.get("type").and_then(Value::as_str) == Some(SETTLED) => {
+                break Err(v.payload.get("result").cloned().unwrap_or(Value::Null));
+            }
+            Some(_) => {}
+            None => break Err(json!({"error": format!("{agent}: the watch closed before the job started")})),
         }
     };
     kernel.unwatch(agent, &watcher).await;

@@ -2132,13 +2132,12 @@ async fn run_verb(agent_id: &AgentId, call: declared::Call, kernel: &Arc<Kernel>
             let prepare: fantastic_ai_core::remote_provider::Prepare = Box::new(move |key, args, model| {
                 Box::pin(async move {
                     let mut args = args;
-                    match server::resolve(&pid, &pk, model, chat_max, key.as_ref()).await {
-                        Err(refused) => return Err(refused),
-                        // the API's budget for a chat that names none: this pass's
-                        Ok(Some(n)) => args.knobs.get_or_insert_with(Default::default).max_tokens = Some(n),
-                        Ok(None) => {}
+                    let (budget, write) = server::resolve(&pid, &pk, model, chat_max, key.as_ref()).await?;
+                    // the API's budget for a chat that names none: this pass's
+                    if let Some(n) = budget {
+                        args.knobs.get_or_insert_with(Default::default).max_tokens = Some(n);
                     }
-                    Ok(args)
+                    Ok::<_, serde_json::Value>(fantastic_ai_core::remote_provider::Prepared { args, write })
                 })
             });
             let caller = caller_of(&a.rid);

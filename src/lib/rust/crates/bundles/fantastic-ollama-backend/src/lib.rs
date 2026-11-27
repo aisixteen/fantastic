@@ -462,10 +462,9 @@ impl Handler for OllamaBackendBundle {
         let (id, k) = (agent_id.clone(), Arc::clone(kernel));
         let prepare: fantastic_ai_core::remote_provider::Prepare = Box::new(move |key, args, _chosen| {
             Box::pin(async move {
-                match server::resolve(&id, &k, key.as_ref()).await {
-                    Some(refused) => Err(refused),
-                    None => Ok(args),
-                }
+                server::resolve(&id, &k, key.as_ref())
+                    .await
+                    .map(|write| fantastic_ai_core::remote_provider::Prepared { args, write })
             })
         });
         // THE PROVIDER VERBS (`complete`, `models`, `set_default_model`): an AI chat completes here

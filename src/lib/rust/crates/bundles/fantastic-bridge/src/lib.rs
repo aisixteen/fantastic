@@ -347,14 +347,28 @@ async fn set_identity_reply(
     if let Some(exposes) = a.exposes {
         patch.insert("exposes".into(), json!(exposes));
     }
-    if !patch.is_empty() {
-        let written = kernel.write_own(agent_id, patch).await;
-        if fantastic_kernel::is_refused(&written) {
-            return written;
-        }
+    if patch.is_empty() {
+        let attrs = identity_from_meta(agent_id, kernel);
+        return state.transport.set_identity(attrs).await;
     }
-    let attrs = identity_from_meta(agent_id, kernel);
-    state.transport.set_identity(attrs).await
+    // the write is a call (#795): the verb defers, and its settle pushes the identity
+    let d = match kernel.defer() {
+        Ok(d) => d,
+        Err(refused) => return refused,
+    };
+    let (me, k) = (agent_id.clone(), Arc::clone(kernel));
+    kernel
+        .write_own(agent_id, patch, move |written| async move {
+            let reply = if fantastic_kernel::is_refused(&written) {
+                written
+            } else {
+                let attrs = identity_from_meta(&me, &k);
+                state.transport.set_identity(attrs).await
+            };
+            k.settle_deferred(d.pid(), fantastic_kernel::Outcome::of_reply(Some(d.pid()), reply));
+        })
+        .await;
+    Value::Null
 }
 
 /// `forward` — the one verb that carries bytes either way: the local caller sends
@@ -957,30 +971,50 @@ async fn build_ws_transport(
 }
 
 /// python `relay_connector._relay.build_transport` — validates BEFORE minting
-/// the guid, so a refused boot leaves no identity behind.
+/// the guid, so a refused boot leaves no identity behind. A guid minted now is written
+/// to the leg's own record first (a step, #795), and the dial follows its settle.
 async fn build_relay_transport(agent_id: &AgentId, kernel: &Arc<Kernel>, next: BuiltNext) {
-    match relay_args(agent_id, kernel).await {
-        Ok((relay_url, guid, partner, reconnect, heartbeat)) => {
-            let identity = identity_from_meta(agent_id, kernel);
-            RelayTransport::connect(
-                &relay_url,
-                &guid,
-                password_reader(agent_id, kernel, &relay_url),
-                &partner,
-                reconnect,
-                heartbeat,
-                identity,
-                RelaySpawn::new(kernel, agent_id),
-                Box::new(move |t| {
-                    Box::pin(async move {
-                        next(t.map(|t| t as Arc<dyn BridgeTransport>).map_err(|e| transport_error_text(&e))).await;
-                    })
-                }),
-            )
-            .await;
-        }
-        Err(e) => next(Err(e)).await,
+    let args = match relay_args(agent_id, kernel) {
+        Ok(a) => a,
+        Err(e) => return next(Err(e)).await,
+    };
+    if !args.minted {
+        return dial_relay(agent_id.clone(), Arc::clone(kernel), args, next).await;
     }
+    // its own field, written with `update_agent` as itself — persisted by the root
+    // loader's writer off the `updated` event
+    let mut patch = serde_json::Map::new();
+    patch.insert("guid".to_string(), Value::String(args.guid.clone()));
+    let (me, k) = (agent_id.clone(), Arc::clone(kernel));
+    kernel
+        .write_own(agent_id, patch, move |written| async move {
+            if fantastic_kernel::is_refused(&written) {
+                return next(Err(format!("relay_connector: guid not written: {written}"))).await;
+            }
+            dial_relay(me, k, args, next).await;
+        })
+        .await;
+}
+
+/// Dial the relay with a leg's arguments.
+async fn dial_relay(agent_id: AgentId, kernel: Arc<Kernel>, a: RelayArgs, next: BuiltNext) {
+    let identity = identity_from_meta(&agent_id, &kernel);
+    RelayTransport::connect(
+        &a.relay_url,
+        &a.guid,
+        password_reader(&agent_id, &kernel, &a.relay_url),
+        &a.partner,
+        a.reconnect,
+        a.heartbeat,
+        identity,
+        RelaySpawn::new(&kernel, &agent_id),
+        Box::new(move |t| {
+            Box::pin(async move {
+                next(t.map(|t| t as Arc<dyn BridgeTransport>).map_err(|e| transport_error_text(&e))).await;
+            })
+        }),
+    )
+    .await;
 }
 
 /// What runs with a built relay transport, or why it was not built.
@@ -988,9 +1022,20 @@ type BuiltNext = Box<
     dyn FnOnce(Result<Arc<dyn BridgeTransport>, String>) -> futures_util::future::BoxFuture<'static, ()> + Send,
 >;
 
-/// A relay leg's dial arguments off its record — `(relay_url, guid, partner,
-/// reconnect, heartbeat)` — the guid minted and written on its first boot.
-async fn relay_args(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(String, String, String, f64, f64), String> {
+/// A relay leg's dial arguments off its record.
+struct RelayArgs {
+    relay_url: String,
+    guid: String,
+    partner: String,
+    reconnect: f64,
+    heartbeat: f64,
+    /// The guid was minted now: it is not on the record yet.
+    minted: bool,
+}
+
+/// A relay leg's dial arguments off its record, a guid minted on its first boot (not
+/// written: [`build_relay_transport`] writes it).
+fn relay_args(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<RelayArgs, String> {
     let relay_url = meta_string(agent_id, kernel, "relay_url");
     let partner = meta_string(agent_id, kernel, "partner_guid");
     let (Some(relay_url), Some(partner)) = (relay_url, partner) else {
@@ -1013,22 +1058,11 @@ async fn relay_args(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(String,
     // `guid` (our WS path) is auto-minted ONCE on first boot if absent and
     // persisted into the record, so every later hydration re-dials the SAME path;
     // an explicit guid always wins, and a minted one is never regenerated.
-    let guid = match meta_string(agent_id, kernel, "guid") {
-        Some(guid) => guid,
-        None => {
-            let g = mint_guid();
-            // its own field, written with `update_agent` as itself — persisted
-            // by the root loader's writer off the `updated` event.
-            let mut patch = serde_json::Map::new();
-            patch.insert("guid".to_string(), Value::String(g.clone()));
-            let written = kernel.write_own(agent_id, patch).await;
-            if fantastic_kernel::is_refused(&written) {
-                return Err(format!("relay_connector: guid not written: {written}"));
-            }
-            g
-        }
+    let (guid, minted) = match meta_string(agent_id, kernel, "guid") {
+        Some(guid) => (guid, false),
+        None => (mint_guid(), true),
     };
-    Ok((relay_url, guid, partner, reconnect, heartbeat))
+    Ok(RelayArgs { relay_url, guid, partner, reconnect, heartbeat, minted })
 }
 
 /// The bare message a python `ConnectionClosed`/`ValueError` carries — rust's

@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
-use fantastic_kernel::{AgentId, Blob, Item, Kernel, Status};
+use fantastic_kernel::{AgentId, Item, Kernel, Status};
 use serde_json::{json, Value};
 
 /// The handler.
@@ -101,32 +101,8 @@ impl UserBundle {
             .map(|a| a.id.0.clone())
     }
 
-    /// One item, sent from inside this handler: its sender is `user`.
-    async fn send_as(kernel: &Arc<Kernel>, item: Item) -> (Value, Option<Blob>) {
-        let k = Arc::clone(kernel);
-        let mut out = k.send(vec![item]).await;
-        let o = out.remove(0);
-        let result = match o.status {
-            Status::TimedOut if o.result.is_null() => refuse("timed_out", "user: timeout"),
-            _ => o.result,
-        };
-        (result, o.body)
-    }
-
-    /// The page tree as the loader holds it.
-    async fn tree(kernel: &Arc<Kernel>, loader: &str) -> Vec<Value> {
-        let (r, _) = Self::send_as(
-            kernel,
-            Item::new(AgentId::from(loader), json!({"type": "load_tree"})),
-        )
-        .await;
-        r.get("records")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    /// `around {view?, x, y, radius}` from the page records.
+    /// `around {view?, x, y, radius}` from the page records: the loader's `load_tree`
+    /// is a call (#795), so the verb defers and its settle answers.
     async fn around(me: &AgentId, a: verbs::Around, kernel: &Arc<Kernel>) -> Value {
         let loader = match a.canvas.as_deref() {
             Some(c) => match Self::loader_of(kernel, c) {
@@ -145,11 +121,34 @@ impl UserBundle {
                 }
             },
         };
-        let (x, y, radius) = (a.x, a.y, a.radius);
         // page lines are parked with the peers (grant model v9, Q5): only the
         // shell (no agent origin) sees page agents; any agent caller sees none
         let shell = fantastic_kernel::current_origin().is_none();
-        let recs = Self::tree(kernel, &loader).await;
+        let d = match kernel.defer() {
+            Ok(d) => d,
+            Err(refused) => return refused,
+        };
+        let k = Arc::clone(kernel);
+        // one item, sent from inside this handler: its sender is `user`
+        let item = Item::new(AgentId::from(loader.as_str()), json!({"type": "load_tree"}));
+        kernel
+            .call_then(item, move |o| async move {
+                let tree = match o.status {
+                    Status::TimedOut if o.result.is_null() => refuse("timed_out", "user: timeout"),
+                    _ => o.result,
+                };
+                let recs = tree.get("records").and_then(Value::as_array).cloned().unwrap_or_default();
+                let reply = Self::members(a, &recs, shell);
+                k.settle_deferred(d.pid(), fantastic_kernel::Outcome::of_reply(Some(d.pid()), reply));
+            })
+            .await;
+        Value::Null
+    }
+
+    /// The cells of `a.view` within `a.radius` of the point, nearest first, from the
+    /// page records `recs`; `shell`: the caller is the shell, which alone sees them.
+    fn members(a: verbs::Around, recs: &[Value], shell: bool) -> Value {
+        let (x, y, radius) = (a.x, a.y, a.radius);
         let view = a.view;
         if !recs
             .iter()

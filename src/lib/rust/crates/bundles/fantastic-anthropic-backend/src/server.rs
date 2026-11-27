@@ -237,10 +237,11 @@ pub async fn read(
     Ok(out)
 }
 
-/// Read what a pass leaves to the API: the record's absent `context_window`, written
-/// back, and — when the chat names no `max_tokens` (`chat_max`) — the pass's output
-/// budget. `Ok` carries that budget (`None`: the chat names one, or nothing can be
-/// read); `Err` is the verb's refusal.
+/// Read what a pass leaves to the API: the record's absent `context_window`, to be
+/// written back (the caller's step), and — when the chat names no `max_tokens`
+/// (`chat_max`) — the pass's output budget. `Ok` carries that budget (`None`: the chat
+/// names one, or nothing can be read) and the fields to write (empty: none); `Err` is
+/// the verb's refusal.
 ///
 /// `key`: the key read for the record's endpoint (a step before, #795).
 ///
@@ -252,7 +253,7 @@ pub async fn resolve(
     model: Option<String>,
     chat_max: Option<i64>,
     key: &dyn KeySource,
-) -> Result<Option<i64>, Value> {
+) -> Result<(Option<i64>, Map<String, Value>), Value> {
     // the model of the pass (a provider's record names none: the chat's, else its default)
     let mut rec = helpers::agent_meta(agent_id, kernel);
     if let Some(m) = model {
@@ -284,7 +285,7 @@ pub async fn resolve(
     // nothing to read, or nothing to read it with — the provider names a missing
     // `model` / `endpoint` when it is built
     if missing(&rec).is_empty() || !named("model") || !named("endpoint") {
-        return Ok(pass_max);
+        return Ok((pass_max, Map::new()));
     }
     let mut values = match read(&rec, key).await {
         Ok(v) => v,
@@ -313,13 +314,7 @@ pub async fn resolve(
     if let Some(n) = read_max {
         read_budgets().lock().expect("budgets poisoned").insert(kept_key, n);
     }
-    if !values.is_empty() {
-        let written = kernel.write_own(agent_id, values).await;
-        if fantastic_kernel::is_refused(&written) {
-            return Err(written);
-        }
-    }
-    Ok(read_max.or(pass_max))
+    Ok((read_max.or(pass_max), values))
 }
 
 

@@ -124,6 +124,12 @@ pub(super) struct Scripted {
     asked: Mutex<Vec<Vec<Value>>>,
     model: Mutex<String>,
     report: Arc<Mutex<ProviderReport>>,
+    /// How many requests are AT REST: answered whole and read to their end, or held at
+    /// their hold point (a stall once asked; a hang once its text was read).
+    at_rest: Arc<Mutex<usize>>,
+    /// Fired each time a request comes to rest: a test waits on this event, never on a
+    /// clock.
+    rested: Arc<tokio::sync::Notify>,
 }
 
 impl Scripted {
@@ -133,7 +139,19 @@ impl Scripted {
             asked: Mutex::new(Vec::new()),
             model: Mutex::new(model.to_string()),
             report: Arc::new(Mutex::new(ProviderReport::default())),
+            at_rest: Arc::default(),
+            rested: Arc::default(),
         })
+    }
+
+    /// How many requests came to rest.
+    pub(super) fn at_rest(&self) -> usize {
+        *self.at_rest.lock().unwrap()
+    }
+
+    /// The event of the next request coming to rest, armed now so none is missed.
+    pub(super) fn rested(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.rested)
     }
 
     pub(super) fn push(&self, steps: Vec<Step>) {
@@ -173,7 +191,13 @@ impl Provider for Scripted {
         if !step.model.is_empty() {
             *self.model.lock().unwrap() = step.model.to_string();
         }
+        let (count, rested) = (Arc::clone(&self.at_rest), Arc::clone(&self.rested));
+        let rest = move || {
+            *count.lock().unwrap() += 1;
+            rested.notify_waiters();
+        };
         if step.stall {
+            rest();
             futures_util::future::pending::<()>().await;
         }
         let mut evs: Vec<Result<ProviderEvent, ProviderError>> = Vec::new();
@@ -182,7 +206,10 @@ impl Provider for Scripted {
         }
         let head = futures_util::stream::iter(evs);
         if step.hang {
-            return Ok(Box::pin(head.chain(futures_util::stream::pending())));
+            // at rest once the reader polls past the text: everything sent was read
+            let held = futures_util::stream::once(async move { rest() })
+                .filter_map(|()| futures_util::future::ready(None::<Result<ProviderEvent, ProviderError>>));
+            return Ok(Box::pin(head.chain(held).chain(futures_util::stream::pending())));
         }
         let cell = Arc::clone(&self.report);
         let settle = step.report;
@@ -190,6 +217,7 @@ impl Provider for Scripted {
             if let Some(r) = settle {
                 *cell.lock().unwrap() = r;
             }
+            rest();
         })
         .filter_map(|()| futures_util::future::ready(None::<Result<ProviderEvent, ProviderError>>));
         Ok(Box::pin(head.chain(tail)))
@@ -319,7 +347,20 @@ pub(super) async fn chat_on(
     }
     let r = operator(kernel, "kernel_state", create).await;
     assert!(r.get("error").is_none(), "create {id}: {r}");
-    AgentId::from(id)
+    let a = AgentId::from(id);
+    booted(&a).await;
+    a
+}
+
+/// Wait until `agent`'s boot is over — its store reads are steps (#795) — and any pass
+/// it started has ended: woken by the agent's own life events, never a clock (the
+/// bound only says a boot that never ends). A row planted before this could be read by
+/// the boot as one owed a recall.
+pub(super) async fn booted(agent: &AgentId) {
+    assert!(
+        crate::state::until_quiet(agent, Duration::from_secs(60)).await,
+        "{agent}: its boot never ended"
+    );
 }
 
 /// A store agent `id` of `module` under the root, with `extra` on its record.

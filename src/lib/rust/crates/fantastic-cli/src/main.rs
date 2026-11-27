@@ -417,15 +417,14 @@ async fn dispatch(
         apply_ledger_cap(&booted, cap);
         // The help is the kernel's own verb docs (its `reflect` at a tier),
         // rendered from its declarations.
-        let reply = booted
-            .kernel
-            .operator_send(vec![Item::new(
+        let reply = one_call(
+            &booted.kernel,
+            Item::new(
                 AgentId::from("kernel"),
                 json!({"type": "reflect", "tier": "oneliners", "tree": "none"}),
-            )])
-            .await
-            .remove(0)
-            .result;
+            ),
+        )
+        .await;
         println!("{}", py_json_dumps(&reply, true, Some(2)));
         // Every non-daemon mode ends with an idempotent kernel
         // shutdown (python's atexit → `Kernel.shutdown`), even here where no
@@ -447,19 +446,15 @@ async fn dispatch(
             Some(first) if !first.contains('=') => (first.clone(), &rest[1..]),
             _ => (DEFAULT_ROOT_ID.to_string(), rest),
         };
-        let payload = match typed_payload(&booted.kernel, &target, "reflect", kvs).await {
+        let payload = match typed_payload(&booted.kernel, &target, "reflect", kvs) {
             Ok(p) => p,
             Err(refused) => return Ok(refuse_args(&refused)),
         };
-        let reply = booted
-            .kernel
-            .operator_send(vec![Item::new(
-                AgentId::from(target.as_str()),
-                Value::Object(payload),
-            )])
-            .await
-            .remove(0)
-            .result;
+        let reply = one_call(
+            &booted.kernel,
+            Item::new(AgentId::from(target.as_str()), Value::Object(payload)),
+        )
+        .await;
         // Python `json.dumps(reply, indent=2, default=str)`: ensure_ascii
         // and python's float repr, not serde's pretty printer.
         println!("{}", py_json_dumps(&reply, true, Some(2)));
@@ -496,11 +491,9 @@ async fn dispatch(
         };
         apply_ledger_cap(&booted, cap);
         let root_id = booted.kernel.root().expect("root").id.clone();
-        // Boot the root loader so the new record subscribes + persists.
-        let _ = booted
-            .kernel
-            .operator_send(vec![Item::new(root_id.clone(), json!({"type": "boot"}))])
-            .await;
+        // Boot the root loader so the new record subscribes + persists: a
+        // lifecycle hook, run directly (Q2).
+        boot_root(&booted.kernel).await;
         // `create_agent` boots the loader child → its own boot reads the
         // manifest and hydrates the roster. The kernel never parses YAML;
         // the loader does. No duplicate-init guard: a store-less kernel
@@ -508,9 +501,9 @@ async fn dispatch(
         // `create_agent` refuse (the same id twice). Once loaded the loader is
         // an agent like any other: its roster pass is its own sends, so the
         // operator gives it a create line on itself.
-        let reply = booted
-            .kernel
-            .operator_send(vec![Item::new(
+        let reply = one_call(
+            &booted.kernel,
+            Item::new(
                 root_id.clone(),
                 json!({
                     "type": "create_agent",
@@ -522,10 +515,9 @@ async fn dispatch(
                     "manifest": manifest,
                     "can": {loader_name.as_str(): {"create": {"who": ["*"], "what": "*"}}},
                 }),
-            )])
-            .await
-            .remove(0)
-            .result;
+            ),
+        )
+        .await;
         println!("{}", py_json_dumps(&reply, true, Some(2)));
         booted.kernel.flush_records().await;
         // The lock release, THEN the kernel shutdown — see the same
@@ -555,7 +547,7 @@ async fn dispatch(
         apply_ledger_cap(&booted, cap);
         // THE VALUES take the type the verb's declaration asks for (the kernel is up, so
         // its bundles' declared verbs are known).
-        let payload = match typed_payload(&booted.kernel, &id, &verb, &args[2..]).await {
+        let payload = match typed_payload(&booted.kernel, &id, &verb, &args[2..]) {
             Ok(p) => p,
             Err(refused) => return Ok(refuse_args(&refused)),
         };
@@ -563,22 +555,12 @@ async fn dispatch(
         // subscribe and persist. The debounce never ticks before we exit, so
         // the writer is drained synchronously after the call — python's `call`
         // mode does exactly this (`modes/dispatch.py`).
-        let _ = booted
-            .kernel
-            .operator_send(vec![Item::new(
-                booted.kernel.root().expect("root").id.clone(),
-                json!({"type": "boot"}),
-            )])
-            .await;
-        let reply = booted
-            .kernel
-            .operator_send(vec![Item::new(
-                AgentId::from(id.as_str()),
-                Value::Object(payload),
-            )])
-            .await
-            .remove(0)
-            .result;
+        boot_root(&booted.kernel).await;
+        let reply = one_call(
+            &booted.kernel,
+            Item::new(AgentId::from(id.as_str()), Value::Object(payload)),
+        )
+        .await;
         println!("{}", py_json_dumps(&reply, true, Some(2)));
         booted.kernel.flush_records().await;
         // The lock release, THEN the kernel shutdown — python's own
@@ -712,6 +694,26 @@ fn refuse_args(refused: &Value) -> ExitCode {
     ExitCode::from(1)
 }
 
+/// THE ONE-SHOT CALL (#795): `item` is the operator's call, and its settle comes back
+/// to this process as a message — the one message a one-shot run reads before it
+/// prints the result and ends. The result (a refusal as data).
+async fn one_call(kernel: &Arc<fantastic_kernel::Kernel>, item: Item) -> Value {
+    let (tx, mut inbox) = tokio::sync::mpsc::unbounded_channel();
+    fantastic_kernel::send::as_operator(kernel.call_then(item, move |out| async move {
+        let _ = tx.send(out.result);
+    }))
+    .await;
+    inbox.recv().await.unwrap_or(Value::Null)
+}
+
+/// Boot the ROOT LOADER so this run's mutations (create/update/delete) subscribe and
+/// persist: the root's `boot` hook, a lifecycle hook run directly (Q2, `announce`).
+async fn boot_root(kernel: &Arc<fantastic_kernel::Kernel>) {
+    if let Some(root) = kernel.root() {
+        let _ = kernel.announce(&root, json!({"type": "boot"})).await;
+    }
+}
+
 /// The payload of a one-shot `fantastic <id> <verb> k=v …` call: each value is read as
 /// the type the verb's OWN declaration asks for that argument (`limit=7` is the integer 7
 /// where the verb declares an integer, the text `7` where it declares text; a JSON
@@ -719,7 +721,7 @@ fn refuse_args(refused: &Value) -> ExitCode {
 /// kernel's ([`fantastic_kernel::typing`]), the same code the model's `<k>v</k>` goes
 /// through; a value that is not its declared type is refused by argument name, and an
 /// agent or verb this kernel does not declare is refused by the reader.
-async fn typed_payload(
+fn typed_payload(
     kernel: &std::sync::Arc<fantastic_kernel::Kernel>,
     target: &str,
     verb: &str,
@@ -736,7 +738,7 @@ async fn typed_payload(
         };
         pairs.push((k.to_string(), v.to_string()));
     }
-    fantastic_kernel::typing::operator_payload(kernel, target, verb, &pairs).await
+    fantastic_kernel::typing::operator_payload(kernel, target, verb, &pairs)
 }
 
 #[cfg(test)]
@@ -745,8 +747,8 @@ mod typed_payload_tests {
     use serde_json::json;
     use std::sync::Arc;
 
-    #[tokio::test]
-    async fn a_value_for_an_undeclared_verb_stays_the_text_written() {
+    #[test]
+    fn a_value_for_an_undeclared_verb_stays_the_text_written() {
         let kernel = Arc::new(fantastic_kernel::Kernel::new());
         let p = typed_payload(
             &kernel,
@@ -754,7 +756,6 @@ mod typed_payload_tests {
             "ping",
             &["n=42".into(), "flag=true".into(), "w=[1]".into()],
         )
-        .await
         .unwrap();
         assert_eq!(
             serde_json::Value::Object(p),
@@ -762,11 +763,10 @@ mod typed_payload_tests {
         );
     }
 
-    #[tokio::test]
-    async fn an_argument_without_an_equals_sign_is_refused_not_dropped() {
+    #[test]
+    fn an_argument_without_an_equals_sign_is_refused_not_dropped() {
         let kernel = Arc::new(fantastic_kernel::Kernel::new());
         let e = typed_payload(&kernel, "nobody", "ping", &["n=42".into(), "no_equals".into()])
-            .await
             .unwrap_err();
         assert_eq!(e["reason"], json!("bad_arg"));
         assert_eq!(e["arg"], json!("no_equals"));

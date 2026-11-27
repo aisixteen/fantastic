@@ -84,6 +84,23 @@ impl Fixture {
     }
 }
 
+/// TEST SIDE: a home call's reply, read here once it settles (the host is told by
+/// its continuation; the test waits for that message).
+trait Called {
+    async fn called(&self, payload: Value) -> Result<Value, String>;
+}
+
+impl Called for HomeKernel {
+    async fn called(&self, payload: Value) -> Result<Value, String> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.call(payload, move |r| async move {
+            let _ = tx.send(r);
+        })
+        .await;
+        rx.await.unwrap_or_else(|_| Err("the call was never settled".into()))
+    }
+}
+
 fn free_port() -> u16 {
     let l = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("a free port");
     l.local_addr().expect("its address").port()
@@ -123,7 +140,7 @@ fn yaml(path: &Path) -> Value {
 async fn until(hk: &HomeKernel, what: &str, ok: impl Fn(&Value) -> bool) -> Value {
     for _ in 0..200 {
         let state = hk
-            .call(json!({"type": "list"}))
+            .called(json!({"type": "list"}))
             .await
             .expect("list answers");
         if ok(&state) {
@@ -562,7 +579,7 @@ async fn call_is_user_forward_and_a_refusal_is_err() {
     let f = Fixture::new();
     let hk = f.boot().await;
     let mut rx = hk.events();
-    let state = hk.call(json!({"type": "list"})).await.expect("list");
+    let state = hk.called(json!({"type": "list"})).await.expect("list");
     assert_eq!(
         (state["type"].clone(), state["protocol"].clone()),
         (json!("state"), json!("fantastic.home"))
@@ -570,16 +587,16 @@ async fn call_is_user_forward_and_a_refusal_is_err() {
     // the call reached `home` as a send, mirrored to its watchers
     next_of(&mut rx, "list").await;
     // a verb the grants do not name never reaches `home`: `user` may not send it
-    let e = hk.call(json!({"type": "nope"})).await.unwrap_err();
+    let e = hk.called(json!({"type": "nope"})).await.unwrap_err();
     assert!(e.starts_with("user may not call 'nope' on home"), "{e}");
     // a refusal of `home`'s own
     let e = hk
-        .call(json!({"type": "close_page", "id": "x"}))
+        .called(json!({"type": "close_page", "id": "x"}))
         .await
         .unwrap_err();
     assert_eq!(e, "home: no page \"x\" is open");
     let e = hk
-        .call(json!({"type": "open", "paths": ["relative"]}))
+        .called(json!({"type": "open", "paths": ["relative"]}))
         .await
         .unwrap_err();
     assert!(e.contains("argument 'paths[0]' must be"), "{e}");
@@ -593,10 +610,10 @@ async fn events_carries_every_payload_on_home() {
     let hk = f.boot().await;
     let mut rx = hk.events();
     let mut second = hk.events();
-    hk.call(json!({"type": "dismiss"})).await.expect("dismiss");
+    hk.called(json!({"type": "dismiss"})).await.expect("dismiss");
     let mirrored = next_of(&mut rx, "dismiss").await;
     assert_eq!(mirrored, json!({"type": "dismiss"}));
-    hk.call(json!({"type": "focus"})).await.expect("focus");
+    hk.called(json!({"type": "focus"})).await.expect("focus");
     // the mirrored call, then the emit: both `focus`
     assert_eq!(next_of(&mut rx, "focus").await, json!({"type": "focus"}));
     assert_eq!(next_of(&mut rx, "focus").await, json!({"type": "focus"}));
@@ -663,7 +680,7 @@ async fn pages_and_selection_survive_a_restart() {
     })
     .await;
     let state = hk
-        .call(json!({"type": "select", "id": "g-notes"}))
+        .called(json!({"type": "select", "id": "g-notes"}))
         .await
         .expect("select");
     assert_eq!(
@@ -713,7 +730,7 @@ async fn the_home_never_lists_its_own_folder() {
         .collect();
     assert_eq!(ids, ["g-other"]);
     let e = hk
-        .call(json!({"type": "open", "paths": [own.clone()]}))
+        .called(json!({"type": "open", "paths": [own.clone()]}))
         .await
         .unwrap_err();
     assert!(
@@ -721,7 +738,7 @@ async fn the_home_never_lists_its_own_folder() {
         "{e}"
     );
     let e = hk
-        .call(json!({"type": "register", "path": own}))
+        .called(json!({"type": "register", "path": own}))
         .await
         .unwrap_err();
     assert!(
@@ -741,8 +758,8 @@ async fn menu_reaches_home_through_user_and_its_spec_validates() {
     let _one = SERIAL.lock().await;
     let f = Fixture::new();
     let hk = f.boot().await;
-    let state = hk.call(json!({"type": "list"})).await.expect("list");
-    let r = hk.call(json!({"type": "menu"})).await.expect("menu");
+    let state = hk.called(json!({"type": "list"})).await.expect("list");
+    let r = hk.called(json!({"type": "menu"})).await.expect("menu");
     assert_eq!(r["type"], json!("menu_spec"), "{r}");
     assert!(r["seq"].as_u64() >= state["seq"].as_u64(), "{r}");
     let msg: fantastic_home::menu::MenuSpecMsg = serde_json::from_value(r).expect("a MenuSpecMsg");

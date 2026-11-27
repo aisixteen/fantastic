@@ -78,7 +78,7 @@ pub mod test_support;
 pub mod verbs;
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use fantastic_bundle::{py_json_dumps, py_repr, py_repr_value, py_strip};
@@ -558,8 +558,61 @@ pub struct CredentialStoreBundle {
     /// change them and write both back; python runs that with no await in
     /// between, so it is atomic on its event loop. Dispatches here run on many
     /// threads, so the same read-modify-write is serialized explicitly — two
-    /// rotations must not lose one another's ref.
-    writes: tokio::sync::Mutex<()>,
+    /// rotations must not lose one another's ref. The record write is a call
+    /// (#795), so each `set`/`forget` is a JOB of a serial queue: the next starts when
+    /// the previous one's write has settled, and no handler waits for it — a queued
+    /// call has deferred its settle.
+    writes: Arc<Mutex<Serial>>,
+}
+
+/// A record write still to make, and the reply once it is written.
+enum Step {
+    /// Answered now: nothing to write.
+    Done(Value),
+    /// The store's own `refs` to write, then `reply`.
+    Write(Map<String, Value>, Value),
+}
+
+/// One `set` or `forget`, run when the queue reaches it.
+type Job = Box<dyn FnOnce(Next) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send>;
+
+/// The serial queue of a store's writes.
+#[derive(Default)]
+struct Serial {
+    busy: bool,
+    queue: std::collections::VecDeque<Job>,
+}
+
+/// What a job calls once it is done: the next queued job starts.
+struct Next(Arc<Mutex<Serial>>);
+
+impl Next {
+    async fn next(self) {
+        let job = {
+            let mut q = self.0.lock().expect("writes poisoned");
+            let job = q.queue.pop_front();
+            if job.is_none() {
+                q.busy = false;
+            }
+            job
+        };
+        if let Some(job) = job {
+            job(self).await;
+        }
+    }
+}
+
+/// Run `job` now when no write is running, else queue it.
+async fn enqueue(writes: &Arc<Mutex<Serial>>, job: Job) {
+    {
+        let mut q = writes.lock().expect("writes poisoned");
+        if q.busy {
+            q.queue.push_back(job);
+            return;
+        }
+        q.busy = true;
+    }
+    job(Next(Arc::clone(writes))).await;
 }
 
 impl Default for CredentialStoreBundle {
@@ -574,7 +627,7 @@ impl CredentialStoreBundle {
     pub fn with_keychain(keychain: Arc<dyn Keychain>) -> Self {
         Self {
             keychain,
-            writes: tokio::sync::Mutex::new(()),
+            writes: Arc::default(),
         }
     }
 
@@ -589,6 +642,56 @@ impl CredentialStoreBundle {
             ))),
             BackendKind::Env => Ok(Backend::Env(rec.clone())),
         }
+    }
+
+    /// A `set` or `forget` as a job of the store's serial queue (#795): the call
+    /// defers; when the queue reaches it, `step` reads and changes the backend and the
+    /// record, the record is written (a call), and its settle publishes `kind`, settles
+    /// the call and starts the next job.
+    async fn write<F>(
+        &self,
+        agent_id: &AgentId,
+        kernel: &Arc<Kernel>,
+        kind: &'static str,
+        step: F,
+    ) -> Result<Reply, BundleError>
+    where
+        F: FnOnce(&AgentId, &Arc<Kernel>) -> Result<Step, BundleError> + Send + 'static,
+    {
+        let d = match kernel.defer() {
+            Ok(d) => d,
+            Err(refused) => return Ok(Some(refused)),
+        };
+        let (id, k) = (agent_id.clone(), Arc::clone(kernel));
+        let job: Job = Box::new(move |next| {
+            Box::pin(async move {
+                let pid = d.pid();
+                let reply = match step(&id, &k) {
+                    Err(e) => {
+                        let raised = json!({"error": e.to_string(), "raised": true});
+                        k.settle_deferred(pid, fantastic_kernel::Outcome::new(Some(pid), fantastic_kernel::Status::Failed, raised));
+                        return next.next().await;
+                    }
+                    Ok(Step::Done(v)) => v,
+                    Ok(Step::Write(patch, reply)) => {
+                        let (me, kk) = (id.clone(), Arc::clone(&k));
+                        k.write_own(&id, patch, move |written| async move {
+                            let out = if fantastic_kernel::is_refused(&written) { written } else { reply };
+                            published(&kk, &me, kind, &out).await;
+                            kk.settle_deferred(pid, fantastic_kernel::Outcome::of_reply(Some(pid), out));
+                            next.next().await;
+                        })
+                        .await;
+                        return;
+                    }
+                };
+                published(&k, &id, kind, &reply).await;
+                k.settle_deferred(pid, fantastic_kernel::Outcome::of_reply(Some(pid), reply));
+                next.next().await;
+            })
+        });
+        enqueue(&self.writes, job).await;
+        Ok(Some(Value::Null))
     }
 
     fn reflect(id: &AgentId, rec: &Map<String, Value>) -> Value {
@@ -619,12 +722,12 @@ impl CredentialStoreBundle {
         Value::Object(out)
     }
 
-    async fn set(
+    fn set(
         &self,
         id: &AgentId,
         args: &verbs::Set,
         kernel: &Arc<Kernel>,
-    ) -> Result<Value, BundleError> {
+    ) -> Result<Step, BundleError> {
         // the binding is the declaration's alone: `set` declares no host argument, so
         // the entry refuses one by name
         let r = args.ref_name.as_str();
@@ -644,12 +747,12 @@ impl CredentialStoreBundle {
                 ),
             );
             with(&mut out, "arg", json!("backend"));
-            return Ok(out);
+            return Ok(Step::Done(out));
         }
         let mut refs = refs_of(&rec);
         // declared by update_agent alone — set never makes one
         let Some(mut entry) = refs.get(r).filter(|v| !v.is_null()).map(entry_map) else {
-            return Ok(no_such_ref(r));
+            return Ok(Step::Done(no_such_ref(r)));
         };
         let h = hosts(entry.get("host"));
         // the declared host is stored WITH the value
@@ -661,11 +764,10 @@ impl CredentialStoreBundle {
         refs.insert(r.to_string(), Value::Object(entry));
         let mut patch = Map::new();
         patch.insert("refs".into(), Value::Object(refs));
-        let written = kernel.write_own(id, patch).await;
-        if fantastic_kernel::is_refused(&written) {
-            return Ok(written);
-        }
-        Ok(json!({"ref": r, "host": hosts_value(h), "fields": sorted_names, "stored": true}))
+        Ok(Step::Write(
+            patch,
+            json!({"ref": r, "host": hosts_value(h), "fields": sorted_names, "stored": true}),
+        ))
     }
 
     fn get(&self, id: &AgentId, args: &verbs::Get, kernel: &Kernel) -> Result<Value, BundleError> {
@@ -737,12 +839,12 @@ impl CredentialStoreBundle {
         json!({"refs": out})
     }
 
-    async fn forget(
+    fn forget(
         &self,
         id: &AgentId,
         args: &verbs::Forget,
         kernel: &Arc<Kernel>,
-    ) -> Result<Value, BundleError> {
+    ) -> Result<Step, BundleError> {
         let r = args.ref_name.as_str();
         let rec = record(kernel, id);
         if matches!(backend_kind(&rec)?, record::BackendKind::Env) {
@@ -754,24 +856,22 @@ impl CredentialStoreBundle {
                 ),
             );
             with(&mut out, "arg", json!("backend"));
-            return Ok(out);
+            return Ok(Step::Done(out));
         }
         let mut refs = refs_of(&rec);
         let Some(mut entry) = refs.get(r).filter(|v| !v.is_null()).map(entry_map) else {
-            return Ok(no_such_ref(r));
+            return Ok(Step::Done(no_such_ref(r)));
         };
         self.backend(id, &rec)?.drop_ref(r)?;
         // the value's names go with the value; the declaration stays
-        if entry.shift_remove("fields").is_some() {
-            refs.insert(r.to_string(), Value::Object(entry));
-            let mut patch = Map::new();
-            patch.insert("refs".into(), Value::Object(refs));
-            let written = kernel.write_own(id, patch).await;
-            if fantastic_kernel::is_refused(&written) {
-                return Ok(written);
-            }
+        let reply = json!({"forgotten": true, "ref": r});
+        if entry.shift_remove("fields").is_none() {
+            return Ok(Step::Done(reply));
         }
-        Ok(json!({"forgotten": true, "ref": r}))
+        refs.insert(r.to_string(), Value::Object(entry));
+        let mut patch = Map::new();
+        patch.insert("refs".into(), Value::Object(refs));
+        Ok(Step::Write(patch, reply))
     }
 }
 
@@ -863,22 +963,22 @@ impl Handler for CredentialStoreBundle {
         let out = match call {
             Call::Reflect(_) => Self::reflect(agent_id, &record(kernel, agent_id)),
             Call::Set(a) => {
-                let out = {
-                    let _one = self.writes.lock().await;
-                    self.set(agent_id, &a, kernel).await?
-                };
-                published(kernel, agent_id, "stored", &out).await;
-                out
+                let keychain = Arc::clone(&self.keychain);
+                return self
+                    .write(agent_id, kernel, "stored", move |id, k| {
+                        Self::with_keychain(keychain).set(id, &a, k)
+                    })
+                    .await;
             }
             Call::Get(a) => self.get(agent_id, &a, kernel)?,
             Call::List(_) => Self::list(agent_id, kernel),
             Call::Forget(a) => {
-                let out = {
-                    let _one = self.writes.lock().await;
-                    self.forget(agent_id, &a, kernel).await?
-                };
-                published(kernel, agent_id, "forgotten", &out).await;
-                out
+                let keychain = Arc::clone(&self.keychain);
+                return self
+                    .write(agent_id, kernel, "forgotten", move |id, k| {
+                        Self::with_keychain(keychain).forget(id, &a, k)
+                    })
+                    .await;
             }
         };
         Ok(Some(out))

@@ -101,9 +101,12 @@ pub(crate) async fn read_model_at(endpoint: &str, key: &dyn KeySource) -> Result
 }
 
 /// Read an absent `model` from the server with `key` (read for the record's endpoint
-/// before, a step) and write it back. `None` when the record names one or it was
-/// written; otherwise the verb's refusal.
-pub async fn resolve(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &dyn KeySource) -> Option<Value> {
+/// before, a step): the record fields to write back (empty when the record names one or
+/// there is no endpoint), or the verb's refusal. The write is the caller's step.
+///
+/// # Errors
+/// The refusal, naming `model`.
+pub async fn resolve(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &dyn KeySource) -> Result<Map<String, Value>, Value> {
     let rec = helpers::agent_meta(agent_id, kernel);
     let endpoint = rec
         .get("endpoint")
@@ -113,19 +116,18 @@ pub async fn resolve(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &dyn KeySour
         .to_string();
     // Nothing to read without an endpoint — the provider names it when it is built.
     if rec.get("model").is_some_and(|m| !m.is_null()) || endpoint.is_empty() {
-        return None;
+        return Ok(Map::new());
     }
     match read_model_at(&endpoint, key).await {
         Ok(model) => {
             let mut patch = Map::new();
             patch.insert("model".into(), json!(model));
-            let written = kernel.write_own(agent_id, patch).await;
-            fantastic_kernel::is_refused(&written).then_some(written)
+            Ok(patch)
         }
         Err((status, e)) => {
             let mut r = refusal(fantastic_ai_core::provider::read_reason(status), e);
             with(&mut r, "arg", json!("model"));
-            Some(r)
+            Err(r)
         }
     }
 }

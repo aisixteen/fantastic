@@ -213,8 +213,15 @@ async fn took_capabilities(
     if held != Some(&new) {
         let mut patch = Map::new();
         patch.insert(FIELD.to_string(), new);
-        // the chat's own field, written as itself
-        let _ = kernel.write_own(agent_id, patch).await;
+        // the chat's own field, written as itself (a call, #795: nothing waits for it)
+        let me = agent_id.clone();
+        kernel
+            .write_own(agent_id, patch, move |written| async move {
+                if fantastic_kernel::is_refused(&written) {
+                    eprintln!("  [ai] {me}: the model's capabilities were not kept: {written}");
+                }
+            })
+            .await;
     }
 }
 

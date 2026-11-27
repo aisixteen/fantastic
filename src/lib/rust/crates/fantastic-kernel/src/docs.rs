@@ -108,18 +108,22 @@ pub(crate) fn section(
 
 /// The verb docs of an agent on a CONNECTED KERNEL (`<guid>|<agent id>`): THAT
 /// kernel's own `reflect` of the agent, asked with `tier`, `verb` and `part`. This
-/// kernel asks as itself over the peer's live routes, and the peer judges its leg.
-/// An id of this kernel's own guid is answered here, as the operator reads it. A
-/// qualified id naming no connected kernel is the unknown answer.
-pub async fn remote_docs(
+/// kernel asks as itself over the peer's live routes, and the peer judges its leg; the
+/// ask is a call (#795): `then` gets the answer when the peer gives it, and nothing
+/// waits. An id of this kernel's own guid is answered here, as the operator reads it,
+/// at once. A qualified id naming no connected kernel is the unknown answer.
+pub async fn remote_docs<F>(
     kernel: &Arc<Kernel>,
     qualified: &str,
     tier: Option<Tier>,
     verb: Option<&str>,
     part: Option<Part>,
-) -> Value {
+    then: F,
+) where
+    F: FnOnce(Value) + Send + 'static,
+{
     let Some(target) = kernel.qualified_target(qualified) else {
-        return crate::refusal::unknown_agent(qualified);
+        return then(crate::refusal::unknown_agent(qualified));
     };
     let mut ask = json!({"type": "reflect"});
     if let Some(t) = tier {
@@ -133,9 +137,9 @@ pub async fn remote_docs(
     }
     let Some(remote) = target.remote.as_ref() else {
         // this kernel's own guid — a LOCAL id, answered here
-        return local_docs(kernel, &target, &ask);
+        return then(local_docs(kernel, &target, &ask));
     };
-    crate::peers::ask_peer(remote, ask).await
+    crate::peers::ask_peer(remote, ask, then).await;
 }
 
 /// The verb section of a local agent's reflect `ask`, read as the operator.

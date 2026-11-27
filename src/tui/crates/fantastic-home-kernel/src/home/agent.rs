@@ -72,9 +72,15 @@ impl HomeBundle {
             // carries the identity of the code that keeps them
             let payload = json!({"type": "update_agent", "id": ID, "pages": pages,
                                  "selection": selection});
+            // a call (#795): nothing waits for it; a refusal is said
             fantastic_kernel::spawn_inherit(async move {
-                let _ = kernel
-                    .send(vec![fantastic_kernel::Item::new(AgentId::from("kernel"), payload)])
+                let item = fantastic_kernel::Item::new(AgentId::from("kernel"), payload);
+                kernel
+                    .call_then(item, |out| async move {
+                        if fantastic_kernel::is_refused(&out.result) {
+                            eprintln!("  [home] the pages were not kept: {}", out.result);
+                        }
+                    })
                     .await;
             });
         });

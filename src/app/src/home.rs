@@ -106,11 +106,16 @@ impl Shell {
         self.down.store(true, Ordering::SeqCst);
     }
 
-    /// Call `home` the way a page does (`user.forward`). A refusal is `Err`.
-    pub async fn call(&self, payload: Value) -> Result<Value, String> {
+    /// Call `home` the way a page does (`user.forward`). A call (#795): `then` gets
+    /// the reply when it settles (a refusal is `Err`); nothing waits for it.
+    pub async fn call<F, Fut>(&self, payload: Value, then: F)
+    where
+        F: FnOnce(Result<Value, String>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
         match self.kernel.read().await.as_ref() {
-            Some(k) => k.call(payload).await,
-            None => Err("the home kernel is not running".into()),
+            Some(k) => k.call(payload, then).await,
+            None => then(Err("the home kernel is not running".into())).await,
         }
     }
 }
@@ -187,19 +192,31 @@ async fn up(app: AppHandle, mut guard: OwnedRwLockWriteGuard<Option<HomeKernel>>
     }
     let watcher = app.clone();
     tauri::async_runtime::spawn(async move { watch(watcher, events).await });
-    if !shell.fullscreen {
-        let applied = match shell.call(json!({"type": "menu"})).await {
-            Ok(spec) => menu::apply(&app, spec).await,
-            Err(e) => Err(e),
-        };
-        if let Err(e) = applied {
-            fatal(&app, &format!("the home's menu: {e}"));
-            return;
-        }
+    let backdrop = shell.backdrop.name();
+    if shell.fullscreen {
+        return ready(app, url, backdrop).await;
     }
+    // the menu is the home's answer, a message when it settles
+    shell
+        .call(json!({"type": "menu"}), move |r| async move {
+            let applied = match r {
+                Ok(spec) => menu::apply(&app, spec).await,
+                Err(e) => Err(e),
+            };
+            if let Err(e) = applied {
+                fatal(&app, &format!("the home's menu: {e}"));
+                return;
+            }
+            ready(app, url, backdrop).await;
+        })
+        .await;
+}
+
+/// The home is shown: the intents queued meanwhile go.
+async fn ready(app: AppHandle, url: String, backdrop: &'static str) {
     intents::ready(&app).await;
     eprintln!("fantastic-app: the home: {url}");
-    eprintln!("fantastic-app: the backdrop: {}", shell.backdrop.name());
+    eprintln!("fantastic-app: the backdrop: {backdrop}");
 }
 
 /// The events task: `menu_spec` (applied, outside fullscreen mode), `state` (the
@@ -271,9 +288,14 @@ fn focus(app: &AppHandle) {
 /// Send `intent` to `home`; a refusal is shown, not fatal (the home changed nothing).
 pub async fn send(app: &AppHandle, intent: Intent) {
     let payload = serde_json::to_value(&intent).expect("an intent serializes");
-    if let Err(e) = shell(app).call(payload).await {
-        warn(app, &e);
-    }
+    let a = app.clone();
+    shell(app)
+        .call(payload, move |r| async move {
+            if let Err(e) = r {
+                warn(&a, &e);
+            }
+        })
+        .await;
 }
 
 /// A refusal of the shell's own: a warning dialog, or stderr in fullscreen mode.

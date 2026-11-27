@@ -204,11 +204,21 @@ pub fn listed_models(meta: &Map<String, Value>) -> Vec<String> {
 
 /// What a backend reads from its API before a pass's request, given the key and the
 /// pass's `complete` (its model chosen: the call's, else the default): the `complete`
-/// to run, or the verb's refusal. Its own I/O, in the verb's task.
+/// to run and the backend's own record fields the read found (written back as a step
+/// before the pass, #795), or the verb's refusal. Its own I/O, in the verb's task.
 pub type Prepare = Box<
-    dyn FnOnce(Arc<dyn crate::credentials::KeySource>, Complete, Option<String>) -> futures_util::future::BoxFuture<'static, Result<Complete, Value>>
+    dyn FnOnce(Arc<dyn crate::credentials::KeySource>, Complete, Option<String>) -> futures_util::future::BoxFuture<'static, Result<Prepared, Value>>
         + Send,
 >;
+
+/// What a [`Prepare`] read: the `complete` to run, and the record fields to write back
+/// first (empty: nothing to write).
+pub struct Prepared {
+    /// The `complete` to run.
+    pub args: Complete,
+    /// The backend's own record fields the read found.
+    pub write: Map<String, Value>,
+}
 
 /// `complete`: one pass on the call's `model`, else the record's `default_model`, with the
 /// call's `knobs` — as STEPS (#795): the default read, the key read, then the pass, its
@@ -268,14 +278,44 @@ where
         let Self { me, kernel, keys: _, prepare, build, settle } = self;
         let forker = settle.forker();
         let owner = me.clone();
+        let again = forker.clone();
         forker.run(&owner, "complete", async move {
-            let args = match prepare {
+            let (args, write) = match prepare {
                 Some(p) => match p(Arc::clone(&key), args, chosen.clone()).await {
-                    Ok(a) => a,
+                    Ok(p) => (p.args, p.write),
                     Err(refused) => return settle.reply(refused),
                 },
-                None => args,
+                None => (args, Map::new()),
             };
+            if write.is_empty() {
+                return Self::stream(me, kernel, build, settle, args, chosen, key).await;
+            }
+            // what the read found is the backend's own record first (a step); the pass
+            // runs once it is written, in a task under this execution again
+            let (m, k) = (me.clone(), Arc::clone(&kernel));
+            kernel
+                .write_own(&me, write, move |written| async move {
+                    if fantastic_kernel::is_refused(&written) {
+                        return settle.reply(written);
+                    }
+                    let owner = m.clone();
+                    again.run(&owner, "complete", Self::stream(m, k, build, settle, args, chosen, key));
+                })
+                .await;
+        });
+    }
+
+    /// The pass's request and stream, once the backend's record holds what it needs.
+    async fn stream(
+        me: AgentId,
+        kernel: Arc<Kernel>,
+        build: B,
+        settle: crate::steps::Settle,
+        args: Complete,
+        chosen: Option<String>,
+        key: Arc<dyn crate::credentials::KeySource>,
+    ) {
+        {
             let mut over = crate::helpers::agent_meta(&me, &kernel);
             over.remove("model");
             if let Some(m) = &chosen {
@@ -312,7 +352,7 @@ where
                     settle.reply(r);
                 }
             }
-        });
+        }
     }
 }
 

@@ -115,20 +115,29 @@ impl Me {
 
 /// The store. `here` is this fantastic's state folder, fixed by the binary;
 /// `canvas` the URL this run serves, set by the binary (RAM: a run's, never a record's).
+#[derive(Clone)]
 pub struct UserStore {
+    place: Arc<Place>,
+    setups: Arc<UserHomeStore>,
+}
+
+/// Where this fantastic's folder lives, and the run's canvas: what a step after the
+/// record write reaches (#795).
+struct Place {
     home: Result<PathBuf, String>,
     here: PathBuf,
     canvas: Mutex<Option<String>>,
-    setups: UserHomeStore,
 }
 
 impl UserStore {
     /// `home`: the resolved home dir (or why there is none); `here`: this fantastic's state folder.
     pub fn new(home: Result<PathBuf, String>, here: PathBuf) -> Self {
-        let setups = UserHomeStore::new(home.clone());
-        Self { home, here, canvas: Mutex::new(None), setups }
+        let setups = Arc::new(UserHomeStore::new(home.clone()));
+        Self { place: Arc::new(Place { home, here, canvas: Mutex::new(None) }), setups }
     }
+}
 
+impl Place {
     fn home(&self) -> Result<&Path, Value> {
         self.home.as_deref().map_err(|e| refusal(NOT_FOUND, format!("user_store: {e}")))
     }
@@ -247,17 +256,6 @@ impl UserStore {
         Ok((target, at))
     }
 
-    /// THE RECORD FIRST, ON DISK: `key` patched and the record writer drained, so
-    /// the switch or name has landed before the home is touched. A crash after it
-    /// leaves a record the next boot makes the home match.
-    async fn persist(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &str, value: Value) {
-        // its own field, written as itself
-        let mut patch = serde_json::Map::new();
-        patch.insert(key.to_string(), value);
-        let _ = kernel.write_own(agent_id, patch).await;
-        kernel.flush_records().await;
-    }
-
     /// Remove a fantastic's folder: its `fantastic.yaml`, then the folder — one
     /// holding anything else is refused, never emptied.
     fn remove_folder(dir: &Path) -> Result<(), Value> {
@@ -273,52 +271,6 @@ impl UserStore {
         }
         fs::remove_file(&file).map_err(io(&file))?;
         fs::remove_dir(dir).map_err(io(dir))
-    }
-
-    /// The switch: checked against the home first (no home, no guid, a taken name:
-    /// refused, nothing touched), then the RECORD lands, then the home follows —
-    /// a home write that fails puts the switch back.
-    async fn register_home_folder(&self, agent_id: &AgentId, kernel: &Arc<Kernel>, me: &Me, on: bool) -> Result<Value, Value> {
-        let set = Me { guid: me.guid.clone(), on, name: me.name.clone() };
-        let at = if on { self.place(&set)?.1 } else { self.find(set.guid()?)? };
-        Self::persist(agent_id, kernel, SWITCH, Value::Bool(on)).await;
-        let done = if on {
-            self.write_here(&set).map(|s| json!({"stored": s}))
-        } else {
-            at.as_deref().map_or(Ok(()), Self::remove_folder).map(|()| json!({"unstored": at.is_some()}))
-        };
-        match done {
-            Ok(mut out) => {
-                with(&mut out, SWITCH, Value::Bool(on));
-                Ok(out)
-            }
-            Err(e) => {
-                Self::persist(agent_id, kernel, SWITCH, Value::Bool(me.on)).await;
-                Err(e)
-            }
-        }
-    }
-
-    /// The name: with the switch on, checked against the home first (a taken name:
-    /// refused, nothing touched), then the RECORD lands, then the folder is
-    /// renamed — a rename that fails puts the name back. `null` = the guid.
-    async fn name_home_folder(&self, agent_id: &AgentId, kernel: &Arc<Kernel>, me: &Me, name: Option<String>) -> Result<Value, Value> {
-        let named = Me { guid: me.guid.clone(), on: me.on, name: name.clone() };
-        let mut out = json!({"name": name, "folder": named.folder()?});
-        if me.on {
-            self.place(&named)?;
-        }
-        Self::persist(agent_id, kernel, NAME, name.map_or(Value::Null, Value::String)).await;
-        if me.on {
-            match self.write_here(&named) {
-                Ok(s) => with(&mut out, "stored", s),
-                Err(e) => {
-                    Self::persist(agent_id, kernel, NAME, me.name.clone().map_or(Value::Null, Value::String)).await;
-                    return Err(e);
-                }
-            }
-        }
-        Ok(out)
     }
 
     /// The canvas this run serves (`null`: none): kept for the run, and with the
@@ -427,6 +379,102 @@ impl UserStore {
     }
 }
 
+impl UserStore {
+    /// THE RECORD FIRST, ON DISK: `key` patched and the record writer drained, so
+    /// the switch or name has landed before the home is touched; then `then`. The
+    /// write is a call (#795): `then` runs with its settle, nothing waits for it. A
+    /// crash after it leaves a record the next boot makes the home match.
+    async fn persist<F, Fut>(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &str, value: Value, then: F)
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        // its own field, written as itself
+        let mut patch = serde_json::Map::new();
+        patch.insert(key.to_string(), value);
+        let k = Arc::clone(kernel);
+        kernel
+            .write_own(agent_id, patch, move |_| async move {
+                k.flush_records().await;
+                then().await;
+            })
+            .await;
+    }
+
+    /// Settle the deferred verb `d` with `out` (a refusal as its answer).
+    fn settle(kernel: &Kernel, d: fantastic_kernel::Deferred, out: Result<Value, Value>) {
+        let v = out.unwrap_or_else(|r| r);
+        kernel.settle_deferred(d.pid(), fantastic_kernel::Outcome::of_reply(Some(d.pid()), v));
+    }
+
+    /// The switch: checked against the home first (no home, no guid, a taken name:
+    /// refused, nothing touched), then the RECORD lands (the verb defers until it
+    /// has, #795), then the home follows — a home write that fails puts the switch
+    /// back.
+    async fn register_home_folder(&self, agent_id: &AgentId, kernel: &Arc<Kernel>, me: &Me, on: bool) -> Result<Value, Value> {
+        let set = Me { guid: me.guid.clone(), on, name: me.name.clone() };
+        let at = if on { self.place.place(&set)?.1 } else { self.place.find(set.guid()?)? };
+        let d = kernel.defer()?;
+        let (place, id, k, was) = (Arc::clone(&self.place), agent_id.clone(), Arc::clone(kernel), me.on);
+        Self::persist(agent_id, kernel, SWITCH, Value::Bool(on), move || async move {
+            let done = if on {
+                place.write_here(&set).map(|s| json!({"stored": s}))
+            } else {
+                at.as_deref().map_or(Ok(()), Place::remove_folder).map(|()| json!({"unstored": at.is_some()}))
+            };
+            match done {
+                Ok(mut out) => {
+                    with(&mut out, SWITCH, Value::Bool(on));
+                    Self::settle(&k, d, Ok(out));
+                }
+                Err(e) => {
+                    let k2 = Arc::clone(&k);
+                    Self::persist(&id, &k, SWITCH, Value::Bool(was), move || async move {
+                        Self::settle(&k2, d, Err(e));
+                    })
+                    .await;
+                }
+            }
+        })
+        .await;
+        Ok(Value::Null)
+    }
+
+    /// The name: with the switch on, checked against the home first (a taken name:
+    /// refused, nothing touched), then the RECORD lands (the verb defers until it
+    /// has, #795), then the folder is renamed — a rename that fails puts the name
+    /// back. `null` = the guid.
+    async fn name_home_folder(&self, agent_id: &AgentId, kernel: &Arc<Kernel>, me: &Me, name: Option<String>) -> Result<Value, Value> {
+        let named = Me { guid: me.guid.clone(), on: me.on, name: name.clone() };
+        let mut out = json!({"name": name, "folder": named.folder()?});
+        if me.on {
+            self.place.place(&named)?;
+        }
+        let d = kernel.defer()?;
+        let (place, id, k, on, was) = (Arc::clone(&self.place), agent_id.clone(), Arc::clone(kernel), me.on, me.name.clone());
+        Self::persist(agent_id, kernel, NAME, name.map_or(Value::Null, Value::String), move || async move {
+            if !on {
+                return Self::settle(&k, d, Ok(out));
+            }
+            match place.write_here(&named) {
+                Ok(s) => {
+                    with(&mut out, "stored", s);
+                    Self::settle(&k, d, Ok(out));
+                }
+                Err(e) => {
+                    let k2 = Arc::clone(&k);
+                    Self::persist(&id, &k, NAME, was.map_or(Value::Null, Value::String), move || async move {
+                        Self::settle(&k2, d, Err(e));
+                    })
+                    .await;
+                }
+            }
+        })
+        .await;
+        Ok(Value::Null)
+    }
+}
+
 #[async_trait]
 impl Handler for UserStore {
     type Call = verbs::Call;
@@ -454,15 +502,15 @@ impl Handler for UserStore {
     async fn handle(&self, agent_id: &AgentId, call: Self::Call, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
         let me = Me::of(agent_id, kernel);
         let out = match call {
-            verbs::Call::Boot(_) => return Ok(self.boot(&me)),
-            verbs::Call::Reflect(_) => return Ok(Some(self.reflect(&me))),
-            verbs::Call::List(_) => self.list(&me),
+            verbs::Call::Boot(_) => return Ok(self.place.boot(&me)),
+            verbs::Call::Reflect(_) => return Ok(Some(self.place.reflect(&me))),
+            verbs::Call::List(_) => self.place.list(&me),
             verbs::Call::RegisterHomeFolder(a) => self.register_home_folder(agent_id, kernel, &me, a.value).await,
             verbs::Call::NameHomeFolder(a) => self.name_home_folder(agent_id, kernel, &me, a.name).await,
-            verbs::Call::SetCanvas(a) => self.set_canvas(&me, a.url),
-            verbs::Call::Unstore(a) => self.unstore(&me, &a.guid),
-            verbs::Call::UnstoreOthers(_) => self.unstore_others(&me),
-            verbs::Call::Shutdown(_) => self.shutdown(&me),
+            verbs::Call::SetCanvas(a) => self.place.set_canvas(&me, a.url),
+            verbs::Call::Unstore(a) => self.place.unstore(&me, &a.guid),
+            verbs::Call::UnstoreOthers(_) => self.place.unstore_others(&me),
+            verbs::Call::Shutdown(_) => self.place.shutdown(&me),
             verbs::Call::PersistRecord(a) => self.setups.persist(a, kernel),
             verbs::Call::ForgetRecord(a) => self.setups.forget(a),
             verbs::Call::LoadTree(_) => self.setups.load_tree(),
@@ -506,13 +554,11 @@ mod tests {
     }
 
     async fn call(s: &UserStore, k: &Arc<Kernel>, id: &AgentId, p: Value) -> Value {
-        // THE ENTRY: the call is parsed and checked against the declared verbs first, and
-        // runs as the agent, as its dispatch would (its own record writes are its own)
-        fantastic_kernel::test_support::as_agent(id.clone(), fantastic_kernel::Bundle::handle_binary(s, id, p, None, k))
-            .await
-            .unwrap()
-            .0
-            .unwrap_or(Value::Null)
+        // THROUGH A DISPATCH, `s` the agent's bundle: the call is checked against the
+        // declared verbs, its own record writes are its own calls, and a verb that
+        // defers until its write settled answers then (#795)
+        k.bundles.register_folder(HANDLER_MODULE, Arc::new(s.clone()), json!({}));
+        k.operator_send(vec![fantastic_kernel::Item::new(id.clone(), p)]).await.remove(0).result
     }
 
     fn info(h: &Path, folder: &str) -> Option<Value> {
@@ -882,7 +928,7 @@ mod tests {
         s.remember_ref("vllm/box:8000", "box:8000").unwrap();
         let st = UserStore::new(Ok(h.clone()), h.parent().unwrap().join("p"));
         let me = Me { guid: Some("g".into()), on: false, name: None };
-        let l = st.list(&me).unwrap();
+        let l = st.place.list(&me).unwrap();
         assert_eq!(l["keys"], json!([{"ref": "vllm/box:8000", "host": "box:8000"}]));
         assert!(h.join("user/keys/refs.json").exists());
     }

@@ -236,12 +236,15 @@ pub fn verb_schema(
 }
 
 /// The payload of a call to `target`, its values read by the schema of the verb it
-/// names; a target or verb not declared here leaves the text as written. `Err` is the
-/// refusal naming the argument that is not what its declaration asks for.
-pub async fn payload(
+/// names: this kernel's own declaration, else `remote` — the one a CONNECTED kernel's
+/// `reflect` gave for an agent there ([`remote_schema`], asked before). A target or
+/// verb declared by neither leaves the text as written. `Err` is the refusal naming
+/// the argument that is not what its declaration asks for.
+pub fn payload(
     kernel: &Arc<Kernel>,
     target: &str,
     payload: &mut Map<String, Value>,
+    remote: Option<&Value>,
 ) -> Result<(), Value> {
     let Some(verb) = payload
         .get("type")
@@ -255,7 +258,7 @@ pub async fn payload(
         .filter(|(k, _)| k.as_str() != "type")
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    let Some(schema) = target_verb_schema(kernel, target, &verb, &args).await else {
+    let Some(schema) = verb_schema(kernel, target, &verb, &args).or_else(|| remote.cloned()) else {
         return Ok(());
     };
     if let Value::Object(done) = read_value(&verb, "", &schema, &Value::Object(args))? {
@@ -266,32 +269,38 @@ pub async fn payload(
     Ok(())
 }
 
-/// The schema of `verb` on `target`: this kernel's own declaration, or, for an agent on
-/// a CONNECTED kernel (`<guid>|<agent id>`, a page's view), the one that kernel's
-/// `reflect` gives with `verb` and `part: schema`, asked before the call is sent (#719). `None` when neither declares it.
-pub async fn target_verb_schema(
-    kernel: &Arc<Kernel>,
-    target: &str,
-    verb: &str,
-    args: &Map<String, Value>,
-) -> Option<Value> {
-    if let Some(s) = verb_schema(kernel, target, verb, args) {
-        return Some(s);
-    }
-    if !target.contains('|') {
-        return None;
-    }
+/// Does reading a call to `target` of `verb` take a peer's schema: is `target` an
+/// agent on a CONNECTED kernel (`<guid>|<agent id>`, a page's view) that this kernel
+/// does not declare itself?
+#[must_use]
+pub fn needs_remote_schema(kernel: &Arc<Kernel>, target: &str, verb: &str) -> bool {
+    target.contains('|') && verb_schema(kernel, target, verb, &Map::new()).is_none()
+}
+
+/// The schema of `verb` on an agent of a CONNECTED kernel (`<guid>|<agent id>`): the
+/// one that kernel's `reflect` gives with `verb` and `part: schema` (#719), asked as a
+/// call to the peer (#795): `then` gets it when the peer answers (`None` when it
+/// declares none, refuses, or disconnected first), run as a message to the asker (its
+/// identity, captured here). Nothing waits for it.
+pub async fn remote_schema<F, Fut>(kernel: &Arc<Kernel>, target: &str, verb: &str, then: F)
+where
+    F: FnOnce(Option<Value>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let v = verb.to_string();
+    let who = crate::tasks::Inherited::capture();
     crate::docs::remote_docs(
         kernel,
         target,
         None,
         Some(verb),
         Some(crate::declared::Part::Schema),
+        move |docs| {
+            let schema = docs.get("schemas").and_then(|s| s.get(&v)).cloned();
+            tokio::spawn(who.scope(then(schema)));
+        },
     )
-    .await
-    .get("schemas")
-    .and_then(|s| s.get(verb))
-    .cloned()
+    .await;
 }
 
 /// A routing field of a call (not an argument of its verb) read as `kind`
@@ -302,8 +311,9 @@ pub fn routing(name: &str, kind: &str, v: &Value) -> Result<Value, Value> {
 
 /// The payload of a one-shot call an OPERATOR typed as `k=v` pairs: each value is read as
 /// its argument's declaration asks ([`operator_text`]); an agent or verb not declared
-/// here leaves the text as written. `Err` names the argument that is not its type.
-pub async fn operator_payload(
+/// here (a one-shot kernel has no peers) leaves the text as written. `Err` names the
+/// argument that is not its type.
+pub fn operator_payload(
     kernel: &Arc<Kernel>,
     target: &str,
     verb: &str,
@@ -313,7 +323,7 @@ pub async fn operator_payload(
         .iter()
         .map(|(k, v)| (k.clone(), Value::String(v.clone())))
         .collect();
-    let schema = target_verb_schema(kernel, target, verb, &text).await;
+    let schema = verb_schema(kernel, target, verb, &text);
     let mut out = Map::new();
     out.insert("type".to_string(), Value::String(verb.to_string()));
     for (k, v) in pairs {
@@ -435,9 +445,9 @@ mod tests {
                 .collect()
         };
         // an integer where `ps` declares one, text where `reflect` declares text
-        let p = operator_payload(&kernel, "kernel", "ps", &pairs(&[("limit", "7")])).await.unwrap();
+        let p = operator_payload(&kernel, "kernel", "ps", &pairs(&[("limit", "7")])).unwrap();
         assert_eq!(p["limit"], json!(7));
-        let p = operator_payload(&kernel, "kernel", "reflect", &pairs(&[("verb", "7")])).await.unwrap();
+        let p = operator_payload(&kernel, "kernel", "reflect", &pairs(&[("verb", "7")])).unwrap();
         assert_eq!(p["verb"], json!("7"));
         // a list only where the verb declares one
         let p = operator_payload(
@@ -446,7 +456,6 @@ mod tests {
             "await_set",
             &pairs(&[("ids", r#"["a","b"]"#), ("timeout_s", "2.5")]),
         )
-        .await
         .unwrap();
         assert_eq!(p["ids"], json!(["a", "b"]));
         assert_eq!(p["timeout_s"], json!(2.5));
@@ -461,7 +470,6 @@ mod tests {
                 ("root", "12"),
             ]),
         )
-        .await
         .unwrap();
         assert_eq!(p["allow"], json!(["."]));
         assert_eq!(p["root"], json!("12"));
@@ -471,13 +479,12 @@ mod tests {
             "update_agent",
             &pairs(&[("id", "kernel_state"), ("delete_lock", "true")]),
         )
-        .await
         .unwrap();
         assert_eq!(p["delete_lock"], json!(true));
         // a verb the agent does not declare types nothing
-        let p = operator_payload(&kernel, "kernel", "make_tea", &pairs(&[("limit", "7")])).await.unwrap();
+        let p = operator_payload(&kernel, "kernel", "make_tea", &pairs(&[("limit", "7")])).unwrap();
         assert_eq!(p["limit"], json!("7"));
-        let p = operator_payload(&kernel, "nobody", "ps", &pairs(&[("limit", "7")])).await.unwrap();
+        let p = operator_payload(&kernel, "nobody", "ps", &pairs(&[("limit", "7")])).unwrap();
         assert_eq!(p["limit"], json!("7"));
     }
 

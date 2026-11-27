@@ -410,6 +410,19 @@ impl Outcome {
         Self::new(pid, Status::Accepted, Value::Null)
     }
 
+    /// A handler's REPLY as its settle, as a returned reply settles: `errored` when it
+    /// is refusal-shaped, else `completed` — what a deferred handler hands
+    /// [`crate::Kernel::settle_deferred`].
+    #[must_use]
+    pub fn of_reply(pid: Option<TaskId>, reply: Value) -> Self {
+        let status = if crate::refusal::is_refused(&reply) {
+            Status::Errored
+        } else {
+            Status::Completed
+        };
+        Self::new(pid, status, reply)
+    }
+
     /// The item never reached the task table: a gate denial, an unknown agent,
     /// a malformed item. The refusal rides in `result` UNCHANGED, so every
     /// caller's existing `error`/`reason` branch keeps working.
