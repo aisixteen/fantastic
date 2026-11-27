@@ -26,12 +26,11 @@
 use super::{error_frame, gate_leg, Envelope, send_envelope, Out, INBOUND_PAYLOAD_KEY, REPLY_KEY};
 use fantastic_io_bridge::authorizer::Decision;
 use fantastic_kernel::refusal::{bad, refusal, TRANSPORT_ERROR};
-use fantastic_kernel::{AgentId, Kernel, PeerReply, PeerRoute};
+use fantastic_kernel::{AgentId, Kernel, PeerAnswer, PeerRoute};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::mpsc::WeakSender;
-use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 
@@ -129,9 +128,9 @@ struct Calls {
     /// The last frame id handed out — ids are `<prefix>-1`, `<prefix>-2`, … per
     /// connection.
     seq: u64,
-    /// Frame id → the waiting call; it is answered with the reply and the
-    /// reply frame's `secret` marks.
-    waiting: HashMap<String, oneshot::Sender<(PeerReply, Vec<String>)>>,
+    /// Frame id → how the call is answered once its reply frame comes (#795): with
+    /// the reply and the reply frame's `secret` marks. Nothing waits on it.
+    waiting: HashMap<String, PeerAnswer>,
     /// Set once the socket is gone: a call that reaches the route after that
     /// settles at once instead of waiting on a peer that can no longer answer.
     gone: bool,
@@ -174,34 +173,17 @@ fn settle_gone(calls: &Mutex<Calls>, guid: &str) {
         c.gone = true;
         (c.waiting.drain().collect(), c.peer.clone())
     };
-    for (_, tx) in waiting {
-        let _ = tx.send(((disconnected(&peer, guid), None), Vec::new()));
+    for (_, answer) in waiting {
+        answer.answer((disconnected(&peer, guid), None), Vec::new());
     }
 }
 
-/// Takes a call's entry back out of the table on every exit — an answer, a
-/// disconnect, or the caller giving up (its timeout or `cancel` drops the
-/// future mid-wait). Python's `finally: out_calls.pop(fid, None)`.
-struct Forget {
-    calls: Arc<Mutex<Calls>>,
-    fid: String,
-}
-
-impl Drop for Forget {
-    fn drop(&mut self) {
-        self.calls
-            .lock()
-            .expect("peer calls poisoned")
-            .waiting
-            .remove(&self.fid);
-    }
-}
-
-/// ONE call into the page: an outbound `{type:"call", id, target, payload}`
-/// frame, resolved by the inbound answer carrying the same id. The page judges
-/// it as the leg that serves it there. A body rides the binary channel at
-/// `payload.<its path>` — where python's payload dict holds it and where the
-/// page's decoder puts it back.
+/// ONE call into the page (#795): an outbound `{type:"call", id, target, payload}`
+/// frame; the inbound answer carrying the same id answers it through `answer`, and
+/// this ends once the frame is out. The page judges it as the leg that serves it
+/// there. A body rides the binary channel at `payload.<its path>` — where python's
+/// payload dict holds it and where the page's decoder puts it back. A connection
+/// that is gone answers at once.
 async fn call_page(
     calls: Arc<Mutex<Calls>>,
     out: WeakSender<Out>,
@@ -209,26 +191,29 @@ async fn call_page(
     agent_id: String,
     mut payload: Value,
     body: Option<fantastic_kernel::Blob>,
-) -> PeerReply {
-    let (fid, rx, peer) = {
+    answer: PeerAnswer,
+) {
+    let (fid, peer) = {
         let mut c = calls.lock().expect("peer calls poisoned");
         if c.gone {
-            return (disconnected(&c.peer, &guid), None);
+            let gone = disconnected(&c.peer, &guid);
+            drop(c);
+            answer.answer((gone, None), Vec::new());
+            return;
         }
+        // a call another tab answered (or that ended) holds nothing any more
+        c.waiting.retain(|_, a| a.is_open());
         c.seq += 1;
         let fid = format!("{}-{}", c.prefix, c.seq);
-        let (tx, rx) = oneshot::channel();
-        c.waiting.insert(fid.clone(), tx);
-        (fid, rx, c.peer.clone())
-    };
-    let _forget = Forget {
-        calls: Arc::clone(&calls),
-        fid: fid.clone(),
+        c.waiting.insert(fid.clone(), answer.clone());
+        (fid, c.peer.clone())
     };
     // The route holds the sink WEAKLY: a call still in flight must not keep a
     // closed socket's writer alive.
     let Some(out) = out.upgrade() else {
-        return (disconnected(&peer, &guid), None);
+        calls.lock().expect("peer calls poisoned").waiting.remove(&fid);
+        answer.answer((disconnected(&peer, &guid), None), Vec::new());
+        return;
     };
     // the slot python's dict holds the bytes in: `null` on the head, in place
     // (the kernel admitted the path at launch)
@@ -242,17 +227,6 @@ async fn call_page(
         "payload": payload,
     });
     send_envelope(&out, envelope, body, INBOUND_PAYLOAD_KEY).await;
-    drop(out);
-    // The sender side is dropped only by the disconnect settle, which answers
-    // first — a closed channel still means the peer is gone.
-    let (reply, marks) = rx
-        .await
-        .unwrap_or_else(|_| ((disconnected(&peer, &guid), None), Vec::new()));
-    // The reply frame's own secret marks, rooted at this reply: this kernel
-    // records the call's reply as `[secret]` there (this runs inside the remote
-    // target's dispatch); the caller gets it whole.
-    fantastic_kernel::note_reply_secret(marks);
-    reply
 }
 
 /// Ask a kernel's leg to start (`on`) or stop streaming its agent `agent_id`:
@@ -386,7 +360,7 @@ impl PeerLink {
             let calls = Arc::clone(&self.calls);
             let weak = out.downgrade();
             let g = guid.to_string();
-            move |agent_id, payload, body| -> fantastic_kernel::PeerCallFuture {
+            move |agent_id, payload, body, answer| -> fantastic_kernel::PeerEmitFuture {
                 Box::pin(call_page(
                     Arc::clone(&calls),
                     weak.clone(),
@@ -394,6 +368,7 @@ impl PeerLink {
                     agent_id,
                     payload,
                     body,
+                    answer,
                 ))
             }
         };
@@ -544,7 +519,7 @@ impl PeerLink {
             .expect("peer calls poisoned")
             .waiting
             .remove(fid);
-        let Some(tx) = waiting else { return };
+        let Some(answer) = waiting else { return };
         // the reply's own secret paths (malformed ⇒ none; the reply still lands)
         let marks = frame
             .get("secret")
@@ -569,7 +544,9 @@ impl PeerLink {
             };
             (!path.is_empty()).then(|| fantastic_kernel::Blob::new(path, b.bytes))
         });
-        let _ = tx.send(((data, body), marks));
+        // The reply frame's own secret marks, rooted at this reply: this kernel
+        // records the call's reply as `[secret]` there; the caller gets it whole.
+        answer.answer((data, body), marks);
     }
 
     /// The page is gone: it is no longer an address, and every call still

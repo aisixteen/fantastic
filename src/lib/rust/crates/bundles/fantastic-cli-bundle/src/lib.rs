@@ -81,8 +81,6 @@ pub struct ErrorLine {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StatusPhase {
-    /// Waiting behind other turns.
-    Queued,
     /// The model is thinking.
     Thinking,
     /// A tool call is made or answered.
@@ -95,8 +93,6 @@ pub enum StatusPhase {
     Failed,
     /// The call ended with no reply (no output).
     Stalled,
-    /// The call ended while the agent waits on its own work (no output).
-    Awaiting,
     /// The agent is paused (no output).
     Paused,
     /// A resume found nothing held (no output).
@@ -113,7 +109,7 @@ pub enum ContextPhase {
     TooSmall,
 }
 
-/// Renders one-line phase markers for queued / thinking / tool_calling (entry and exit); `streaming` and `done` produce no output (token and done cover them).
+/// Renders one-line phase markers for thinking / tool_calling (entry and exit); `streaming` and `done` produce no output (token and done cover them).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct Status {
     /// The phase.
@@ -124,7 +120,7 @@ pub struct Status {
     pub client_id: Option<String>,
     /// When.
     pub ts: Option<f64>,
-    /// What the phase carries: `ahead` of a queued one, the `tool` of a tool_calling one.
+    /// What the phase carries: the `tool` of a tool_calling one.
     pub detail: Option<Map<String, Value>>,
 }
 
@@ -228,10 +224,6 @@ fn render_status(args: &Status) -> Option<String> {
     let detail = args.detail.clone().unwrap_or_default();
     let prefix = line_prefix(args.source.as_deref());
     let line = match args.phase {
-        StatusPhase::Queued => {
-            let ahead = text_or(&detail, "ahead", "0");
-            format!("{prefix} queued ({ahead} ahead)")
-        }
         StatusPhase::Thinking => format!("{prefix} thinking…"),
         StatusPhase::ToolCalling => {
             let tool = detail
@@ -263,7 +255,6 @@ fn render_status(args: &Status) -> Option<String> {
         | StatusPhase::Done
         | StatusPhase::Failed
         | StatusPhase::Stalled
-        | StatusPhase::Awaiting
         | StatusPhase::Paused
         | StatusPhase::Idle => return None,
     };

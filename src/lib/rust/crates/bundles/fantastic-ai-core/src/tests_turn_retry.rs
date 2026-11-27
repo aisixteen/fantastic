@@ -287,7 +287,7 @@ fn is_status(v: &Value, phase: &str) -> bool {
 /// A status that ends a call.
 fn ends_call(v: &Value) -> bool {
     v["type"] == json!("status")
-        && ["done", "failed", "stalled", "awaiting"]
+        && ["done", "failed", "stalled"]
             .contains(&v["phase"].as_str().unwrap_or_default())
 }
 
@@ -1695,7 +1695,7 @@ mod rec {
             .iter()
             .position(|v| {
                 v["type"] == "status"
-                    && ["done", "failed", "stalled", "awaiting"]
+                    && ["done", "failed", "stalled"]
                         .contains(&v["phase"].as_str().unwrap_or_default())
             })
             .map_or(ai_evs.len(), |i| i + 1);

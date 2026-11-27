@@ -59,7 +59,7 @@ enum Two {
 
 enum Page {
     One { at: usize },
-    Two { d: Details, at: usize, editing: Option<(Two, String)> },
+    Two { d: Box<Details>, at: usize, editing: Option<(Two, String)> },
 }
 
 pub struct SetupPanel {
@@ -81,7 +81,7 @@ impl SetupPanel {
     #[cfg(test)]
     pub fn open_key_prompt(&mut self) {
         let b = Backend { module: "x.tools".into(), fields: vec![], key: Some(true) };
-        self.page = Page::Two { d: Details::new(&b, None, &[]), at: 0, editing: Some((Two::Secret, String::new())) };
+        self.page = Page::Two { d: Box::new(Details::new(&b, None, &[])), at: 0, editing: Some((Two::Secret, String::new())) };
         self.backends = Some(vec![b]);
     }
     #[cfg(test)]
@@ -193,7 +193,7 @@ impl SetupPanel {
         match self.backend(module) {
             Some(b) => {
                 let d = Details::new(b, current, &taken);
-                self.page = Page::Two { d, at: 0, editing: None };
+                self.page = Page::Two { d: Box::new(d), at: 0, editing: None };
                 self.result = None;
             }
             None => self.result = Some(Err(format!("this build links no {}", provider_of(module)))),

@@ -19,8 +19,3 @@ pub const COMPOSER_H: u16 = 2;
 /// the status bar
 pub const STATUS_H: u16 = 1;
 
-/// cells of indent per tree depth
-pub const INDENT: u16 = 2;
-
-/// the outline's context gutter, ' X '
-pub const GUTTER_W: u16 = 3;

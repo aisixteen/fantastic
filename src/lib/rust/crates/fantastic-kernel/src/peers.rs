@@ -39,14 +39,42 @@ use std::sync::Arc;
 /// holds the bytes, at whatever key the peer's handler put them).
 pub type PeerReply = (Value, Option<Blob>);
 
-/// The future a route returns for one call.
-pub type PeerCallFuture = Pin<Box<dyn Future<Output = PeerReply> + Send>>;
+/// HOW A PEER CALL IS ANSWERED (#795): the route hands the call to the peer and its
+/// future ends once the frame is out; the peer's answer, whenever it comes, goes
+/// through this. Every route of the guid (each tab of one identity) gets the same
+/// answer: the FIRST one settles the call, any later one is late and takes nothing.
+#[derive(Clone)]
+pub struct PeerAnswer(Arc<std::sync::Mutex<Option<AnswerFn>>>);
 
-/// `call(agent_id, payload, body)` — deliver ONE call to the peer's `agent_id`,
-/// with the raw request body at its payload path when the call carries one. The
-/// peer judges what arrives as the transport leg that serves it there — a caller
-/// is always local.
-type PeerCallFn = dyn Fn(String, Value, Option<Blob>) -> PeerCallFuture + Send + Sync;
+type AnswerFn = Box<dyn FnOnce(PeerReply, Vec<String>) + Send>;
+
+impl PeerAnswer {
+    /// The answer `then` takes: the peer's reply and its own secret marks (dotted
+    /// paths into the reply, recorded as shown here).
+    pub fn new(then: impl FnOnce(PeerReply, Vec<String>) + Send + 'static) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(Some(Box::new(then)))))
+    }
+
+    /// Answer the call: `true` when this answer settled it, `false` when it was
+    /// answered already (another tab).
+    pub fn answer(&self, reply: PeerReply, marks: Vec<String>) -> bool {
+        let then = self.0.lock().expect("peer answer poisoned").take();
+        then.map(|f| f(reply, marks)).is_some()
+    }
+
+    /// Not answered yet.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        self.0.lock().expect("peer answer poisoned").is_some()
+    }
+}
+
+/// `call(agent_id, payload, body, answer)` — hand ONE call to the peer's `agent_id`,
+/// with the raw request body at its payload path when the call carries one; its
+/// future ends once the frame is handed to the transport, and the peer's reply comes
+/// later through `answer`. The peer judges what arrives as the transport leg that
+/// serves it there — a caller is always local.
+type PeerCallFn = dyn Fn(String, Value, Option<Blob>, PeerAnswer) -> PeerEmitFuture + Send + Sync;
 
 /// The future a route returns for one emit — it settles once the frame is handed
 /// to the transport (an emit has no reply).
@@ -82,7 +110,7 @@ impl PeerRoute {
     /// delivers.
     pub fn new<F, E>(via: impl Into<String>, call: F, emit: E) -> Arc<Self>
     where
-        F: Fn(String, Value, Option<Blob>) -> PeerCallFuture + Send + Sync + 'static,
+        F: Fn(String, Value, Option<Blob>, PeerAnswer) -> PeerEmitFuture + Send + Sync + 'static,
         E: Fn(String, Value, Option<Blob>) -> PeerEmitFuture + Send + Sync + 'static,
     {
         Arc::new(Self {
@@ -97,7 +125,7 @@ impl PeerRoute {
     /// start or stop streaming one agent's events over this route.
     pub fn with_watch<F, E, W>(via: impl Into<String>, call: F, emit: E, watch: W) -> Arc<Self>
     where
-        F: Fn(String, Value, Option<Blob>) -> PeerCallFuture + Send + Sync + 'static,
+        F: Fn(String, Value, Option<Blob>, PeerAnswer) -> PeerEmitFuture + Send + Sync + 'static,
         E: Fn(String, Value, Option<Blob>) -> PeerEmitFuture + Send + Sync + 'static,
         W: Fn(String, bool) -> PeerEmitFuture + Send + Sync + 'static,
     {
@@ -120,9 +148,9 @@ impl PeerRoute {
         (self.emit)(agent_id, payload, body)
     }
 
-    /// Deliver one call through this route.
-    pub fn call(&self, agent_id: String, payload: Value, body: Option<Blob>) -> PeerCallFuture {
-        (self.call)(agent_id, payload, body)
+    /// Hand one call to this route; `answer` takes the peer's reply when it comes.
+    pub fn call(&self, agent_id: String, payload: Value, body: Option<Blob>, answer: PeerAnswer) -> PeerEmitFuture {
+        (self.call)(agent_id, payload, body, answer)
     }
 }
 
@@ -382,20 +410,56 @@ impl Kernel {
     }
 }
 
-/// The dispatch of a call to a remote target: hand it to EVERY live route of the
-/// peer (each tab of one identity); the first reply settles it and the other
-/// calls are dropped. Python `RemoteTarget._dispatch_task`.
-pub(crate) async fn call_peer(remote: &RemoteRef, payload: Value, body: Option<Blob>) -> PeerReply {
-    let calls = remote
-        .routes
-        .iter()
-        .map(|r| r.call(remote.agent_id.clone(), payload.clone(), body.clone()));
-    // The losers are DROPPED with `select_all`'s rest — their routes forget them.
-    // TODO: first-reply-wins hides tab DESYNC — if the tabs of one
-    // identity diverge, the other replies are dropped unseen. Must be solved
-    // (later).
-    let (first, _, _rest) = futures_util::future::select_all(calls).await;
-    first
+/// The dispatch of a call to a remote target (#795): the execution DEFERS its settle
+/// and the call goes to EVERY live route of the peer (each tab of one identity); the
+/// dispatch ends once the frames are out. The first answer settles the execution, its
+/// reply verbatim (`errored` when refusal-shaped, as a handler's reply), with the
+/// reply's own secret marks; a later answer is late. A dispatch that cannot defer (a
+/// bookkeeping run) answers the refusal now. Python `RemoteTarget._dispatch_task`.
+pub(crate) async fn call_peer(kernel: &Arc<Kernel>, remote: &RemoteRef, payload: Value, body: Option<Blob>) -> PeerReply {
+    let d = match kernel.defer() {
+        Ok(d) => d,
+        Err(refused) => return (refused, None),
+    };
+    let k = Arc::downgrade(kernel);
+    // TODO: first-reply-wins hides tab DESYNC — if the tabs of one identity
+    // diverge, the other replies are dropped unseen. Must be solved (later).
+    let answer = PeerAnswer::new(move |(reply, body), marks| {
+        let Some(k) = k.upgrade() else { return };
+        let status = if crate::refusal::is_refused(&reply) {
+            crate::outcome::Status::Errored
+        } else {
+            crate::outcome::Status::Completed
+        };
+        let out = crate::outcome::Outcome::new(Some(d.pid()), status, reply)
+            .with_body(body)
+            .with_secret(marks);
+        k.settle_deferred(d.pid(), out);
+    });
+    for r in &remote.routes {
+        r.call(remote.agent_id.clone(), payload.clone(), body.clone(), answer.clone())
+            .await;
+    }
+    (Value::Null, None)
+}
+
+/// THE PEER'S OWN `reflect` of one of its agents (`ask`), as this kernel's typing reads
+/// it before a call (`docs::remote_docs`): the first route's answer, or the refusal
+/// of a peer that disconnected first.
+pub(crate) async fn ask_peer(remote: &RemoteRef, ask: Value) -> Value {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let answer = PeerAnswer::new(move |(reply, _), _| {
+        let _ = tx.send(reply);
+    });
+    for r in &remote.routes {
+        r.call(remote.agent_id.clone(), ask.clone(), None, answer.clone()).await;
+    }
+    rx.await.unwrap_or_else(|_| {
+        crate::refusal::refusal(
+            crate::refusal::TRANSPORT_ERROR,
+            format!("the peer {} disconnected before answering", remote.guid),
+        )
+    })
 }
 
 /// An emit to a remote target: hand it to EVERY live route of the peer (each tab

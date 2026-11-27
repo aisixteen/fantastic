@@ -449,3 +449,24 @@ async fn a_boot_says_paused_when_the_store_says_paused_and_loads_no_head() {
     send(&kernel, &id, json!({"type": "boot"})).await;
     assert!(phases(&mut rx).is_empty());
 }
+
+/// THE BOOT'S READS ARE STEPS (#795): a boot of an agent whose store says paused keeps
+/// it paused once they ran, a message sent after it is held (no pass), and the resume
+/// runs it.
+#[tokio::test]
+async fn a_boot_keeps_the_stored_pause_and_holds_what_arrives() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, id) = setup(&tmp, "bootheld").await;
+    let served = served_for(&id);
+    send(&kernel, &id, json!({"type": "pause"})).await;
+    let b = send(&kernel, &id, json!({"type": "boot"})).await;
+    assert!(b.get("error").is_none(), "{b}");
+    let r = send(&kernel, &id, json!({"type": "send", "text": "after-boot-probe"})).await;
+    assert_eq!(r["paused"], json!(true), "{r}");
+    let st = send(&kernel, &id, json!({"type": "status"})).await;
+    assert_eq!(st["generating"], json!(false), "a paused agent ran a pass: {st}");
+    send(&kernel, &id, json!({"type": "resume"})).await;
+    await_request(&served, "after-boot-probe")
+        .await
+        .expect("the held message never reached the model");
+}

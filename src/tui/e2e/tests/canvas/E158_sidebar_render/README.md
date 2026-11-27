@@ -24,8 +24,8 @@ iframe: the probe reads it through CDP, as the chat probes read a chat). Seeded:
    skin tokens, the word under the name, the face's filter, the outline round the tile: a 1.5px
    ring 3px outside it in the state's colour, drawn by the tile's `::before`):
    - at rest: no badge, no word, no outline;
-   - Working: `thinking` (the stub holds its answer), `queued` (a second message meanwhile),
-     `writing` (the answer's first line, then a hold), `retrying` (a stream that dies); its
+   - Working: `thinking` (the stub holds its answer; a second message meanwhile keeps it
+     Working and is read by the next pass), `writing` (the answer's first line, then a hold), `retrying` (a stream that dies); its
      outline is a ray running round the tile (the accent over the faint selected line);
    - Done: a call that completed: ✓ on ok, kept after the call;
    - Failed: the retried stream dies again: × on error, kept (#795: nothing re-runs it);

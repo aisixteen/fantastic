@@ -1061,11 +1061,11 @@ pub async fn inquiry_accept(
 /// `boot` — LAZY: never loads the conversation. Checks the record names a memory
 /// store (fail loud otherwise), starts a new incarnation, and marks the view for
 /// rebuilding — the first call reads the head from the store and runs
-/// `context_recall`. Python `_make_boot`. The store reads: whether the agent is
-/// paused (its last `pause`/`resume` row) — a paused agent says `paused` (#714) —,
-/// when its record offers `line_summary`, its last line (#709), and the messages stored
-/// after its last answer, which one pass reads (#795); a store that refuses a read
-/// refuses the boot. After a kernel restart, the calls the previous process cut that
+/// `context_recall`. Python `_make_boot`. The store reads, as steps (#795): whether the
+/// agent is paused (its last `pause`/`resume` row) — a paused agent says `paused`
+/// (#714) —, when its record offers `line_summary`, its last line (#709), and the
+/// messages stored after its last answer, which one pass reads; a store that refuses a
+/// read refuses the boot. After a kernel restart, the calls the previous process cut that
 /// concern this agent come to it as one notice ([`crate::route::resume_cut`]).
 pub async fn boot(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     crate::state::bump_incarnation(agent_id);
@@ -1089,23 +1089,54 @@ pub async fn boot(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
         .recall_due
         .lock()
         .expect("recall_due poisoned") = true;
-    if let Err(e) = crate::pause::announce_at_boot(agent_id, kernel).await {
-        return refusal(fantastic_kernel::refusal::STORE_REFUSED, e.0);
-    }
-    // THE MESSAGES STORED AND NOT READ (the process stopped first) are read by a pass
-    // (#795): nothing acked is lost
-    if let Err(e) = crate::life::restore_unread(kernel, agent_id).await {
-        return refusal(fantastic_kernel::refusal::STORE_REFUSED, e.0);
-    }
-    // the chat's current line: the last `line_summary` its history holds (#709)
-    if let Err(e) = crate::line_summary::restore(agent_id, kernel).await {
-        return refusal(fantastic_kernel::refusal::STORE_REFUSED, e.0);
-    }
-    // WORK THE RESTART CUT (#726) goes on: what the previous process left in flight is
-    // a dead letter now, and this agent is told, once.
-    crate::route::resume_cut(kernel, agent_id, &kernel.take_cut(agent_id)).await;
-    crate::life::wake(kernel, agent_id);
+    // THE BOOT'S STORE READS ARE STEPS (#795): the pause row, the messages stored and
+    // not read (the process stopped first: nothing acked is lost), the chat's current
+    // line (#709). Until they ran the agent is BOOTING: what arrives meanwhile is
+    // stored and starts no pass; the last step sets the pause the store says, goes on
+    // with the restart's cut work and wakes the agent. A boot sent as a call settles
+    // then; the kernel's own boot run returns now.
+    crate::life::set_booting(agent_id, true);
+    let settle = crate::steps::deferred(kernel);
+    let (k, me) = (Arc::clone(kernel), agent_id.clone());
+    crate::pause::announce_at_boot(agent_id, kernel, settle, move |settle, paused| async move {
+        let paused = match paused {
+            Ok(p) => p,
+            Err(e) => return boot_refused(&me, settle, e),
+        };
+        let (k2, me2) = (Arc::clone(&k), me.clone());
+        crate::life::restore_unread(&k, &me, settle, move |settle, back| async move {
+            if let Err(e) = back {
+                return boot_refused(&me2, settle, e);
+            }
+            let (k3, me3) = (Arc::clone(&k2), me2.clone());
+            crate::line_summary::restore(&me2, &k2, settle, move |settle, line| async move {
+                if let Err(e) = line {
+                    return boot_refused(&me3, settle, e);
+                }
+                // WORK THE RESTART CUT (#726) goes on: what the previous process left
+                // in flight is a dead letter now, and this agent is told, once.
+                crate::route::resume_cut(&k3, &me3, &k3.take_cut(&me3)).await;
+                crate::life::set_paused(&me3, paused);
+                crate::life::set_booting(&me3, false);
+                crate::life::wake(&k3, &me3);
+                settle.reply(Value::Null);
+            })
+            .await;
+        })
+        .await;
+    })
+    .await;
     Value::Null
+}
+
+/// A boot whose store refused a read: the boot's refusal (said when the kernel ran the
+/// boot itself, which answers no call), and the agent no longer booting.
+fn boot_refused(agent_id: &AgentId, settle: crate::steps::Settle, e: crate::memory::MemoryStoreError) {
+    crate::life::set_booting(agent_id, false);
+    if settle.pid().is_none() {
+        eprintln!("  [ai] {agent_id}: boot: {}", e.0);
+    }
+    settle.reply(refusal(fantastic_kernel::refusal::STORE_REFUSED, e.0));
 }
 
 /// `watch` — announce every row this agent appends to the caller's inbox as

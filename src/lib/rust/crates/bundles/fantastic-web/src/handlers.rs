@@ -272,7 +272,23 @@ async fn read_chunk(
             "length": CHUNK,
         }),
     );
-    let out = kernel.send(vec![item]).await.remove(0);
+    // THE CALL IS ASYNC (#795): it acks, and its settle — a message to this route —
+    // hands the chunk to the HTTP response, the transport the browser reads
+    // (a refusal at launch is the answer at once)
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let ack = kernel
+        .call(item, move |out| async move {
+            let _ = tx.send(out);
+        })
+        .await;
+    let out = if ack.status == fantastic_kernel::Status::Accepted {
+        match rx.await {
+            Ok(o) => o,
+            Err(_) => return (Value::Null, None),
+        }
+    } else {
+        ack
+    };
     // python takes the chunk at the reply's `bytes` key; one anywhere else is
     // not a chunk
     (out.result, out.body.and_then(|b| b.into_at("bytes")))

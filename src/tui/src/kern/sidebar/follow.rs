@@ -240,20 +240,20 @@ mod tests {
     fn each_chat_keeps_its_last_phase_until_idle() {
         let mut mine = BTreeMap::new();
         // a call's phases, each the chat's last
-        for p in ["queued", "thinking", "streaming", "retrying"] {
+        for p in ["thinking", "streaming", "retrying"] {
             keep_phase(&mut mine, "c1", p);
             assert_eq!(mine.get("c1").map(String::as_str), Some(p));
         }
         // the ends and a pause stay: the tree shows them until the next call
-        for p in ["done", "failed", "stalled", "awaiting", "paused"] {
+        for p in ["done", "failed", "stalled", "paused"] {
             keep_phase(&mut mine, "c1", "thinking");
             keep_phase(&mut mine, "c1", p);
             assert_eq!(mine.get("c1").map(String::as_str), Some(p), "{p} is kept");
         }
         keep_phase(&mut mine, "c2", "done");
         // the next call moves the chat on
-        keep_phase(&mut mine, "c1", "queued");
-        assert_eq!(mine.get("c1").map(String::as_str), Some("queued"));
+        keep_phase(&mut mine, "c1", "thinking");
+        assert_eq!(mine.get("c1").map(String::as_str), Some("thinking"));
         // a resume with nothing held: the chat is at rest, another chat keeps its own
         keep_phase(&mut mine, "c1", "idle");
         assert_eq!(

@@ -158,6 +158,7 @@ pub fn row_at(n: usize, sel: usize, area: Rect, filter: bool, view: SideView, fo
     (i < n).then_some(i)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     f: &mut Frame<'_>,
     area: Rect,

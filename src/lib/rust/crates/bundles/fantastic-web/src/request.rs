@@ -122,60 +122,122 @@ fn store_ids(kernel: &Kernel) -> Vec<AgentId> {
     ids
 }
 
-/// The `(store, ref)` bound to `netloc` that holds an `api_key`: stores in id
-/// order, refs in the store's order, the first match. A store that refuses the
-/// `list` (this agent holds no line on it) is passed over.
-async fn find_ref(kernel: &Arc<Kernel>, netloc: &str) -> Option<(String, String)> {
-    for store in store_ids(kernel) {
-        let out = kernel
-            .send(vec![Item::new(store.clone(), json!({"type": "list"}))])
-            .await
-            .remove(0);
-        if out.status != Status::Completed {
-            continue;
-        }
-        let Some(refs) = out.result.get("refs").and_then(Value::as_array) else {
-            continue;
-        };
-        for row in refs {
-            let bound = row.get("host").and_then(Value::as_str).unwrap_or("");
-            let has_key = match row.get("fields") {
-                Some(Value::Array(a)) => a.iter().any(|f| f.as_str() == Some(KEY_FIELD)),
-                Some(Value::Object(m)) => m.contains_key(KEY_FIELD),
-                _ => false,
-            };
-            if has_key && bound == netloc {
-                if let Some(r) = row.get("ref").and_then(Value::as_str) {
-                    return Some((store.as_str().to_string(), r.to_string()));
-                }
+/// A step's continuation (#795): what runs with a call's settle.
+type Boxed = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+type Then<T> = Box<dyn FnOnce(T) -> Boxed + Send>;
+
+/// ONE CALL AS A STEP (#795): `item` goes out through [`Kernel::call`] as this agent,
+/// and its settle — or its refusal at launch, at once — runs `next`. Nothing waits.
+async fn step<F, Fut>(kernel: &Arc<Kernel>, item: Item, next: F)
+where
+    F: FnOnce(fantastic_kernel::Outcome) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let slot = Arc::new(Mutex::new(Some(next)));
+    let held = Arc::clone(&slot);
+    let ack = kernel
+        .call(item, move |o| async move {
+            let next = held.lock().expect("step poisoned").take();
+            if let Some(next) = next {
+                next(o).await;
             }
+        })
+        .await;
+    if ack.status != Status::Accepted {
+        let next = slot.lock().expect("step poisoned").take();
+        if let Some(next) = next {
+            next(ack).await;
         }
     }
-    None
+}
+
+/// The ref of a store's `list` reply bound to `netloc` that holds an `api_key`.
+fn ref_in(listed: &Value, netloc: &str) -> Option<String> {
+    listed.get("refs").and_then(Value::as_array)?.iter().find_map(|row| {
+        let bound = row.get("host").and_then(Value::as_str).unwrap_or("");
+        let has_key = match row.get("fields") {
+            Some(Value::Array(a)) => a.iter().any(|f| f.as_str() == Some(KEY_FIELD)),
+            Some(Value::Object(m)) => m.contains_key(KEY_FIELD),
+            _ => false,
+        };
+        (has_key && bound == netloc)
+            .then(|| row.get("ref").and_then(Value::as_str).map(str::to_string))
+            .flatten()
+    })
+}
+
+/// The `(store, ref)` bound to `netloc` that holds an `api_key`, as steps: stores in id
+/// order (`stores`), refs in the store's order, the first match. A store that refuses
+/// the `list` (this agent holds no line on it) is passed over.
+fn find_ref(kernel: Arc<Kernel>, netloc: String, mut stores: Vec<AgentId>, then: Then<Option<(String, String)>>) -> Boxed {
+    Box::pin(async move {
+        if stores.is_empty() {
+            return then(None).await;
+        }
+        let store = stores.remove(0);
+        let k = Arc::clone(&kernel);
+        step(&kernel, Item::new(store.clone(), json!({"type": "list"})), move |out| async move {
+            if out.status == Status::Completed {
+                if let Some(r) = ref_in(&out.result, &netloc) {
+                    return then(Some((store.as_str().to_string(), r))).await;
+                }
+            }
+            find_ref(k, netloc, stores, then).await;
+        })
+        .await;
+    })
+}
+
+/// Does [`bound_refs`] read any store for `allow`: a host that is no wildcard, and a
+/// credential store to ask.
+pub(crate) fn looks_up(kernel: &Kernel, allow: &[String]) -> bool {
+    allow.iter().any(|e| parse_allow(e).is_some_and(|a| !a.wildcard)) && !store_ids(kernel).is_empty()
 }
 
 /// The credential ref names (`store/ref`, never a value) for each host of the
-/// allowlist — what the view shows.
-pub(crate) async fn bound_refs(kernel: &Arc<Kernel>, allow: &[String]) -> Value {
-    let mut out = Map::new();
-    for entry in allow {
-        let Some(a) = parse_allow(entry) else {
-            continue;
+/// allowlist — what the view shows — as steps: `then` gets them once every host is
+/// looked up.
+pub(crate) fn bound_refs(kernel: Arc<Kernel>, allow: Vec<String>, then: Then<Value>) -> Boxed {
+    refs_from(kernel, allow.into_iter().collect(), Map::new(), then)
+}
+
+fn refs_from(
+    kernel: Arc<Kernel>,
+    mut left: VecDeque<String>,
+    mut out: Map<String, Value>,
+    then: Then<Value>,
+) -> Boxed {
+    Box::pin(async move {
+        let Some(entry) = left.pop_front() else {
+            return then(Value::Object(out)).await;
+        };
+        let Some(a) = parse_allow(&entry) else {
+            return refs_from(kernel, left, out, then).await;
         };
         let loc = match (a.wildcard, a.port) {
             (true, _) => {
-                out.insert(entry.clone(), Value::Null);
-                continue;
+                out.insert(entry, Value::Null);
+                return refs_from(kernel, left, out, then).await;
             }
             (false, Some(p)) if Some(p) != default_port(&a.scheme) => format!("{}:{p}", a.host),
             _ => a.host.clone(),
         };
-        let name = find_ref(kernel, &loc.to_lowercase())
-            .await
-            .map(|(s, r)| format!("{s}/{r}"));
-        out.insert(entry.clone(), name.map_or(Value::Null, Value::String));
-    }
-    Value::Object(out)
+        let stores = store_ids(&kernel);
+        let k = Arc::clone(&kernel);
+        find_ref(
+            kernel,
+            loc.to_lowercase(),
+            stores,
+            Box::new(move |found| {
+                Box::pin(async move {
+                    let name = found.map(|(s, r)| format!("{s}/{r}"));
+                    out.insert(entry, name.map_or(Value::Null, Value::String));
+                    refs_from(k, left, out, then).await;
+                })
+            }),
+        )
+        .await;
+    })
 }
 
 fn default_port(scheme: &str) -> Option<u16> {
@@ -197,24 +259,44 @@ fn may_carry_key(url: &Url) -> bool {
         )
 }
 
-/// The key for `url`'s host, read from the store at use; `None` when no ref is
-/// bound to the host or the scheme may not carry it. A store that answers without the key is a refusal naming
-/// the ref, never a value.
-async fn secret_for(kernel: &Arc<Kernel>, url: &Url) -> Result<Option<String>, Value> {
+/// The key for `url`'s host, read from the store at use, as steps: `then` gets `None`
+/// when no ref is bound to the host or the scheme may not carry it. A store that
+/// answers without the key is a refusal naming the ref, never a value.
+fn secret_for(kernel: Arc<Kernel>, url: &Url, then: Then<Result<Option<String>, Value>>) -> Boxed {
     let loc = netloc(url);
-    if !may_carry_key(url) {
-        return Ok(None);
-    }
-    let Some((store, r)) = find_ref(kernel, &loc).await else {
-        return Ok(None);
-    };
-    let out = kernel
-        .send(vec![Item::new(
-            AgentId::from(store.as_str()),
-            json!({"type": "get", "ref": r, "host": loc}),
-        )])
-        .await
-        .remove(0);
+    let carries = may_carry_key(url);
+    Box::pin(async move {
+        if !carries {
+            return then(Ok(None)).await;
+        }
+        let stores = store_ids(&kernel);
+        let k = Arc::clone(&kernel);
+        find_ref(
+            kernel,
+            loc.clone(),
+            stores,
+            Box::new(move |found| {
+                Box::pin(async move {
+                    let Some((store, r)) = found else {
+                        return then(Ok(None)).await;
+                    };
+                    let item = Item::new(
+                        AgentId::from(store.as_str()),
+                        json!({"type": "get", "ref": r, "host": loc}),
+                    );
+                    step(&k, item, move |out| async move {
+                        then(key_of(&out, &store, &r, &loc)).await;
+                    })
+                    .await;
+                })
+            }),
+        )
+        .await;
+    })
+}
+
+/// The key a store's `get` answered, or the refusal naming the ref.
+fn key_of(out: &fantastic_kernel::Outcome, store: &str, r: &str, loc: &str) -> Result<Option<String>, Value> {
     let key = out
         .result
         .get("fields")
@@ -504,7 +586,11 @@ fn plan(a: &Request, allow: &[String]) -> Result<Plan, Value> {
     })
 }
 
-/// Serve one `request`.
+/// Serve one `request` (#795): the call DEFERS its settle. Each hop's credential is
+/// read from its store as steps ([`secret_for`]), and the HTTP exchange is the
+/// handler's own I/O, a task under the deferred execution (its `cancel` ends it); a
+/// redirect is the next hop. The last hop settles the call. `timeout` bounds the
+/// whole request, every hop and credential read included.
 pub(crate) async fn serve(
     agent: &AgentId,
     a: &Request,
@@ -516,174 +602,265 @@ pub(crate) async fn serve(
         Ok(p) => p,
         Err(e) => return e,
     };
-    let method = plan.method.to_string();
-    let host = netloc(&plan.url);
-    let deadline = plan.timeout;
-    let run = run(plan, &allow, kernel);
-    let (out, last_host, status) = match tokio::time::timeout(deadline, run).await {
-        Ok(r) => r,
-        Err(_) => (
-            refusal_hint(
-                TIMEOUT,
-                "request: the host did not answer in time",
-                "raise timeout (at most 120 seconds) or retry",
-            ),
-            host.clone(),
-            None,
-        ),
+    let d = match kernel.defer() {
+        Ok(d) => d,
+        Err(refused) => return refused,
     };
-    remember(agent, &method, &last_host, status);
-    // WHAT CHANGED, PUBLISHED on the agent's own inbox: its view re-reads `recent_requests`
-    kernel
-        .emit(agent, json!({"type": "request_served", "method": method, "host": last_host, "status": status}))
-        .await;
-    out
-}
-
-/// The hops: `(reply or refusal, the last host asked, its status)`.
-async fn run(plan: Plan, allow: &[String], kernel: &Arc<Kernel>) -> (Value, String, Option<u16>) {
-    let Plan {
-        mut method,
-        mut url,
-        headers,
-        mut body,
-        json_body,
-        timeout,
-    } = plan;
-    let client = match reqwest::Client::builder()
+    let first_host = netloc(&plan.url);
+    let hop = Hop {
+        kernel: Arc::clone(kernel),
+        agent: agent.clone(),
+        pid: d.pid(),
+        verb: plan.method.to_string(),
+        first_host,
+        ends: tokio::time::Instant::now() + plan.timeout,
+        client: None,
+        allow,
+        hops: 0,
+        plan,
+    };
+    let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
-        .timeout(timeout)
-        .build()
-    {
-        Ok(c) => c,
+        .timeout(hop.plan.timeout)
+        .build();
+    match client {
+        Ok(c) => next_hop(Hop { client: Some(c), ..hop }).await,
         Err(_) => {
-            return (
-                refusal(TRANSPORT_ERROR, "request: no HTTP client could be built"),
-                netloc(&url),
-                None,
-            )
+            let host = netloc(&hop.plan.url);
+            finish(hop, refusal(TRANSPORT_ERROR, "request: no HTTP client could be built"), host, None).await;
         }
-    };
-    let mut hops = 0;
-    loop {
-        let host = netloc(&url);
-        let secret = match secret_for(kernel, &url).await {
-            Ok(s) => s,
-            Err(e) => return (e, host, None),
-        };
-        let mut req = client
-            .request(method.clone(), url.clone())
-            .headers(headers.clone());
-        if let Some(b) = &body {
-            if json_body && !headers.contains_key(CONTENT_TYPE) {
-                req = req.header(CONTENT_TYPE, "application/json");
-            }
-            req = req.body(b.clone());
-        }
-        if let Some(k) = &secret {
-            if let Ok(mut v) = HeaderValue::from_str(&format!("Bearer {k}")) {
-                v.set_sensitive(true);
-                req = req.header(AUTHORIZATION, v);
-            }
-        }
-        let mut resp = match req.send().await {
-            Ok(r) => r,
-            Err(e) => return (transport(&e), host, None),
-        };
-        let status = resp.status();
-        if status.is_redirection() {
-            if let Some(loc) = resp.headers().get(LOCATION).and_then(|v| v.to_str().ok()) {
-                hops += 1;
-                let Ok(next) = url.join(loc) else {
-                    return (
-                        bad(
-                            "url",
-                            "request: a redirect named an unusable location",
-                            "check the host",
-                        ),
-                        host,
-                        Some(status.as_u16()),
-                    );
-                };
-                if hops > MAX_REDIRECTS {
-                    return (
-                        refusal(TRANSPORT_ERROR, "request: too many redirects"),
-                        host,
-                        Some(status.as_u16()),
-                    );
-                }
-                if !allowed(&next, allow) {
-                    return (
-                        not_allowed(&next, "a redirect left the allowlist"),
-                        host,
-                        Some(status.as_u16()),
-                    );
-                }
-                let keeps = matches!(status.as_u16(), 307 | 308);
-                if !keeps && !matches!(method, Method::GET | Method::HEAD) {
-                    method = Method::GET;
-                    body = None;
-                }
-                url = next;
-                continue;
-            }
-        }
-        // read up to the cap plus a key's length less one, so a key straddling the
-        // cap is whole when it is redacted; the cut comes after (see `finish_body`)
-        let limit = BODY_CAP + secret.as_deref().map_or(0, |k| k.len().saturating_sub(1));
-        let mut buf: Vec<u8> = Vec::new();
-        let mut more = false;
-        loop {
-            match resp.chunk().await {
-                Ok(Some(c)) => {
-                    if buf.len() + c.len() > limit {
-                        buf.extend_from_slice(&c[..limit - buf.len()]);
-                        more = true;
-                        break;
-                    }
-                    buf.extend_from_slice(&c);
-                }
-                Ok(None) => break,
-                Err(e) => return (transport(&e), host, Some(status.as_u16())),
-            }
-        }
-        let secret_bytes = secret.as_deref().map(str::as_bytes);
-        let mut out = Map::new();
-        out.insert("status".into(), json!(status.as_u16()));
-        let mut hdrs = Map::new();
-        for (k, v) in resp.headers() {
-            if k.as_str() == "set-cookie" {
-                continue;
-            }
-            let mut text = String::from_utf8_lossy(v.as_bytes()).into_owned();
-            if let Some(s) = secret_bytes {
-                text = String::from_utf8_lossy(&redact(text.as_bytes(), s)).into_owned();
-            }
-            hdrs.insert(k.as_str().to_string(), json!(text));
-        }
-        let is_json = hdrs
-            .get("content-type")
-            .and_then(Value::as_str)
-            .is_some_and(|t| t.to_ascii_lowercase().contains("json"));
-        out.insert("headers".into(), Value::Object(hdrs));
-        let (mut buf, truncated) = finish_body(buf, more, secret_bytes);
-        if truncated {
-            whole_chars(&mut buf);
-        }
-        match String::from_utf8(buf) {
-            Ok(text) => match serde_json::from_str::<Value>(&text) {
-                Ok(v) if is_json && !truncated => out.insert("json".into(), v),
-                _ => out.insert("text".into(), Value::String(text)),
-            },
-            Err(e) => out.insert(
-                "bytes".into(),
-                Value::String(base64::engine::general_purpose::STANDARD.encode(e.into_bytes())),
-            ),
-        };
-        out.insert("truncated".into(), json!(truncated));
-        return (Value::Object(out), host, Some(status.as_u16()));
     }
+    Value::Null
+}
+
+/// One `request` in flight: what its next hop needs.
+struct Hop {
+    kernel: Arc<Kernel>,
+    agent: AgentId,
+    /// The deferred execution the last hop settles.
+    pid: fantastic_kernel::TaskId,
+    /// The method the call asked for (what the recent ring shows).
+    verb: String,
+    /// The first hop's host: a request that runs out of time names it.
+    first_host: String,
+    /// When the whole request runs out of time.
+    ends: tokio::time::Instant,
+    client: Option<reqwest::Client>,
+    allow: Vec<String>,
+    hops: usize,
+    plan: Plan,
+}
+
+/// The request ran out of time.
+fn timed_out() -> Value {
+    refusal_hint(
+        TIMEOUT,
+        "request: the host did not answer in time",
+        "raise timeout (at most 120 seconds) or retry",
+    )
+}
+
+/// The last hop: the outcome kept in the recent ring, published on the agent's inbox
+/// (its view re-reads `recent_requests`), and the deferred call settled with it.
+async fn finish(hop: Hop, out: Value, last_host: String, status: Option<u16>) {
+    remember(&hop.agent, &hop.verb, &last_host, status);
+    hop.kernel
+        .emit(
+            &hop.agent,
+            json!({"type": "request_served", "method": hop.verb, "host": last_host, "status": status}),
+        )
+        .await;
+    let st = if fantastic_kernel::is_refused(&out) {
+        Status::Errored
+    } else {
+        Status::Completed
+    };
+    hop.kernel
+        .settle_deferred(hop.pid, fantastic_kernel::Outcome::new(Some(hop.pid), st, out));
+}
+
+/// The next hop, as steps: its host's credential, then the exchange as the handler's
+/// own I/O, then the next hop of a redirect, or the settle.
+fn next_hop(hop: Hop) -> Boxed {
+    Box::pin(async move {
+        if tokio::time::Instant::now() >= hop.ends {
+            let host = hop.first_host.clone();
+            return finish(hop, timed_out(), host, None).await;
+        }
+        let url = hop.plan.url.clone();
+        let kernel = Arc::clone(&hop.kernel);
+        secret_for(
+            kernel,
+            &url,
+            Box::new(move |secret| {
+                Box::pin(async move {
+                    let host = netloc(&hop.plan.url);
+                    let secret = match secret {
+                        Ok(s) => s,
+                        Err(e) => return finish(hop, e, host, None).await,
+                    };
+                    // THE HANDLER'S OWN I/O: a task under the deferred execution, so its
+                    // `cancel` ends the exchange with it; an execution already ended runs
+                    // nothing
+                    let (k, owner, pid) = (Arc::clone(&hop.kernel), hop.agent.clone(), hop.pid);
+                    if !k.tasks.contains(&pid) {
+                        return;
+                    }
+                    fantastic_kernel::CURRENT_TASK.sync_scope(pid, || {
+                        k.spawn_task(&owner, "request", async move {
+                            let left = hop.ends.saturating_duration_since(tokio::time::Instant::now());
+                            let ran = tokio::time::timeout(left, exchange(&hop, secret.as_deref())).await;
+                            match ran {
+                                Err(_) => {
+                                    let host = hop.first_host.clone();
+                                    finish(hop, timed_out(), host, None).await;
+                                }
+                                Ok(Exchange::Done(out, status)) => finish(hop, out, host, status).await,
+                                Ok(Exchange::Next { url, method, drop_body, status }) => {
+                                    let mut hop = hop;
+                                    hop.hops += 1;
+                                    if hop.hops > MAX_REDIRECTS {
+                                        let r = refusal(TRANSPORT_ERROR, "request: too many redirects");
+                                        return finish(hop, r, host, Some(status)).await;
+                                    }
+                                    if !allowed(&url, &hop.allow) {
+                                        let r = not_allowed(&url, "a redirect left the allowlist");
+                                        return finish(hop, r, host, Some(status)).await;
+                                    }
+                                    if drop_body {
+                                        hop.plan.method = method;
+                                        hop.plan.body = None;
+                                    }
+                                    hop.plan.url = url;
+                                    next_hop(hop).await;
+                                }
+                            }
+                        });
+                    });
+                })
+            }),
+        )
+        .await;
+    })
+}
+
+/// What one HTTP exchange came to.
+enum Exchange {
+    /// The reply (or a refusal) and the host's status, when it answered.
+    Done(Value, Option<u16>),
+    /// A redirect to `url`: the next hop, as `method` without the body when
+    /// `drop_body`.
+    Next { url: Url, method: Method, drop_body: bool, status: u16 },
+}
+
+/// ONE HTTP exchange of a hop, with its credential (`secret`).
+async fn exchange(hop: &Hop, secret: Option<&str>) -> Exchange {
+    let Some(client) = hop.client.as_ref() else {
+        return Exchange::Done(refusal(TRANSPORT_ERROR, "request: no HTTP client could be built"), None);
+    };
+    let Plan {
+        method,
+        url,
+        headers,
+        body,
+        json_body,
+        ..
+    } = &hop.plan;
+    let mut req = client.request(method.clone(), url.clone()).headers(headers.clone());
+    if let Some(b) = body {
+        if *json_body && !headers.contains_key(CONTENT_TYPE) {
+            req = req.header(CONTENT_TYPE, "application/json");
+        }
+        req = req.body(b.clone());
+    }
+    if let Some(k) = secret {
+        if let Ok(mut v) = HeaderValue::from_str(&format!("Bearer {k}")) {
+            v.set_sensitive(true);
+            req = req.header(AUTHORIZATION, v);
+        }
+    }
+    let mut resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => return Exchange::Done(transport(&e), None),
+    };
+    let status = resp.status();
+    if status.is_redirection() {
+        if let Some(loc) = resp.headers().get(LOCATION).and_then(|v| v.to_str().ok()) {
+            let Ok(next) = url.join(loc) else {
+                return Exchange::Done(
+                    bad(
+                        "url",
+                        "request: a redirect named an unusable location",
+                        "check the host",
+                    ),
+                    Some(status.as_u16()),
+                );
+            };
+            let keeps = matches!(status.as_u16(), 307 | 308);
+            let drop_body = !keeps && !matches!(*method, Method::GET | Method::HEAD);
+            return Exchange::Next {
+                url: next,
+                method: if drop_body { Method::GET } else { method.clone() },
+                drop_body,
+                status: status.as_u16(),
+            };
+        }
+    }
+    // read up to the cap plus a key's length less one, so a key straddling the
+    // cap is whole when it is redacted; the cut comes after (see `finish_body`)
+    let limit = BODY_CAP + secret.map_or(0, |k| k.len().saturating_sub(1));
+    let mut buf: Vec<u8> = Vec::new();
+    let mut more = false;
+    loop {
+        match resp.chunk().await {
+            Ok(Some(c)) => {
+                if buf.len() + c.len() > limit {
+                    buf.extend_from_slice(&c[..limit - buf.len()]);
+                    more = true;
+                    break;
+                }
+                buf.extend_from_slice(&c);
+            }
+            Ok(None) => break,
+            Err(e) => return Exchange::Done(transport(&e), Some(status.as_u16())),
+        }
+    }
+    let secret_bytes = secret.map(str::as_bytes);
+    let mut out = Map::new();
+    out.insert("status".into(), json!(status.as_u16()));
+    let mut hdrs = Map::new();
+    for (k, v) in resp.headers() {
+        if k.as_str() == "set-cookie" {
+            continue;
+        }
+        let mut text = String::from_utf8_lossy(v.as_bytes()).into_owned();
+        if let Some(s) = secret_bytes {
+            text = String::from_utf8_lossy(&redact(text.as_bytes(), s)).into_owned();
+        }
+        hdrs.insert(k.as_str().to_string(), json!(text));
+    }
+    let is_json = hdrs
+        .get("content-type")
+        .and_then(Value::as_str)
+        .is_some_and(|t| t.to_ascii_lowercase().contains("json"));
+    out.insert("headers".into(), Value::Object(hdrs));
+    let (mut buf, truncated) = finish_body(buf, more, secret_bytes);
+    if truncated {
+        whole_chars(&mut buf);
+    }
+    match String::from_utf8(buf) {
+        Ok(text) => match serde_json::from_str::<Value>(&text) {
+            Ok(v) if is_json && !truncated => out.insert("json".into(), v),
+            _ => out.insert("text".into(), Value::String(text)),
+        },
+        Err(e) => out.insert(
+            "bytes".into(),
+            Value::String(base64::engine::general_purpose::STANDARD.encode(e.into_bytes())),
+        ),
+    };
+    out.insert("truncated".into(), json!(truncated));
+    Exchange::Done(Value::Object(out), Some(status.as_u16()))
 }
 
 #[cfg(test)]

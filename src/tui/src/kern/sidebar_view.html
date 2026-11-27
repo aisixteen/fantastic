@@ -189,9 +189,9 @@ function chatSet(reply) {
   return out;
 }
 // the state of a chat, the design's six: what it asks > its last phase as its sidebar agent
-// published it (none: at rest). A running call, and a chain that waits on its own work, is
-// Working (the spinner) with its word; a call's end keeps its badge until the next call.
-var WORKING = { queued: "queued", thinking: "thinking", streaming: "writing", retrying: "retrying", awaiting: "waiting" };
+// published it (none: at rest). A running pass is Working (the spinner) with its word; a
+// pass's end keeps its badge until the next one.
+var WORKING = { thinking: "thinking", streaming: "writing", retrying: "retrying" };
 var ENDED = {
   stalled: { kind: "stalled", label: "stalled", glyph: "!" },
   failed: { kind: "failed", label: "failed", glyph: "\u00d7" },

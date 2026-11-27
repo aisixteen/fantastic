@@ -152,7 +152,7 @@ pub struct Unembed {
     pub id: String,
 }
 
-/// A privacy-filtered snapshot of the messages not read yet and the pass in flight: full text only for the asking client's own entries. Answers at once.
+/// A privacy-filtered snapshot of the pass in flight: full text only for the asking client's own entry. Answers at once.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Status {

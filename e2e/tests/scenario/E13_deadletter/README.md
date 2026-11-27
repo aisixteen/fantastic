@@ -48,8 +48,7 @@ scripted OpenAI-compatible servers play a lead and a worker (the kernel's own
 is busy on a slow answer; the lead's message to it is HELD, then passes its 3 s
 deadline. The probe proves, on python and rust alike:
 
-- `status` answers at once on a busy agent, counts the held message in
-  `others_pending` and names the sender in `pending_from`;
+- `status` answers at once on a busy agent;
 - the message is withdrawn into a dead letter: the lead is told
   `your message to worker hit its 3.0s deadline → dead letter <pid>; resend or drop`,
   and the worker's history holds a `withdrawn` row naming the pid;

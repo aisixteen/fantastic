@@ -76,9 +76,8 @@ pub struct AiPanel {
     /// Seconds since `since`, taken in `layout` so `render` stays a pure view.
     clock: f32,
     /// The kernel's own phase for this agent, from its status frames. Never
-    /// inferred: `queued` with `ahead` is the honest word for a second send.
+    /// inferred.
     pub phase: Option<String>,
-    pub ahead: Option<i64>,
     /// The last generation's USAGE, from its `done` status (`prompt_tokens`,
     /// `completion_tokens`, `gen_seconds`, `context_window`, `*_estimated`) —
     /// the status line's speed and context, as on the canvas.
@@ -132,7 +131,6 @@ impl AiPanel {
             clock: 0.0,
             phase: None,
             usage: None,
-            ahead: None,
             body: None,
             last: Outline::default(),
             proj_key: None,
@@ -688,10 +686,6 @@ impl Panel for AiPanel {
                     .get("phase")
                     .and_then(Value::as_str)
                     .map(str::to_string);
-                self.ahead = payload
-                    .get("detail")
-                    .and_then(|d| d.get("ahead"))
-                    .and_then(Value::as_i64);
                 if let Some(d) = payload.get("detail").filter(|d| d.get("completion_tokens").is_some()) {
                     self.usage = Some(d.clone());
                 }
@@ -901,12 +895,9 @@ impl Panel for AiPanel {
             let n = |k: &str| kv.get(k).and_then(Value::as_i64).unwrap_or(0);
             bits.push(format!("kv {}/{} · evicted {}", n("live"), n("slots"), n("evicted")));
         }
-        // THE HONEST WORD for a second send: it is queued behind a turn that holds
-        // the backend's lock. It is linked to what is running; it does not steer it.
-        match (self.phase.as_deref(), self.ahead) {
-            (Some("queued"), Some(n)) => bits.push(format!("queued · ahead {n}")),
-            (Some(p), _) => bits.push(p.to_string()),
-            (None, _) => {}
+        // the kernel's own word for the pass in flight
+        if let Some(p) = self.phase.as_deref() {
+            bits.push(p.to_string());
         }
         if !self.waiting.is_empty() {
             bits.push(format!("{}{}", theme::INQUIRY, self.waiting.len()));
@@ -1269,11 +1260,11 @@ mod tests {
     }
 
     #[test]
-    fn a_status_frame_reports_queued_with_how_many_are_ahead() {
+    fn a_status_frame_reports_its_phase() {
         let mut p = AiPanel::new("ai".into());
         let mut out = Vec::new();
         assert!(p.on_event(
-            &json!({"type":"status","phase":"queued","detail":{"ahead":2}}),
+            &json!({"type":"status","phase":"thinking","detail":{}}),
             &mut out
         ));
         let s = Store::default();
@@ -1288,7 +1279,7 @@ mod tests {
             provider: None,
         };
         let line = p.status(&cx).unwrap();
-        assert!(line.contains("queued · ahead 2"), "{line}");
+        assert!(line.contains("thinking"), "{line}");
     }
 
     #[test]

@@ -629,10 +629,10 @@ async def wait_quiet(pg: Page, total: float, quiet: float, cell: int = 0) -> boo
     while time.time() < deadline:
         got = await chat_eval(pg, look, cell) or {}
         n, said, phase, reason = got.get("n", 0), got.get("said", False), got.get("phase", ""), got.get("reason", "")
-        thinking = phase in ("thinking", "streaming", "tool_calling", "queued")
+        thinking = phase in ("thinking", "streaming", "tool_calling")
         if thinking:
             seen_live = True
-        if seen_live and said and not thinking and reason not in ("", "awaiting"):
+        if seen_live and said and not thinking and reason != "":
             ended = ended or time.time()
             if time.time() - ended >= ENDED_HOLD_S:
                 return True

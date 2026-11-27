@@ -348,7 +348,8 @@ class HostKernel:
 
     def quiet(self, *ids: str) -> bool:
         """Is each of `ids` QUIET now: no task of its own in `ps`, and — for an AI agent —
-        no pass in flight and nothing unread (its `status`)? A pass's plumbing calls are
+        no pass in flight (its `status`; a message stored unread starts a pass at once
+        unless the agent is paused)? A pass's plumbing calls are
         STEPS that hold no task of the agent's (#795), so `ps` alone misses a pass between
         its steps; `status` `generating` is set from the pass's first step. An agent with
         no such `status` (an exec bridge, a store) is judged by `ps` alone."""
@@ -357,7 +358,7 @@ class HostKernel:
             return False
         for aid in ids:
             st = self.send(aid, {"type": "status"})
-            if isinstance(st, dict) and (st.get("generating") or st.get("pending_from")):
+            if isinstance(st, dict) and st.get("generating"):
                 return False
         return True
 

@@ -10,7 +10,7 @@
 //!
 //! VIEWS: every View gets the frame laid out for IT (`vm::Frames`, keyed by
 //! View) — the same state, reflowed to its size, with its own scroll windows. Only a terminal panel's PTY has one size; it follows
-//! the latest View to resize or type (tmux's `latest`, `vm::effective`).
+//! the latest View to resize or type (tmux's `latest`).
 //!
 //! LEAVING: a thin client's quit gestures (Ctrl-C twice, Ctrl-A d, holding q)
 //! DETACH only that client — the ViewModel reads them as `App::leave` from a

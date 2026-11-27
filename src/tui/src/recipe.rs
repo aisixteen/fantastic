@@ -149,7 +149,7 @@ pub fn parse(args: &[String]) -> Result<Opts, String> {
     let mut i = 0;
     let next = |i: &mut usize, what: &str| -> Result<String, String> {
         *i += 1;
-        args.get(*i).filter(|v| !v.is_empty()).cloned().ok_or_else(|| format!("{what}"))
+        args.get(*i).filter(|v| !v.is_empty()).cloned().ok_or_else(|| what.to_string())
     };
     while i < args.len() {
         match args[i].as_str() {

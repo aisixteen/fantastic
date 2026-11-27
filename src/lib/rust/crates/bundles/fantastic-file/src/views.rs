@@ -238,7 +238,8 @@ fn find_view(kernel: &Arc<Kernel>, bridge: &str, kind: &str, path: &str) -> Opti
 }
 
 /// python `open_view`: reuse the view of `path` on this bridge, or make it — as the
-/// asker ([`Kernel::send_as_caller`]), under the bridge. The new view's `can` is its one edge,
+/// asker ([`Kernel::call_for`]), under the bridge; a create defers the call, and its
+/// settle settles it (#795). The new view's `can` is its one edge,
 /// `$parent: {call: GRANTS}`: the asker hands it out, so it must hold those verbs on
 /// the bridge by a line of its own.
 ///
@@ -298,26 +299,52 @@ pub(crate) async fn open_view(
         payload["id"] = json!(chosen);
     }
     // The arguments are judged here first, so a bad chosen id is open_view's own
-    // refusal; the create itself is sent for the asker ([`Kernel::send_as_caller`])
+    // refusal; the create itself is sent for the asker ([`Kernel::call_for`])
     // and checked as it — refused for work that carries no origin at all.
     if let Err(e) = serde_json::from_value::<CreateAgent>(payload.clone()) {
         return rf::bad("open_view", "id", &e.to_string());
     }
     payload["type"] = json!("create_agent");
-    let made = kernel
-        .send_as_caller(vec![Item::new(AgentId::from("kernel"), payload)])
-        .await
-        .remove(0)
-        .result;
-    if made.get("error").is_some() {
-        return made;
+    // THE CREATE IS A CALL FOR THE ASKER (#795): `open_view` defers, and the create's
+    // settle — a message to the bridge — settles it
+    let Some(asker) = fantastic_kernel::Asker::current() else {
+        return fantastic_kernel::refusal::unknown_agent("kernel");
+    };
+    let d = match kernel.defer() {
+        Ok(d) => d,
+        Err(refused) => return refused,
+    };
+    let (k, kind, path) = (Arc::clone(kernel), kind.to_string(), path.to_string());
+    let item = Item::new(AgentId::from("kernel"), payload);
+    let slot = Arc::new(std::sync::Mutex::new(Some((k, kind, path))));
+    let held = Arc::clone(&slot);
+    let settle = move |k: Arc<Kernel>, kind: String, path: String, made: Value| {
+        let answer = if made.get("error").is_some() {
+            made
+        } else {
+            let vid = made.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+            json!({"id": vid, "kind": kind, "path": path, "created": true})
+        };
+        let status = if fantastic_kernel::is_refused(&answer) {
+            fantastic_kernel::Status::Errored
+        } else {
+            fantastic_kernel::Status::Completed
+        };
+        k.settle_deferred(d.pid(), fantastic_kernel::Outcome::new(Some(d.pid()), status, answer));
+    };
+    let ack = kernel
+        .call_for(&asker, item, move |out| async move {
+            if let Some((k, kind, path)) = held.lock().expect("open_view poisoned").take() {
+                settle(k, kind, path, out.result);
+            }
+        })
+        .await;
+    if ack.status != fantastic_kernel::Status::Accepted {
+        if let Some((k, kind, path)) = slot.lock().expect("open_view poisoned").take() {
+            settle(k, kind, path, ack.result);
+        }
     }
-    let vid = made
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    json!({"id": vid, "kind": kind, "path": path, "created": true})
+    Value::Null
 }
 
 /// Is this record the view of `path` of this kind on this bridge?

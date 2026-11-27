@@ -118,7 +118,7 @@ details.tools>summary,details.think>summary{min-height:40px}
 </div>
 <div class="dialog" id="dialog"><button class="earlier" id="earlier" type="button" hidden></button></div>
 <div class="queue" id="queue"></div>
-<div class="foot"><span id="others"></span><button class="clear" id="clear" type="button" title="start a new thread: nothing is deleted, the earlier one stays recallable">clear</button></div>
+<div class="foot"><span></span><button class="clear" id="clear" type="button" title="start a new thread: nothing is deleted, the earlier one stays recallable">clear</button></div>
 <div class="input"><div class="field"><textarea id="text" rows="1" placeholder="Message" aria-label="Message"></textarea><button class="send" id="send" type="button" aria-label="Send">Send</button></div></div>
 <script>
 // pure
@@ -220,21 +220,21 @@ function collapseReports(rows) {
   return out;
 }
 // the phases that end a call, or come outside one (`paused`, `idle`): nothing of it runs any more
-var ENDS = { done: 1, failed: 1, stalled: 1, awaiting: 1, paused: 1, idle: 1 };
+var ENDS = { done: 1, failed: 1, stalled: 1, paused: 1, idle: 1 };
 function endsCall(phase) { return ENDS[phase] === 1; }
 // a call that ended with one of these reasons is not a failure
-var CALM = { "": 1, ok: 1, awaiting: 1, nothing_to_await: 1 };
+var CALM = { "": 1, ok: 1 };
 // the agent's state, as the header shows it: working while a call runs, asks you while an
 // inquiry is open, failed when the last call ended with a failure reason, done after a good one
 function stateOf(phase, reason, asks) {
   if (asks > 0) return "asks";
-  if (phase === "thinking" || phase === "streaming" || phase === "tool_calling" || phase === "queued") return "working";
+  if (phase === "thinking" || phase === "streaming" || phase === "tool_calling") return "working";
   if (!CALM[reason || ""]) return "failed";
   return reason === "ok" ? "done" : "idle";
 }
 // the word for a running call, as the tree shows it
 function phaseWord(phase) {
-  return phase === "thinking" ? "thinking" : phase === "streaming" ? "writing" : phase === "tool_calling" ? "using tools" : phase === "queued" ? "queued" : "";
+  return phase === "thinking" ? "thinking" : phase === "streaming" ? "writing" : phase === "tool_calling" ? "using tools" : "";
 }
 // "asks you · 12 min": the age of the oldest open inquiry (`ts` is seconds since the epoch)
 function inquiryAge(ts, nowMs) {
@@ -474,11 +474,6 @@ function textsOf(rows) {
   // THE CLOCK: the "asks you · N min" age, and whether the line is still recent, drawn again
   // from what the view holds; it reads nothing
   setInterval(drawState, 30000);
-  function bind(sendId) {
-    if (!sendId || pending.some(function (q) { return q.sendId === sendId; })) return;
-    var q = pending.find(function (x) { return !x.sendId; });
-    if (q) q.sendId = sendId;
-  }
   function promote(sendId) {
     var i = pending.findIndex(function (q) { return q.sendId === sendId; });
     if (i < 0) i = pending.findIndex(function (q) { return !q.sendId; });
@@ -490,14 +485,13 @@ function textsOf(rows) {
     inflight = { sendId: sendId };
     refresh();
   }
-  // THE AGENT'S STATE, read again on its events: whether a call runs (any client's), its phase
-  // while none of this view's own runs, and how many wait from other clients
+  // THE AGENT'S STATE, read again on its events: whether a call runs (any client's), and its
+  // phase while none of this view's own runs
   function followStatus() {
     return call({ type: "status", client_id: me }).then(function (snap) {
       if (!snap || typeof snap !== "object" || typeof snap.error === "string") return;
       var cur = snap.current && typeof snap.current === "object" ? snap.current : null;
       anyRunning = cur !== null;
-      $("others").textContent = typeof snap.others_pending === "number" && snap.others_pending > 0 ? "+" + snap.others_pending + " from other clients" : "";
       if (!inflight) {
         if (cur && s(cur, "phase")) phase(s(cur, "phase"));
         else if (!cur && curPhase !== "idle") phase("idle");
@@ -538,7 +532,6 @@ function textsOf(rows) {
     if (typeof p.error === "string") { notice("✕ " + p.error, "error"); return; }
     var d;
     switch (p.type) {
-      case "queued": if (mine(p) && s(p, "send_id")) bind(s(p, "send_id")); break;
       case "status": {
         var ph = s(p, "phase"), det = o(p, "detail"), sid = s(det, "send_id");
         // a COPY OF A `status` CALL (this view's own read, another view's) is no event: only
@@ -551,8 +544,7 @@ function textsOf(rows) {
           else { anyRunning = true; if (!inflight && ph !== "retrying") phase(ph); refresh(); follow(); }
           break;
         }
-        if (ph === "queued") { bind(sid); phase("queued"); }
-        else if (ph === "thinking" || ph === "streaming") { if (!inflight || inflight.sendId !== sid) promote(sid); phase(ph); }
+        if (ph === "thinking" || ph === "streaming") { if (!inflight || inflight.sendId !== sid) promote(sid); phase(ph); }
         else if (ph === "tool_calling") { tool(o(det, "tool")); phase(ph); }
         else if (endsCall(ph)) {
           if (inflight && (!sid || inflight.sendId === sid)) inflight = null;
@@ -777,7 +769,6 @@ function textsOf(rows) {
     await drawHistory(300);
     var snap = await call({ type: "status", client_id: me });
     if (snap && typeof snap === "object") {
-      $("others").textContent = typeof snap.others_pending === "number" && snap.others_pending > 0 ? "+" + snap.others_pending + " from other clients" : "";
       var cur = o(snap, "current");
       anyRunning = Object.keys(cur).length > 0;
       if (anyRunning && cur.is_mine !== true && s(cur, "phase")) phase(s(cur, "phase"));
@@ -789,10 +780,6 @@ function textsOf(rows) {
         if (Object.keys(lt).length > 0) tool(lt);
         phase(s(cur, "phase") || "thinking");
       }
-      (Array.isArray(snap.mine_pending) ? snap.mine_pending : []).forEach(function (e) {
-        var b = bubble("user", s(e, "text"), ""); b.classList.add("queued"); queue.appendChild(b);
-        pending.push({ el: b, sendId: s(e, "send_id") });
-      });
       refresh();
     }
     inquiries();

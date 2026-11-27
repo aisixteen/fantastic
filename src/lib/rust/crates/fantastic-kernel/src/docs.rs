@@ -135,7 +135,7 @@ pub async fn remote_docs(
         // this kernel's own guid — a LOCAL id, answered here
         return local_docs(kernel, &target, &ask);
     };
-    crate::peers::call_peer(remote, ask, None).await.0
+    crate::peers::ask_peer(remote, ask).await
 }
 
 /// The verb section of a local agent's reflect `ask`, read as the operator.

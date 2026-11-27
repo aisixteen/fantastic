@@ -137,7 +137,7 @@ pub(crate) fn wake(kernel: &Arc<Kernel>, self_id: &AgentId) {
     let state = state_for(self_id);
     let next = {
         let mut life = state.life.lock().expect("life poisoned");
-        if life.running || life.paused || life.unread.is_empty() {
+        if life.running || life.paused || life.booting || life.unread.is_empty() {
             None
         } else {
             life.running = true;
@@ -212,6 +212,14 @@ pub(crate) fn owe(self_id: &AgentId, delta: isize) {
     state.changed();
 }
 
+/// The boot's reads are out (`true`) or have all run: while booting, arrivals are
+/// stored and no pass starts.
+pub(crate) fn set_booting(self_id: &AgentId, booting: bool) {
+    let state = state_for(self_id);
+    state.life.lock().expect("life poisoned").booting = booting;
+    state.changed();
+}
+
 /// Paused (`true`) or resumed: a paused agent stores its arrivals and runs no pass.
 pub(crate) fn set_paused(self_id: &AgentId, paused: bool) {
     let state = state_for(self_id);
@@ -250,23 +258,30 @@ const NOT_ARRIVALS: [&str; 7] = ["late", "withdrawn", "held", "pause", "resume",
 /// ended there.
 const PASS_ENDS: [&str; 2] = ["error", "stopped"];
 
-/// AT BOOT (#795): the messages the store holds after the last answer — stored, acked,
-/// never read by a pass because the process stopped first — go back on the unread list,
-/// so the next wake reads them. Read from the store's tail; the conversation is not
-/// loaded.
-///
-/// # Errors
-/// The store refused the read.
-pub(crate) async fn restore_unread(kernel: &Arc<Kernel>, self_id: &AgentId) -> MemResult<usize> {
-    let res = crate::memory::store_call(
-        self_id,
-        kernel,
-        json!({"type": "read", "from_last_kind": "clear", "order": "desc", "limit": 64}),
-    )
-    .await?;
-    let rows = crate::memory::rows_of(&res, self_id);
+/// AT BOOT (#795), as a step: the messages the store holds after the last answer —
+/// stored, acked, never read by a pass because the process stopped first — go back on
+/// the unread list, so the next wake reads them. Read from the store's tail; the
+/// conversation is not loaded. The next step gets how many came back, or the store's
+/// refusal of the read.
+pub(crate) async fn restore_unread<R, F, Fut>(kernel: &Arc<Kernel>, self_id: &AgentId, rec: R, next: F)
+where
+    R: Send + 'static,
+    F: FnOnce(R, MemResult<usize>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let ask = json!({"type": "read", "from_last_kind": "clear", "order": "desc", "limit": 64});
+    let me = self_id.clone();
+    crate::steps::rows(self_id, kernel, ask, rec, move |rec, rows| async move {
+        next(rec, rows.map(|rows| unread_back(&me, &rows))).await;
+    })
+    .await;
+}
+
+/// The messages among the store's tail `rows` (newest first) that no pass read, put
+/// back on the unread list; how many.
+fn unread_back(self_id: &AgentId, rows: &[Value]) -> usize {
     let mut back: Vec<Arrival> = Vec::new();
-    for r in &rows {
+    for r in rows {
         let kind = r.get("kind").and_then(Value::as_str);
         let role = r.get("role").and_then(Value::as_str);
         if role == Some("assistant") || kind.is_some_and(|k| PASS_ENDS.contains(&k)) {
@@ -308,5 +323,5 @@ pub(crate) async fn restore_unread(kernel: &Arc<Kernel>, self_id: &AgentId) -> M
         life.unread = merged;
     }
     state.changed();
-    Ok(n)
+    n
 }
