@@ -5,12 +5,12 @@ group: coding
 title: "after a long run, recall and grep reach the very first instruction and a stored body"
 runner: probe.py
 runtimes: [rust]
-costs: turns
+costs: passes
 long: true  # > 8 min measured; at most 2 run at once (run.py LONG_LANES)
 limits:
   idle_seconds: 60
-  max_turns: 80
-  no_progress_turns: 32
-  turn_chars: 60000
-  turn_seconds: 300
+  max_passes: 80
+  no_progress_passes: 32
+  pass_chars: 60000
+  pass_seconds: 300
 env: {E2E_WINDOW: "12000"}  # the squeeze the fold family measures under (the harness default is 32k)

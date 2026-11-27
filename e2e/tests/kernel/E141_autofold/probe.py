@@ -17,7 +17,7 @@ next to a `file_bridge` agent (`files`) holding an 80 kB file.
   P3. after the next answer the recall reply is a `<folded … verb="recall" … recalled="id B"`
       marker; the store row B is still whole;
   P4. a malformed answer after thinking (a foreign `<invoke>` and 50 closers) is
-      re-asked inside its turn (#766): request 2 is request 1's messages, then the
+      re-asked inside its pass (#766): request 2 is request 1's messages, then the
       attempt without its thought, read no further than the delta that held the
       foreign tag, and the report; the store holds neither;
   P5. the next send: no request holds the failed attempt, its thought or its report.
@@ -98,16 +98,16 @@ def fill(name: str, own: str, facts: dict[str, str]) -> str:
     return "".join(out)
 
 
-def messages_of(turn: dict) -> list[dict]:
-    return turn["body"].get("messages") or []
+def messages_of(one_pass: dict) -> list[dict]:
+    return one_pass["body"].get("messages") or []
 
 
-def blob(turn: dict) -> str:
-    return json.dumps(messages_of(turn), ensure_ascii=False)
+def blob(one_pass: dict) -> str:
+    return json.dumps(messages_of(one_pass), ensure_ascii=False)
 
 
-def user_texts(turn: dict) -> list[str]:
-    return [str(m.get("content")) for m in messages_of(turn) if m.get("role") == "user"]
+def user_texts(one_pass: dict) -> list[str]:
+    return [str(m.get("content")) for m in messages_of(one_pass) if m.get("role") == "user"]
 
 
 def main() -> int:
@@ -128,14 +128,14 @@ def main() -> int:
         if not cond:
             bad.append(what)
 
-    def turns_at_least(n: int, bound: float = 90) -> list[dict]:
+    def passes_at_least(n: int, bound: float = 90) -> list[dict]:
         end = time.monotonic() + bound
         while time.monotonic() < end:
-            got = m.turns()
+            got = m.passes()
             if len(got) >= n:
                 return got
             time.sleep(0.05)
-        return m.turns()
+        return m.passes()
 
     def idle(bound: float = 90) -> bool:
         end = time.monotonic() + bound
@@ -152,12 +152,12 @@ def main() -> int:
     def run(label: str, text: str, want: int) -> list[dict]:
         out = hk.send(AI, {"type": "send", "text": text})
         need(not out.get("error"), f"{label}: the send is accepted: {str(out)[:200]}")
-        turns_at_least(want)
+        passes_at_least(want)
         need(idle(), f"{label}: the chain settles")
         time.sleep(0.5)
-        turns = m.turns()
-        need(len(turns) == want, f"{label}: {want} requests: {len(turns)}")
-        return turns
+        passes = m.passes()
+        need(len(passes) == want, f"{label}: {want} requests: {len(passes)}")
+        return passes
 
     read = (f'<call name="send"><routing><target_id>{FILES}</target_id></routing>'
             '<payload><type>read</type><path>big.txt</path></payload></call>')
@@ -179,11 +179,11 @@ def main() -> int:
                         can={**can, PROV: PROVIDER})
         need(rec.get("id") == AI, f"create {AI}: {str(rec)[:200]}")
 
-        # ── P1 · the read reply is whole the turn it arrives ──────────────────
+        # ── P1 · the read reply is whole the pass it arrives ──────────────────
         m.reply(f"<think>PLAN-{TOKEN}</think>Reading.\n{read}",
                 f'<think>SEEN-{TOKEN}</think>Got it.\n{DONE}')
-        turns = run("P1", "read big.txt", 2)
-        need(len(turns) > 1 and "L100 " in user_texts(turns[1])[-1],
+        passes = run("P1", "read big.txt", 2)
+        need(len(passes) > 1 and "L100 " in user_texts(passes[1])[-1],
              "P1: request 2 carries the whole read reply")
         big = [r for r in history() if r.get("role") == "user"
                and int(r.get("bytes") or 0) > 64000]
@@ -198,20 +198,20 @@ def main() -> int:
         m.reply(f'<call name="send"><routing><target_id>{AI}</target_id></routing>'
                 f'<payload><type>recall</type><id>{b}</id></payload></call>',
                 f'Noted.\n{DONE}')
-        turns = run("P2", "next", 2)
-        seen = blob(turns[0]) if turns else ""
-        users = user_texts(turns[0]) if turns else []
+        passes = run("P2", "next", 2)
+        seen = blob(passes[0]) if passes else ""
+        users = user_texts(passes[0]) if passes else []
         need(any(f'<folded id="{b}" verb="read" from="{FILES}"' in t for t in users),
              "P2: request 1 shows the read reply as its marker")
         need(sum(t.count("<thought id=") for t in users) == 2,
              "P2: request 1 shows both thoughts as markers on user-side messages")
         need(all("<thought id=" not in str(x.get("content"))
-                 for x in (messages_of(turns[0]) if turns else [])
+                 for x in (messages_of(passes[0]) if passes else [])
                  if x.get("role") == "assistant"),
              "P2: no assistant message holds a marker")
         need(f"PLAN-{TOKEN}" not in seen and f"SEEN-{TOKEN}" not in seen and "L100 " not in seen,
              "P2: request 1 holds no thought text and no body")
-        last = user_texts(turns[1])[-1] if len(turns) > 1 else ""
+        last = user_texts(passes[1])[-1] if len(passes) > 1 else ""
         need(" ai recall" in last and "L100 " in last,
              "P2: request 2 carries the recalled row whole")
 
@@ -233,20 +233,20 @@ def main() -> int:
         # ── P3 · the recall reply folds after the next answer ─────────────────
         m.clear()
         m.reply(DONE)
-        turns = run("P3", "again", 1)
-        seen = blob(turns[0]) if turns else ""
+        passes = run("P3", "again", 1)
+        seen = blob(passes[0]) if passes else ""
         need(any(f'verb="recall" from="{AI}" recalled="id {b}"' in t
-                 for t in user_texts(turns[0]) if turns),
+                 for t in user_texts(passes[0]) if passes),
              "P3: the recall reply is its marker")
         need("L100 " not in seen, "P3: the body is nowhere in the request")
         need(any(r.get("id") == b and int(r.get("bytes") or 0) > 64000 for r in history()),
              "P3: the store row is still whole")
 
-        # ── P4 · a malformed answer is re-asked inside its turn (#766) ────────
+        # ── P4 · a malformed answer is re-asked inside its pass (#766) ────────
         m.clear()
         m.reply(CUT, DONE)
-        turns = run("P4", "cut it", 2)
-        pairs = [[(x.get("role"), x.get("content")) for x in messages_of(t)] for t in turns]
+        passes = run("P4", "cut it", 2)
+        pairs = [[(x.get("role"), x.get("content")) for x in messages_of(t)] for t in passes]
         pairs += [[], []]
         need(len(pairs[1]) == len(pairs[0]) + 2 and pairs[1][:-2] == pairs[0],
              "P4: request 2 is the re-ask: request 1's messages unchanged, then one pair")
@@ -260,7 +260,7 @@ def main() -> int:
              f"{att.count('</invoke>')} of 50 closers")
         need(pairs[1][-1][0] == "user" and rpt.startswith("[malformed call — nothing ran]"),
              f"P4: the re-ask's last user message is the report: {rpt[:120]!r}")
-        need(f"CUT-{TOKEN}" not in (blob(turns[1]) if len(turns) > 1 else ""),
+        need(f"CUT-{TOKEN}" not in (blob(passes[1]) if len(passes) > 1 else ""),
              "P4: the failed attempt's thought is not in the re-ask")
         rows = [r for r in history() if r.get("role") == "assistant"]
         need(not any("<invoke" in str(r.get("head")) or "Sending it." in str(r.get("head"))
@@ -271,8 +271,8 @@ def main() -> int:
         # ── P5 · the failed attempt is in no later request ────────────────────
         m.clear()
         m.reply(DONE)
-        turns = run("P5", "after", 1)
-        seen = json.dumps([x for x in (messages_of(turns[0]) if turns else [])
+        passes = run("P5", "after", 1)
+        seen = json.dumps([x for x in (messages_of(passes[0]) if passes else [])
                            if x.get("role") != "system"], ensure_ascii=False)
         need("Sending it." not in seen and "<invoke" not in seen
              and "[malformed call" not in seen and f"CUT-{TOKEN}" not in seen,

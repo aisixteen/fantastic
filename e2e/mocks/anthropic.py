@@ -32,7 +32,7 @@ ERROR_TYPES = {400: "invalid_request_error", 401: "authentication_error",
 
 class AnthropicMock(MockServer):
     base_path = "/v1/messages"
-    turn_path = "/v1/messages"
+    pass_path = "/v1/messages"
 
     def __init__(self, *a, **kw) -> None:
         super().__init__(*a, **kw)
@@ -61,7 +61,7 @@ class AnthropicMock(MockServer):
             return 404, self.error_body(404, f"model: {path.rsplit('/', 1)[-1]}")
         return None
 
-    def turn(self, h, req, text):
+    def on_pass(self, h, req, text):
         def ev(kind, **body):
             return sse(kind, {"type": kind, **body})
 

@@ -101,7 +101,7 @@ impl SetupBundle {
                 Err(e) => done(fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("ai_settings: {e}"))).await,
             },
             // change a live AI agent's fields (same backend): live on its next
-            // turn — the backend reads its record per call. The key for its
+            // pass — the backend reads its record per call. The key for its
             // endpoint, when one is stored, is named, with its line `get`.
             Call::ConfigureAi(a) => {
                 let id = a.id;
@@ -132,7 +132,7 @@ impl SetupBundle {
                 by.asker(host, "kernel", payload, move |out| async move {
                     done(match out.result.get("error").and_then(Value::as_str) {
                         Some(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("configure_ai: {e}")),
-                        None => json!({"configured": id, "note": "live on its next turn"}),
+                        None => json!({"configured": id, "note": "live on its next pass"}),
                     })
                     .await;
                 })

@@ -7,7 +7,7 @@ cycle, a depth-9 chain, and every tag argument (`<timeout>`, `<id>`,
 
 The stub keys on a `CASE=<name>#<n>` marker the harness plants in the send
 text, so twenty independent scripts run
-in ONE boot and none of them inherits another's turn counter. Each case records
+in ONE boot and none of them inherits another's pass counter. Each case records
 its reply, the rows it left, and the events its WS watcher saw.
 """
 
@@ -54,15 +54,15 @@ def tag(target: str, verb: str, **args) -> str:
 #: Every case: the script the stub answers with, in order. A dict entry asks the
 #: stub for something other than a clean 200 (a stall, a cut stream, a status).
 CASES = {
-    # B1.3 — three turns with no call in them at all.
-    "call_less_turns": ["Thinking about it.", "Still thinking.", "Done thinking."],
+    # B1.3 — three passes with no call in them at all.
+    "call_less_passes": ["Thinking about it.", "Still thinking.", "Done thinking."],
     # B1.6 / B3.2 — an inquiry whose options and action are not strings.
     "inquiry_shapes": [
         '<call name="inquiry"><question>pick</question><options><item>true</item>'
         '<item>b</item></options><action><a>1</a><b>—</b></action></call>',
         DONE,
     ],
-    # An empty answer — the stub returns nothing at all (a dead turn).
+    # An empty answer — the stub returns nothing at all (a dead pass).
     "empty_text": ["", DONE],
     # B1.10 — a stateless `messages` send; the rows must not grow.
     "stateless_messages": [tag("kernel", "messages", ids=[1]), DONE],
@@ -121,10 +121,10 @@ CASES = {
     # B1.17 — a slow local verb, then a `boot` of the AI while it is in flight.
     "boot_midflight": [tag("slow", "sleep", seconds=3), DONE],
     "noop": [DONE],
-    # C-context — THE family's one compaction, forced. Turn 1 answers with a
+    # C-context — THE family's one compaction, forced. Pass 1 answers with a
     # call-less block of `AI_FILL_CHARS`; the nudge that follows carries it into
-    # the history, and THAT turn is the one that crosses the budget — by ~8000
-    # tokens, not by one character. Turn 2 closes the case.
+    # the history, and THAT pass is the one that crosses the budget — by ~8000
+    # tokens, not by one character. Pass 2 closes the case.
     "context_fill": [FILL, DONE],
 }
 
@@ -238,7 +238,7 @@ def run(ctx) -> None:  # noqa: C901
                 harness={"quiesce": q,
                          "request_numbers": [r["n"] for r in stub.requests[before_req:]]})
 
-        for case in ("call_less_turns", "inquiry_shapes", "empty_text", "stateless_messages",
+        for case in ("call_less_passes", "inquiry_shapes", "empty_text", "stateless_messages",
                      "send_to_number", "send_to_blank", "text_number", "probe_raise",
                      "tag_timeout_word", "tag_empty_id", "tag_payloadless",
                      "tag_timeout_short", "tag_execution_id_reuse", "tag_execution_id_int",
@@ -313,6 +313,6 @@ def run(ctx) -> None:  # noqa: C901
         rec.json("stub/index", stub.requests)
         # The cap is DATA: which case ran away, and how far it got before the
         # harness ended the chain (see `OpenAIChatStub.case_cap`).
-        rec.json("stub/case_turns", {"cap": stub.case_cap, "turns": stub.case_turns,
+        rec.json("stub/case_passes", {"cap": stub.case_cap, "passes": stub.case_passes,
                                      "cap_hits": stub.cap_hits})
         stub.stop()

@@ -3,7 +3,7 @@
 //! `ai_core/core.py:708-831`, which is canonical.
 //!
 //! THE STORE IS NEVER TOUCHED. Every function is pure: they take the durable
-//! turns and return a VIEW. The durable JSONL sidecar keeps every turn verbatim,
+//! rows and return a VIEW. The durable JSONL sidecar keeps every row verbatim,
 //! so the trace stays complete and `recall` can page anything back.
 //!
 //! Why trim at all. Reflect replies — many of them repeats of a target already
@@ -91,14 +91,14 @@ fn starts_a_block(s: &str) -> bool {
     take_run(rest).is_some_and(|(_, r)| r.starts_with(" · "))
 }
 
-/// Split a delivered turn into its reply BLOCKS. Python `_reply_blocks` /
+/// Split a delivered message into its reply BLOCKS. Python `_reply_blocks` /
 /// `_BLOCK_SPLIT` (`\n\n(?=\[reply to \S+ · )`).
 ///
-/// A delivered turn carries ONE OR MORE blocks — a batch arrives whole, one block
+/// A delivered message carries ONE OR MORE blocks — a batch arrives whole, one block
 /// per call, joined by a blank line. The trimmers below work on the BLOCK, the
-/// unit they were written for; treating the whole turn as one reply would either
+/// unit they were written for; treating the whole message as one reply would either
 /// delete siblings (the reflect cut) or trim nothing (a count guard that skips
-/// every multi-reply turn).
+/// every multi-reply message).
 pub fn reply_blocks(content: &str) -> Vec<&str> {
     let mut out: Vec<&str> = Vec::new();
     let mut start = 0usize;
@@ -119,9 +119,9 @@ pub fn reply_blocks(content: &str) -> Vec<&str> {
     out
 }
 
-/// The turn's content, or `""`.
-fn content_of(turn: &Value) -> &str {
-    turn.get("content").and_then(Value::as_str).unwrap_or("")
+/// The message's content, or `""`.
+fn content_of(message: &Value) -> &str {
+    message.get("content").and_then(Value::as_str).unwrap_or("")
 }
 
 /// A refusal of the model's own call — a verb its target does not answer
@@ -215,7 +215,7 @@ fn recalled_what(store: &[Value], tag_line: &str, agent: &str, nth: usize) -> St
     find().unwrap_or_default()
 }
 
-/// Whether a user turn's content will fold once it is answered: it opens with a
+/// Whether a user message's content will fold once it is answered: it opens with a
 /// reply tag and carries a recall reply or a body over [`AUTOFOLD_AT`] tokens (a
 /// `reflect` never folds).
 #[must_use]
@@ -237,7 +237,7 @@ pub fn reply_pid(block: &str) -> Option<i64> {
     pid.parse().ok()
 }
 
-/// `pieces` with every stored text of a reply turn split into its reply blocks, one
+/// `pieces` with every stored text of a reply message split into its reply blocks, one
 /// piece each: the unit a marker stands for. The map joins a run of texts again with
 /// the blank line it was split at, so the bytes do not change.
 #[must_use]
@@ -254,9 +254,9 @@ pub(crate) fn blocks(pieces: Vec<Piece>) -> Vec<Piece> {
     out
 }
 
-/// KEEP (#641): `message`, the turn that just arrived, with the `keep` cue — the block's
+/// KEEP (#641): `message`, the message that just arrived, with the `keep` cue — the block's
 /// pid in it — after each reply block that will fold. The cue's presence is what asks;
-/// the model's view of the turn only, never stored. The cue is written in the type's call
+/// the model's view of the message only, never stored. The cue is written in the type's call
 /// form by the map ([`Piece::KeepCue`]).
 #[must_use]
 pub(crate) fn mark_keep(message: Value) -> Value {
@@ -333,7 +333,7 @@ pub(crate) struct Autofolded {
 
 /// AUTOFOLD (#556): the row `store[idx]`, whose current message is `msg`, as the
 /// model sees it. An assistant row is its own text; its thinking, when it has any, is a
-/// [`Piece::Thought`] for the next user-side message. An answered reply turn shows each
+/// [`Piece::Thought`] for the next user-side message. An answered reply message shows each
 /// large body or recall reply as a [`Piece::Folded`] (its tag line, its size, the row's id,
 /// the summary the model kept). Pure and never stored: the store keeps every row whole,
 /// and `recall` with the row's id reads it back. A row with no int `id` comes back

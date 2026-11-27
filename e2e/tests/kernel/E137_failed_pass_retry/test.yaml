@@ -1,6 +1,6 @@
 # WHAT to measure and HOW LONG to allow. NO MODEL: a scripted OpenAI-compatible
 # server plays the model for the kernel's own vllm_backend agent, driven over web_rest.
-id: failed_turn_retry
+id: failed_pass_retry
 group: kernel
 title: "a failed pass is retried only by transport_retries, inside the pass (#533, #795): an HTTP 500 retried on the link answers in the same pass, a stream cut at max_tokens fails with an error row naming it, and failures on every request end the pass after 1 + transport_retries requests (no hang, no request past the bound)"
 runner: probe.py
@@ -8,4 +8,4 @@ runtimes: [rust]
 costs: free
 limits:
   idle_seconds: 120
-  turn_seconds: 300
+  pass_seconds: 300

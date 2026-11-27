@@ -1,14 +1,14 @@
 //! The system block from a FILE: the record's `file_bridge_id`
 //! names the file VIEW this agent reads it THROUGH, `system_prompt_file` the view's
 //! own path. Not set → nothing is looked up (the default block). Set and unusable
-//! → [`PromptFileError`]: the turn fails loud, never another block.
+//! → [`PromptFileError`]: the pass fails loud, never another block.
 //!
 //! The agent reads the file through that view, AS ITSELF, with the view's own verbs
 //! only — every read and watch is its own gated send, so its own `can` holds a line
 //! on the view (`read`, `watch`). It watches the view through a private inbox and
 //! arms the view's change relay (`watch`): a `changed` event for the path marks the
-//! text STALE, and the next turn reads it again — no restart, and no read on a turn
-//! nothing changed. RAM only: armed on the first turn that needs it, re-armed when
+//! text STALE, and the next pass reads it again — no restart, and no read on a pass
+//! nothing changed. RAM only: armed on the first pass that needs it, re-armed when
 //! the record names another view or path, dropped when either field is cleared
 //! or the agent deleted. The reason a set file is unusable is also the agent's
 //! `system_prompt_file_error` until a read succeeds.
@@ -21,7 +21,7 @@ use fantastic_bundle::{py_repr, py_strip};
 use fantastic_kernel::{AgentId, Item, Kernel, Status, TaskId};
 use serde_json::{json, Map, Value};
 
-/// `system_prompt_file` is set and cannot be the block — the turn fails, said so.
+/// `system_prompt_file` is set and cannot be the block — the pass fails, said so.
 /// Python `PromptFileError(RuntimeError)`.
 #[derive(Debug, Clone)]
 pub struct PromptFileError(pub String);

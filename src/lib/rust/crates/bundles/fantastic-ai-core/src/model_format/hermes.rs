@@ -15,7 +15,7 @@
 //!   form ([`render_call`]). One repair only: JSON that `serde_json` does not read and
 //!   that `jsonrepair-rs` completes by adding closing brackets and braces at its end and
 //!   nothing else ([`closed`]; the JSON alone when a `<bytes>` block follows it) is read so, and an [`Out::Repaired`] goes before its call
-//!   (the turn's `repaired` trace event). Several calls in one block are [`Out::Bad`]
+//!   (the pass's `repaired` trace event). Several calls in one block are [`Out::Bad`]
 //!   with [`REPORT_MULTI`], each call written as its own block. A call that does not
 //!   read, a JSON call with no tags, a closer with no opener and a call in the default
 //!   form are each [`Out::Bad`] with this type's report (`res/hermes/report_*.txt`). A

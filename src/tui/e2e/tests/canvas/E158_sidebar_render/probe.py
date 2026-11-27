@@ -59,7 +59,7 @@ def responder(req: dict, _raw: bytes):
     # the link retry re-sends the same request: it dies again
     if "S_RETRY" in last:
         return {"cut": True, "text": "a stream that dies"}
-    # an empty answer is re-asked inside its turn (#795): it stays empty
+    # an empty answer is re-asked inside its pass (#795): it stays empty
     if "S_DEAD" in last or last.startswith("[no call was dispatched]"):
         return ""
     if "S_HANDOFF" in last:
@@ -310,11 +310,11 @@ async def states(pg, r: dict, info: dict) -> None:
     r["8g2 kept after the call: the cross on error, the word failed"] = look(await now("failed"), "failed", "\u00d7", "error", "accent_on", "failed")
     await shot(pg, "6-failed", info, light=True)
 
-    # An empty answer is no call: re-asked inside its turn (Working, retrying), then the
-    # harness stops the turn (Failed, #795)
+    # An empty answer is no call: re-asked inside its pass (Working, retrying), then the
+    # harness stops the pass (Failed, #795)
     n = len(await seen())
     dead = asyncio.create_task(fire(port, A, {"type": "send", "text": "S_DEAD"}))
-    r["8h an empty answer is re-asked (Working, retrying), then the turn is stopped (Failed)"] = await ends(n, "active:thinking", "active:retrying", "failed:failed")
+    r["8h an empty answer is re-asked (Working, retrying), then the pass is stopped (Failed)"] = await ends(n, "active:thinking", "active:retrying", "failed:failed")
     info["dead"] = await dead
 
     # A hands B a slow message and ends its answer with `done` (#795): B thinks meanwhile,

@@ -5,13 +5,13 @@ group: agentic_advanced
 title: "one AI is the bot of a multi-user chat server — ten events over five channels and seven accounts (two shown as \"Sam\", one person on two accounts, a bot, a newcomer, a spoofed identity); a test-local people directory with many handles per person"
 runner: probe.py
 runtimes: [python]
-costs: turns
+costs: passes
 muted: "#170: the Python product keeps the old grant model; this probe drives it"
 long: true
 limits:
   idle_seconds: 120
-  max_turns: 120
-  no_progress_turns: 0
-  turn_chars: 120000
-  turn_seconds: 600
+  max_passes: 120
+  no_progress_passes: 0
+  pass_chars: 120000
+  pass_seconds: 600
 env: {FANTASTIC_AI_SEND_TIMEOUT: "600"}

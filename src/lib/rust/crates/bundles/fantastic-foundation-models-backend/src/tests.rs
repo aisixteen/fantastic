@@ -1,6 +1,6 @@
 //! foundation_models_backend against a fake engine (no model, no macOS 26): the
 //! record it takes, what it refuses at the write, what reflect shows, how ai-core's
-//! messages become one FMCore request, whole turns through a kernel, and
+//! messages become one FMCore request, whole passes through a kernel, and
 //! cancellation. The FMCore texts are pinned here AND checked against the swift
 //! `FMCore.swift` in this crate ([`the_pinned_texts_are_fmcores_words`]).
 
@@ -29,7 +29,7 @@ async fn pair_chat(
 }
 
 const TOO_BIG_4096: &str = "context_window must be a positive int no larger than the on-device model's window (4096 tokens)";
-const NOT_A_USER_TURN: &str = "RuntimeError: foundation_models_backend: the last message is not a user turn (role {role}) — the on-device session answers a prompt";
+const NOT_A_USER_MESSAGE: &str = "RuntimeError: foundation_models_backend: the last message is not a user message (role {role}) — the on-device session answers a prompt";
 
 fn bundle(engine: FakeEngine) -> FoundationModelsBackendBundle {
     FoundationModelsBackendBundle::new(Arc::new(engine))
@@ -398,7 +398,7 @@ async fn context_status_budgets_against_the_models_window() {
 // ── messages -> one request ─────────────────────────────────────────
 
 #[test]
-fn system_text_becomes_instructions_and_the_last_user_turn_the_prompt() {
+fn system_text_becomes_instructions_and_the_last_user_message_the_prompt() {
     let r = FoundationModelsProvider::request(
         &[
             content("system", "you are fm"),
@@ -415,12 +415,12 @@ fn system_text_becomes_instructions_and_the_last_user_turn_the_prompt() {
         r,
         FmRequest {
             instructions: "you are fm\n\nlate note".to_string(),
-            turns: vec![
-                FmTurn {
+            messages: vec![
+                FmMessage {
                     role: "user".to_string(),
                     content: "hi".to_string()
                 },
-                FmTurn {
+                FmMessage {
                     role: "assistant".to_string(),
                     content: "hello".to_string()
                 },
@@ -433,16 +433,16 @@ fn system_text_becomes_instructions_and_the_last_user_turn_the_prompt() {
 }
 
 #[test]
-fn a_list_not_ending_in_a_user_turn_is_refused() {
+fn a_list_not_ending_in_a_user_message_is_refused() {
     let refusal =
         |m: &[Value]| raised(&FoundationModelsProvider::request(m, None, None).unwrap_err());
     assert_eq!(
         refusal(&[content("user", "a"), content("assistant", "b")]),
-        NOT_A_USER_TURN.replace("{role}", "assistant")
+        NOT_A_USER_MESSAGE.replace("{role}", "assistant")
     );
     assert_eq!(
         refusal(&[content("system", "s")]),
-        NOT_A_USER_TURN.replace("{role}", "none")
+        NOT_A_USER_MESSAGE.replace("{role}", "none")
     );
 }
 
@@ -450,7 +450,7 @@ fn a_list_not_ending_in_a_user_turn_is_refused() {
 fn the_request_json_is_the_headers_shape() {
     let r = FmRequest {
         instructions: "be \"terse\"".to_string(),
-        turns: vec![FmTurn {
+        messages: vec![FmMessage {
             role: "user".to_string(),
             content: "é\n".to_string(),
         }],
@@ -460,7 +460,7 @@ fn the_request_json_is_the_headers_shape() {
     };
     assert_eq!(
         r.to_json(),
-        r#"{"instructions":"be \"terse\"","turns":[{"role":"user","content":"é\n"}],"prompt":"p","temperature":0.5,"max_tokens":null}"#
+        r#"{"instructions":"be \"terse\"","messages":[{"role":"user","content":"é\n"}],"prompt":"p","temperature":0.5,"max_tokens":null}"#
     );
 }
 
@@ -539,7 +539,7 @@ async fn dropping_a_live_stream_cancels_it_once_and_a_finished_one_not_at_all() 
     let engine = FakeEngine::new().hang();
     let req = FmRequest {
         instructions: String::new(),
-        turns: vec![],
+        messages: vec![],
         prompt: "p".to_string(),
         temperature: None,
         max_tokens: None,
@@ -598,9 +598,9 @@ async fn a_broken_bridge_delta_is_an_error_and_still_cancels_on_drop() {
     );
 }
 
-// ── whole turns through the kernel ──────────────────────────────────
+// ── whole passes through the kernel ──────────────────────────────────
 
-/// The `max_tokens` the engine was asked for on one turn of a chat whose knobs are `knobs`.
+/// The `max_tokens` the engine was asked for on one pass of a chat whose knobs are `knobs`.
 async fn asked_max_tokens(window: i64, knobs: Value) -> Option<i64> {
     let engine = Arc::new(
         FakeEngine::new()
@@ -626,7 +626,7 @@ async fn a_chat_with_no_max_tokens_asks_for_the_bounded_default() {
 }
 
 #[tokio::test]
-async fn a_send_streams_the_engines_text_and_replays_the_conversation_next_turn() {
+async fn a_send_streams_the_engines_text_and_replays_the_conversation_next_pass() {
     let engine = Arc::new(FakeEngine::new().context_size(32768).script(vec![
         vec![
             Step::Text("first "),
@@ -647,7 +647,7 @@ async fn a_send_streams_the_engines_text_and_replays_the_conversation_next_turn(
         !req0.instructions.is_empty(),
         "the system block is the instructions"
     );
-    assert!(req0.turns.is_empty());
+    assert!(req0.messages.is_empty());
     // each message is its stored text: no time head (the date is the system block's)
     let body = |text: &str| -> String { text.to_string() };
     assert_eq!(body(&req0.prompt), "hi");
@@ -660,21 +660,21 @@ async fn a_send_streams_the_engines_text_and_replays_the_conversation_next_turn(
     assert!(two.starts_with("second"), "{two}");
     let reqs = engine.requests();
     assert_eq!(reqs.len(), 2, "{reqs:?}");
-    let roles: Vec<&str> = reqs[1].turns.iter().map(|t| t.role.as_str()).collect();
+    let roles: Vec<&str> = reqs[1].messages.iter().map(|t| t.role.as_str()).collect();
     assert_eq!(roles, ["user", "assistant"]);
     assert_eq!(
-        reqs[1].turns[0].content, req0.prompt,
+        reqs[1].messages[0].content, req0.prompt,
         "the stored row renders as it was sent"
     );
-    assert!(body(&reqs[1].turns[1].content).starts_with("first "));
+    assert!(body(&reqs[1].messages[1].content).starts_with("first "));
     assert!(!req0.instructions.is_empty() && req0.instructions.contains("This thread began on "));
     assert_eq!(body(&reqs[1].prompt), "again");
 }
 
 #[tokio::test]
-async fn a_lean_system_prompt_turn_runs_in_the_real_on_device_window() {
+async fn a_lean_system_prompt_pass_runs_in_the_real_on_device_window() {
     // 4096 tokens, the window the SDK reports on macOS 27.0: a caller's own
-    // short system block is the instructions, verbatim, and the turn runs.
+    // short system block is the instructions, verbatim, and the pass runs.
     let engine = Arc::new(FakeEngine::new().context_size(4096));
     let fx = kernel(&engine, json!({})).await;
     // the chat's record holds the prompt: a send carries none
@@ -700,7 +700,7 @@ async fn a_lean_system_prompt_turn_runs_in_the_real_on_device_window() {
 #[tokio::test]
 async fn the_default_system_block_fits_the_on_device_window() {
     // With the verb docs out of the reflects and the howto tight, the kernel's
-    // default system block fits the 4096-token on-device window — the turn runs
+    // default system block fits the 4096-token on-device window — the pass runs
     // with no `system_prompt`.
     let engine = Arc::new(FakeEngine::new().context_size(4096));
     let fx = kernel(&engine, json!({})).await;
@@ -754,7 +754,7 @@ async fn an_unavailable_model_is_a_failure_no_retry_mends() {
 async fn unavailability_is_named_before_the_window_is_judged() {
     // The real window (4096) AND the default system block, which cannot fit: the
     // caller still reads WHY the model cannot answer, not `context_insufficient`
-    // — the availability refusal comes first in the turn (swift `makeProvider`,
+    // — the availability refusal comes first in the pass (swift `makeProvider`,
     // python `_get_provider`).
     let engine = Arc::new(
         FakeEngine::new()
@@ -777,7 +777,7 @@ async fn a_kernel_cancel_of_the_send_cancels_the_on_device_stream() {
     let engine = Arc::new(FakeEngine::new().hang());
     let fx = Arc::new(kernel(&engine, json!({})).await);
     fx.send_ack("hi", json!({})).await;
-    // wait for the generation to be in flight: the chat's turn (its provider completes it)
+    // wait for the generation to be in flight: the chat's pass (its provider completes it)
     let mut task_id = None;
     for _ in 0..200 {
         let table = call(&fx.k, "kernel", json!({"type": "ps"})).await;
@@ -948,7 +948,7 @@ async fn off_macos_the_engine_refuses_naming_the_platform() {
     assert_eq!(e.context_size(), crate::engine::FM_DOCUMENTED_CONTEXT_SIZE);
     let req = FmRequest {
         instructions: String::new(),
-        turns: vec![],
+        messages: vec![],
         prompt: "p".to_string(),
         temperature: None,
         max_tokens: None,

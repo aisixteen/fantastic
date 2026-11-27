@@ -25,7 +25,7 @@ pub struct AiSettings {
     pub id: String,
 }
 
-/// Change a live AI agent's fields (same backend): live on its next turn. The key stored for its endpoint is named and granted. Returns {configured, note}.
+/// Change a live AI agent's fields (same backend): live on its next pass. The key stored for its endpoint is named and granted. Returns {configured, note}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigureAi {

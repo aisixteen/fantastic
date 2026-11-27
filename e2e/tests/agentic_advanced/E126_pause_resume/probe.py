@@ -1,6 +1,6 @@
 """agentic_advanced/pause_resume — a paused agent holds its messages across a restart.
 
-Python runtime, NO MODEL (a stub provider). Turn 0 is answered; then `pause`, three
+Python runtime, NO MODEL (a stub provider). Pass 0 is answered; then `pause`, three
 messages sent while paused (each held, none reaches the model), a kernel RESTART (the
 pause and the queue live in the memory store), a fourth message, `resume`. Scored: the
 replies of each verb, the model seeing no held text while paused or at boot, the first

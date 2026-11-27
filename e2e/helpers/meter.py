@@ -16,10 +16,10 @@ plus `finish_reason` (Anthropic's `stop_reason`), time to first byte and total
 time, and the request's message count and content chars (a top-level Anthropic
 `system` counts into the chars). Headers are forwarded, never logged.
 
-THE TURN TEXT. Each request also lands as `turns/<tag>/<NNN>.txt` beside
+THE PASS TEXT. Each request also lands as `passes/<tag>/<NNN>.txt` beside
 `meter.jsonl`: the message the model was answering, its THINKING (the stream's
 `reasoning_content` / `reasoning`, which no log or history row shows) and its
-reply — written when the stream ends, so a turn cut at a timeout is kept too.
+reply — written when the stream ends, so a pass cut at a timeout is kept too.
 
     uv run python e2e/helpers/meter.py --port P --upstream URL --out meter.jsonl
 """
@@ -131,7 +131,7 @@ def app(upstream: str, out: str) -> Starlette:
     client = httpx.AsyncClient(timeout=None)
     # Open for the server's whole life, line-buffered: every request lands as it ends.
     sink = open(out, "a", buffering=1)  # noqa: SIM115
-    turns = Path(out).parent / "turns"
+    passes = Path(out).parent / "passes"
     seq: defaultdict[str, itertools.count] = defaultdict(lambda: itertools.count(1))
 
     async def forward(request: Request):
@@ -192,7 +192,7 @@ def app(upstream: str, out: str) -> Starlette:
                 await up.aclose()
                 rec["dur"] = round(time.time() - rec["t0"], 3)
                 sink.write(json.dumps(rec) + "\n")
-                d = turns / tag
+                d = passes / tag
                 d.mkdir(parents=True, exist_ok=True)
                 head = {
                     k: rec.get(k)

@@ -35,8 +35,8 @@ async def main():
         plant_fillers(N, pad_to=3000)
         await M.files(root)
         conn = await M.agent(root, core, BK, "ai")
-        conn.limits = _replace(conn.limits, max_turns=6)
-        task = (f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER TURN, in order. Then write "
+        conn.limits = _replace(conn.limits, max_passes=6)
+        task = (f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER PASS, in order. Then write "
                 f"`report.md` through `notes` listing every file you read, one per line. Then {DONE}")
         await drive(conn, task, client_id="ai", via="user")
         await conn.close()

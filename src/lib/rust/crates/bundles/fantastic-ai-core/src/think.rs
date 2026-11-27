@@ -2,7 +2,7 @@
 //!
 //! A reasoning model streams two things. ollama labels them `message.thinking` /
 //! `message.content`; vLLM labels them `reasoning_content` / `content`. We must
-//! read BOTH — a turn spent entirely reasoning is otherwise an empty completion
+//! read BOTH — a pass spent entirely reasoning is otherwise an empty completion
 //! that silently ends the chain. But we
 //! must not KEEP both: feeding a reasoning model its own prior deliberation back
 //! is against every vendor's guidance, and it compounds — a long early
@@ -175,10 +175,10 @@ pub fn without_thinking_fields(reply: &serde_json::Value) -> Option<serde_json::
     Some(out)
 }
 
-/// Per-TURN reasoning wrapper state, threaded through a provider's chunk decoder.
+/// Per-PASS reasoning wrapper state, threaded through a provider's chunk decoder.
 ///
 /// The span opens on the FIRST reasoning chunk and closes when content starts or
-/// the stream ends — **once per turn, never per chunk**. Per chunk the text would
+/// the stream ends — **once per pass, never per chunk**. Per chunk the text would
 /// be a confetti of tags and [`without_thinking`] would eat the answer along with
 /// the deliberation.
 #[derive(Debug, Default)]
@@ -192,7 +192,7 @@ impl ThinkWrap {
         Self { open: false }
     }
 
-    /// Reasoning-channel text arrived: `Some(THINK_OPEN)` on the turn's first
+    /// Reasoning-channel text arrived: `Some(THINK_OPEN)` on the pass's first
     /// reasoning chunk (emit it *before* the text), `None` while already open.
     pub fn open_marker(&mut self) -> Option<&'static str> {
         if self.open {
@@ -286,12 +286,12 @@ impl ThinkMeter {
 }
 
 /// Decode ONE OpenAI-style streaming `delta` into text pieces, reading BOTH
-/// channels. `wrap` carries the per-TURN reasoning span across deltas. A
+/// channels. `wrap` carries the per-PASS reasoning span across deltas. A
 /// property of the `/v1/chat/completions` streaming WIRE, not of a vendor.
 ///
 /// REASONING MODELS SPLIT THEIR OUTPUT. nemotron/deepseek-style models stream
 /// most tokens as `reasoning_content` and only the conclusion as `content`.
-/// Reading `content` alone silently drops whole turns — a model that spends an
+/// Reading `content` alone silently drops whole passes — a model that spends an
 /// entire pass reasoning returns an EMPTY completion, and the chain dies with no
 /// error anywhere.
 pub fn decode_openai_delta(delta: &serde_json::Value, wrap: &mut ThinkWrap) -> Vec<String> {
@@ -393,7 +393,7 @@ mod tests {
             without_thinking("before <think>deliberation</think> after"),
             "before  after"
         );
-        // Several spans, and a turn that is nothing but deliberation.
+        // Several spans, and a pass that is nothing but deliberation.
         assert_eq!(
             without_thinking("<think>a</think>one<think>b</think>two"),
             "onetwo"
@@ -448,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn wrap_opens_and_closes_once_per_turn() {
+    fn wrap_opens_and_closes_once_per_pass() {
         let mut w = ThinkWrap::new();
         assert_eq!(w.open_marker(), Some(THINK_OPEN));
         assert_eq!(w.open_marker(), None, "second reasoning chunk re-opens");
@@ -456,7 +456,7 @@ mod tests {
         assert_eq!(w.close_marker(), Some(THINK_CLOSE));
         assert_eq!(w.close_marker(), None, "closing twice emits a stray tag");
         assert!(!w.is_open());
-        // A content-only turn never opens a span.
+        // A content-only pass never opens a span.
         let mut w2 = ThinkWrap::new();
         assert_eq!(w2.close_marker(), None);
     }

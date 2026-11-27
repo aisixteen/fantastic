@@ -2,11 +2,11 @@
 //! `ai_core/tests/test_system_prompt_file.py`, over this harness.
 //!
 //! Placeholders `{self}` `{store}` `{howto}` are filled per agent and per
-//! turn in whichever prompt is in force; `{self}\n\n{howto}` IS the
+//! pass in whichever prompt is in force; `{self}\n\n{howto}` IS the
 //! default block. `file_bridge_id` (a file view) + `system_prompt_file` (its path)
 //! make a file — read THROUGH that view with its own verbs (`read`, `watch`), as the
-//! agent — the block, re-read on the next turn after the view reports it changed. Not
-//! set: nothing is looked up, the default block. Set and unusable: the turn FAILS,
+//! agent — the block, re-read on the next pass after the view reports it changed. Not
+//! set: nothing is looked up, the default block. Set and unusable: the pass FAILS,
 //! loud. Precedence: per-call > record > file > default.
 
 use super::*;
@@ -26,7 +26,7 @@ async fn update(kernel: &Arc<Kernel>, backend: &AgentId, field: &str, v: Value) 
         .result
 }
 
-async fn turn(
+async fn run_pass(
     kernel: &Arc<Kernel>,
     backend: &AgentId,
     s: &Arc<MockScript>,
@@ -41,14 +41,14 @@ async fn turn(
         .await
         .remove(0)
         .result;
-    assert!(until_passes(s, n).await, "turn {n} never ran");
+    assert!(until_passes(s, n).await, "pass {n} never ran");
     system_of(s, n - 1)
 }
 
 /// A pass that must fail loud: the model is not called, and the pass ends `failed`
 /// (reason `error`) on the agent's inbox, its `error` naming why — `{error}`. The
 /// message itself was acked when it was stored (#795).
-async fn failed_turn(kernel: &Arc<Kernel>, backend: &AgentId, s: &Arc<MockScript>) -> Value {
+async fn failed_pass(kernel: &Arc<Kernel>, backend: &AgentId, s: &Arc<MockScript>) -> Value {
     let mut rx = rebind_backend_inbox(kernel, backend);
     let before = s.passes_served();
     let r = crate::tests::settled(kernel, fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
@@ -120,7 +120,7 @@ async fn the_default_layout_in_placeholders_is_the_default_block() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "pf_ph").await;
     let s = script(&backend, passes(2), Duration::ZERO);
-    let default = turn(&kernel, &backend, &s, 1, json!({})).await;
+    let default = run_pass(&kernel, &backend, &s, 1, json!({})).await;
     update(
         &kernel,
         &backend,
@@ -128,7 +128,7 @@ async fn the_default_layout_in_placeholders_is_the_default_block() {
         json!("{self}\n\n{howto}"),
     )
     .await;
-    assert_eq!(turn(&kernel, &backend, &s, 2, json!({})).await, default);
+    assert_eq!(run_pass(&kernel, &backend, &s, 2, json!({})).await, default);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -148,11 +148,11 @@ async fn placeholders_fill_and_unknown_ones_stay() {
     .await;
     let s = script(&backend, passes(2), Duration::ZERO);
     assert_eq!(
-        turn(&kernel, &backend, &s, 1, json!({})).await,
+        run_pass(&kernel, &backend, &s, 1, json!({})).await,
         format!("store={store} {{nope}}")
     );
     update(&kernel, &backend, "system_prompt", json!("me={self}")).await;
-    let per_call = turn(&kernel, &backend, &s, 2, json!({})).await;
+    let per_call = run_pass(&kernel, &backend, &s, 2, json!({})).await;
     assert!(
         per_call.starts_with(&format!("me=You are `{}`.", backend.as_str())),
         "{per_call}"
@@ -160,14 +160,14 @@ async fn placeholders_fill_and_unknown_ones_stay() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_file_is_the_block_and_an_edit_is_live_next_turn() {
+async fn the_file_is_the_block_and_an_edit_is_live_next_pass() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "pf_file").await;
     std::fs::write(prompt_path(&tmp), "FILE-ROLE\n").unwrap();
     let view = name_file(&kernel, &backend).await;
     let s = script(&backend, passes(12), Duration::ZERO);
     assert_eq!(
-        turn(&kernel, &backend, &s, 1, json!({})).await,
+        run_pass(&kernel, &backend, &s, 1, json!({})).await,
         "FILE-ROLE\n"
     );
     // armed on the view with its own verbs: no refusal, the watch inbox held, the relay on
@@ -176,10 +176,10 @@ async fn the_file_is_the_block_and_an_edit_is_live_next_turn() {
     assert_eq!(view_watching(&kernel, &view).await, json!(true));
     tokio::time::sleep(Duration::from_millis(300)).await;
     std::fs::write(prompt_path(&tmp), "EDITED {self}\n").unwrap();
-    // the watcher marks it stale; the next turn after that reads it again
+    // the watcher marks it stale; the next pass after that reads it again
     let mut got = String::new();
     for n in 2..=10 {
-        got = turn(&kernel, &backend, &s, n, json!({})).await;
+        got = run_pass(&kernel, &backend, &s, n, json!({})).await;
         if got.starts_with("EDITED") {
             break;
         }
@@ -199,12 +199,12 @@ async fn a_record_prompt_beats_the_file_and_clearing_the_field_drops_it() {
     name_file(&kernel, &backend).await;
     update(&kernel, &backend, "system_prompt", json!("RECORD")).await;
     let s = script(&backend, passes(3), Duration::ZERO);
-    assert_eq!(turn(&kernel, &backend, &s, 1, json!({})).await, "RECORD");
+    assert_eq!(run_pass(&kernel, &backend, &s, 1, json!({})).await, "RECORD");
     update(&kernel, &backend, "system_prompt", Value::Null).await;
-    assert_eq!(turn(&kernel, &backend, &s, 2, json!({})).await, "FILE\n");
+    assert_eq!(run_pass(&kernel, &backend, &s, 2, json!({})).await, "FILE\n");
     assert!(kernel.inboxes.contains_key(&watch_inbox(&backend)));
     update(&kernel, &backend, "system_prompt_file", Value::Null).await;
-    let default = turn(&kernel, &backend, &s, 3, json!({})).await;
+    let default = run_pass(&kernel, &backend, &s, 3, json!({})).await;
     assert!(
         default.contains(&format!("You are `{}`.", backend.as_str())),
         "{default}"
@@ -215,13 +215,13 @@ async fn a_record_prompt_beats_the_file_and_clearing_the_field_drops_it() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_missing_file_fails_the_turn_until_it_appears() {
+async fn a_missing_file_fails_the_pass_until_it_appears() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "pf_miss").await;
     prompt_path(&tmp);
     name_file(&kernel, &backend).await;
     let s = script(&backend, passes(12), Duration::ZERO);
-    let r = failed_turn(&kernel, &backend, &s).await;
+    let r = failed_pass(&kernel, &backend, &s).await;
     assert!(
         r["error"]
             .as_str()
@@ -234,7 +234,7 @@ async fn a_missing_file_fails_the_turn_until_it_appears() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     std::fs::write(prompt_path(&tmp), "NOW\n").unwrap();
     let mut got = String::new();
-    // a turn before the watcher reported it still fails; one after reads it
+    // a pass before the watcher reported it still fails; one after reads it
     for _ in 1..=10 {
         tokio::time::sleep(Duration::from_millis(200)).await;
         let before = s.passes_served();
@@ -260,7 +260,7 @@ async fn a_path_without_file_bridge_id_fails_and_a_bridge_alone_is_the_default()
     let (kernel, backend) = mk_kernel(&tmp, "pf_nob").await;
     update(&kernel, &backend, "system_prompt_file", json!("prompt.md")).await;
     let s = script(&backend, passes(2), Duration::ZERO);
-    let r = failed_turn(&kernel, &backend, &s).await;
+    let r = failed_pass(&kernel, &backend, &s).await;
     assert!(
         r["error"]
             .as_str()
@@ -270,7 +270,7 @@ async fn a_path_without_file_bridge_id_fails_and_a_bridge_alone_is_the_default()
     );
     update(&kernel, &backend, "system_prompt_file", Value::Null).await;
     update(&kernel, &backend, "file_bridge_id", json!(leg(&backend))).await;
-    let block = turn(&kernel, &backend, &s, 1, json!({})).await;
+    let block = run_pass(&kernel, &backend, &s, 1, json!({})).await;
     assert!(
         block.contains(&format!("You are `{}`.", backend.as_str())),
         "{block}"
@@ -278,9 +278,9 @@ async fn a_path_without_file_bridge_id_fails_and_a_bridge_alone_is_the_default()
 }
 
 /// The loader sends only a file view's verbs: a bridge named as the view (the agent holding
-/// every verb on it) answers no `watch`, so the turn fails loud and nothing is read.
+/// every verb on it) answers no `watch`, so the pass fails loud and nothing is read.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_bridge_named_as_the_view_fails_the_turn() {
+async fn a_bridge_named_as_the_view_fails_the_pass() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "pf_brg").await;
     std::fs::write(prompt_path(&tmp), "BRIDGE-READ\n").unwrap();
@@ -289,7 +289,7 @@ async fn a_bridge_named_as_the_view_fails_the_turn() {
     let r = update(&kernel, &backend, "system_prompt_file", json!("prompt.md")).await;
     assert!(r.get("error").is_none(), "{r}");
     let s = script(&backend, passes(1), Duration::ZERO);
-    let r = failed_turn(&kernel, &backend, &s).await;
+    let r = failed_pass(&kernel, &backend, &s).await;
     let why = r["error"].as_str().unwrap_or_default();
     assert!(why.contains(&format!("{} watch", leg(&backend))), "{r}");
     assert!(!why.contains("BRIDGE-READ"), "{r}");
@@ -297,13 +297,13 @@ async fn a_bridge_named_as_the_view_fails_the_turn() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_empty_file_fails_the_turn() {
+async fn an_empty_file_fails_the_pass() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "pf_empty").await;
     std::fs::write(prompt_path(&tmp), " \n").unwrap();
     name_file(&kernel, &backend).await;
     let s = script(&backend, passes(1), Duration::ZERO);
-    let r = failed_turn(&kernel, &backend, &s).await;
+    let r = failed_pass(&kernel, &backend, &s).await;
     assert!(
         r["error"].as_str().unwrap_or_default().contains("empty"),
         "{r}"

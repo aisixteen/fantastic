@@ -266,7 +266,7 @@ pub(crate) fn fan_out(
             _ => Vec::new(),
         };
         if call.name != "send" || recipients.is_empty() {
-            // A PLAIN SEND TO A PEER AI carries `msg` too — the sending turn's
+            // A PLAIN SEND TO A PEER AI carries `msg` too — the sending pass's
             // id — so the peer's `[from … · msg N]` header names something the
             // sender can be asked about (python: `payload.setdefault("msg")`).
             let mut call = call;
@@ -392,7 +392,7 @@ pub(crate) struct OpenInquiry {
 }
 
 /// OPEN INQUIRIES (fully async), by the receiver's chain
-/// `(receiver, client_id)`. The answer the model gives in ANY turn of that chain —
+/// `(receiver, client_id)`. The answer the model gives in ANY pass of that chain —
 /// or the news that it ended without one — goes to the asker as a later message
 /// under the inquiry's pid. Python `_open_inquiries`.
 pub(crate) fn open_inquiries() -> &'static Mutex<HashMap<(String, String), OpenInquiry>> {
@@ -723,7 +723,7 @@ async fn route_typed(self_id: AgentId, kernel: Arc<Kernel>, routed: Routed, peer
     let mut streams = call_streams;
     // ONLY THE ANSWER ACTS: calls written inside thinking are
     // read as thinking — dispatch reads the answer.
-    // A malformed or foreign call never reaches this point: the turn re-asked its model
+    // A malformed or foreign call never reaches this point: the pass re-asked its model
     // inside the attempt loop (#766), so the answer routed is the accepted one.
     let answer = crate::call_check::repair(&crate::think::without_thinking(&text));
     let parsed = if cut {
@@ -820,7 +820,7 @@ async fn route_typed(self_id: AgentId, kernel: Arc<Kernel>, routed: Routed, peer
         if CONTROL_CALLS.contains(&call.name.as_str()) {
             // CONTROL CALLS, not dispatches. `done` ends the answer: nothing more
             // now, the next message wakes the agent; `inquiry_answer` hands this
-            // turn's answer back to whoever sent the inquiry (the `inquiry` verb
+            // pass's answer back to whoever sent the inquiry (the `inquiry` verb
             // reads it); `stop` ends the chain as failed. None is a send, none is an
             // error.
             continue;
@@ -841,7 +841,7 @@ async fn route_typed(self_id: AgentId, kernel: Arc<Kernel>, routed: Routed, peer
         // finished.
         //
         // Stopping is still the default and still costs nothing — it is
-        // emitting NO call. A dropped key costs a wasted turn instead of
+        // emitting NO call. A dropped key costs a wasted pass instead of
         // the whole task, and discarding a reply is something you must SAY
         // (`reply_to: null` / "none"), which is the right way round.
         // The tag grammar reads text (`<reply_to>1001</reply_to>` is "1001"): a
@@ -945,7 +945,7 @@ async fn route_typed(self_id: AgentId, kernel: Arc<Kernel>, routed: Routed, peer
         let mut payload = payload.clone();
         // A SELF-CALL INHERITS ITS CONVERSATION. `grep`, `pull` and `recall` are
         // per-client, and a call the MODEL makes belongs to the client whose
-        // turn it is — without this, a model-issued `grep` lands on the default
+        // pass it is — without this, a model-issued `grep` lands on the default
         // client and returns `total=0` against a store full of matches.
         let declares = |payload: &Map<String, Value>, field: &str| {
             payload
@@ -1329,7 +1329,7 @@ pub(crate) fn route_deadline(kernel: &Kernel) -> f64 {
 /// A CHAIN CUT BY A RESTART (#726). Everything is records: at its start the kernel
 /// settled the calls the previous process left in flight as dead letters
 /// ([`fantastic_kernel::executions::CutCall`]); the ones this agent's own tasks made
-/// and the messages sent to it reach it here, at its boot, as ONE notice turn of a
+/// and the messages sent to it reach it here, at its boot, as ONE notice message of a
 /// new chain. A reply it was waiting for will not come (resend or drop it); a message
 /// it held or was answering was cut, and its sender is told by its own dead letter.
 /// Never silent. A call made inside a dispatch (a pass's own store or provider call)
@@ -1353,7 +1353,7 @@ pub(crate) async fn resume_cut(
             let got = c.target == me && c.verb.as_deref() == Some("send");
             if made && c.target == me {
                 Some(format!(
-                    "[your own turn \u{b7} dead letter {}] a reply or reminder on its way to \
+                    "[your own pass \u{b7} dead letter {}] a reply or reminder on its way to \
                      you was cut before you read it",
                     c.id
                 ))

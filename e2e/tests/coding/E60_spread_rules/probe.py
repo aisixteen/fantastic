@@ -36,7 +36,7 @@ FB = "spread_fb"
 N = 12
 DONE = 'end your run by calling done — emit <call name="done"></call>'
 TASK = (
-    "Work through this sequence through the editor `notes`, ONE file per turn:\n"
+    "Work through this sequence through the editor `notes`, ONE file per pass:\n"
     "  read `rules_a.md`, then `filler_0.txt` … `filler_4.txt`,\n"
     "  read `rules_b.md`, then `filler_5.txt` … `filler_8.txt`,\n"
     "  read `rules_c.md`, then `filler_9.txt` … `filler_11.txt`.\n"

@@ -1,10 +1,10 @@
 """memory/fork_marks — two forks of one mark start from the same rows.
 
-Python runtime, NO MODEL: a stub provider answers seven live turns. After the sixth the
+Python runtime, NO MODEL: a stub provider answers seven live passes. After the sixth the
 agent marks its history; `fork_points` lists the mark; `fork {at}` runs twice on it.
 Scored: each fork holds the parent's rows up to the mark, byte for byte (ids and
-content), the two forks equal each other, the seventh turn reached neither, the mark
-reads back with `rows_after` 2 and the record's model, and an `at` that cuts a turn is
+content), the two forks equal each other, the seventh pass reached neither, the mark
+reads back with `rows_after` 2 and the record's model, and an `at` that cuts a pass is
 refused naming its reason and creates no agent.
 """
 
@@ -37,7 +37,7 @@ async def _call(root, payload, target="ai"):
     return (await root.send([{"target": target, "payload": payload}]))[0]["result"]
 
 
-async def _turn(root, text):
+async def _pass(root, text):
     r = await _call(root, {"type": "send", "text": text})
     assert not (isinstance(r, dict) and r.get("error")), r
     for _ in range(200):
@@ -46,7 +46,7 @@ async def _turn(root, text):
             await asyncio.sleep(0.2)
             if not await _live_tasks(root, "ai"):
                 return
-    raise AssertionError("the turn never went quiet")
+    raise AssertionError("the pass never went quiet")
 
 
 async def _rows(root, aid) -> list[dict]:
@@ -73,12 +73,12 @@ async def main():
         assert not r.get("error"), r
         await memory.open_ingress(root, memory.MEMORY, "ai")
         for i in range(6):
-            await _turn(root, f"task step {i}")
+            await _pass(root, f"task step {i}")
 
         marked = await _call(root, {"type": "mark", "label": "six steps done",
                                     "note": "before the seventh", "version": "abc123"})
         at = marked.get("at")
-        await _turn(root, "task step 6")
+        await _pass(root, "task step 6")
         points = await _call(root, {"type": "fork_points"})
         point = (points.get("points") or [{}])[0]
 
@@ -88,7 +88,7 @@ async def main():
         first = await _call(root, {"type": "fork", "at": at, "id": "twin_a"})
         second = await _call(root, {"type": "fork", "at": at, "id": "twin_b"})
         a_rows, b_rows = await _rows(root, "twin_a"), await _rows(root, "twin_b")
-        # an `at` inside a turn (the 2nd conversation row: a question without its answer)
+        # an `at` inside a pass (the 2nd conversation row: a question without its answer)
         conv = [r for r in parent_rows if r.get("role") in ("user", "assistant")]
         cut = await _call(root, {"type": "fork", "at": conv[0]["id"], "id": "twin_cut"})
         listed = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]["result"]
@@ -106,16 +106,16 @@ async def main():
             ("both forks reply {id, copied, at}",
              first.get("id") == "twin_a" and second.get("id") == "twin_b"
              and first.get("at") == at and first.get("copied") == len(prefix) == second.get("copied")),
-            ("the parent held more than the prefix (a seventh turn)", len(parent_rows) > len(prefix) + 2),
+            ("the parent held more than the prefix (a seventh pass)", len(parent_rows) > len(prefix) + 2),
             ("fork A holds exactly the parent's rows up to the mark, ids and content alike",
              _dump(a_rows) == _dump(prefix)),
             ("fork B holds exactly the parent's rows up to the mark, ids and content alike",
              _dump(b_rows) == _dump(prefix)),
             ("the two forks are the same rows", _dump(a_rows) == _dump(b_rows)),
-            ("the seventh turn reached neither fork",
+            ("the seventh pass reached neither fork",
              all("task step 6" not in json.dumps(rs) for rs in (a_rows, b_rows))),
-            ("an at inside a turn is refused cuts_turn and no agent is created",
-             cut.get("reason") == "cuts_turn" and "twin_cut" not in agents),
+            ("an at inside a pass is refused cuts_pass and no agent is created",
+             cut.get("reason") == "cuts_pass" and "twin_cut" not in agents),
         ]
         for name, ok in checks:
             print(f"  [{'ok' if ok else 'XX'}] {name}")

@@ -82,10 +82,10 @@ pub struct BackendState {
     /// Fold rows written since the last automatic `context_recall` — python
     /// `_folds_since`. Every `RECALL_EVERY`-th batch marks a recall due.
     pub folds_since: Mutex<usize>,
-    /// A `context_recall` is owed at the start of the next turn — python
+    /// A `context_recall` is owed at the start of the next pass — python
     /// `_recall_due`. "When it feels it folded, it runs context_recall": at the
-    /// start of the NEXT turn, over the new head. Debounced, because a recall is
-    /// a model call and one after every fold batch doubled the turn price.
+    /// start of the NEXT pass, over the new head. Debounced, because a recall is
+    /// a model call and one after every fold batch doubled the pass price.
     pub recall_due: Mutex<bool>,
     /// Where the last assembled body came from — `"array"` (the view array),
     /// `"store"` (no view yet) or `"store (stale array)"`. Python `_view_source`,
@@ -107,7 +107,7 @@ pub struct BackendState {
     /// to say whether the prompt cache is still warm. Python `_last_send`.
     pub last_send_secs: Mutex<Option<f64>>,
     /// The provider and model the chat's `provider_capabilities` were last checked for in
-    /// this incarnation: the provider is asked again at the first turn after a boot and
+    /// this incarnation: the provider is asked again at the first pass after a boot and
     /// whenever either changes (#622).
     pub caps_checked: Mutex<Option<(String, String)>>,
     /// Image rows a `recall` brought back: shown whole in the next request, once.
@@ -131,7 +131,7 @@ pub struct BackendState {
     /// Token counts with no row yet (#766, 1.7): they land on the next stored assistant
     /// row ([`crate::used::land`]); a process that dies loses them.
     pub(crate) used_pending: Mutex<crate::used::Pending>,
-    /// The model type of the chat's last finished turn pass (#766, 1.7): the calibration
+    /// The model type of the chat's last finished pass (#766, 1.7): the calibration
     /// belongs to it, and is cleared before a pass of another type is projected.
     pub(crate) last_type: Mutex<Option<&'static str>>,
     /// How many trace rows the chat's store holds (#766, 1.10): RAM, read from the store
@@ -378,7 +378,7 @@ pub(crate) fn take_current(agent_id: &AgentId) -> Option<CurrentEntry> {
 /// shapes, which are NOT the same dict with a flag.
 ///
 /// WITH a requesting client the block is BUILT: `{phase, send_id, started_at,
-/// elapsed, is_mine}`, plus this caller's own text when the turn is theirs.
+/// elapsed, is_mine}`, plus this caller's own text when the pass is theirs.
 /// WITHOUT one it is the in-flight ENTRY with its text-bearing keys removed
 /// (`_redact_text`), so it keeps `client_id` and `queued_at` and carries the
 /// entry's own key order. Rust answered one shape for both, with `client_id`

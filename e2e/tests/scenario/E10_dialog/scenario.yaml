@@ -17,7 +17,7 @@ task: >-
   store the number 42 in a document named exactly 'answer' (no extension). Then say ANSWER STORED.
 
 limits:
-  max_turns: 10
+  max_passes: 10
   idle_seconds: 100
 
 # The fixture, by ROLE rather than by bundle name: a compiled kernel can only

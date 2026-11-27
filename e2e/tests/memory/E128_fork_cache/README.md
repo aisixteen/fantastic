@@ -1,10 +1,10 @@
 # E128 fork cache
 
-TURNS tier, the Anthropic plug (`BACKEND=anthropic`, see `e2e/README.md`); without the plug
+PASSES tier, the Anthropic plug (`BACKEND=anthropic`, see `e2e/README.md`); without the plug
 or its key the run prints `E2E-SKIP:` and is reported as skipped. Python runtime.
 
 An agent with `caching: provider_cache` is given a long first message (the primer, named by
-`cache_primer_until`) and takes two turns, so the provider has cached the prefix. It marks
+`cache_primer_until`) and takes two passes, so the provider has cached the prefix. It marks
 its history, and a fork of that mark takes its first send. Scored on the fork's
 cache-read tokens (the backend's own count of what the API reported) being above zero:
 the fork's prompt starts with the parent's bytes, so it hits the parent's cache.

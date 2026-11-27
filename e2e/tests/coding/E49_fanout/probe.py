@@ -1,10 +1,10 @@
-"""coding/fanout — tool parallelism: N lookups in ONE turn's batch. LLM-driven.
+"""coding/fanout — tool parallelism: N lookups in ONE pass's batch. LLM-driven.
 
 Codex `tool_parallelism.rs` proves a model can fan out independent calls in a
 single step. Our substrate's batch send + the `N of M in batch` reply tags ARE
 the oracle: the answer needs five facts, each in its own file, and the model
-must read all five in ONE turn — a batch to the editor whose grouped reply is
-tagged `· k of 5 in batch`. Five serial turns get the answer too but fail the
+must read all five in ONE pass — a batch to the editor whose grouped reply is
+tagged `· k of 5 in batch`. Five serial passes get the answer too but fail the
 tag check, which is the point.
 """
 
@@ -59,9 +59,9 @@ async def main():
 
         task = (
             "Five files `part_0.txt` … `part_4.txt` each hold one token. In a "
-            "SINGLE turn, read ALL FIVE at once through the editor `notes` "
-            "(five `read` calls in one turn — reflect `notes` for the shape; do "
-            "NOT read them one per turn). Then write their tokens joined by "
+            "SINGLE pass, read ALL FIVE at once through the editor `notes` "
+            "(five `read` calls in one pass — reflect `notes` for the shape; do "
+            "NOT read them one per pass). Then write their tokens joined by "
             "hyphens IN ORDER (part_0 first) to `answer.md`, nothing else. "
             f"When it is written, {DONE}."
         )
@@ -74,7 +74,7 @@ async def main():
         await human_line(root, conn.id)
         await drive(conn, task, client_id="fan", via="user")
         await conn.close()
-        # the batch tag lives in the DELIVERED reply turn — read the kernel's
+        # the batch tag lives in the DELIVERED reply pass — read the kernel's
         # own history, not the model-output transcript (E53's lesson).
         hist = {"messages": await store_rows(root, core, "ai")}
         joined = str(hist.get("messages", hist))
@@ -82,7 +82,7 @@ async def main():
         got = Path("answer.md").read_text().strip() if Path("answer.md").exists() else ""
         checks = [
             ("the answer joins all five tokens in order", got == expected),
-            ("the five reads rode ONE turn's batch", " of 5 in batch" in joined),
+            ("the five reads rode ONE pass's batch", " of 5 in batch" in joined),
         ]
         for name, ok in checks:
             print(f"  [{'ok' if ok else 'XX'}] {name}")

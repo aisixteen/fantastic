@@ -1,6 +1,6 @@
 """backends/system_prompt_file — an AI agent's system block from a FILE. NO MODEL.
 
-A scripted Responses endpoint (`runners/_responses_stub.py`: every turn answers
+A scripted Responses endpoint (`runners/_responses_stub.py`: every pass answers
 `done`, every request body recorded — the system block is its `instructions`) and,
 on the PACKAGED host of `RUNTIME` (rust), every call through
 `web_rest`: a `file_bridge` exposing `prompt.md`, its file view `pf` of that path,
@@ -12,18 +12,18 @@ the pass FAILS loud (its `failed` status names why), the model is never called:
 
   1. the file is the block, its placeholders filled per agent (`{store}`), an
      unknown `{…}` kept verbatim;
-  2. an editor's save (a direct write) is the block on a following turn — no
+  2. an editor's save (a direct write) is the block on a following pass — no
      restart — and `{self}` is this agent's identity;
   3. an atomic save (a temp file renamed over) is seen too;
   4. precedence: the record's `system_prompt` beats the file; null brings it back;
   5. `{self}\\n\\n{howto}` in the file == the default block, byte for byte;
-  6. the file deleted → the turn fails naming the path (and reflect's
+  6. the file deleted → the pass fails naming the path (and reflect's
      `system_prompt_file_error` says it); written again → the file once more, the
      error gone;
-  7. a view the agent holds no line on → the turn fails with the unknown answer
+  7. a view the agent holds no line on → the pass fails with the unknown answer
      for the view, nothing of the file reaches the model; the line written into
      the agent's `can` → the file reads (the view cannot block it);
-  8. a path with no `file_bridge_id` → the turn fails; `file_bridge_id` alone →
+  8. a path with no `file_bridge_id` → the pass fails; `file_bridge_id` alone →
      the default block;
   9. a malformed value is refused at the write.
 
@@ -94,7 +94,7 @@ def main() -> int:
             return {"error": f"relay {src} refused: {str(r)[:200]}", "relay": True}
         return r.get("result") or {}
 
-    def turn() -> str:
+    def one_pass() -> str:
         """One `send`; the system block the model got for it."""
         before = len(stub.requests)
         hk.send("ai", {"type": "send", "text": "go"})
@@ -106,12 +106,12 @@ def main() -> int:
             return "<no request>"
         return str(stub.requests[-1]["body"].get("instructions"))
 
-    def turn_until(pred, tries: int = 12) -> str:
-        """Turns until `pred(block)` (the watcher marks the text stale; a turn
+    def pass_until(pred, tries: int = 12) -> str:
+        """Passes until `pred(block)` (the watcher marks the text stale; a pass
         after that reads it again)."""
         got = ""
         for _ in range(tries):
-            got = turn()
+            got = one_pass()
             if pred(got):
                 break
             time.sleep(0.25)
@@ -121,7 +121,7 @@ def main() -> int:
         time.sleep(0.3)  # one save per watcher burst
         prompt.write_text(text)
 
-    def failed_turn() -> dict:
+    def failed_pass() -> dict:
         """A pass that must fail loud: the send is acked (#795), its `failed` status
         names why (`error`), no model request."""
         before = len(stub.requests)
@@ -133,13 +133,13 @@ def main() -> int:
     def failed_until(pred, tries: int = 12) -> dict:
         r: dict = {}
         for _ in range(tries):
-            r = failed_turn_quiet()
+            r = failed_pass_quiet()
             if pred(r):
                 break
             time.sleep(0.25)
         return r
 
-    def failed_turn_quiet() -> dict:
+    def failed_pass_quiet() -> dict:
         before = len(stub.requests)
         out = run_pass(hk, "ai", {"type": "send", "text": "go"}, bound=15)
         return {"error": out["error"] or "", "_called": len(stub.requests) > before}
@@ -232,31 +232,31 @@ def main() -> int:
                 f"refused at the write: {field}={v!r} → {str(r)[:160]}",
             )
 
-        default = turn()
+        default = one_pass()
         need("You are `ai`." in default, "nothing set: the default block")
 
         # 8 · a path with no file_bridge_id fails; file_bridge_id alone is the default
         update("ai", system_prompt_file=PATH)
-        r = failed_turn()
+        r = failed_pass()
         need(
             "no file_bridge_id" in str(r.get("error")),
             f"a path without file_bridge_id fails loud: {str(r)[:200]}",
         )
         update("ai", system_prompt_file=None)
         update("ai", file_bridge_id="pf")
-        b = turn()
+        b = one_pass()
         need("You are `ai`." in b, "file_bridge_id alone: the default block")
         r = update("ai", system_prompt_file=PATH)
         need(r.get("updated") is True, f"system_prompt_file set: {str(r)[:200]}")
 
         # 1 · the file is the block; {store} filled, an unknown {…} kept
-        b = turn()
+        b = one_pass()
         need(b == "ROLE-ONE store=memory {nope}\n", f"the file is the block: {b[:120]!r}")
         need(reflect_error() is None, "no system_prompt_file_error while it reads")
 
-        # 2 · an editor's save, live on a following turn; {self} filled
+        # 2 · an editor's save, live on a following pass; {self} filled
         save("ROLE-TWO {self}\n")
-        b = turn_until(lambda s: s.startswith("ROLE-TWO"))
+        b = pass_until(lambda s: s.startswith("ROLE-TWO"))
         need(b.startswith("ROLE-TWO You are `ai`."), f"an editor's save is live: {b[:120]!r}")
 
         # 3 · an atomic save (temp + rename over)
@@ -264,22 +264,22 @@ def main() -> int:
         tmp = work / ".prompt.md.tmp"
         tmp.write_text("ROLE-THREE\n")
         os.replace(tmp, prompt)
-        b = turn_until(lambda s: s == "ROLE-THREE\n")
+        b = pass_until(lambda s: s == "ROLE-THREE\n")
         need(b == "ROLE-THREE\n", f"an atomic save is live: {b[:120]!r}")
 
         # 4 · precedence: record > file; null brings the file back
         update("ai", system_prompt="RECORD")
-        b = turn()
+        b = one_pass()
         need(b == "RECORD", f"the record's system_prompt beats the file: {b[:80]!r}")
         update("ai", system_prompt=None)
-        b = turn()
+        b = one_pass()
         need(b == "ROLE-THREE\n", f"null: the file again: {b[:80]!r}")
 
         # 5 · the default layout in placeholders IS the default block
         save("{self}\n\n{howto}")
-        layout = turn_until(lambda s: "You are `ai`." in s)
+        layout = pass_until(lambda s: "You are `ai`." in s)
         update("ai", system_prompt_file=None)
-        plain = turn()
+        plain = one_pass()
         need(
             layout == plain and "You are `ai`." in plain,
             f"{{self}}\\n\\n{{howto}} == the default block "
@@ -287,21 +287,21 @@ def main() -> int:
         )
         update("ai", system_prompt_file=PATH)
 
-        # 6 · deleted → the turn fails + the error; written again → the file
+        # 6 · deleted → the pass fails + the error; written again → the file
         save("BACK\n")
-        turn_until(lambda s: s == "BACK\n")
+        pass_until(lambda s: s == "BACK\n")
         time.sleep(0.3)
         prompt.unlink()
         r = failed_until(lambda r: "prompt.md" in str(r.get("error")))
         need(
             "prompt.md" in str(r.get("error"))
             and not r.get("_called"),
-            f"the file deleted: the turn fails loud: {str(r)[:200]}",
+            f"the file deleted: the pass fails loud: {str(r)[:200]}",
         )
         why = reflect_error()
         need("prompt.md" in str(why), f"reflect names why: {why!r}")
         save("AGAIN\n")
-        b = turn_until(lambda s: s == "AGAIN\n")
+        b = pass_until(lambda s: s == "AGAIN\n")
         need(b == "AGAIN\n", f"written again: the file once more: {b[:80]!r}")
         need(reflect_error() is None, "the error is gone once a read succeeds")
 
@@ -312,16 +312,16 @@ def main() -> int:
              "ai holds no line on pf_sealed")
         r = update("ai", file_bridge_id="pf_sealed", system_prompt_file="sealed.md")
         need(r.get("updated") is True, f"ai names pf_sealed: {str(r)[:200]}")
-        r = failed_turn()
+        r = failed_pass()
         need(
             "no agent 'pf_sealed'" in str(r.get("error"))
             and "SECRET-ROLE" not in str(r),
-            f"no line on the view: the turn fails with the unknown answer: {str(r)[:200]}",
+            f"no line on the view: the pass fails with the unknown answer: {str(r)[:200]}",
         )
         # the line written into the AI's own `can`: the file reads (the view cannot block)
         r = update("ai", can={**AI_CAN, "pf_sealed": call(*VIEW_VERBS)})
         need(r.get("updated") is True, f"ai's can gains the pf_sealed line: {str(r)[:200]}")
-        b = turn_until(lambda s: s == "SECRET-ROLE\n")
+        b = pass_until(lambda s: s == "SECRET-ROLE\n")
         need(b == "SECRET-ROLE\n", f"with the line, the sealed file is the block: {b[:80]!r}")
     finally:
         hk.close()

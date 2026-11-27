@@ -305,9 +305,9 @@ async fn restart_child() {
         assert_eq!(named.result["n"], json!(1));
         let dead = call(&k, "probe", json!({"type": "fail"})).await;
         assert_eq!(dead.status.as_str(), "failed");
-        // an AI turn, then a clear-fold over it
-        let turn = call(&k, "ai", json!({"type": "send", "text": "remember the lighthouse"})).await;
-        assert!(turn.result.get("error").is_none(), "{}", turn.result);
+        // an AI pass, then a clear-fold over it
+        let pass = call(&k, "ai", json!({"type": "send", "text": "remember the lighthouse"})).await;
+        assert!(pass.result.get("error").is_none(), "{}", pass.result);
         let cleared = call(&k, "ai", json!({"type": "context_clear", "why": "new thread"})).await.result;
         let fold = cleared["cleared"].as_i64().unwrap_or_else(|| panic!("no clear-fold: {cleared}"));
         let head = call(&k, "ai", json!({"type": "history"})).await.result;

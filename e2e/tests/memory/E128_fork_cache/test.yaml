@@ -6,12 +6,12 @@ group: memory
 title: "a fork's first send reads the parent's prompt cache: the Anthropic reply's cache-read tokens are above zero"
 runner: probe.py
 runtimes: [python]
-costs: turns
+costs: passes
 muted: "#170: the Python product keeps the old grant model; this probe drives it"
 limits:
   idle_seconds: 90
-  max_turns: 8
-  no_progress_turns: 8
-  turn_chars: 120000
-  turn_seconds: 300
+  max_passes: 8
+  no_progress_passes: 8
+  pass_chars: 120000
+  pass_seconds: 300
 env: {}

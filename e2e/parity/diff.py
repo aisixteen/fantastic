@@ -77,7 +77,7 @@ class Norm:
                "after", "next", "bundles_next", "view_ids", "killed", "covers",
                # an AI status event's `msg` — the id of the message it is about.
                "msg",
-               # a streaming part's anchor — the message id the turn answers
+               # a streaming part's anchor — the message id the pass answers
                # (`part_start.re`).
                "re"}
     COUNT_KEYS = {"bytes", "size", "body_len", "content-length", "__bytes_len__"}
@@ -733,7 +733,7 @@ def by_mark_and_sock(entries: list) -> list:
 
     `wire/frames.jsonl` is every frame on every socket in one arrival-ordered
     list. Order inside ONE socket is a contract (C76 — a state stream within one
-    subscription, B2.13 — a turn's token/status sequence) and is kept exactly.
+    subscription, B2.13 — a pass's token/status sequence) and is kept exactly.
     The order in which two INDEPENDENT sockets received the same broadcast is
     not: two runs of the same immutable tree can swap `ctrl` and `proto`.
 
@@ -783,12 +783,12 @@ def by_mark_and_sock(entries: list) -> list:
 #:
 #: WHY. A PTY is a BYTE STREAM; where it is cut into `output` events is read
 #: timing, not behaviour. Python's single event loop runs the pty fd callback
-#: only after the in-flight write dispatch has finished, so one shell turn's
+#: only after the in-flight write dispatch has finished, so one shell pass's
 #: echo + output + prompt arrive in one read and are coalesced BY ACCIDENT; the
 #: ports read on their own thread and see each write as it lands. No runtime has
 #: coalescing code, so there is nothing to mirror.
 #:
-#: The runtimes split one shell turn's output into different numbers of frames
+#: The runtimes split one shell pass's output into different numbers of frames
 #: while the CONCATENATED BYTES are identical. Because the frame stream is
 #: diffed POSITIONALLY, one extra frame would cascade into every later line.
 #:
@@ -988,7 +988,7 @@ def shape_of(x, depth: int = 0):
 # they are rewritten while they are read), and that is unchanged.
 #
 # It is normalised in the HARNESS rather than by making the ports' debounce
-# imitate python's event-loop turn boundaries — that would be a new timing
+# imitate python's event-loop pass boundaries — that would be a new timing
 # contract in three runtimes, to make a write count match that measures nothing
 # but which thread read the rows.
 
@@ -1189,7 +1189,7 @@ def bagify(x, keys, top=False):
 _PH = re.compile(r"<ID#(\d+):(int|str)>")
 
 
-#: N19 — ROW-ID ORDER WITHIN A TURN.
+#: N19 — ROW-ID ORDER WITHIN A PASS.
 #:
 #: WHAT IT NORMALISES. N4 replaces a minted row id with `<ID#n>` numbered BY
 #: FIRST APPEARANCE, i.e. by MINT ORDER. This pass throws that numbering away and
@@ -1205,7 +1205,7 @@ _PH = re.compile(r"<ID#(\d+):(int|str)>")
 #:
 #: WHY. Python's single event loop cannot run a spawned task body until the
 #: handler that spawned it SUSPENDS; rust's runs concurrently on another thread.
-#: So within one turn 2–3 ids are handed out in a different order on the two
+#: So within one pass 2–3 ids are handed out in a different order on the two
 #: runtimes, and the sequence RE-CONVERGES on the next row — the same rows, the
 #: same parents, the same content, a permuted id assignment.
 #:
@@ -1538,18 +1538,18 @@ SELF_REFLECT_FILES = ("ai_paths/events.json", "ai_paths/cases/cycle.json")
 
 
 def canon_self_reflect(events: list) -> list:
-    """N21 — an agent busy with one turn is sent a PEER message (a `send` event
+    """N21 — an agent busy with one pass is sent a PEER message (a `send` event
     with no `client_id`) and, a moment later, the reply its own earlier call was
-    waiting for. The peer turn's self-`reflect` (the agent reflecting itself as
+    waiting for. The peer pass's self-`reflect` (the agent reflecting itself as
     its prompt is assembled) and the reply's DELIVERY race: python records the
     reflect right after the peer `send`; a port may record the reply's `send` and
     its `queued` status first. That order is not a contract.
 
     Canonical form: the first `reflect` after a peer `send` is moved to right
     after it, but ONLY across `send` events and `queued` statuses. A `thinking`
-    status (a turn STARTED) or anything else in between ends the search — so the
-    case where the two turns themselves ran in the other order (rust: the reply's
-    turn thinks first) is NOT reordered and stays a diff line."""
+    status (a pass STARTED) or anything else in between ends the search — so the
+    case where the two passes themselves ran in the other order (rust: the reply's
+    pass thinks first) is NOT reordered and stays a diff line."""
     out = list(events)
     i = 0
     while i < len(out):
@@ -1982,7 +1982,7 @@ _STUB_AGENT = re.compile(r"\bid=(\w+)\s+model=")
 
 def pair_stub_requests(fa: dict, fb: dict) -> dict:
     """N22 — `ai_paths` runs TWO AI agents, and the stub numbers their requests in
-    ARRIVAL order across both: when `ai2`'s turn reaches the stub before `ai`'s,
+    ARRIVAL order across both: when `ai2`'s pass reaches the stub before `ai`'s,
     every number after it shifts, so paired files would read as wholly
     different. Each
     AGENT's own request sequence is a contract and stays compared, in order: the
@@ -2340,7 +2340,7 @@ def cmd_rulecheck() -> int:
         print(f"  {'ok  ' if ok else 'FAIL'} N18 — {name}: {len(lines)} line(s), "
               f"expected {'>0' if want else '0'}")
 
-    # ── N19 — row-id order within a turn. ──────────────────────────────────
+    # ── N19 — row-id order within a pass. ──────────────────────────────────
     # A PERMUTATION of the ids among rows minted in the same window must be 0
     # lines; a dropped row, a re-parented row and a changed body must not be.
     def R(i, parent=None, verb="send", agent="ai", kind="call", extra=None):
@@ -2352,7 +2352,7 @@ def cmd_rulecheck() -> int:
             r.update(extra)
         return r
 
-    # The shape: a handler row (41) spawns two rows in one turn; python
+    # The shape: a handler row (41) spawns two rows in one pass; python
     # mints the task before the call, rust the other way round, and everything
     # after re-converges.
     base = {"rows": [R(41, verb="boot"), R(42, 41, verb="think"),
@@ -2366,7 +2366,7 @@ def cmd_rulecheck() -> int:
     changed = {"rows": [R(41, verb="boot"), R(42, 41, verb="THINK"),
                         R(43, 41, verb="reply", kind="task"), R(44, 41, verb="settle")]}
     n19 = [
-        ("a permutation of ids minted in one turn is not a difference", base, perm, False),
+        ("a permutation of ids minted in one pass is not a difference", base, perm, False),
         ("a DROPPED row is still a difference", base, dropped_row, True),
         ("a RE-PARENTED row is still a difference", base, reparented, True),
         ("a changed verb is still a difference", base, changed, True),
@@ -2415,7 +2415,7 @@ def cmd_rulecheck() -> int:
     # them; everything else in the same entry stays exact, and a ZERO stays a
     # zero so "no system block at all" cannot hide in "a shorter one".
     def census(bytes_, sysc, messages=3, keys=("model", "messages")):
-        return [{"n": 1, "agent": "a", "kind": "turn", "phase": "live", "name": "t",
+        return [{"n": 1, "agent": "a", "kind": "pass", "phase": "live", "name": "t",
                  "bytes": bytes_, "system_chars": sysc, "messages": messages,
                  "has_context_notice": False, "keys": list(keys)}]
 
@@ -2635,11 +2635,11 @@ def cmd_rulecheck() -> int:
          lambda: compare_json("t/frames.jsonl", frames_view([R1, OUT, E1]),
                               frames_view([E1, OUT, R1]), Norm({}, None, "python"),
                               Norm({}, None, "rust")), True),
-        ("N21 — the peer turn's self-reflect after the reply's delivery",
+        ("N21 — the peer pass's self-reflect after the reply's delivery",
          lambda: cjr({"ai": canon_self_reflect([PEER, SELF, REPLY, QUEUED, THINK])},
                      {"ai": canon_self_reflect([PEER, REPLY, QUEUED, SELF, THINK])},
                      "ai_paths/events.json"), False),
-        ("N21 — the two TURNS in the other order is still a line",
+        ("N21 — the two PASSES in the other order is still a line",
          lambda: cjr({"ai": canon_self_reflect([PEER, SELF, REPLY, QUEUED, THINK])},
                      {"ai": canon_self_reflect([PEER, REPLY, THINK, SELF])},
                      "ai_paths/events.json"), True),

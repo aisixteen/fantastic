@@ -209,7 +209,7 @@ async fn http_errors_are_classed_by_the_shared_classifier() {
         (404, ErrorClass::Permanent(NOT_FOUND)),
         (429, ErrorClass::Transient),
         (503, ErrorClass::Transient),
-        (400, ErrorClass::Turn),
+        (400, ErrorClass::Pass),
     ] {
         assert_eq!(status_refusal(code).await.class, want, "HTTP {code}");
     }
@@ -312,7 +312,7 @@ fn a_reasoning_summary_is_the_thought_channel_too() {
 }
 
 #[test]
-fn all_thought_turn_still_closes_the_wrapper() {
+fn all_thought_pass_still_closes_the_wrapper() {
     let body = sse(&[
         json!({"type": "response.reasoning_text.delta", "delta": "hm"}),
         done("completed", None, 1),
@@ -321,7 +321,7 @@ fn all_thought_turn_still_closes_the_wrapper() {
 }
 
 #[test]
-fn a_cut_main_turn_is_an_error_and_a_bounded_cut_an_answer() {
+fn a_cut_main_pass_is_an_error_and_a_bounded_cut_an_answer() {
     let body = text(&["half a "], "incomplete", Some("max_output_tokens"));
     let (_, verdict, report) = decode_all(&body, false);
     let why = verdict.expect("an unbounded cut is an error");
@@ -584,7 +584,7 @@ async fn send_streams_tokens_raw_on_both_channels() {
 }
 
 /// `endpoint` is REQUIRED on the record — refused AT THE WRITE (the kind's
-/// schema), naming the field and what it is, never only at the first turn.
+/// schema), naming the field and what it is, never only at the first pass.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_record_without_an_endpoint_is_refused_at_the_write_naming_it() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -884,7 +884,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
 }
 
 /// A 200 whose body starts and then stops: the connection stays open and silent,
-/// the stall under test. The read clock, not the connection, ends the turn (#177).
+/// the stall under test. The read clock, not the connection, ends the pass (#177).
 fn quiet_response(content_type: &str, body: &str) -> (Vec<u8>, bool) {
     (
         format!(

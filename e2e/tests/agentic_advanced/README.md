@@ -28,7 +28,7 @@ itself. `subai`'s task says so explicitly — it did not always, and the omissio
 cost real runs that scored as model failures while the fixture was withholding
 lines the task required. `selftest.py` exists because of that.
 
-These are the most expensive tests in the suite: long idle windows, high turn
+These are the most expensive tests in the suite: long idle windows, high pass
 caps, and several model-driven agents alive at once.
 
 E124 (self-managed groups) needs a model key and the polyglot clone. Without a

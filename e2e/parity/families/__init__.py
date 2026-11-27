@@ -144,7 +144,7 @@ def quiesce(stub, k, *, agent: str = "ai", max_s: float = 120, still: float = 4.
     `ps` shows no task for `agent`.
 
     Two conditions, not one. A stub that has gone quiet can simply be between
-    turns, and a `ps` that is empty for an instant can be a turn that has not
+    passes, and a `ps` that is empty for an instant can be a pass that has not
     been queued yet; waiting on both makes the chains reproducible instead of
     length-dependent.
     """

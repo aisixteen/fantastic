@@ -1,8 +1,8 @@
 //! THE INPUT LINE, and the two palettes that hang off it.
 //!
-//! One honest thing this must never hide: a second message sent while a turn holds
+//! One honest thing this must never hide: a second message sent while a pass holds
 //! the backend's lock is QUEUED, not an interrupt. It is linked to the running
-//! turn and it does not steer it. The composer says so in the hint, because a
+//! pass and it does not steer it. The composer says so in the hint, because a
 //! human who believes they interrupted a model and did not has been lied to by
 //! their tool.
 //!

@@ -154,7 +154,7 @@ async fn a_line_is_the_chats_state_its_reflect_and_an_event_on_its_inbox() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_turn_of_a_line_alone_is_a_turn_with_no_call() {
+async fn a_pass_of_a_line_alone_is_a_pass_with_no_call() {
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_kernel(&tmp, "ls_alone").await;
     offer(&kernel, &agent).await;
@@ -165,7 +165,7 @@ async fn a_turn_of_a_line_alone_is_a_turn_with_no_call() {
     );
     say(&kernel, &agent, "go").await;
     assert!(until_passes(&s, 2).await);
-    // re-asked inside the turn (#795): nothing of the attempt ran, its line included
+    // re-asked inside the pass (#795): nothing of the attempt ran, its line included
     assert!(
         s.request(1)
             .contains(&crate::tests::json_text(crate::model_format::default::REPORT_NO_CALL)),
@@ -327,7 +327,7 @@ async fn closed(kernel: &Arc<Kernel>, agent: &AgentId, tag: &str) -> i64 {
     a
 }
 
-/// One projection, as a turn runs it, every summariser ask answered with [`SUMMARY`].
+/// One projection, as a pass runs it, every summariser ask answered with [`SUMMARY`].
 async fn project(kernel: &Arc<Kernel>, agent: &AgentId) -> Arc<MockScript> {
     let s = script(
         agent,

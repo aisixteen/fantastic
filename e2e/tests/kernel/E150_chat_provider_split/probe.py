@@ -9,7 +9,7 @@ its `provider_id` names (`complete`, `watch`). Rust lane (`runtimes: [rust]`), d
      names the provider and holds no `endpoint`; its `history` holds the transcript; the
      provider's holds none;
   2. swap: `update_agent` the chat's `provider_id` to a second provider (another server): the
-     next turn reaches the second server, and that request carries the earlier rows;
+     next pass reaches the second server, and that request carries the earlier rows;
   3. lines: a chat with no line on its provider is refused by the provider's name (`cannot
      watch provider …`) and the server sees no request from it; a chat HOLDING the line
      completes and the provider's record is byte-equal before and after (the target can
@@ -17,7 +17,7 @@ its `provider_id` names (`complete`, `watch`). Rust lane (`runtimes: [rust]`), d
      cap) is refused by the provider's name and the server sees nothing;
   4. across the bridge (MUTED while `MUTED_4` is set, #763): the provider on a SECOND kernel that
      dials the first through a `ws_bridge` (as E118): the chat names it `<guid>|<id>`, the second
-     kernel's bridge is the leg that serves the call there, and the turn completes through it.
+     kernel's bridge is the leg that serves the call there, and the pass completes through it.
 
 Every line is the caller's own `can`; nothing is written on a target.
 """
@@ -103,21 +103,21 @@ def idle(hk: HostKernel, aid: str, bound: float = 60) -> bool:
     return False
 
 
-def turns_at_least(m: VllmMock, n: int, bound: float = 60) -> list[dict]:
+def passes_at_least(m: VllmMock, n: int, bound: float = 60) -> list[dict]:
     end = time.monotonic() + bound
     while time.monotonic() < end:
-        if len(m.turns()) >= n:
+        if len(m.passes()) >= n:
             break
         time.sleep(0.05)
-    return m.turns()
+    return m.passes()
 
 
-def messages(turn: dict) -> str:
-    return json.dumps(turn["body"].get("messages") or [])
+def messages(one_pass: dict) -> str:
+    return json.dumps(one_pass["body"].get("messages") or [])
 
 
 def refused_by_name(hk: HostKernel, cid: str, pid: str, bound: float = 30) -> str:
-    """Send a turn to chat `cid`; the text, once it names the refusal of provider `pid`."""
+    """Send a message to chat `cid`; the text, once it names the refusal of provider `pid`."""
     out = hk.send(cid, {"type": "send", "text": "hello there"})
     want = f"cannot watch provider `{pid}`"
     end = time.monotonic() + bound
@@ -154,9 +154,9 @@ def across_the_bridge(spec: dict, hk: HostKernel) -> None:
         mfar.reply("Answer from the far kernel." + DONE)
         out = hk.send(REMOTE_AI, {"type": "send", "text": "Ask the far provider."})
         need(not out.get("error"), f"the chat accepts a send: {short(out, 160)}")
-        turns_f = turns_at_least(mfar, 1)
-        need(idle(hk, REMOTE_AI), "the remote-provider turn settles")
-        need(len(turns_f) == 1, f"the far kernel's server saw the request: {len(turns_f)}")
+        passes_f = passes_at_least(mfar, 1)
+        need(idle(hk, REMOTE_AI), "the remote-provider pass settles")
+        need(len(passes_f) == 1, f"the far kernel's server saw the request: {len(passes_f)}")
         need("Answer from the far kernel." in history_text(hk, REMOTE_AI),
              "the transcript is on the chat's kernel; the provider's is on the far one")
         need("Answer from the far kernel." not in history_text(far, REMOTE_PROV),
@@ -181,9 +181,9 @@ def main() -> int:
         ma.reply("First answer." + DONE)
         out = hk.send(AI, {"type": "send", "text": "Say the first thing."})
         need(not out.get("error"), f"the chat accepts a send: {short(out, 160)}")
-        turns = turns_at_least(ma, 1)
-        need(idle(hk, AI), "the chat's turn settles")
-        need(len(turns) == 1, f"the provider's server saw one request: {len(turns)}")
+        passes = passes_at_least(ma, 1)
+        need(idle(hk, AI), "the chat's pass settles")
+        need(len(passes) == 1, f"the provider's server saw one request: {len(passes)}")
         rec = record(hk, AI)
         need(rec.get("provider_id") == PROV and rec.get("endpoint") is None,
              f"the chat's record names its provider and holds no endpoint: provider_id="
@@ -206,15 +206,15 @@ def main() -> int:
         mb.reply("Second answer." + DONE)
         out = hk.send(AI, {"type": "send", "text": "Now the second thing."})
         need(not out.get("error"), f"the chat accepts a send: {short(out, 160)}")
-        turns_b = turns_at_least(mb, 1)
-        need(idle(hk, AI), "the swapped chat's turn settles")
-        need(len(turns_b) == 1 and len(ma.turns()) == 1,
-             f"the next turn went to the second server only: b={len(turns_b)} a={len(ma.turns())}")
-        sent = messages(turns_b[0]) if turns_b else ""
-        need(MODEL_B == (turns_b[0]["body"].get("model") if turns_b else None),
+        passes_b = passes_at_least(mb, 1)
+        need(idle(hk, AI), "the swapped chat's pass settles")
+        need(len(passes_b) == 1 and len(ma.passes()) == 1,
+             f"the next pass went to the second server only: b={len(passes_b)} a={len(ma.passes())}")
+        sent = messages(passes_b[0]) if passes_b else ""
+        need(MODEL_B == (passes_b[0]["body"].get("model") if passes_b else None),
              "the request names the chat's model")
         need("First answer." in sent and "Say the first thing." in sent,
-             "the request to the new provider carries the rows of the earlier turn")
+             "the request to the new provider carries the rows of the earlier pass")
         need("Second answer." in history_text(hk, AI), "the chat's history holds the second answer")
 
         # ── 3 · the lines: the caller's own, and the cap ──
@@ -224,17 +224,17 @@ def main() -> int:
         seen = refused_by_name(hk, NO_GRANT, PROV)
         need(f"cannot watch provider `{PROV}`" in seen,
              f"a chat with no line on its provider is refused by the provider's name: {seen[:200]}")
-        need(len(ma.turns()) == 1, f"it never reached the server: {len(ma.turns())} request(s) in all")
+        need(len(ma.passes()) == 1, f"it never reached the server: {len(ma.passes())} request(s) in all")
         # (a) a chat holding the line completes; the provider's record is untouched
         prov_before = json.dumps(hk.stored(PROV), sort_keys=True)
         chat(hk, HOLDS_LINE, PROV, MODEL_A, {PROV: COMPLETE})
         ma.reply("Third answer." + DONE)
         out = hk.send(HOLDS_LINE, {"type": "send", "text": "The third thing."})
         need(not out.get("error"), f"the chat holding the line accepts a send: {short(out, 160)}")
-        turns_at_least(ma, 2)
-        need(idle(hk, HOLDS_LINE), "its turn settles")
-        need(len(ma.turns()) == 2 and "Third answer." in history_text(hk, HOLDS_LINE),
-             f"a chat holding the line completes: {len(ma.turns())} request(s) in all")
+        passes_at_least(ma, 2)
+        need(idle(hk, HOLDS_LINE), "its pass settles")
+        need(len(ma.passes()) == 2 and "Third answer." in history_text(hk, HOLDS_LINE),
+             f"a chat holding the line completes: {len(ma.passes())} request(s) in all")
         need(json.dumps(hk.stored(PROV), sort_keys=True) == prov_before and prov_before != "{}",
              "the provider's record is byte-equal before and after (it can neither widen nor block)")
         # (b) the cap: the line held under an ancestor whose tree does not hold the provider.
@@ -247,7 +247,7 @@ def main() -> int:
         need(f"cannot watch provider `{PROV}`" in seen,
              f"the cap: {MID} holds no line on {PROV}, so its child's call is refused by the "
              f"provider's name: {seen[:200]}")
-        need(len(ma.turns()) == 2, f"the capped chat never reached the server: {len(ma.turns())} in all")
+        need(len(ma.passes()) == 2, f"the capped chat never reached the server: {len(ma.passes())} in all")
 
         # ── 4 · the provider on another kernel, across the bridge ──
         print("\n── 4 · across the bridge ──", flush=True)

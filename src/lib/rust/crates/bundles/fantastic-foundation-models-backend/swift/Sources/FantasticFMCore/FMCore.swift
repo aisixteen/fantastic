@@ -95,10 +95,10 @@ public enum FMReason {
 
 // MARK: - the request
 
-/// One prior turn of the conversation: `user` (a prompt the model was given) or
-/// `assistant` (what it answered). System text is never a turn — it is the
+/// One prior message of the conversation: `user` (a prompt the model was given) or
+/// `assistant` (what it answered). System text is never a message — it is the
 /// request's `instructions`.
-public struct FMTurn: Sendable, Equatable {
+public struct FMMessage: Sendable, Equatable {
     public var role: String
     public var content: String
 
@@ -108,36 +108,36 @@ public struct FMTurn: Sendable, Equatable {
     }
 }
 
-/// One generation: the instructions, the prior turns (rebuilt into the
+/// One generation: the instructions, the prior messages (rebuilt into the
 /// session's transcript, in order), the prompt to answer, and the two options
 /// the backend exposes. A nil option is the model's own default.
 public struct FMRequest: Sendable, Equatable {
     public var instructions: String
-    public var turns: [FMTurn]
+    public var messages: [FMMessage]
     public var prompt: String
     public var temperature: Double?
     public var maxTokens: Int?
 
     public init(
-        instructions: String, turns: [FMTurn], prompt: String,
+        instructions: String, messages: [FMMessage], prompt: String,
         temperature: Double? = nil, maxTokens: Int? = nil
     ) {
         self.instructions = instructions
-        self.turns = turns
+        self.messages = messages
         self.prompt = prompt
         self.temperature = temperature
         self.maxTokens = maxTokens
     }
 
-    /// The roles a transcript turn may carry.
+    /// The roles a transcript message may carry.
     public static let ROLES = ["user", "assistant"]
 
     /// Refuse what a session cannot take, before any model call — the same
     /// checks, and the same words, whichever runtime sent the request.
     public func validate() throws(FMError) {
-        for (i, t) in turns.enumerated() where !Self.ROLES.contains(t.role) {
+        for (i, t) in messages.enumerated() where !Self.ROLES.contains(t.role) {
             throw FMError(
-                "turn \(i) has role \(jsonString(t.role)) — a transcript turn is user or "
+                "message \(i) has role \(jsonString(t.role)) — a transcript message is user or "
                     + "assistant (system text goes in instructions)")
         }
         if let t = temperature, !(t.isFinite && t >= 0) {
@@ -149,9 +149,9 @@ public struct FMRequest: Sendable, Equatable {
     }
 
     /// Parse the C ABI's `request_json`:
-    /// `{"instructions":str,"turns":[{"role":str,"content":str}],"prompt":str,
+    /// `{"instructions":str,"messages":[{"role":str,"content":str}],"prompt":str,
     ///   "temperature":number|null?,"max_tokens":int|null?}`.
-    /// `instructions`, `turns` and `prompt` are required; other keys are ignored.
+    /// `instructions`, `messages` and `prompt` are required; other keys are ignored.
     public init(json: Data) throws(FMError) {
         let wire: Wire
         do {
@@ -163,17 +163,17 @@ public struct FMRequest: Sendable, Equatable {
         }
         self.init(
             instructions: wire.instructions,
-            turns: wire.turns.map { FMTurn(role: $0.role, content: $0.content) },
+            messages: wire.messages.map { FMMessage(role: $0.role, content: $0.content) },
             prompt: wire.prompt, temperature: wire.temperature, maxTokens: wire.max_tokens)
     }
 
     private struct Wire: Decodable {
-        struct Turn: Decodable {
+        struct Message: Decodable {
             let role: String
             let content: String
         }
         let instructions: String
-        let turns: [Turn]
+        let messages: [Message]
         let prompt: String
         let temperature: Double?
         let max_tokens: Int?
@@ -192,7 +192,7 @@ public struct FMRequest: Sendable, Equatable {
         return "a \(name)"
     }
 
-    /// A decoding failure as the path it failed at — `turns[1].role is missing`.
+    /// A decoding failure as the path it failed at — `messages[1].role is missing`.
     private static func describe(_ e: DecodingError) -> String {
         func path(_ keys: [CodingKey]) -> String {
             var out = ""

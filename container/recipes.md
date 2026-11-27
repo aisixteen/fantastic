@@ -131,7 +131,7 @@ container the store's `env` backend is the fit — pass the key at launch
 `--api-key` takes none: leave `credentials` off. Durable
 memory = files on a DATA `file_bridge` (`root=.fantastic/data allow='["."]'` — keep it
 apart from the `.fantastic` records store, which holds every agent's grants); the
-model decides what to save and recalls it on a fresh turn — judgment emerges, it
+model decides what to save and recalls it on a fresh pass — judgment emerges, it
 isn't coded.
 
 ---

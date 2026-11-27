@@ -17,7 +17,7 @@
 //! a known kind (design: `tmp/canvas_ai.md`). The cell's AI agent is built from
 //! one of the user's SAVED SET-UPS, and only the CLI may read those
 //! (`kern/saved`), so the page asks `canvas_root`. The AI is its direct
-//! child, on the PROJECT's memory store from its first turn (owner D4,
+//! child, on the PROJECT's memory store from its first pass (owner D4,
 //! 2026-10-03: no per-cell RAM store; a closed, unkept cell's rows stay in
 //! SQLite). Its record holds its own lines (`$parent` `send`, the store, the system
 //! block, its provider), handed out by the canvas node from its own lines; the person
@@ -530,7 +530,7 @@ impl BackendBundle {
 
     /// Make AI `ai` as `me`'s direct children: a PROVIDER (`<ai>_provider`: the spec's backend
     /// handler, endpoint, models, key, prices) and the CHAT `ai` (`ai_chat.tools`, `provider_id`
-    /// naming the provider), both on the project's memory store from the first turn (owner D4).
+    /// naming the provider), both on the project's memory store from the first pass (owner D4).
     /// The chat's record holds its lines on the store and on the provider's `complete` / `watch`;
     /// the provider's its line on the store (and its key's `get`). A spec whose handler is
     /// `ai_chat.tools` makes the chat alone, on the provider it names (#632: the caller names the
@@ -700,7 +700,7 @@ impl BackendBundle {
             }
         }
         // an AI is made the way every AI is (`make_ai`): a provider and its chat, on the project's
-        // memory store from its first turn, the chat holding its lines on its store and its
+        // memory store from its first pass, the chat holding its lines on its store and its
         // provider. Equipment that is an AI reaches its memory store through this.
         if is_ai {
             let ai = match want_id {
@@ -915,7 +915,7 @@ impl BackendBundle {
         .await;
     }
 
-    /// KEEP: the AI is on the project's memory store from its first turn, so a
+    /// KEEP: the AI is on the project's memory store from its first pass, so a
     /// kept dialog is a recorded one — its name, saved set-up and how to re-make it.
     async fn keep(host: &Host, by: &By, a: verbs::Keep, done: Done<Value>) {
         Self::keep_with(host, by, a.id, a.name, None, done).await;

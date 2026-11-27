@@ -5,7 +5,7 @@
 //! - `ai` is a chat on a PROVIDER (`ai_provider`, the backend). On the SAME backend the provider
 //!   is RE-POINTED (its endpoint, its own fields) and
 //!   what the server decides is CLEARED, so the backend reads it from the server
-//!   before its first turn (and writes it back);
+//!   before its first pass (and writes it back);
 //! - on a DIFFERENT backend it is remade: deleted and created again under the
 //!   same id on the same store (the dialog's rows are keyed by the id, so the
 //!   conversation carries over; its own grants are written again);

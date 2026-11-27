@@ -2,10 +2,10 @@
 # and the kernel's own provider agent per provider with an `ai_chat.tools` chat through it, driven over web_rest.
 id: provider_mocks
 group: backends
-title: "the provider mocks (vllm, ollama, responses, anthropic) answer each backend for real: a turn's text, the probes a record leaves to the server, the key on every request, an HTTP error and a refused key fail the turn loud"
+title: "the provider mocks (vllm, ollama, responses, anthropic) answer each backend for real: a pass's text, the probes a record leaves to the server, the key on every request, an HTTP error and a refused key fail the pass loud"
 runner: probe.py
 runtimes: [rust]
 costs: free
 limits:
   idle_seconds: 120
-  turn_seconds: 300
+  pass_seconds: 300

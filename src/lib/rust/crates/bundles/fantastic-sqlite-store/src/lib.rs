@@ -1196,7 +1196,7 @@ impl Handler for SqliteStoreBundle {
         let out = match call {
             Call::Reflect(_) => self.reflect(agent_id, kernel),
             // Opens the file (the schema ensured): a bad `path` fails LOUD here,
-            // at boot, not on the first turn.
+            // at boot, not on the first pass.
             Call::Boot(_) => match self.conn(agent_id, kernel) {
                 Ok(_) => return Ok(None),
                 Err(e) => e,

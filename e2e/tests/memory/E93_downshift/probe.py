@@ -1,7 +1,7 @@
 """memory/downshift — the window shrinks under a running agent.
 
 The agent works at a large window (no compaction needed); then its record is updated
-to a small window — as a model switch would. Its next turn is fitted to the new window:
+to a small window — as a model switch would. Its next pass is fitted to the new window:
 compaction fires, and nothing is `too_small`."""
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ async def main():
         plant_fillers(N, pad_to=4000)
         await M.files(root)
         conn = await M.agent(root, core, BK, "ai", window=64000, record={"context_async": False})
-        await drive(conn, f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER TURN. Do not write "
+        await drive(conn, f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER PASS. Do not write "
                           f"anything. After the last one, {DONE}", client_id="ai", via="user")
         before = len(conn.compactions)
         r = await M.call(root, root.id, {"type": "update_agent", "id": "ai", "context_window": 12000, "num_ctx": 12000})
@@ -44,10 +44,10 @@ async def main():
               f"too_small={too_small} update={str(r)[:80]}")
         ok = M.report([
             ("no compaction at the large window", before == 0),
-            ("the next turn after the switch compacted", len(conn.compactions) > before),
+            ("the next pass after the switch compacted", len(conn.compactions) > before),
             ("never too_small", not too_small),
         ])
-        verdict(ok, "fitted to the smaller window on the very next turn" if ok else "a downshift check failed")
+        verdict(ok, "fitted to the smaller window on the very next pass" if ok else "a downshift check failed")
     finally:
         await close()
 

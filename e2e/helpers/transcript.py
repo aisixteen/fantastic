@@ -16,7 +16,7 @@ ASSISTANT text — so the wire view is sufficient for a verdict. It is not
 sufficient for `SHOW_SYSTEM=1`, and a wire source says so rather than printing an
 empty box and letting you conclude the system block was empty.
 
-Both sources expose the same three things the drive loop needs: how many turns
+Both sources expose the same three things the drive loop needs: how many passes
 have landed (`n`), the assistant text so far (`transcript`), and a list of trips
 to abort on.
 """
@@ -30,22 +30,22 @@ from typing import Protocol, runtime_checkable
 class TranscriptSource(Protocol):
     """The contract the drive loop depends on — not a provider, not a socket."""
 
-    #: turns that have LANDED (completed), not turns started
+    #: passes that have LANDED (completed), not passes started
     n: int
-    #: one entry per landed turn: the assistant text of that turn
+    #: one entry per landed pass: the assistant text of that pass
     transcript: list[str]
     #: appended by whatever notices a runaway; non-empty aborts the run
     trips: list[str]
 
     @property
     def text(self) -> str:
-        """Every turn joined — what the probes' scoring regexes read."""
+        """Every pass joined — what the probes' scoring regexes read."""
         ...
 
     def sees_prompt(self) -> bool:
         """True when this source can show what the model was GIVEN.
 
-        `SHOW_SYSTEM` and the per-turn `USER →` boxes are only meaningful when
+        `SHOW_SYSTEM` and the per-pass `USER →` boxes are only meaningful when
         this is true. A wire source returns False so the difference is stated
         rather than silently rendered as nothing.
         """

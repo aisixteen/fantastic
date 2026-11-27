@@ -23,7 +23,7 @@ SCORING is split, deliberately:
           which the AI writes. The trap is symmetric: opening everything fails
           exactly like opening nothing, so a line on all three is not a shortcut.
   SOFT  — observations, reported but never asserted: did a plan artifact appear
-          anywhere, and did the last turn report back in prose.
+          anywhere, and did the last pass report back in prose.
 """
 
 from __future__ import annotations
@@ -60,8 +60,8 @@ from helpers.kernel import open_kernel, home
 BK = _resolve_backend()
 BACKEND, MODEL = BK.name, BK.model
 CTX = int(os.environ.get("CTX", "262144"))
-# IDLE is silence-since-the-last-pass, so it must exceed ONE turn's wall clock, not
-# the run's: a late turn is a long prompt plus a thought plus an answer, and too
+# IDLE is silence-since-the-last-pass, so it must exceed ONE pass's wall clock, not
+# the run's: a late pass is a long prompt plus a thought plus an answer, and too
 # short an IDLE gives up MID-RUN, where the truncation reads as a model failure. The
 # launcher sets it from `test.yaml`.
 IDLE = float(os.environ.get("IDLE", "240"))
@@ -69,17 +69,17 @@ SHOW_SYSTEM = os.environ.get("SHOW_SYSTEM") == "1"
 # A CEILING. Without one this harness has no end but IDLE, and a model can keep
 # re-verifying a posture already set.
 # 0 = no cap.
-MAX_TURNS = int(os.environ.get("MAX_TURNS", "40"))
+MAX_PASSES = int(os.environ.get("MAX_PASSES", "40"))
 NO_PROGRESS = int(os.environ.get("NO_PROGRESS", "8"))
-TURN_CHARS = int(os.environ.get("TURN_CHARS", "120000"))
-TURN_SECONDS = float(os.environ.get("TURN_SECONDS", "600"))
+PASS_CHARS = int(os.environ.get("PASS_CHARS", "120000"))
+PASS_SECONDS = float(os.environ.get("PASS_SECONDS", "600"))
 # Every bound in ONE object, carrying this probe's own tuned values.
 LIM = Limits(
     idle=IDLE,
-    max_turns=MAX_TURNS,
+    max_passes=MAX_PASSES,
     no_progress=NO_PROGRESS,
-    turn_chars=TURN_CHARS,
-    turn_seconds=TURN_SECONDS,
+    pass_chars=PASS_CHARS,
+    pass_seconds=PASS_SECONDS,
     ctx=CTX,
     show_system=os.environ.get("SHOW_SYSTEM") == "1",
 )
@@ -401,7 +401,7 @@ async def main():
     print("═" * (W + 4))
 
     # SURFACE A FAILED SEND. `ai_core` returns {"error": ...} rather than raising —
-    # a turn that timed out or errored otherwise reads as a model that produced
+    # a pass that timed out or errored otherwise reads as a model that produced
     # nothing — a harness failure wearing a model failure's clothes (e.g. a cold GPU
     # pushing the first prompt past `FANTASTIC_AI_SEND_TIMEOUT`). Raise `FANTASTIC_AI_SEND_TIMEOUT` for a cold cache.
     # THE TASK COMES FROM THE HUMAN: `user` dispatches it as itself, so it is
@@ -432,10 +432,10 @@ async def main():
     # process, and `conn.proxy` is the same object on either transport.
     spy = conn.proxy
     capped = ""
-    # STOP ON NO PROGRESS, NOT ON TURN COUNT: a fixed turn budget cannot tell
+    # STOP ON NO PROGRESS, NOT ON PASS COUNT: a fixed pass budget cannot tell
     # "slower" from "worse", and under parallel load it can cut work the probe
     # finishes solo. The re-verify-forever
-    # loop the cap exists to end has a signature the turn count does not: turns that
+    # loop the cap exists to end has a signature the pass count does not: passes that
     # mutate nothing.
     stale = 0
     seen_writes = -1
@@ -447,30 +447,30 @@ async def main():
             seen_writes, stale = writes, 0
         elif spy.n != last:
             stale += 1
-        # CHAIN DEATH. The tripwires examine each TURN, so a model that simply
-        # stops producing turns evades every one of them and the run sits out the
+        # CHAIN DEATH. The tripwires examine each PASS, so a model that simply
+        # stops producing passes evades every one of them and the run sits out the
         # full IDLE before scoring. The shared check (`helpers.ai.ChainEnd`) ends
-        # the run 30 s after the last turn with nothing of the AI's in flight, or
+        # the run 30 s after the last pass with nothing of the AI's in flight, or
         # DONE_QUIET after a `done` call with nothing in flight anywhere.
         if spy.n == last and last > 0:
             _cap, _busy = await ender.check(spy.transcript, idle)
             if _cap:
                 capped = _cap
         if runaway:
-            # A turn blew the per-turn bound: the model is looping INSIDE one pass
-            # and no turn-counting cap can see it.
-            capped = "RUNAWAY TURN — " + runaway[-1]
+            # A pass blew the per-pass bound: the model is looping INSIDE one pass
+            # and no pass-counting cap can see it.
+            capped = "RUNAWAY PASS — " + runaway[-1]
         elif NO_PROGRESS and stale >= NO_PROGRESS:
-            capped = f"NO_PROGRESS={NO_PROGRESS} turns with no new call"
-        elif MAX_TURNS and spy.n >= MAX_TURNS:
-            capped = f"MAX_TURNS={MAX_TURNS}"
+            capped = f"NO_PROGRESS={NO_PROGRESS} passes with no new call"
+        elif MAX_PASSES and spy.n >= MAX_PASSES:
+            capped = f"MAX_PASSES={MAX_PASSES}"
         if capped:
-            # Cancel the in-flight turn through the TASK TABLE — the same `ps` /
+            # Cancel the in-flight pass through the TASK TABLE — the same `ps` /
             # `cancel` an operator would use, not a private kill switch.
             # ps/cancel are KERNEL verbs — the ROOT answers them, and a task id
             # already names its own agent. Addressed to `aid` (non-root) they came
             # back `not_here` and the harness, which discards the reply, cancelled
-            # NOTHING: the cap only broke its own loop while the turns kept running.
+            # NOTHING: the cap only broke its own loop while the passes kept running.
             _t = (
                 (
                     (
@@ -514,7 +514,7 @@ async def main():
             )
             if any(t.get("agent") == aid and t.get("verb") != "ps" for t in _rows):
                 print(
-                    f"  … idle {idle:.0f}s but a turn is STILL GENERATING — waiting on",
+                    f"  … idle {idle:.0f}s but a pass is STILL GENERATING — waiting on",
                     flush=True,
                 )
                 idle = 0.0
@@ -567,16 +567,16 @@ async def main():
         for f in os.listdir(".")
         if os.path.isfile(f) and not f.endswith((".py", ".jsonl")) and ".tmp." not in f
     )
-    last_turn = transcript[-1] if transcript else ""
+    last_message = transcript[-1] if transcript else ""
     plan_words = sum(
         w in " ".join(transcript).lower() for w in ("plan", "step", "first", "then")
     )
     print(f"\n  observed — memory documents after the run : {docs[:8]}")
     print(f"  observed — planning language in run : {plan_words}/4 markers")
     print(
-        f"  observed — final turn is prose      : {not last_turn.lstrip().startswith('<call ')}"
+        f"  observed — final message is prose      : {not last_message.lstrip().startswith('<call ')}"
     )
-    print(f"  observed — final turn length        : {len(last_turn)} chars")
+    print(f"  observed — final message length        : {len(last_message)} chars")
     (
         await root.send(
             [

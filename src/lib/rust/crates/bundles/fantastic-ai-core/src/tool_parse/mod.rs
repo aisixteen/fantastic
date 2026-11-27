@@ -6,7 +6,7 @@
 //!  - [`crate::route::route_reply`] — every completion is scanned and each call
 //!    found is dispatched, with its reply delivered to its own `reply_to`. This
 //!    is the path a chain continues on. A shape this module does not recognize is
-//!    a turn that silently does nothing, which is why [`malformed_calls`] exists.
+//!    a pass that silently does nothing, which is why [`malformed_calls`] exists.
 //!  - [`crate::projection::reaction_from`] — scans the DURABLE transcript for
 //!    whether the model reacted to a compaction notice (e.g. by emitting a
 //!    `recall`/persist call).
@@ -121,7 +121,7 @@ pub fn terminated_calls(text: &str) -> Vec<(ToolCall, String)> {
 
 /// Non-streaming: pull every finalized `<call>` out of a complete string. A call
 /// with no `</call>` is NOT a call: the model stopped generating before it closed,
-/// so nothing is dispatched — the turn's cut marker names it as not sent
+/// so nothing is dispatched — the pass's cut marker names it as not sent
 /// ([`crate::stream_parts::cut_marker`]). A call written inside a wrapper tag is not
 /// one either (#188): the router refuses it, so folds and projection, which read the
 /// same calls, do not count it.
@@ -158,7 +158,7 @@ impl MalformedCall {
 ///
 /// Exists because a call that cannot be read is the one failure a model cannot
 /// debug: [`extract_tool_calls`] returns `[]` for it, which is byte-identical to
-/// a turn that emitted no call at all — and that means "done": nothing parsed,
+/// a pass that emitted no call at all — and that means "done": nothing parsed,
 /// nothing dispatched, no error came back, and the run ends looking finished
 /// with the task untouched. Models self-correct from an error out loud, so the
 /// fix is not a better parser, it is giving this failure the same voice the

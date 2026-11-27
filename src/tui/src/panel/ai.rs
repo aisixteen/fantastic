@@ -26,9 +26,9 @@
 //! DRAFT, dropped when its part ends (the answer arrives as its row). The model's
 //! reasoning is never shown: a thinking part flashes `thinking`. A part that was
 //! aborted, or a malformed call, stays as one dim `not sent` line until the next
-//! turn. A MALFORMED ATTEMPT (`retrying` with `kind: "call"`) stays drawn under
+//! pass. A MALFORMED ATTEMPT (`retrying` with `kind: "call"`) stays drawn under
 //! the line `malformed, retry m of n`, the retry streaming below it; the group
-//! lives until the next turn, as the `not sent` lines, and is in no stored row.
+//! lives until the next pass, as the `not sent` lines, and is in no stored row.
 //! `S` is the agent's `stop`.
 
 use ratatui::layout::Rect;
@@ -68,10 +68,10 @@ pub struct AiPanel {
     /// First visible line. Kept as an OFFSET because it is a window into the
     /// rendered list, while the cursor is a row id.
     pub top: usize,
-    /// A turn is in flight (a `thinking`/`streaming`/`tool_calling` status, or
+    /// A pass is in flight (a `thinking`/`streaming`/`tool_calling` status, or
     /// tokens arriving): the pane flashes `thinking` — never the token stream.
     pub live: bool,
-    /// When the turn in flight began, for the indicator's clock.
+    /// When the pass in flight began, for the indicator's clock.
     since: Option<std::time::Instant>,
     /// Seconds since `since`, taken in `layout` so `render` stays a pure view.
     clock: f32,
@@ -98,14 +98,14 @@ pub struct AiPanel {
     waiting: Vec<Waiting>,
     /// The parts being written now, in order (`stream_id`, the draft).
     drafts: Vec<(String, Draft)>,
-    /// What did not go out this turn — an aborted part, a malformed call — one
-    /// line each, until the next turn.
+    /// What did not go out this pass — an aborted part, a malformed call — one
+    /// line each, until the next pass.
     not_sent: Vec<String>,
     /// The running attempt's ended drafts, kept undrawn: a malformed retry
     /// moves them under its label.
     ended: Vec<(String, Draft)>,
     /// The discarded attempts, in order: each one's label and its drafts.
-    /// Cleared where `not_sent` is (the next turn's start).
+    /// Cleared where `not_sent` is (the next pass's start).
     discarded: Vec<(String, Vec<Draft>)>,
 }
 
@@ -212,7 +212,7 @@ impl AiPanel {
         o
     }
 
-    /// A turn is in flight: start the indicator's clock (once per turn).
+    /// A pass is in flight: start the indicator's clock (once per pass).
     fn go_live(&mut self) {
         if !self.live {
             self.live = true;
@@ -377,12 +377,12 @@ impl AiPanel {
         out
     }
 
-    /// The text a message shows: its whole body for a turn or a question, the
+    /// The text a message shows: its whole body for a message or a question, the
     /// one-line head for plumbing (folds, recalls, other kinds) and whenever the
     /// body is empty.
     fn text_of(l: &thread::OutlineLine) -> &str {
         match &l.kind {
-            LineKind::Turn { .. } | LineKind::Waiting | LineKind::Late | LineKind::Monitor { .. }
+            LineKind::Message { .. } | LineKind::Waiting | LineKind::Late | LineKind::Monitor { .. }
                 if !l.body.is_empty() =>
             {
                 &l.body
@@ -415,7 +415,7 @@ impl AiPanel {
                 label.as_ref().map_or(String::new(), |l| format!(" \"{l}\"")),
                 if *ended { " · ended" } else { "" },
             ),
-            LineKind::Turn { .. } => String::new(),
+            LineKind::Message { .. } => String::new(),
             LineKind::Other(k) => format!("{k} "),
         };
         // WHAT THE LINE IS decides its hue (theme's SAY_*); a failed thread's
@@ -431,13 +431,13 @@ impl AiPanel {
             style = style.add_modifier(Modifier::BOLD);
         }
         let state = Style::default().fg(theme::closure(l.closure));
-        // Who said it: the vouched sender, else — for the model's own turn — this
+        // Who said it: the vouched sender, else — for the model's own message — this
         // agent's id. Its label wears the speaker's hue.
         let (from, from_col) = match (&l.from, &l.kind) {
             (Some(f), _) if f == crate::env::HUMAN => (format!("{f}: "), theme::SAY_HUMAN),
             (Some(f), _) if f == &self.agent => (format!("{f}: "), theme::SAY_SELF),
             (Some(f), _) => (format!("{f}: "), theme::SAY_OTHER),
-            (None, LineKind::Turn { assistant: true }) => (format!("{}: ", self.agent), theme::SAY_SELF),
+            (None, LineKind::Message { assistant: true }) => (format!("{}: ", self.agent), theme::SAY_SELF),
             _ => (String::new(), theme::FG),
         };
         // THE QUESTION BADGE on a root that carries one: the inquiry colour, the
@@ -694,7 +694,7 @@ impl Panel for AiPanel {
                     && detail.and_then(|d| d.get("kind")).and_then(Value::as_str) == Some("call");
                 match phase.as_deref() {
                     Some("thinking" | "streaming" | "tool_calling") => {
-                        // a new turn: last turn's not-sent lines and discarded
+                        // a new pass: last pass's not-sent lines and discarded
                         // attempts go
                         if !self.live {
                             self.not_sent.clear();
@@ -702,7 +702,7 @@ impl Panel for AiPanel {
                         }
                         self.go_live();
                     }
-                    // a malformed attempt is re-asked inside the turn: stay live
+                    // a malformed attempt is re-asked inside the pass: stay live
                     _ if call_retry => {
                         self.go_live();
                         self.discard_attempt(detail);
@@ -838,7 +838,7 @@ impl Panel for AiPanel {
 
         if o.lines.is_empty() && _cx.store.unloaded.contains(_cx.agent) {
             lines.push(Line::from(Span::styled(
-                "  this agent has not loaded its history yet — it will on its next turn.",
+                "  this agent has not loaded its history yet — it will on its next pass.",
                 Style::default().fg(theme::DIM),
             )));
         } else if o.lines.is_empty() {
@@ -1322,7 +1322,7 @@ mod tests {
         let screen = draw_once(&p, &cx, 60, 14);
         assert!(screen.contains("→ files send · not sent — malformed"), "{screen}");
         assert!(screen.contains("hello there · not sent — stopped"), "{screen}");
-        // the turn ends: the indicator stops; the next turn clears the not-sent lines
+        // the pass ends: the indicator stops; the next pass clears the not-sent lines
         p.on_event(&json!({"type":"status","phase":"done"}), &mut out);
         assert!(!p.live);
         p.on_event(&json!({"type":"status","phase":"thinking"}), &mut out);
@@ -1389,7 +1389,7 @@ mod tests {
         evs.push(abort(1));
         evs.extend(running(2, "друга спроба"));
         let screen = feed_and_draw(&mut p, &evs);
-        assert!(p.live, "the turn stays live");
+        assert!(p.live, "the pass stays live");
         let at = |needle: &str| screen.find(needle).unwrap_or_else(|| panic!("{needle} missing:\n{screen}"));
         let label = at("malformed, retry 1 of 2");
         let first = at("перша спроба");
@@ -1437,7 +1437,7 @@ mod tests {
         evs.push(json!({"type":"status","phase":"done"}));
         let screen = feed_and_draw(&mut p, &evs);
         assert!(!p.live);
-        assert!(screen.contains("malformed, retry 1 of 2"), "kept until the next turn:\n{screen}");
+        assert!(screen.contains("malformed, retry 1 of 2"), "kept until the next pass:\n{screen}");
         let screen = feed_and_draw(&mut p, &[json!({"type":"status","phase":"thinking"})]);
         assert!(p.discarded.is_empty());
         assert!(!screen.contains("malformed, retry") && !screen.contains("відкинуто"), "{screen}");

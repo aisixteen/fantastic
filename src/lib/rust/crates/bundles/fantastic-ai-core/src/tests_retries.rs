@@ -1,4 +1,4 @@
-//! #198 part 2: a turn whose link dropped is retried, visibly. A child module of
+//! #198 part 2: a pass whose link dropped is retried, visibly. A child module of
 //! `tests`, so it reaches the mock harness (`mk_kernel`, `script`, `pass`, ...).
 
 use super::*;
@@ -29,7 +29,7 @@ async fn send_text(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) -> Value {
 }
 
 #[tokio::test]
-async fn a_dropped_link_is_retried_and_the_turn_answers() {
+async fn a_dropped_link_is_retried_and_the_pass_answers() {
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_retrying(&tmp, "rt_answers", 2).await;
     let s = script(
@@ -47,7 +47,7 @@ async fn a_dropped_link_is_retried_and_the_turn_answers() {
 }
 
 #[tokio::test]
-async fn retries_run_out_and_the_turn_fails() {
+async fn retries_run_out_and_the_pass_fails() {
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_retrying(&tmp, "rt_runout", 1).await;
     let s = script(
@@ -60,7 +60,7 @@ async fn retries_run_out_and_the_turn_fails() {
         Duration::ZERO,
     );
     let r = send_text(&kernel, &agent, "hello").await;
-    // the link retry ran out after 2 requests, and the turn failed: nothing re-runs it (#795)
+    // the link retry ran out after 2 requests, and the pass failed: nothing re-runs it (#795)
     assert_eq!(r["accepted"], json!(true), "{r}");
     let errors = crate::tests::error_rows(&kernel, &agent).await;
     assert!(errors.iter().any(|e| e.contains("connect failed again")), "{errors:?}");
@@ -82,7 +82,7 @@ async fn a_model_error_is_never_retried() {
         Duration::ZERO,
     );
     let r = send_text(&kernel, &agent, "hello").await;
-    // no link retry, and no retry turn (#795): one request, the turn failed
+    // no link retry, and no retry pass (#795): one request, the pass failed
     assert_eq!(r["accepted"], json!(true), "{r}");
     let errors = crate::tests::error_rows(&kernel, &agent).await;
     assert!(errors.iter().any(|e| e.contains("boom")), "{errors:?}");
@@ -103,7 +103,7 @@ async fn retries_are_off_by_default() {
         Duration::ZERO,
     );
     let r = send_text(&kernel, &agent, "hello").await;
-    // no link retry by default: one request, the turn failed (#795)
+    // no link retry by default: one request, the pass failed (#795)
     assert_eq!(r["accepted"], json!(true), "{r}");
     let errors = crate::tests::error_rows(&kernel, &agent).await;
     assert!(errors.iter().any(|e| e.contains("connect failed")), "{errors:?}");
@@ -185,7 +185,7 @@ async fn a_404_is_one_request_and_the_chain_gives_up() {
 }
 
 /// A 503 IS TRANSIENT and its retries are BOUNDED: `1 + transport_retries` requests,
-/// then the turn fails (#795: no retry turn of its own) — nothing more is sent, and the
+/// then the pass fails (#795: no retry pass of its own) — nothing more is sent, and the
 /// call ends `failed` naming the endpoint's error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_503_is_retried_within_its_bounds() {

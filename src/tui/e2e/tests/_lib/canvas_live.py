@@ -78,7 +78,7 @@ def seed_key(home: Path, record: dict) -> dict:
     store does not exist here): the product names its own ref at spawn."""
     rec = {k: v for k, v in record.items() if k != "credentials"}
     # the window the model has (owner: 262144 for window AND output — vLLM gives
-    # a turn what the prompt leaves of it when max_tokens reaches the window)
+    # a pass what the prompt leaves of it when max_tokens reaches the window)
     if (ctx := os.environ.get("CTX")) and "context_window" not in rec:
         rec["context_window"] = int(ctx)
     # the thought: the RUN's, when it names one (REASONING_EFFORT,
@@ -609,7 +609,7 @@ async def chat_drawn(pg: Page, secs: float, cell: int = 0) -> bool:
 
 
 async def say(pg: Page, text: str, cell: int = 0) -> None:
-    """Send a turn in chat cell #cell: type into its input and press Send."""
+    """Send a message in chat cell #cell: type into its input and press Send."""
     await chat_eval(pg, f"(()=>{{const i=d.getElementById('text'); i.value={json.dumps(text)};"
                         " i.dispatchEvent(new Event('input',{bubbles:true})); d.getElementById('send').click(); return true;})()", cell)
 

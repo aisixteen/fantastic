@@ -91,7 +91,7 @@ async def main():
     )
     try:
         Path("worker.py").write_text(WORKER)
-        # the ai's chat leg — without one, history is RAM-empty and each turn is
+        # the ai's chat leg — without one, history is RAM-empty and each pass is
         # amnesiac.
         r = await _call(root, root.id, {
             "type": "create_agent", "parent_id": home(root), "id": FB,

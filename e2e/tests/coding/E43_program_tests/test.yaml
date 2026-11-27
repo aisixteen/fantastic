@@ -3,11 +3,11 @@ group: coding
 title: the model runs the tests, FIXES the bug, and proves it green
 runner: probe.py
 runtimes: [rust]
-costs: turns
+costs: passes
 limits:
   idle_seconds: 90
-  max_turns: 24
-  no_progress_turns: 32
-  turn_chars: 80000
-  turn_seconds: 480
+  max_passes: 24
+  no_progress_passes: 32
+  pass_chars: 80000
+  pass_seconds: 480
 env: {}

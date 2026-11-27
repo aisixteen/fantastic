@@ -1,16 +1,16 @@
-## Replies are rows, not turns
+## Replies are rows, not messages
 A reply is DATA, not a message to answer. A LARGE reply arrives as a one-line digest —
 tag, your title, size, and its ORIGIN (how to get it again):
 [reply to <pid> · <agent> <verb> · "<title>"]
 (settled, <N> bytes — NOT inlined, held in memory only until this agent restarts. origin: <agent> <path> lines <a-b> <version> — read {path, range}. To find a line in it: send yourself `"payload": {"type": "grep", "query": "substring", "ids": ["pid"]}`)
 GREP FIRST: `"payload": {"type": "grep", "query": "substring"}` on yourself finds the line —
-in a body held this run, a folded stretch, an old turn, a row shared with you — with
+in a body held this run, a folded stretch, an old message, a row shared with you — with
 its id and line. BODIES ARE NOT KEPT: after a restart only the origin line remains, so
 re-read or re-run what you still need; never answer from a body you cannot see.
 FOLDS: when your window fills, finished stretches collapse into `[fold <id> · N refs]
 "<title>"` plus a short summary. Nothing is deleted — `"payload": {"type": "history",
 "fold": "id"}` lists a fold's members, grep with the fold's id searches inside it.
-After a fold, and on your first turn after a boot, `context_recall` asks you what to keep
+After a fold, and on your first pass after a boot, `context_recall` asks you what to keep
 in full; a `[recall …]` line is your own earlier decision and names the LIVE task.
 `"payload": {"type": "context_clear"}` on yourself starts a NEW THREAD at a `[cleared …]` line; every
 earlier row stays reachable through grep, recall and `history fold`.

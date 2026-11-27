@@ -14,8 +14,8 @@
 //! line-delimited JSON; each line carries `{message:{content?, thinking?}}`.
 //! BOTH text channels are read: a reasoning model streams its deliberation as
 //! `thinking` and only its conclusion as `content`, so reading `content` alone
-//! reports the whole turn as an empty completion. The deliberation is wrapped in
-//! `<think>…</think>` once per turn (see `fantastic_ai_core::think`). NO `tools`
+//! reports the whole pass as an empty completion. The deliberation is wrapped in
+//! `<think>…</think>` once per pass (see `fantastic_ai_core::think`). NO `tools`
 //! array is sent and NO `tool_calls` are read — tool-calling is RAW
 //! prompt-and-parse owned by ai-core (the model emits a `<call name=…>` envelope
 //! in the content text).
@@ -23,7 +23,7 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
-use fantastic_ai_core::constants::DEFAULT_TURN_TOKENS;
+use fantastic_ai_core::constants::DEFAULT_PASS_TOKENS;
 use fantastic_ai_core::credentials::KeySource;
 use fantastic_ai_core::provider::{
     stream_idle_of, within, Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream,
@@ -85,7 +85,7 @@ struct OllamaProvider {
     num_ctx: Option<u64>,
     /// Generation cap (`num_predict`): the calling chat's `max_tokens` (#632). Unbounded,
     /// a weak model can ramble for thousands of tokens instead of emitting one action,
-    /// blowing the send timeout. A chat that names none gets `DEFAULT_TURN_TOKENS`
+    /// blowing the send timeout. A chat that names none gets `DEFAULT_PASS_TOKENS`
     /// (#495). CAUTION on a
     /// THINKING model: the cap is spent on reasoning tokens first, so too small a
     /// value truncates mid-thought and yields an EMPTY completion — pair it with
@@ -224,7 +224,7 @@ impl Provider for OllamaProvider {
 ///
 /// PER LINE, NOT PER BODY. Draining the whole response before handing it over
 /// would keep anything from reaching `text_so_far`, the `token` events or the
-/// `streaming` phase until the completion was already finished, and a long turn
+/// `streaming` phase until the completion was already finished, and a long pass
 /// would be indistinguishable from a stalled request. Python's provider is an
 /// async generator over the response lines; this yields on the same boundary.
 fn consume_ndjson(
@@ -250,7 +250,7 @@ fn consume_ndjson(
                         return None;
                     }
                     // THE READ CLOCK: a body quiet for the idle window is a stalled
-                    // stream, and the turn fails with its error row (#177).
+                    // stream, and the pass fails with its error row (#177).
                     let chunk = match within(stream_idle, inner.next()).await {
                         Ok(chunk) => chunk,
                         Err(stalled) => {
@@ -269,7 +269,7 @@ fn consume_ndjson(
                             }
                             st.buf.clear();
                         }
-                        // The turn ended while still reasoning (content never
+                        // The pass ended while still reasoning (content never
                         // started) — close the span exactly once so the
                         // deliberation is strippable.
                         if let Some(m) = st.wrap.close_marker() {
@@ -309,7 +309,7 @@ fn consume_ndjson(
     ))
 }
 
-/// Per-line NDJSON decode state — the buffer plus the per-TURN reasoning span.
+/// Per-line NDJSON decode state — the buffer plus the per-PASS reasoning span.
 struct NdjsonState {
     buf: Vec<u8>,
     wrap: ThinkWrap,
@@ -347,12 +347,12 @@ fn note_usage(chunk: &Value, report: &ReportCell) {
 }
 
 /// Decode ONE ollama NDJSON chunk into content tokens, reading BOTH text
-/// channels. `wrap` carries the per-TURN reasoning span across chunks.
+/// channels. `wrap` carries the per-PASS reasoning span across chunks.
 ///
 /// THINKING MODELS SPLIT THEIR OUTPUT — read every text field, not just one.
 /// ollama streams a reasoning model's tokens as `message.thinking` and only its
 /// conclusion as `message.content`. Reading `content` alone silently drops whole
-/// turns — a model that spends all its generated tokens reasoning yields an EMPTY
+/// passes — a model that spends all its generated tokens reasoning yields an EMPTY
 /// completion, and the chain ends with no tool call and no error while ollama's
 /// own log shows the request answered normally, so it looks like the server
 /// wedged.
@@ -400,7 +400,7 @@ pub struct OllamaRecord {
     /// The ollama server URL.
     #[schemars(length(min = 1))]
     pub endpoint: String,
-    /// The model name; left out, read from the server before a turn and written here (the one model `GET /api/tags` lists).
+    /// The model name; left out, read from the server before a pass and written here (the one model `GET /api/tags` lists).
     pub model: Option<String>,
     /// The context window ollama loads the model with.
     #[schemars(range(min = 1))]
@@ -456,7 +456,7 @@ impl Handler for OllamaBackendBundle {
         call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        // A verb that runs a turn first reads a `model` the record leaves out (with the
+        // A verb that runs a pass first reads a `model` the record leaves out (with the
         // key read for it, a step); a server that does not answer refuses the verb,
         // naming it.
         let (id, k) = (agent_id.clone(), Arc::clone(kernel));
@@ -487,7 +487,7 @@ impl Handler for OllamaBackendBundle {
     }
 
     /// The kernel is killing a task of this agent. If it is the in-flight
-    /// generation, close the turn out for the caller before the substrate drops
+    /// generation, close the pass out for the caller before the substrate drops
     /// the future (which frees the HTTP stream + the FIFO guard by itself).
     async fn on_cancel(
         &self,
@@ -500,7 +500,7 @@ impl Handler for OllamaBackendBundle {
 }
 
 /// The provider this agent is configured for. Built per call (it is cheap and the
-/// record can change between turns), and shared by `send` and the verbs that need
+/// record can change between passes), and shared by `send` and the verbs that need
 /// a completion of their own — `context_recall` asks the model which rows to keep
 /// in full.
 ///
@@ -555,12 +555,12 @@ fn temperature_of(meta: &Map<String, Value>) -> f64 {
         .unwrap_or(DEFAULT_TEMPERATURE)
 }
 
-/// A turn's output bound (`num_predict`): the pass's `max_tokens` (the calling chat's
-/// knob), else [`DEFAULT_TURN_TOKENS`].
+/// A pass's output bound (`num_predict`): the pass's `max_tokens` (the calling chat's
+/// knob), else [`DEFAULT_PASS_TOKENS`].
 fn num_predict_of(meta: &Map<String, Value>) -> u64 {
     meta.get("max_tokens")
         .and_then(Value::as_u64)
-        .unwrap_or(DEFAULT_TURN_TOKENS.unsigned_abs())
+        .unwrap_or(DEFAULT_PASS_TOKENS.unsigned_abs())
 }
 
 #[cfg(test)]

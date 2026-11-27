@@ -5,7 +5,7 @@
 //!   tokens go out as `provider_token` events on its own stream, tagged with the
 //!   caller's `rid`; the reply carries the report (model, prompt / completion
 //!   tokens, stop reason). See [`complete`].
-//! - An AI CHAT (`ai_chat.tools`) holds the conversation: the turn loop, the
+//! - An AI CHAT (`ai_chat.tools`) holds the conversation: the pass loop, the
 //!   `<call>` parse and route, the memory, the folds. It knows its provider only
 //!   by id (`provider_id`, a local id or a peer's `<guid>|<id>`), through
 //!   [`RemoteProvider`]: it watches the provider, sends `complete`, and reads the
@@ -481,7 +481,7 @@ pub async fn complete(agent_id: &AgentId, args: &Complete, kernel: &Arc<Kernel>,
     reply
 }
 
-/// THE HARNESS THINKING CAP (#782): a meter for a chat's TURN (no `max_tokens` of its
+/// THE HARNESS THINKING CAP (#782): a meter for a chat's PASS (no `max_tokens` of its
 /// own: a side call is bounded by that) whose knobs carry a `thinking_token_budget` the
 /// provider's server cannot enforce. Past the cap, [`complete`] closes the thinking span,
 /// drops the request and reports `stop_reason` [`THINKING_CUT`]; the chat re-asks once
@@ -993,7 +993,7 @@ mod tests_remote_provider;
 /// capabilities]}}`: the provider's own lines (its key line among them) are never copied
 /// into the chat; the chat's other lines come from its bundle's defaults. The chat
 /// holds the conversation; the provider keeps answering `complete`. Returns the
-/// chat's id. A provider's own tests drive a whole turn through it. Test support
+/// chat's id. A provider's own tests drive a whole pass through it. Test support
 /// only (feature `test-support`): nothing shipped creates as the operator here.
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]

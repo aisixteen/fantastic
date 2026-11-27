@@ -7,7 +7,7 @@ only (`runtimes: [rust]`), driven over `web_rest` on the packaged host.
 1. **local split** — the chat answers `send`; its record names the provider and holds no
    `endpoint`; its `history` holds the transcript; the provider's holds none.
 2. **swap** — `update_agent` the chat's `provider_id` to a second provider (another server): the
-   next turn reaches the second server and its request carries the earlier rows.
+   next pass reaches the second server and its request carries the earlier rows.
 3. **lines** — every line is the caller's own `can`: a chat with no line on its provider is
    refused by the provider's name (`cannot watch provider …`) and the server sees nothing; a
    chat holding the line completes and the provider's record is byte-equal before and after;

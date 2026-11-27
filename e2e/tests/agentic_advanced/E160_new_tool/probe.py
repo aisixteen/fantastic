@@ -22,13 +22,13 @@ SCORED (hard):
                 bundle (`reflect bundles=all`: base py_agent, no error);
   2. VERB     — the model called a verb that bundle declares (beside the base's own),
                 on that agent, and its reply carried the digest the harness computes;
-  3. ANSWER   — the model's own turns carry the digest;
+  3. ANSWER   — the model's own passes carry the digest;
   4. GRANTS   — exact (`grant_faults`): the AI's `can` after the run is the one it
                 started with (an agent never widens its own lines), the new agent's
                 `can` holds no `*`, and the new agent is under the AI (reached by
                 position).
 Reported, not scored: `reload_bundle`, a docs reflect (`tier`/`verb`/`part`) of the
-new agent before its first call (and with `part=schema`), turns used.
+new agent before its first call (and with `part=schema`), passes used.
 
 `score` is the one scoring: the free twin runs it on its scripted run too, so a
 perfect actor is proven to pass it.
@@ -70,8 +70,8 @@ def _calls(transcript: list[str]) -> list[tuple[str, dict]]:
     from ai_core.tool_parse import extract_tool_calls
 
     out: list[tuple[str, dict]] = []
-    for turn in transcript:
-        for c in extract_tool_calls(turn or ""):
+    for one_pass in transcript:
+        for c in extract_tool_calls(one_pass or ""):
             a = c.get("arguments") or {}
             payload = a.get("payload") if isinstance(a.get("payload"), dict) else {}
             out.append((str(a.get("target_id") or ""), payload))
@@ -128,18 +128,18 @@ def grant_faults(before: dict, records: dict, ai: str, new: str, verb: str) -> l
     return out
 
 
-def score(*, ai: str, digest: str, before: dict, records: dict, turns: list[str],
+def score(*, ai: str, digest: str, before: dict, records: dict, replies: list[str],
           held: list[dict], catalog: list[dict], bundle_verbs: dict, schemas: dict) -> dict:
     """The four scored checks, from what the run left behind.
 
-    `turns` are the model's own turns; `held` the AI's rows; `catalog` the
+    `replies` are the model's own replies; `held` the AI's rows; `catalog` the
     `reflect bundles=all` rows; `bundle_verbs` each folder bundle's own verbs (its
     `bundle.yaml`); `schemas` the verbs a `reflect part=schema` lists for each agent
     the run created. The pair scored is the
     first (agent, declared verb) the model called whose reply carried the digest —
     else the first one called — so a failed first attempt does not hide a later one.
     """
-    calls = _calls(turns)
+    calls = _calls(replies)
     folders = {b.get("name") for b in catalog
                if b.get("base") == "py_agent" and "error" not in b}
     made = [i for i, rec in records.items()
@@ -167,7 +167,7 @@ def score(*, ai: str, digest: str, before: dict, records: dict, turns: list[str]
         "new": new,
         "verb": verb,
         "replied": hit is not None,
-        "answered": digest in "\n".join(turns),
+        "answered": digest in "\n".join(replies),
         "faults": faults,
         "docs_first": [p for i, (t, p) in enumerate(calls)
                        if i < first and t == new and p.get("type") == "reflect"
@@ -260,7 +260,7 @@ async def main():
     before = await agents()
 
     capped = await drive(conn, TASK, client_id="new_tool", via="user")
-    turns = list(conn.proxy.transcript)
+    replies = list(conn.proxy.transcript)
     held = (await k(AID, {"type": "rows"})).get("rows") or []
     records = await agents()
     # `rest`'s own tree: the whole catalog (a `call` line on the root shows none)
@@ -269,11 +269,11 @@ async def main():
     await conn.close()
     await close_kernel()
 
-    s = score(ai=AID, digest=DIGEST, before=before, records=records, turns=turns,
+    s = score(ai=AID, digest=DIGEST, before=before, records=records, replies=replies,
               held=held, catalog=cat.get("bundles") or [],
               bundle_verbs=folder_verbs(cat.get("bundles") or []), schemas=schemas)
     new, verb, faults = s["new"], s["verb"], s["faults"]
-    print(f"\n  calls: {len(s['calls'])} · turns: {conn.turns} · cap: {capped or 'clean'}")
+    print(f"\n  calls: {len(s['calls'])} · passes: {conn.passes} · cap: {capped or 'clean'}")
     print(f"  made from a folder bundle: {s['made']} · declared: {s['declared']}")
     print(f"  reload_bundle: {s['reloads']}")
     print(f"  docs reflect of {new or '-'} before its first call: "

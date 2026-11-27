@@ -60,7 +60,7 @@ func stream(_ json: String?, _ c: Collector) -> UInt64 {
     return json.withCString { fm_stream($0, c.ctx, onChunk, onDone) }
 }
 
-let TINY = #"{"instructions":"","turns":[],"prompt":"hi"}"#
+let TINY = #"{"instructions":"","messages":[],"prompt":"hi"}"#
 
 @Suite("FMBridge C ABI", .serialized)
 struct FMBridgeTests {
@@ -99,7 +99,7 @@ struct FMBridgeTests {
         await with(engine) {
             let c = Collector()
             let h = stream(
-                #"{"instructions":"sys","turns":[{"role":"user","content":"a"},{"role":"assistant","content":"b"}],"prompt":"hi","temperature":0.5,"max_tokens":7}"#,
+                #"{"instructions":"sys","messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"}],"prompt":"hi","temperature":0.5,"max_tokens":7}"#,
                 c)
             #expect(h >= 1)
             #expect(await eventually { c.doneCount == 1 })
@@ -113,7 +113,7 @@ struct FMBridgeTests {
                     == [
                         FMRequest(
                             instructions: "sys",
-                            turns: [.init(role: "user", content: "a"), .init(role: "assistant", content: "b")],
+                            messages: [.init(role: "user", content: "a"), .init(role: "assistant", content: "b")],
                             prompt: "hi", temperature: 0.5, maxTokens: 7)
                     ])
             #expect(await eventually { FMBridge.live == 0 }, "a finished handle is forgotten")
@@ -160,7 +160,7 @@ struct FMBridgeTests {
             #expect(a.error == "request_json is NULL")
 
             let b = Collector()
-            _ = stream(#"{"turns":[],"prompt":"p"}"#, b)
+            _ = stream(#"{"messages":[],"prompt":"p"}"#, b)
             #expect(await eventually { b.doneCount == 1 })
             #expect(b.error == "request_json: `instructions` is missing")
             #expect(b.chunks == 0)
@@ -177,14 +177,14 @@ struct FMBridgeTests {
         }
     }
 
-    @Test func anInvalidTurnIsRefusedInFMCoresWords() async {
+    @Test func anInvalidMessageIsRefusedInFMCoresWords() async {
         await with(FakeEngine()) {
             let c = Collector()
-            _ = stream(#"{"instructions":"","turns":[{"role":"tool","content":"x"}],"prompt":"p"}"#, c)
+            _ = stream(#"{"instructions":"","messages":[{"role":"tool","content":"x"}],"prompt":"p"}"#, c)
             #expect(await eventually { c.doneCount == 1 })
             #expect(
                 c.error
-                    == "turn 0 has role \"tool\" — a transcript turn is user or assistant (system "
+                    == "message 0 has role \"tool\" — a transcript message is user or assistant (system "
                     + "text goes in instructions)")
         }
     }

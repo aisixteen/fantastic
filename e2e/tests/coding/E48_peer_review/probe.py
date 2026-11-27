@@ -1,7 +1,7 @@
 """coding/peer_review — one AI SENDS ANOTHER AN INQUIRY, and the answer decides the verdict.
 
 Codex `auto_review.rs`: a second agent reviews the first's work. Two real AI
-agents — but the harness no longer drives them in turn. THE HUMAN tasks the
+agents — but the harness no longer drives them IN_PASS_KEEP. THE HUMAN tasks the
 coder, the coder applies a change that VIOLATES the spec, and then the CODER
 SENDS THE REVIEWER AN INQUIRY, the same verb a person answers. The reviewer
 reads `spec.md` and `git diff` itself and answers by THINKING; its answer comes
@@ -9,10 +9,10 @@ back as the reply, and the coder records it.
 
 That is the whole point of ONE INQUIRY VERB: `send(<anyone>, {type:"inquiry"})`
 reaches a human who answers from a record and a peer AI who answers from a
-turn, and the sender never branches on which. Before this an AI sent an inquiry
+pass, and the sender never branches on which. Before this an AI sent an inquiry
 got `unknown type 'inquiry'` — inquiry between agents had no shape at all.
 
-Scored on the verdict file, the reviewer's own tally of turns, and the ledger
+Scored on the verdict file, the reviewer's own tally of passes, and the ledger
 edge proving `ai -> ai_rev` actually happened.
 
 The coder and reviewer take FANTASTIC_AI_MODEL_CODER / FANTASTIC_AI_MODEL_REVIEWER,
@@ -85,7 +85,7 @@ async def main():
             assert not r.get("error"), f"create {payload['id']}: {r}"
 
         # THE HUMAN who wants the work done. The task originates here, so the
-        # coder's first turn arrives as a gated `user -> ai` send with a ledger
+        # coder's first pass arrives as a gated `user -> ai` send with a ledger
         # row rather than an operator injection from outside the kernel. Its line
         # on the coder is written once the coder exists (a line naming a missing
         # id is refused).
@@ -139,10 +139,10 @@ async def main():
         await c.close()
 
         # THE REVIEWER'S OWN RECORD OF WORK. It was never driven by the harness,
-        # so its turns exist only because the coder inquired: reading its history
+        # so its passes exist only because the coder inquired: reading its history
         # is how we know a second mind actually ran.
         # THE DEFAULT CLIENT: the coder's question carried no `client_id`, so the
-        # reviewer's turns live under ai_core's default — reading them under the
+        # reviewer's passes live under ai_core's default — reading them under the
         # coder's own client name would find an empty history and score a second
         # mind that plainly worked as never having run.
         rev_hist = {"messages": await store_rows(root, core, "ai_rev")}
@@ -168,7 +168,7 @@ async def main():
         if not inquired_peer and core is None:
             # The coder's ROWS, not its transcript: a delivered reply is a
             # user-role row, and the connector's transcript keeps assistant
-            # turns only.
+            # passes only.
             coder_rows = await store_rows(root, core, "ai")
             inquired_peer = [r for r in coder_rows
                              if r.get("role") == "user"

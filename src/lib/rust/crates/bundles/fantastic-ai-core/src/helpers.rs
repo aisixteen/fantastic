@@ -108,10 +108,10 @@ pub fn mint_send_id() -> String {
     out
 }
 
-/// A FRESH 4-hex token for ONE delivered turn's batch — python's
+/// A FRESH 4-hex token for ONE delivered pass's batch — python's
 /// `secrets.token_hex(2)`.
 ///
-/// Per TURN and not derived from the batch's content: two turns that made the
+/// Per PASS and not derived from the batch's content: two passes that made the
 /// same calls would collide, which is the exact confusion the token exists to
 /// prevent — a model that reads the same file twice in a row would see the same
 /// batch token both times and could not tell the batches apart.

@@ -50,21 +50,21 @@ struct FMCoreTests {
 
     // MARK: the request
 
-    @Test func onlyUserAndAssistantTurnsAreTranscriptTurns() {
+    @Test func onlyUserAndAssistantMessagesAreTranscriptMessages() {
         let bad = FMRequest(
-            instructions: "", turns: [.init(role: "user", content: "a"), .init(role: "system", content: "s")],
+            instructions: "", messages: [.init(role: "user", content: "a"), .init(role: "system", content: "s")],
             prompt: "p")
         #expect(throws: FMError.self) { try bad.validate() }
         do { try bad.validate() } catch {
             #expect(
                 error.message
-                    == "turn 1 has role \"system\" — a transcript turn is user or assistant "
+                    == "message 1 has role \"system\" — a transcript message is user or assistant "
                     + "(system text goes in instructions)")
         }
         #expect(throws: Never.self) {
             try FMRequest(
                 instructions: "i",
-                turns: [.init(role: "user", content: "a"), .init(role: "assistant", content: "b")],
+                messages: [.init(role: "user", content: "a"), .init(role: "assistant", content: "b")],
                 prompt: "p", temperature: 0, maxTokens: 1
             ).validate()
         }
@@ -76,30 +76,30 @@ struct FMCoreTests {
             return nil
         }
         #expect(
-            message(FMRequest(instructions: "", turns: [], prompt: "p", temperature: -0.5))
+            message(FMRequest(instructions: "", messages: [], prompt: "p", temperature: -0.5))
                 == "temperature must be a number >= 0, got -0.5")
         #expect(
-            message(FMRequest(instructions: "", turns: [], prompt: "p", temperature: .nan))
+            message(FMRequest(instructions: "", messages: [], prompt: "p", temperature: .nan))
                 == "temperature must be a number >= 0, got nan")
         #expect(
-            message(FMRequest(instructions: "", turns: [], prompt: "p", maxTokens: 0))
+            message(FMRequest(instructions: "", messages: [], prompt: "p", maxTokens: 0))
                 == "max_tokens must be a positive int, got 0")
     }
 
     @Test func theRequestJsonParses() throws {
         let r = try FMRequest(
             json: Data(
-                #"{"instructions":"be brief","turns":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}],"prompt":"again","temperature":0.2,"max_tokens":64,"extra":1}"#
+                #"{"instructions":"be brief","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}],"prompt":"again","temperature":0.2,"max_tokens":64,"extra":1}"#
                     .utf8))
         #expect(
             r
                 == FMRequest(
                     instructions: "be brief",
-                    turns: [.init(role: "user", content: "hi"), .init(role: "assistant", content: "hello")],
+                    messages: [.init(role: "user", content: "hi"), .init(role: "assistant", content: "hello")],
                     prompt: "again", temperature: 0.2, maxTokens: 64))
         // null / absent options are the model's own
         let bare = try FMRequest(
-            json: Data(#"{"instructions":"","turns":[],"prompt":"p","temperature":null}"#.utf8))
+            json: Data(#"{"instructions":"","messages":[],"prompt":"p","temperature":null}"#.utf8))
         #expect(bare.temperature == nil && bare.maxTokens == nil)
     }
 
@@ -108,21 +108,21 @@ struct FMCoreTests {
             do { _ = try FMRequest(json: Data(json.utf8)) } catch { return error.message }
             return nil
         }
-        #expect(message(#"{"turns":[],"prompt":"p"}"#) == "request_json: `instructions` is missing")
+        #expect(message(#"{"messages":[],"prompt":"p"}"#) == "request_json: `instructions` is missing")
         #expect(
-            message(#"{"instructions":"","turns":[{"role":"user"}],"prompt":"p"}"#)
-                == "request_json: `turns[0].content` is missing")
+            message(#"{"instructions":"","messages":[{"role":"user"}],"prompt":"p"}"#)
+                == "request_json: `messages[0].content` is missing")
         #expect(
-            message(#"{"instructions":"","turns":[],"prompt":5}"#)
+            message(#"{"instructions":"","messages":[],"prompt":5}"#)
                 == "request_json: `prompt` is not a string")
         #expect(
-            message(#"{"instructions":"","turns":[],"prompt":"p","max_tokens":"9"}"#)
+            message(#"{"instructions":"","messages":[],"prompt":"p","max_tokens":"9"}"#)
                 == "request_json: `max_tokens` is not an int")
         #expect(
-            message(#"{"instructions":"","turns":"x","prompt":"p"}"#)
-                == "request_json: `turns` is not a list")
+            message(#"{"instructions":"","messages":"x","prompt":"p"}"#)
+                == "request_json: `messages` is not a list")
         #expect(
-            message(#"{"instructions":null,"turns":[],"prompt":"p"}"#)
+            message(#"{"instructions":null,"messages":[],"prompt":"p"}"#)
                 == "request_json: `instructions` is null, expected a string")
         #expect(message("[1]") == "request_json: the document is not an object")
         #expect(message("not json")?.hasPrefix("request_json: ") == true)
@@ -151,7 +151,7 @@ struct FMCoreTests {
 
     @Test func thePreflightRefusesAnUnavailableModelBeforeTheRequest() {
         // unavailable AND invalid: the reason is what the caller reads
-        let bad = FMRequest(instructions: "", turns: [.init(role: "tool", content: "")], prompt: "p")
+        let bad = FMRequest(instructions: "", messages: [.init(role: "tool", content: "")], prompt: "p")
         do {
             try fmPreflight(.unavailable(reason: FMReason.deviceNotEligible), bad)
             Issue.record("must refuse")
@@ -175,13 +175,13 @@ struct FMCoreTests {
 
     // MARK: the transcript the real engine builds (no model call)
 
-    @Test func theTranscriptReplaysInstructionsAndTurnsInOrder() throws {
+    @Test func theTranscriptReplaysInstructionsAndMessagesInOrder() throws {
         #if canImport(FoundationModels) && os(macOS)
             guard #available(macOS 26.0, *) else { return }
             let t = SystemFMEngine.transcript(
                 FMRequest(
                     instructions: "be brief",
-                    turns: [.init(role: "user", content: "hi"), .init(role: "assistant", content: "hello")],
+                    messages: [.init(role: "user", content: "hi"), .init(role: "assistant", content: "hello")],
                     prompt: "again"))
             let kinds = t.map { e -> String in
                 switch e {
@@ -194,7 +194,7 @@ struct FMCoreTests {
             #expect(kinds == ["instructions", "prompt", "response"])
             // no instructions entry at all when there are none
             let bare = SystemFMEngine.transcript(
-                FMRequest(instructions: "", turns: [.init(role: "user", content: "x")], prompt: "y"))
+                FMRequest(instructions: "", messages: [.init(role: "user", content: "x")], prompt: "y"))
             #expect(bare.count == 1)
         #endif
     }

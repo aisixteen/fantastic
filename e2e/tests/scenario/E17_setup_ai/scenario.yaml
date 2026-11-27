@@ -266,7 +266,7 @@ runs:
       lock_released: true
       rows_grew: true
 
-  # ── a restart: boot is lazy — the agent holds no history until its next turn,
+  # ── a restart: boot is lazy — the agent holds no history until its next pass,
   #    and the transcript is a view of what it holds (`rows`) ──
   - name: recall
     script: |

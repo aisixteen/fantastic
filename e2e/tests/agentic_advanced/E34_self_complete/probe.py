@@ -1,13 +1,13 @@
 """agentic_advanced/self_complete — done means STOPPING, unassisted.
 
 The taught contract: a chain ends on an explicit `{"name":"done"}` call; a
-silent turn is nudged ONCE by the runtime. This probe measures that a model
+silent pass is nudged ONCE by the runtime. This probe measures that a model
 under that contract (1) does a small task and (2) then ends its own chain.
 
 Memory is FILES: the task's artifact is a text file written through a gated
 file agent's `write`. Scored on the FILE plus HOW the run
 ended — the work must be present, and the chain must have ended by itself, not
-been cut for looping (NO_PROGRESS), a runaway turn, or the turn cap.
+been cut for looping (NO_PROGRESS), a runaway pass, or the pass cap.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ TASK = (
 )
 
 #: cut reasons that mean the model did NOT stop by itself
-_CUT = ("NO_PROGRESS", "RUNAWAY", "MAX_TURNS")
+_CUT = ("NO_PROGRESS", "RUNAWAY", "MAX_PASSES")
 
 
 async def main():

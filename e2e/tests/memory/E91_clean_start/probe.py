@@ -1,8 +1,8 @@
 """memory/clean_start — a kernel on an EMPTY memory store (a stubbed model).
 
 `kernel_start` with a fresh ram_store; an AI agent created and wired to it (explicit
-gates both ends); its boot is lazy — nothing read. The first turn reads an EMPTY
-head, answers, and writes its turn (user + assistant rows) into its own key; the
+gates both ends); its boot is lazy — nothing read. The first pass reads an EMPTY
+head, answers, and writes its pass (user + assistant rows) into its own key; the
 kernel's execution rows land under `kernel` in the same store. Nothing errors."""
 
 from __future__ import annotations
@@ -54,16 +54,16 @@ async def main():
               f"kernel_rows={len(kernel_rows)}  ai_rows={len(ai_rows)}")
         checks = [
             ("the store started empty for the agent", before == []),
-            ("the first turn ran without error", out["status"] == "completed"
+            ("the first pass ran without error", out["status"] == "completed"
              and not (out["result"] or {}).get("error")),
-            ("its turn is in its own key: user then assistant", roles[:2] == ["user", "assistant"]),
+            ("its pass is in its own key: user then assistant", roles[:2] == ["user", "assistant"]),
             ("the kernel's execution rows landed under `kernel`", len(kernel_rows) > 0),
             ("the agent's rows and the kernel's are separate keys", len(ai_rows) >= 2),
         ]
         for name, ok in checks:
             print(f"  [{'ok' if ok else 'XX'}] {name}")
         allok = all(ok for _, ok in checks)
-        verdict(allok, "clean start: empty head, first turn stored, kernel rows under kernel"
+        verdict(allok, "clean start: empty head, first pass stored, kernel rows under kernel"
                 if allok else "a clean_start check failed")
     finally:
         WRAPS.pop("ai", None)

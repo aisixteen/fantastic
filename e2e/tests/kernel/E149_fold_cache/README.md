@@ -14,9 +14,9 @@ caching none) runs on a scripted vllm plug.
 
 - A0: `ai_a`, holding no line on `creds`, reads the key: the reply is the unknown answer
   (`no agent 'creds'`, no side, no hint, no ids) and never the key.
-- B1a: a `read` of the big file is whole in its turn (and stored whole).
+- B1a: a `read` of the big file is whole in its pass (and stored whole).
 - B1b: the next request holds the tag line and the default marker `<folded id="B"
-  verb="read" from="files" tokens="N" head="…"/> unfold: …`, not the body; a `reflect bigdoc_1 part=docs tier=detailed` is whole in its turn.
+  verb="read" from="files" tokens="N" head="…"/> unfold: …`, not the body; a `reflect bigdoc_1 part=docs tier=detailed` is whole in its pass.
 - B2: the reflect reply stays whole (a reflect never folds: whole state, superseded
   instead); `recall` by its row id D gives the body back whole.
 - B3: the recall reply is `<folded … verb="recall" from="ai_b" recalled="id D" …/>`

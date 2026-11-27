@@ -1,4 +1,4 @@
-"""coding/two_roots_live — two ROOTS interleave across turns, in a live agent.
+"""coding/two_roots_live — two ROOTS interleave across passes, in a live agent.
 
 The human sends task A, and while A's chain is running sends task B. B queues behind the
 FIFO lock and starts a new root; A keeps arriving as delivered replies. Scored on disk
@@ -35,10 +35,10 @@ DONE = 'end your run by calling done — emit <call name="done"></call>'
 from ai_core.folds import chains as _chains
 
 FB = "roots_fb"
-TASK_A = ("TASK A: read `filler_0.txt` … `filler_3.txt` through `notes`, ONE PER TURN, then "
+TASK_A = ("TASK A: read `filler_0.txt` … `filler_3.txt` through `notes`, ONE PER PASS, then "
           f"write `report_a.md` listing exactly those four filenames, one per line. Then {DONE}.")
 TASK_B = ("TASK B (separate from anything else you are doing): read `filler_4.txt` … "
-          "`filler_7.txt` through `notes`, ONE PER TURN, then write `report_b.md` listing "
+          "`filler_7.txt` through `notes`, ONE PER PASS, then write `report_b.md` listing "
           f"exactly those four filenames, one per line. Then {DONE}.")
 
 

@@ -5,12 +5,12 @@ group: memory
 title: "a read, a restart, then a question about a line of it: the model re-reads (origin) or already said it — never a guessed body; no `pull` exists"
 runner: probe.py
 runtimes: [python]
-costs: turns
+costs: passes
 muted: "#170: the Python product keeps the old grant model; this probe drives it"
 limits:
   idle_seconds: 90
-  max_turns: 40
-  no_progress_turns: 32
-  turn_chars: 60000
-  turn_seconds: 300
+  max_passes: 40
+  no_progress_passes: 32
+  pass_chars: 60000
+  pass_seconds: 300
 env: {E2E_WINDOW: "16000"}

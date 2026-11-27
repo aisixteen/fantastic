@@ -18,9 +18,9 @@
 //! streams raw text and ai-core owns the `<call>` grammar. Never FM's Tool
 //! protocol, never guided generation.
 //!
-//! NO FALLBACKS: an unavailable model fails the turn LOUD, naming the reason
+//! NO FALLBACKS: an unavailable model fails the pass LOUD, naming the reason
 //! (device not eligible / Apple Intelligence not enabled / model not ready /
-//! platform not macOS 26+) — checked FIRST in the turn ([`Provider::ready`]),
+//! platform not macOS 26+) — checked FIRST in the pass ([`Provider::ready`]),
 //! before the context is projected. Nothing is routed to another backend.
 //!
 //! THE WINDOW is the model's own, read from the SDK (`fm_context_size`): the
@@ -33,7 +33,7 @@ pub mod engine;
 pub mod system;
 
 use async_trait::async_trait;
-use engine::{unavailable_message, FmEngine, FmEvent, FmRequest, FmStream, FmTurn};
+use engine::{unavailable_message, FmEngine, FmEvent, FmMessage, FmRequest, FmStream};
 use fantastic_ai_core::constants::default_max_tokens;
 use fantastic_ai_core::provider::{
     Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
@@ -84,7 +84,7 @@ impl FoundationModelsBackendBundle {
     }
 
     /// The provider for one pass. An UNAVAILABLE model makes a provider that
-    /// refuses the turn up front ([`Provider::ready`]) — naming the reason,
+    /// refuses the pass up front ([`Provider::ready`]) — naming the reason,
     /// before the context is projected — so the caller reads why, not a window
     /// failure on a model that could never have answered.
     /// The record is passed in (`complete` lays the pass's `model` over the agent's).
@@ -222,7 +222,7 @@ impl Handler for FoundationModelsBackendBundle {
         Ok(())
     }
 
-    /// The kernel is killing a task of this agent: close the turn out for the
+    /// The kernel is killing a task of this agent: close the pass out for the
     /// caller. The kernel then DROPS the generation's future, and with it the
     /// [`FmStream`], whose drop cancels the on-device session (`fm_cancel`).
     async fn on_cancel(
@@ -242,7 +242,7 @@ impl Handler for FoundationModelsBackendBundle {
 /// THE SPLIT (swift's `FoundationModelsProvider.request`, exactly):
 ///   * every `system` message -> `instructions`, joined with a blank line, in order;
 ///   * the LAST non-system message must be `user` -> `prompt`;
-///   * every other non-system message, in order -> `turns` (`user`/`assistant`).
+///   * every other non-system message, in order -> `messages` (`user`/`assistant`).
 pub struct FoundationModelsProvider {
     engine: Arc<dyn FmEngine>,
     temperature: Option<f64>,
@@ -259,7 +259,7 @@ impl FoundationModelsProvider {
     /// answer.
     ///
     /// # Errors
-    /// A list whose last non-system message is not a `user` turn.
+    /// A list whose last non-system message is not a `user` message.
     pub fn request(
         messages: &[Value],
         temperature: Option<f64>,
@@ -282,15 +282,15 @@ impl FoundationModelsProvider {
                 .last()
                 .map_or_else(|| "none".to_string(), |m| fantastic_ai_core::helpers::shown(&role(m)));
             return Err(ProviderError::raised(format!(
-                "{NAME}: the last message is not a user turn (role {r}) — the on-device \
+                "{NAME}: the last message is not a user message (role {r}) — the on-device \
                  session answers a prompt"
             )));
         };
         Ok(FmRequest {
             instructions: instructions.join("\n\n"),
-            turns: earlier
+            messages: earlier
                 .iter()
-                .map(|m| FmTurn {
+                .map(|m| FmMessage {
                     role: fantastic_ai_core::helpers::shown(&role(m)),
                     content: content(m),
                 })
@@ -323,7 +323,7 @@ impl Provider for FoundationModelsProvider {
     }
 
     /// `max_tokens` bounds a side call (a fold summary); `None`, the record's
-    /// `max_tokens` (or the model's own) bounds the turn.
+    /// `max_tokens` (or the model's own) bounds the pass.
     async fn chat(
         &self,
         messages: &[Value],

@@ -1,12 +1,12 @@
-"""WATCH — examine every model turn as it lands, and stop the run when it goes wrong.
+"""WATCH — examine every model pass as it lands, and stop the run when it goes wrong.
 
 The problem this solves is wall-clock, not correctness. A live probe costs 10-20
 minutes, and this session repeatedly spent all of it on a run that was already dead
-at turn 2: a swallowed timeout (0 chars, scored as a model failure), a model
+at pass 2: a swallowed timeout (0 chars, scored as a model failure), a model
 re-sending one reflect forever, 31k characters of `k e k e k e`. In every case the
-evidence was in the FIRST few turns and nobody looked until the end.
+evidence was in the FIRST few passes and nobody looked until the end.
 
-So: after each assistant turn, run the tripwires. If one trips, the caller cancels
+So: after each assistant pass, run the tripwires. If one trips, the caller cancels
 the in-flight task and scores immediately with the reason named.
 
 Design rules, learned the hard way this session:
@@ -23,11 +23,11 @@ Design rules, learned the hard way this session:
 Knobs, all env, all off when 0:
 
     WATCH_STOP        1 = stop on a trip (default), 0 = report only
-    WATCH_DIGEST      1 = one compact line per turn (default), 0 = silent
+    WATCH_DIGEST      1 = one compact line per pass (default), 0 = silent
     WATCH_REPEAT      identical consecutive calls before tripping   (default 4)
-    WATCH_SILENT      consecutive turns with no call at all         (default 4)
+    WATCH_SILENT      consecutive passes with no call at all         (default 4)
     WATCH_MALFORMED   total unparseable envelopes before tripping   (default 3)
-    WATCH_RATIO       unique-word ratio below which a turn is soup  (default 0.25)
+    WATCH_RATIO       unique-word ratio below which a pass is soup  (default 0.25)
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ def _target_of(sig: str) -> str:
 
 
 def _calls(text: str) -> tuple[list[str], int]:
-    """(signatures, malformed_count) for one turn, via `tool_parse` itself."""
+    """(signatures, malformed_count) for one pass, via `tool_parse` itself."""
     sigs = []
     for c in extract_tool_calls(text or ""):
         a = c.get("arguments") or {}
@@ -85,18 +85,18 @@ def _calls(text: str) -> tuple[list[str], int]:
 
 
 def _soup_ratio(text: str, window: int = 150) -> float | None:
-    """Lowest unique-word ratio over any window. None if the turn is too short.
+    """Lowest unique-word ratio over any window. None if the pass is too short.
 
-    This is the signature of a degenerating turn — `skimskim -> sksksk -> kkkk`
-    drives the ratio toward zero long before the turn ends.
+    This is the signature of a degenerating pass — `skimskim -> sksksk -> kkkk`
+    drives the ratio toward zero long before the pass ends.
 
-    CALIBRATED ON REAL TURNS, not guessed (every window >= 150 words):
+    CALIBRATED ON REAL PASSES, not guessed (every window >= 150 words):
 
         live_build, PASS      n=31   min 0.427   p5 0.473   median 0.600
         live_plan,  PASS      n=34   min 0.327   p5 0.440   median 0.603
         live_subai, degenerate       0.040
 
-    The worst turn in a passing run sits 8x above the degenerate one, so 0.25 has
+    The worst pass in a passing run sits 8x above the degenerate one, so 0.25 has
     room on both sides. Do not raise it toward 0.33 to catch more: that is inside
     the observed spread of real work, and a tripwire that cuts a passing run is
     worse than no tripwire — it converts a result into a mystery."""
@@ -111,14 +111,14 @@ def _soup_ratio(text: str, window: int = 150) -> float | None:
 
 
 class Watch:
-    """Per-turn examination. `turn()` returns a stop reason, or None."""
+    """Per-pass examination. `examine()` returns a stop reason, or None."""
 
     def __init__(self, label: str = "run"):
         self.label = label
         self.n = 0
         # TOTAL, for reporting. The TRIP reads the streak below.
         self.malformed = 0
-        # CONSECUTIVE turns whose envelopes all failed to parse. Every other
+        # CONSECUTIVE passes whose envelopes all failed to parse. Every other
         # tripwire here is a streak that resets on progress, and so is this one: a
         # cumulative count says "you have written three bad envelopes ever" rather
         # than "you are stuck", and would kill a model that writes a bad escape, is
@@ -129,11 +129,11 @@ class Watch:
         self.last_sig: str | None = None
         self.trips: list[str] = []
 
-    def turn(self, text: str, seconds: float = 0.0) -> str | None:
+    def examine(self, text: str, seconds: float = 0.0) -> str | None:
         self.n += 1
         sigs, bad = _calls(text)
         self.malformed += bad
-        # A turn that produced a USABLE call is progress, whatever else it also
+        # A pass that produced a USABLE call is progress, whatever else it also
         # botched: the model is moving, not looping.
         self.malformed_streak = self.malformed_streak + 1 if (bad and not sigs) else 0
 
@@ -161,7 +161,7 @@ class Watch:
 
         why = self._trip(text, sigs)
         if why:
-            self.trips.append(f"turn {self.n}: {why}")
+            self.trips.append(f"pass {self.n}: {why}")
             print(f"\n  ** WATCH TRIPPED — {why} **\n", flush=True)
             return why if STOP else None
         return None
@@ -174,10 +174,10 @@ class Watch:
             tgt = _target_of(self.last_sig) if self.last_sig else "?"
             return f"same call {self.repeat_streak + 1}x in a row: {tgt}"
         if SILENT and self.silent_streak >= SILENT:
-            return f"{self.silent_streak} turns with no call at all"
+            return f"{self.silent_streak} passes with no call at all"
         if MALFORMED and self.malformed_streak >= MALFORMED:
             return (
-                f"{self.malformed_streak} consecutive turns of unparseable "
+                f"{self.malformed_streak} consecutive passes of unparseable "
                 f"tool_call envelopes ({self.malformed} total)"
             )
         return None

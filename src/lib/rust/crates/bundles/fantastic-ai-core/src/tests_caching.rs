@@ -63,7 +63,7 @@ async fn view_with(kernel: &Arc<Kernel>, agent: &AgentId, caching: Caching) -> V
     msgs
 }
 
-/// The next turn's view as the default type maps it: what its model reads.
+/// The next pass's view as the default type maps it: what its model reads.
 async fn seen_with(kernel: &Arc<Kernel>, agent: &AgentId, caching: Caching) -> Vec<Value> {
     let msgs = view_with(kernel, agent, caching).await;
     crate::model_format::map::messages(
@@ -74,7 +74,7 @@ async fn seen_with(kernel: &Arc<Kernel>, agent: &AgentId, caching: Caching) -> V
 }
 
 /// The history part of a view as `(role, content)`: the system block and the live
-/// user turn are left out.
+/// user message are left out.
 fn history(msgs: &[Value]) -> Vec<(String, String)> {
     msgs[1..msgs.len() - 1]
         .iter()
@@ -87,8 +87,8 @@ fn history(msgs: &[Value]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The stored turns (user and assistant rows) as `(role, content)`, in store order.
-async fn stored_turns(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<(String, String)> {
+/// The stored rows (user and assistant rows) as `(role, content)`, in store order.
+async fn stored_rows(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<(String, String)> {
     store(kernel, agent)
         .await
         .iter()
@@ -139,7 +139,7 @@ const CACHING_CFG: BackendConfig = BackendConfig {
 };
 
 /// [`mk_kernel`] on the caching mock, so a `provider_cache` record is accepted and a
-/// turn reaches the provider with its cache flags.
+/// pass reaches the provider with its cache flags.
 async fn mk_caching_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
     let kernel = base_kernel(tmp, |k| {
         k.bundles
@@ -153,11 +153,11 @@ async fn mk_caching_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
     (kernel, backend)
 }
 
-/// One `send` turn on the agent: the messages the provider was handed for the turn
+/// One `send` pass on the agent: the messages the provider was handed for the pass
 /// itself, as it received them (cache flags included). An owed recall is a provider
-/// pass of its own, served first, so the turn is the pass whose last message is the
+/// pass of its own, served first, so the pass is the pass whose last message is the
 /// live text.
-async fn turn_messages(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) -> Vec<Value> {
+async fn pass_messages(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) -> Vec<Value> {
     let s = script(
         agent,
         vec![pass("ok"), pass("ok"), pass("ok")],
@@ -183,7 +183,7 @@ async fn turn_messages(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) -> Vec
                 .and_then(|m| m["content"].as_str())
                 .is_some_and(|c| c.starts_with(text))
         })
-        .unwrap_or_else(|| panic!("no provider pass carried the turn {text:?}"))
+        .unwrap_or_else(|| panic!("no provider pass carried the pass {text:?}"))
 }
 
 /// The contents of the messages that carry `key` set to true.
@@ -216,7 +216,7 @@ fn caching_is_an_enum_of_two_modes_and_refuses_anything_else() {
 // ─── the two modes over one history ───────────────────────────────────────
 
 #[tokio::test]
-async fn none_and_provider_cache_are_append_only_each_turn_a_prefix_of_the_next() {
+async fn none_and_provider_cache_are_append_only_each_pass_a_prefix_of_the_next() {
     for mode in [Caching::None, Caching::ProviderCache] {
         let tmp = TempDir::new().unwrap();
         let (kernel, agent) = mk_kernel(&tmp, &format!("cm_prefix_{}", mode.name())).await;
@@ -225,19 +225,19 @@ async fn none_and_provider_cache_are_append_only_each_turn_a_prefix_of_the_next(
             let now = history(&view_with(&kernel, &agent, mode).await);
             assert!(
                 now.starts_with(&before),
-                "{}: turn {n} is a prefix of turn {}: {now:?}",
+                "{}: pass {n} is a prefix of pass {}: {now:?}",
                 mode.name(),
                 n + 1
             );
             before = now;
-            // the rows a turn stores: the question, then the answer. A repeated long
+            // the rows a pass stores: the question, then the answer. A repeated long
             // body and a stale read are in the history, and neither is trimmed.
             put(&kernel, &agent, "user", &reply(40 + n, "read", &big())).await;
             put(&kernel, &agent, "user", &format!("question {n}")).await;
             put(&kernel, &agent, "assistant", &format!("answer {n}")).await;
         }
         let last = history(&view_with(&kernel, &agent, mode).await);
-        assert_eq!(last.len(), 9, "{}: every row of three turns", mode.name());
+        assert_eq!(last.len(), 9, "{}: every row of three passes", mode.name());
         assert!(
             last.iter()
                 .filter(|(_, c)| c.starts_with("[reply to "))
@@ -266,7 +266,7 @@ async fn provider_cache_flags_the_primer_end_and_the_last_fold_and_the_fold_move
     let f1 = fold(&kernel, &agent, u2, a2, "fold one").await;
     let f2 = fold(&kernel, &agent, u3, a3, "fold two").await;
 
-    // [u1, a1*primer, F1, F2*last fold], then the live turn
+    // [u1, a1*primer, F1, F2*last fold], then the live message
     let mut msgs = view_with(&kernel, &agent, Caching::ProviderCache).await;
     crate::caching::mark(&mut msgs, Some(a1));
     let flagged = |msgs: &[Value], key: &str| -> Vec<i64> {
@@ -414,11 +414,11 @@ async fn context_fold_refuses_a_caching_value_it_cannot_read() {
     assert_eq!(out["arg"], "caching", "{out}");
 }
 
-// ─── the flags reach the provider on a real turn ────────────────────────────
+// ─── the flags reach the provider on a real pass ────────────────────────────
 
 #[tokio::test]
-async fn a_provider_cache_turn_hands_the_provider_the_primer_and_the_last_fold_flagged() {
-    // [primer rows][fold][fold][task rows], then the live turn: the primer's end and
+async fn a_provider_cache_pass_hands_the_provider_the_primer_and_the_last_fold_flagged() {
+    // [primer rows][fold][fold][task rows], then the live message: the primer's end and
     // the LAST fold's end are flagged on the messages the provider receives, the
     // earlier fold is not.
     let tmp = TempDir::new().unwrap();
@@ -435,7 +435,7 @@ async fn a_provider_cache_turn_hands_the_provider_the_primer_and_the_last_fold_f
     fold(&kernel, &agent, u2, a2, "fold one").await;
     fold(&kernel, &agent, u3, a3, "fold two").await;
 
-    let msgs = turn_messages(&kernel, &agent, "live").await;
+    let msgs = pass_messages(&kernel, &agent, "live").await;
     assert_eq!(msgs[0]["role"], json!("system"));
     assert_eq!(msgs[0]["cache_mark"], json!(true), "the system message");
     let marked: Vec<String> = flagged_contents(&msgs, "cache_mark").split_off(1);
@@ -456,7 +456,7 @@ async fn a_provider_cache_turn_hands_the_provider_the_primer_and_the_last_fold_f
 }
 
 #[tokio::test]
-async fn a_none_turn_hands_the_provider_no_flag_even_with_a_primer_and_folds() {
+async fn a_none_pass_hands_the_provider_no_flag_even_with_a_primer_and_folds() {
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_caching_kernel(&tmp, "cm_wire_off").await;
     put(&kernel, &agent, "user", "u1").await;
@@ -467,7 +467,7 @@ async fn a_none_turn_hands_the_provider_no_flag_even_with_a_primer_and_folds() {
     fold(&kernel, &agent, u2, a2, "fold one").await;
     for mode in ["none"] {
         set(&kernel, &agent, json!({"caching": mode})).await;
-        let msgs = turn_messages(&kernel, &agent, "live").await;
+        let msgs = pass_messages(&kernel, &agent, "live").await;
         assert!(
             msgs.iter().all(|m| m.get("cache_mark").is_none()),
             "{mode}: no mark reaches the provider: {msgs:?}"
@@ -495,7 +495,7 @@ async fn autofold_runs_in_provider_cache_and_none_stays_append_only() {
     );
     put(&kernel, &agent, "user", &reply(12, "read", &body)).await;
     put(&kernel, &agent, "assistant", "ok").await;
-    let before = stored_turns(&kernel, &agent).await;
+    let before = stored_rows(&kernel, &agent).await;
     let none = view_with(&kernel, &agent, Caching::None).await;
     assert_eq!(history(&none), before);
     for mode in [Caching::ProviderCache] {
@@ -512,14 +512,14 @@ async fn autofold_runs_in_provider_cache_and_none_stays_append_only() {
         assert!(!seen.contains("xxxxxxxxxx"), "{mode:?}");
     }
     assert_eq!(
-        stored_turns(&kernel, &agent).await,
+        stored_rows(&kernel, &agent).await,
         before,
         "the store is whole"
     );
 }
 
 #[tokio::test]
-async fn a_provider_cache_turn_marks_before_the_large_body_and_the_next_turn_keeps_that_prefix() {
+async fn a_provider_cache_pass_marks_before_the_large_body_and_the_next_pass_keeps_that_prefix() {
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_caching_kernel(&tmp, "cm_tail").await;
     set(&kernel, &agent, json!({"caching": "provider_cache"})).await;
@@ -530,16 +530,16 @@ async fn a_provider_cache_turn_marks_before_the_large_body_and_the_next_turn_kee
         "read",
         &"x".repeat(crate::constants::AUTOFOLD_AT * 4 + 40),
     );
-    let msgs1 = turn_messages(&kernel, &agent, &text).await;
+    let msgs1 = pass_messages(&kernel, &agent, &text).await;
     let len1 = msgs1.len();
     assert!(msgs1[len1 - 1].get("cache_mark").is_none(), "{len1}");
     let at: Vec<usize> = (0..len1)
         .filter(|i| msgs1[*i].get("cache_mark") == Some(&json!(true)))
         .collect();
     assert_eq!(at, vec![0, len1 - 2], "the system message and the tail");
-    // let the first turn finish before the next send
+    // let the first pass finish before the next send
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let msgs2 = turn_messages(&kernel, &agent, "next").await;
+    let msgs2 = pass_messages(&kernel, &agent, "next").await;
     let pair = |m: &Value| (m["role"].clone(), m["content"].clone());
     let cached: Vec<_> = msgs1[..=len1 - 2].iter().map(pair).collect();
     let again: Vec<_> = msgs2[..=len1 - 2].iter().map(pair).collect();

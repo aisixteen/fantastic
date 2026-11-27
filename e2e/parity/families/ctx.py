@@ -5,14 +5,14 @@ Four AI agents with the SAME window, reserve and script and different
 `context_strategy` — compact, truncate, strip, fold — so the diff shows what each
 strategy DID to the same conversation rather than what four different
 conversations happened to look like. `ai_tiny` gets a window smaller than one
-turn, which trips the too_small failsafe on its first pass.
+pass, which trips the too_small failsafe on its first pass.
 
 Two choices, both so the family can measure what it is for:
   * the data bridge is `bigfiles` rooted at `big`, so the name `store` is free
     for a PERSISTENCE provider — without one, the boot-time `context_recall` the
     reboot measures never runs (`[messages] no store wired`);
-  * requests are saved as `req/<agent>_<kind>_t<turn>.json` with the ordinal kept
-    in the index, so the diff aligns by (agent, kind, turn) instead of by a
+  * requests are saved as `req/<agent>_<kind>_p<pass>.json` with the ordinal kept
+    in the index, so the diff aligns by (agent, kind, pass) instead of by a
     global counter that shifts the moment one runtime makes one extra call.
 """
 
@@ -53,7 +53,7 @@ def tag(target: str, verb: str, title=None, **args) -> str:
     return f'<call name="send"><routing>{routing}</routing><payload>{inner}</payload></call>'
 
 
-def main_turn(n: int, me: str, pid: str) -> str:
+def main_pass(n: int, me: str, pid: str) -> str:
     F = filler(n) + "\n"
     script = {
         0: "Starting the survey.\n" + tag("docs", "reflect", "look at docs"),
@@ -92,7 +92,7 @@ def run(ctx) -> None:  # noqa: C901
         (ctx.work / "big" / f"{name}.txt").write_text(
             "".join(f"{name}-row {i:03d} reading {i * (j + 3):05d} nominal\n" for i in range(60)))
 
-    state = {"current": None, "turns": {}, "reacted": set(), "folds": {}, "last": time.time(),
+    state = {"current": None, "passes": {}, "reacted": set(), "folds": {}, "last": time.time(),
              "k": None}
     index: list = []
     lock = threading.Lock()
@@ -108,7 +108,7 @@ def run(ctx) -> None:  # noqa: C901
         as data instead of being papered over by a harness-planted tag.
         """
         # The system block is message 0 on this wire (vllm_backend merges every
-        # system message into one there); `msgs` are the turns after it.
+        # system message into one there); `msgs` are the messages after it.
         every = body.get("messages") or []
         sysv = "\n\n".join(content_text(m) for m in every
                             if isinstance(m, dict) and m.get("role") == "system")
@@ -133,17 +133,17 @@ def run(ctx) -> None:  # noqa: C901
         first = content_text(msgs[0]) if msgs else ""
         with lock:
             n = len(stub.requests) + 1
-            turn = None
+            pass_n = None
             if kind == "main":
-                turn = state["turns"].get(agent, 0)
-                state["turns"][agent] = turn + 1
+                pass_n = state["passes"].get(agent, 0)
+                state["passes"][agent] = pass_n + 1
         snap = None
         if kind == "main" and state["k"] is not None and agent:
             snap = call(state["k"], agent, {"type": "context_status"}, timeout=8)
         if kind == "main":
             pids = PID_RE.findall(allc)
             pid = pids[-1] if pids else "0"
-            text = main_turn(turn, agent or "?", pid)
+            text = main_pass(pass_n, agent or "?", pid)
             if "[context-notice]" in allc and agent not in state["reacted"]:
                 state["reacted"].add(agent)
                 text = tag(agent, "recall", "recall after notice", query="Note", limit=3) + "\n" + text
@@ -160,12 +160,12 @@ def run(ctx) -> None:  # noqa: C901
             ids = re.findall(r"^(\d+) · ", first, re.M)
             pick = [int(ids[-1])] if ids else []
             text = json.dumps({"expand": pick, "why": "stub recall keeps the newest row in full"})
-        name = f"{agent}_{kind}" + (f"_t{turn:02d}" if turn is not None else "")
+        name = f"{agent}_{kind}" + (f"_p{pass_n:02d}" if pass_n is not None else "")
         rec.raw(f"req/{name}.json", raw)
         rec.text(f"req/{name}.resp.txt", text)
         if snap is not None:
             rec.json(f"req/{name}.context_status", snap)
-        index.append({"n": n, "agent": agent, "kind": kind, "turn": turn, "phase": state["current"],
+        index.append({"n": n, "agent": agent, "kind": kind, "pass": pass_n, "phase": state["current"],
                       "name": name, "bytes": len(raw), "system_chars": len(sysv),
                       "messages": len(msgs), "has_context_notice": "[context-notice]" in allc,
                       "has_stripped_stub": "(stripped:" in allc,
@@ -269,7 +269,7 @@ def run(ctx) -> None:  # noqa: C901
             rec.json(f"{a}/send_goal_reply",
                      call(k, a, {"type": "send", "text": GOAL, "client_id": "probe"}, timeout=240))
             q = quiesce_stub()
-            rec.json(f"{a}/quiesce", {"main_turns": state["turns"].get(a, 0),
+            rec.json(f"{a}/quiesce", {"main_passes": state["passes"].get(a, 0),
                                       "folds": state["folds"].get(a, 0)},
                      harness={"idle_after_s": q})
             rec.json(f"{a}/context_status_1_after_chain", call(k, a, {"type": "context_status"}))

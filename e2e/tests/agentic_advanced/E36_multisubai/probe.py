@@ -13,13 +13,13 @@ only the three digits together are the code, which all three must AGREE on befor
 one of them writes it.
 
 No shared threads exist in this kernel: each solver has ONE interleaved
-conversation and the only shared medium is a file. Every message is a turn for the
-receiver; the storm is the point and is reported (turns per solver, messages).
+conversation and the only shared medium is a file. Every message is a pass for the
+receiver; the storm is the point and is reported (passes per solver, messages).
 
 An AI agent has no standing instructions on its record (a caller's `system_prompt`
 REPLACES the whole default prompt, grammar included), so the solver's role rides in
-the KICKOFF message — the first user turn of its conversation, which stays in its
-context for every turn after.
+the KICKOFF message — the first user message of its conversation, which stays in its
+context for every pass after.
 """
 
 from __future__ import annotations
@@ -139,7 +139,7 @@ def kickoff(k: int) -> str:
         "`DISAGREE <code> <reason>`; (5) only when all three agree does ONE of you "
         "(the one who broadcast the candidate) write the code, alone on the first "
         "line, to `answer.txt` on `notes` (a file agent: verb `write`, "
-        "`path`, `bytes`). End every turn with `done` once you have nothing more to "
+        "`path`, `bytes`). End every pass with `done` once you have nothing more to "
         "send; you will be woken by the next message. Begin: ask your oracle now."
     )
 
@@ -252,7 +252,7 @@ async def _rows(root, aid):
     return await memory.rows_of(root, aid, conversation_only=True)
 
 
-async def _turns(root, aid) -> int:
+async def _passes(root, aid) -> int:
     return sum(1 for r in await _rows(root, aid) if r.get("role") == "assistant")
 
 
@@ -264,7 +264,7 @@ async def main() -> None:
     try:
         await build(root)
         # THE KICKOFF — all three at once, from the operator, replies discarded: the
-        # harness is not a participant and must not be woken by their first turns.
+        # harness is not a participant and must not be woken by their first passes.
         t0 = time.monotonic()
         kicks = [
             asyncio.create_task(
@@ -291,9 +291,9 @@ async def main() -> None:
                 first = (p.read_text(errors="ignore").strip().splitlines() or [""])[0].strip()
                 if re.fullmatch(r"\d{3}", first):
                     answer = first
-            turns = {s: (await _turns(root, s)) for s in SOLVERS}
+            passes = {s: (await _passes(root, s)) for s in SOLVERS}
             live = len(root.ctx.tasks) if hasattr(root.ctx, "tasks") else "?"
-            print(f"  · {time.monotonic() - t0:5.0f}s turns={turns} tasks={live} answer={answer!r}", flush=True)
+            print(f"  · {time.monotonic() - t0:5.0f}s passes={passes} tasks={live} answer={answer!r}", flush=True)
             # THE TAILS, live: every NEW row of every solver since the last tick —
             # a storm you can only count is a storm you cannot understand.
             for s in SOLVERS:
@@ -306,7 +306,7 @@ async def main() -> None:
                     body = " ".join(str(r.get("content") or "").split())
                     print(f"      {s} {role:9} {body[:220]}", flush=True)
             if answer is not None:
-                # let the agreement turns land, then stop
+                # let the agreement passes land, then stop
                 await asyncio.sleep(20.0)
                 break
             if await watch.quiet():
@@ -369,9 +369,9 @@ async def main() -> None:
                         sent.append((float(r.get("ts") or 0), s, tgt.group(1), " ".join(txt.group(1).split())))
         for ts, frm, to, txt in sorted(sent):
             print(f"  {ts - (sent[0][0] if sent else ts):6.0f}s {frm} → {to}: {txt[:150]}")
-        turns = {s: (await _turns(root, s)) for s in SOLVERS}
+        passes = {s: (await _passes(root, s)) for s in SOLVERS}
         received = {s: sum(1 for r in (await _rows(root, s)) if r.get("role") == "user") for s in SOLVERS}
-        print(f"\n  observed — turns per solver     : {turns}  (storm: {sum(turns.values())} turns)")
+        print(f"\n  observed — passes per solver     : {passes}  (storm: {sum(passes.values())} passes)")
         print(f"  observed — messages received    : {received}")
         print(f"  observed — wall                 : {time.monotonic() - t0:.0f}s")
         ok = c1 and c2 and c3 and c4

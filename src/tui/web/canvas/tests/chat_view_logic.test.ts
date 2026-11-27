@@ -157,7 +157,7 @@ test("the agent's state: asks you beats working; a failure reason is failed; ok 
   for (const ph of ["thinking", "streaming", "tool_calling"]) assert.equal(P.stateOf(ph, "", 0), "working");
   assert.equal(P.stateOf("idle", "ok", 0), "done");
   assert.equal(P.stateOf("idle", "", 0), "idle");
-  for (const why of ["error", "dead_turn", "gave_up"]) assert.equal(P.stateOf("idle", why, 0), "failed", why);
+  for (const why of ["error", "dead_pass", "gave_up"]) assert.equal(P.stateOf("idle", why, 0), "failed", why);
 });
 
 test("the inquiry's age: minutes from its ts in seconds, just now under a minute", () => {
@@ -172,7 +172,7 @@ test("the inquiry's age: minutes from its ts in seconds, just now under a minute
 test("a message from another agent gets a `sender to <name>` meta line; the person's own has none", () => {
   assert.equal(P.metaOf("planner", "lead"), "planner to lead");
   assert.equal(P.metaOf("", "lead"), "");
-  assert.equal(P.metaOf("user", "lead"), "", "the person's own turns carry `[from user]`: no meta line");
+  assert.equal(P.metaOf("user", "lead"), "", "the person's own messages carry `[from user]`: no meta line");
 });
 
 test("`code` spans split out of a text, the text stays whole", () => {
@@ -189,7 +189,7 @@ test("a call ends on done, failed or stalled; paused and idle are outside a call
   for (const ph of ["thinking", "streaming", "retrying", "tool_calling", ""]) assert.equal(P.endsCall(ph), false, ph);
 });
 
-test("the running turn's word is the one the tree shows", () => {
+test("the running pass's word is the one the tree shows", () => {
   assert.deepEqual(["thinking", "streaming", "tool_calling", "idle", ""].map((p) => P.phaseWord(p)), ["thinking", "writing", "using tools", "", ""]);
 });
 

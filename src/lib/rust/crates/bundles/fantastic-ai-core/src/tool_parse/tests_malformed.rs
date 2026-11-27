@@ -2,7 +2,7 @@
 //! `bundled_agents/ai/ai_core/tests/test_tool_parse.py`.
 //!
 //! Why the module exists at all: a call that cannot be read returns `[]` from
-//! `extract_tool_calls`, which is byte-identical to a turn that emitted no call
+//! `extract_tool_calls`, which is byte-identical to a pass that emitted no call
 //! — and that means "done": nothing parsed, nothing dispatched, no error came
 //! back, and the run ends looking finished with the task untouched.
 
@@ -77,9 +77,9 @@ fn every_broken_envelope_gets_its_own_report() {
     assert!(bad[1].error.contains("`nope` is not a tool"));
 }
 
-/// A turn that parsed is silent here: nothing to report, nothing to nudge.
+/// A pass that parsed is silent here: nothing to report, nothing to nudge.
 #[test]
-fn a_good_turn_reports_nothing() {
+fn a_good_pass_reports_nothing() {
     let text = r#"<call name="send"><routing><target_id>n</target_id></routing><payload><type>reflect</type></payload></call>"#;
     assert_eq!(extract_tool_calls(text).len(), 1);
     assert!(malformed_calls(text).is_empty());

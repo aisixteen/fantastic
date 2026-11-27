@@ -107,7 +107,7 @@ async def main():
         marker = secrets.token_hex(4)
         plant_fillers(N, marker_in=3, marker=marker, pad_to=6800)
         await _fixture(root, ["ai_a", "ai_b"])
-        task = (f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER TURN, noting anything "
+        task = (f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER PASS, noting anything "
                 f"unusual (an audit marker, if any). Do not write anything. After the last file, {DONE}.")
         # a reads only the odd files (no marker there), b reads all (the marker is in filler_3)
         a = await _connect(root, core, "ai_a")
@@ -134,7 +134,7 @@ async def main():
                "what audit marker did you find, if any? Answer with the value or the word none, then "
                + DONE)
         # THE AGENTS ALREADY EXIST — their records came back with the tree. No connect,
-        # no create: the human sends; the first turn reads the head and recalls.
+        # no create: the human sends; the first pass reads the head and recalls.
         await _ask(root2, "ai_a", ask)
         await _ask(root2, "ai_b", ask)
         rows_a3, rows_b3 = await store_rows(root2, core, "ai_a"), await store_rows(root2, core, "ai_b")

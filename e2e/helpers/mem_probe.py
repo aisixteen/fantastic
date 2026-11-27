@@ -70,7 +70,7 @@ async def ask(root, aid: str, text: str, *, timeout: float = 300.0) -> None:
 
 
 def answers(rows: list[dict], since: int = 0) -> str:
-    """What the agent SAID (assistant turns) from row index `since` on."""
+    """What the agent SAID (assistant messages) from row index `since` on."""
     return " ".join(str(r.get("content") or "") for r in rows[since:] if r.get("role") == "assistant")
 
 

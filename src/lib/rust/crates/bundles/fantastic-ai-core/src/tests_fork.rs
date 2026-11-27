@@ -33,8 +33,8 @@ fn ids(rows: &[Value]) -> Vec<i64> {
     rows.iter().filter_map(|r| r["id"].as_i64()).collect()
 }
 
-/// A finished turn: a user row and the assistant's answer, linked by `parent`.
-async fn turn(kernel: &Arc<Kernel>, agent: &AgentId, q: &str, a: &str) -> (i64, i64) {
+/// A finished exchange: a user row and the assistant's answer, linked by `parent`.
+async fn exchange(kernel: &Arc<Kernel>, agent: &AgentId, q: &str, a: &str) -> (i64, i64) {
     let u = put_row(kernel, agent, json!({"role": "user", "content": q})).await;
     let r = put_row(
         kernel,
@@ -45,15 +45,15 @@ async fn turn(kernel: &Arc<Kernel>, agent: &AgentId, q: &str, a: &str) -> (i64, 
     (u, r)
 }
 
-/// Three finished turns; the ids of every row, in order.
-async fn three_turns(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<i64> {
+/// Three finished exchanges; the ids of every row, in order.
+async fn three_exchanges(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<i64> {
     let mut all = Vec::new();
     for (q, a) in [
         ("question one about the parser", "answer one, tokens"),
         ("question two about the lexer", "answer two, lines"),
         ("question three about the printer", "answer three, bytes"),
     ] {
-        let (u, r) = turn(kernel, agent, q, a).await;
+        let (u, r) = exchange(kernel, agent, q, a).await;
         all.extend([u, r]);
     }
     all
@@ -71,7 +71,7 @@ async fn fold_over(kernel: &Arc<Kernel>, agent: &AgentId, members: &[i64]) -> i6
     .await
 }
 
-/// The prompt the agent's next turn would send.
+/// The prompt the agent's next pass would send.
 async fn messages(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
     let state = crate::state::state_for(agent);
     as_agent(
@@ -93,7 +93,7 @@ async fn messages(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
 async fn fork_copies_rows_up_to_at_with_their_ids() {
     let tmp = TempDir::new().unwrap();
     let (kernel, parent) = mk_kernel(&tmp, "fk_copy").await;
-    let all = three_turns(&kernel, &parent).await;
+    let all = three_exchanges(&kernel, &parent).await;
     let at = all[3];
     let out = verb(&kernel, &parent, json!({"type": "fork", "at": at})).await;
     assert_eq!(out["copied"], 4, "{out}");
@@ -116,8 +116,8 @@ async fn fork_copies_rows_up_to_at_with_their_ids() {
 async fn fork_copies_a_whole_fold_with_its_members() {
     let tmp = TempDir::new().unwrap();
     let (kernel, parent) = mk_kernel(&tmp, "fk_fold").await;
-    let all = three_turns(&kernel, &parent).await;
-    // the first turn is folded AFTER the second one ran: the fold's id is above `at`
+    let all = three_exchanges(&kernel, &parent).await;
+    // the first exchange is folded AFTER the second one ran: the fold's id is above `at`
     let fid = fold_over(&kernel, &parent, &all[..2]).await;
     let out = verb(&kernel, &parent, json!({"type": "fork", "at": all[1]})).await;
     assert_eq!(out["copied"], 3, "{out}");
@@ -135,9 +135,9 @@ async fn fork_copies_a_whole_fold_with_its_members() {
 async fn fork_refuses_an_at_that_cuts_a_fold() {
     let tmp = TempDir::new().unwrap();
     let (kernel, parent) = mk_kernel(&tmp, "fk_cutfold").await;
-    let all = three_turns(&kernel, &parent).await;
+    let all = three_exchanges(&kernel, &parent).await;
     fold_over(&kernel, &parent, &all[..4]).await;
-    // `at` ends turn one: two of the fold's four members are before it, two after
+    // `at` ends exchange one: two of the fold's four members are before it, two after
     let out = verb(
         &kernel,
         &parent,
@@ -150,7 +150,7 @@ async fn fork_refuses_an_at_that_cuts_a_fold() {
 }
 
 #[tokio::test]
-async fn fork_refuses_an_at_that_cuts_a_turn() {
+async fn fork_refuses_an_at_that_cuts_an_exchange() {
     let tmp = TempDir::new().unwrap();
     let (kernel, parent) = mk_kernel(&tmp, "fk_cutturn").await;
     let u = put_row(&kernel, &parent, json!({"role": "user", "content": "go"})).await;
@@ -184,14 +184,14 @@ async fn fork_refuses_an_at_that_cuts_a_turn() {
         assert_eq!(out["reason"], "bad_arg", "at {at}: {out}");
         assert!(!kernel.exists("fk_cutturn_new"));
     }
-    // the end of the finished turn is a boundary
+    // the end of the finished exchange is a boundary
     let out = verb(&kernel, &parent, json!({"type": "fork", "at": done})).await;
     assert_eq!(out["copied"], 4, "{out}");
 }
 
 #[tokio::test]
 async fn fork_refuses_an_open_chain() {
-    // a call whose reply is still owed: the turn is not finished, wherever `at` is
+    // a call whose reply is still owed: the exchange is not finished, wherever `at` is
     let tmp = TempDir::new().unwrap();
     let (kernel, parent) = mk_kernel(&tmp, "fk_open").await;
     let u = put_row(&kernel, &parent, json!({"role": "user", "content": "go"})).await;
@@ -210,7 +210,7 @@ async fn fork_refuses_an_open_chain() {
 async fn fork_refuses_an_at_that_names_no_row() {
     let tmp = TempDir::new().unwrap();
     let (kernel, parent) = mk_kernel(&tmp, "fk_norow").await;
-    three_turns(&kernel, &parent).await;
+    three_exchanges(&kernel, &parent).await;
     let out = verb(&kernel, &parent, json!({"type": "fork", "at": 999_999})).await;
     assert_eq!(out["reason"], "not_found", "{out}");
     assert_eq!(out["at"], 999_999, "{out}");
@@ -232,11 +232,11 @@ async fn fork_refuses_an_at_that_names_no_row() {
 }
 
 #[tokio::test]
-async fn fork_refuses_while_the_parent_is_mid_turn() {
+async fn fork_refuses_while_the_parent_is_mid_pass() {
     let tmp = TempDir::new().unwrap();
     let (kernel, parent) = mk_kernel(&tmp, "fk_busy").await;
-    let all = three_turns(&kernel, &parent).await;
-    let _turn = crate::tests::MidPass::new(&parent);
+    let all = three_exchanges(&kernel, &parent).await;
+    let _mid = crate::tests::MidPass::new(&parent);
     let out = verb(
         &kernel,
         &parent,
@@ -251,12 +251,12 @@ async fn fork_refuses_while_the_parent_is_mid_turn() {
 async fn the_parents_later_rows_folds_and_forgets_do_not_reach_the_fork() {
     let tmp = TempDir::new().unwrap();
     let (kernel, parent) = mk_kernel(&tmp, "fk_later").await;
-    let all = three_turns(&kernel, &parent).await;
+    let all = three_exchanges(&kernel, &parent).await;
     let out = verb(&kernel, &parent, json!({"type": "fork", "at": all[3]})).await;
     let fork = AgentId::from(out["id"].as_str().unwrap());
     let before = store(&kernel, &fork).await;
-    // the parent goes on: a new turn, a fold of the whole history, a forget
-    turn(&kernel, &parent, "question four", "answer four").await;
+    // the parent goes on: a new exchange, a fold of the whole history, a forget
+    exchange(&kernel, &parent, "question four", "answer four").await;
     let folded = verb(
         &kernel,
         &parent,
@@ -273,11 +273,11 @@ async fn the_parents_later_rows_folds_and_forgets_do_not_reach_the_fork() {
 async fn the_forks_rows_do_not_reach_the_parent() {
     let tmp = TempDir::new().unwrap();
     let (kernel, parent) = mk_kernel(&tmp, "fk_back").await;
-    let all = three_turns(&kernel, &parent).await;
+    let all = three_exchanges(&kernel, &parent).await;
     let out = verb(&kernel, &parent, json!({"type": "fork", "at": all[3]})).await;
     let fork = AgentId::from(out["id"].as_str().unwrap());
     let before = store(&kernel, &parent).await;
-    turn(
+    exchange(
         &kernel,
         &fork,
         "only the fork asks",
@@ -301,7 +301,7 @@ async fn the_fork_has_the_parents_card_and_grants() {
     patch.insert("endpoint".into(), json!("http://127.0.0.1:1"));
     patch.insert("output_reserve".into(), json!(512));
     fantastic_kernel::test_support::update(&kernel, &parent, patch);
-    let all = three_turns(&kernel, &parent).await;
+    let all = three_exchanges(&kernel, &parent).await;
     let out = verb(&kernel, &parent, json!({"type": "fork", "at": all[1]})).await;
     let fork = AgentId::from(out["id"].as_str().unwrap());
     assert_ne!(fork, parent);
@@ -349,7 +349,7 @@ async fn the_fork_has_the_parents_card_and_grants() {
 async fn fork_is_all_or_nothing_on_a_store_refusal() {
     let tmp = TempDir::new().unwrap();
     let (kernel, parent) = mk_kernel(&tmp, "fk_refused").await;
-    let all = three_turns(&kernel, &parent).await;
+    let all = three_exchanges(&kernel, &parent).await;
     // the store lets the parent read and prune, not append: the fork inherits that
     fantastic_kernel::test_support::grant(
         &kernel,
@@ -389,9 +389,9 @@ async fn the_forks_prompt_equals_the_parents_for_the_same_prefix() {
     add_file_bridge(&kernel, &file, &tmp.path().join(".fantastic").join("ref")).await;
     let reference = add_backend(&kernel, &id_for(&tmp, "fk_prompt_ref"), &file).await;
 
-    // turn one, a fold of it, turn two with the view row written before its answer
-    // (the fold and the view are both at or before `at`), then a third turn
-    let (u1, a1) = turn(
+    // exchange one, a fold of it, exchange two with the view row written before its answer
+    // (the fold and the view are both at or before `at`), then a third exchange
+    let (u1, a1) = exchange(
         &kernel,
         &parent,
         "question one about the parser",
@@ -414,7 +414,7 @@ async fn the_forks_prompt_equals_the_parents_for_the_same_prefix() {
         json!({"role": "assistant", "content": "answer two", "parent": u2}),
     )
     .await;
-    turn(&kernel, &parent, "question three", "answer three").await;
+    exchange(&kernel, &parent, "question three", "answer three").await;
 
     let out = verb(&kernel, &parent, json!({"type": "fork", "at": at})).await;
     let fork = AgentId::from(out["id"].as_str().unwrap_or_else(|| panic!("{out}")));
@@ -462,13 +462,13 @@ async fn the_forks_prompt_equals_the_parents_for_the_same_prefix() {
 }
 
 #[tokio::test]
-async fn mark_lands_on_a_turn_boundary_outside_a_fold() {
+async fn mark_lands_on_an_exchange_boundary_outside_a_fold() {
     let tmp = TempDir::new().unwrap();
     let (kernel, parent) = mk_kernel(&tmp, "mk_edge").await;
-    let all = three_turns(&kernel, &parent).await;
-    // mid-turn: refused
+    let all = three_exchanges(&kernel, &parent).await;
+    // mid-pass: refused
     {
-        let _turn = crate::tests::MidPass::new(&parent);
+        let _mid = crate::tests::MidPass::new(&parent);
         let out = verb(&kernel, &parent, json!({"type": "mark", "label": "busy"})).await;
         assert_eq!(out["reason"], "locked", "{out}");
     }
@@ -497,7 +497,7 @@ async fn mark_lands_on_a_turn_boundary_outside_a_fold() {
 
     // a head that ends in a fold is a valid place, and `fork` accepts its `at`
     let (kernel, parent) = mk_kernel(&tmp, "mk_edge_fold").await;
-    let all2 = three_turns(&kernel, &parent).await;
+    let all2 = three_exchanges(&kernel, &parent).await;
     let fid = fold_over(&kernel, &parent, &all2).await;
     let out = verb(
         &kernel,
@@ -517,7 +517,7 @@ async fn mark_lands_on_a_turn_boundary_outside_a_fold() {
 async fn mark_keeps_only_the_last_n_marks() {
     let tmp = TempDir::new().unwrap();
     let (kernel, parent) = mk_kernel(&tmp, "mk_last").await;
-    three_turns(&kernel, &parent).await;
+    three_exchanges(&kernel, &parent).await;
     let n = crate::constants::MAX_MARKS;
     for i in 0..n + 2 {
         let out = verb(
@@ -542,7 +542,7 @@ async fn mark_keeps_only_the_last_n_marks() {
 async fn mark_rows_never_reach_the_prompt() {
     let tmp = TempDir::new().unwrap();
     let (kernel, parent) = mk_kernel(&tmp, "mk_hidden").await;
-    three_turns(&kernel, &parent).await;
+    three_exchanges(&kernel, &parent).await;
     let before = serde_json::to_string(&messages(&kernel, &parent).await).unwrap();
     let out = verb(
         &kernel,
@@ -560,7 +560,7 @@ async fn mark_rows_never_reach_the_prompt() {
 async fn fork_points_lists_this_agents_marks_with_rows_after_model_and_warm() {
     let tmp = TempDir::new().unwrap();
     let (kernel, parent) = mk_kernel(&tmp, "fp_list").await;
-    let (_, a1) = turn(&kernel, &parent, "one", "ok one").await;
+    let (_, a1) = exchange(&kernel, &parent, "one", "ok one").await;
     let first = verb(
         &kernel,
         &parent,
@@ -568,8 +568,8 @@ async fn fork_points_lists_this_agents_marks_with_rows_after_model_and_warm() {
     )
     .await;
     assert_eq!(first["at"], a1, "{first}");
-    turn(&kernel, &parent, "two", "ok two").await;
-    let (_, a3) = turn(&kernel, &parent, "three", "ok three").await;
+    exchange(&kernel, &parent, "two", "ok two").await;
+    let (_, a3) = exchange(&kernel, &parent, "three", "ok three").await;
     verb(
         &kernel,
         &parent,
@@ -629,7 +629,7 @@ async fn fork_points_lists_this_agents_marks_with_rows_after_model_and_warm() {
 async fn a_finished_send_makes_the_agent_warm() {
     let tmp = TempDir::new().unwrap();
     let (kernel, parent) = mk_kernel(&tmp, "fp_warm").await;
-    turn(&kernel, &parent, "one", "ok one").await;
+    exchange(&kernel, &parent, "one", "ok one").await;
     verb(&kernel, &parent, json!({"type": "mark", "label": "m"})).await;
     let cold = verb(&kernel, &parent, json!({"type": "fork_points"})).await;
     assert_eq!(cold["points"][0]["warm"], false, "{cold}");
@@ -644,9 +644,9 @@ async fn a_finished_send_makes_the_agent_warm() {
 async fn two_forks_of_one_mark_start_from_the_same_rows() {
     let tmp = TempDir::new().unwrap();
     let (kernel, parent) = mk_kernel(&tmp, "fp_twins").await;
-    three_turns(&kernel, &parent).await;
+    three_exchanges(&kernel, &parent).await;
     let mark = verb(&kernel, &parent, json!({"type": "mark", "label": "base"})).await;
-    turn(&kernel, &parent, "later", "ok later").await;
+    exchange(&kernel, &parent, "later", "ok later").await;
     let point = verb(&kernel, &parent, json!({"type": "fork_points"})).await["points"][0].clone();
     assert_eq!(point["at"], mark["at"]);
     let a = verb(&kernel, &parent, json!({"type": "fork", "at": point["at"]})).await;
@@ -690,7 +690,7 @@ async fn fork_from_forks_the_named_agent() {
         .await;
         assert_eq!(r["updated"], true, "{r}");
     }
-    let all = three_turns(&kernel, &parent).await;
+    let all = three_exchanges(&kernel, &parent).await;
     let out = verb(
         &kernel,
         &peer,
@@ -750,7 +750,7 @@ async fn fork_and_mark_refusals_put_sentence_in_error_code_in_reason() {
     assert!(out["error"].as_str().unwrap().contains(' '), "{out}");
     assert!(out["hint"].is_string(), "{out}");
     assert!(out.get("at").is_some(), "{out}");
-    let _turn = crate::tests::MidPass::new(&parent);
+    let _mid = crate::tests::MidPass::new(&parent);
     let out = verb(&kernel, &parent, json!({"type": "mark", "label": "busy"})).await;
     assert_eq!(out["reason"], "locked", "{out}");
     assert_ne!(out["error"], out["reason"], "{out}");

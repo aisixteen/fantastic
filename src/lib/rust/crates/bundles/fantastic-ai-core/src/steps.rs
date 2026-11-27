@@ -132,14 +132,14 @@ where
 
 /// THE AGENT'S CONVERSATION FROM ITS HEAD, as a step ([`crate::memory::load_history`]
 /// with `behind = false`): the head read from the store the first time, else the rows
-/// after its newest merged in; the next step gets the turns.
+/// after its newest merged in; the next step gets the rows.
 pub(crate) async fn history<R, F, Fut>(self_id: &AgentId, kernel: &Arc<Kernel>, rec: R, next: F)
 where
     R: Send + 'static,
     F: FnOnce(R, MemResult<Vec<Value>>) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    refreshed(self_id, kernel, rec, move |rec, r| next(rec, r.map(crate::memory::turns))).await;
+    refreshed(self_id, kernel, rec, move |rec, r| next(rec, r.map(crate::memory::chat_rows))).await;
 }
 
 /// THE HEAD BROUGHT UP TO THE STORE, as a step ([`crate::memory::refresh_head`]): read
@@ -173,14 +173,14 @@ where
 
 /// THE AGENT'S WHOLE CONVERSATION, as a step ([`crate::memory::load_history`] with
 /// `behind = true`): every row the store holds, before a `clear` too; the next step
-/// gets the turns.
+/// gets the rows.
 pub(crate) async fn whole<R, F, Fut>(self_id: &AgentId, kernel: &Arc<Kernel>, rec: R, next: F)
 where
     R: Send + 'static,
     F: FnOnce(R, MemResult<Vec<Value>>) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    rows(self_id, kernel, json!({"type": "read"}), rec, move |rec, r| next(rec, r.map(crate::memory::turns)))
+    rows(self_id, kernel, json!({"type": "read"}), rec, move |rec, r| next(rec, r.map(crate::memory::chat_rows)))
         .await;
 }
 

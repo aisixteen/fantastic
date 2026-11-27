@@ -8,5 +8,5 @@ runtimes: [rust]
 costs: free
 limits:
   idle_seconds: 120
-  turn_seconds: 300
+  pass_seconds: 300
 duration: 21   # seconds in a green run (rig 2026-11-11): the pool starts the longest first (e2e/run.py)

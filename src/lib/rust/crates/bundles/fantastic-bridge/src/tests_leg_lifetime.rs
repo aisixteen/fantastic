@@ -233,36 +233,36 @@ async fn a_restarted_sender_never_joins_a_settled_execution() {
     assert_eq!(read["lines"][0]["text"], "v2-NEW", "{read}");
 }
 
-// ─── A drop mid-turn releases the called agent's turn ─────────────────
+// ─── A drop mid-pass releases the called agent's pass ─────────────────
 
-/// An agent whose turn holds state only `on_cancel` frees — the shape of an AI
-/// agent's `generating`: dropping the turn's future releases nothing. `turn`
-/// with `park` starts a turn that never ends on its own; a `turn` while one is
+/// An agent whose pass holds state only `on_cancel` frees — the shape of an AI
+/// agent's `generating`: dropping the pass's future releases nothing. `pass`
+/// with `park` starts a pass that never ends on its own; a `pass` while one is
 /// held is refused as busy (the later send that hangs on a wedged agent).
-struct TurnProbe {
+struct PassProbe {
     busy: Arc<AtomicBool>,
     started: Arc<tokio::sync::Notify>,
 }
 
-fantastic_kernel::stand_in_verbs!(turn_verbs {
-    Turn "turn" { park: Option<bool> },
+fantastic_kernel::stand_in_verbs!(pass_verbs {
+    Pass "pass" { park: Option<bool> },
     Status "status" {}
 });
 
 #[async_trait]
-impl Handler for TurnProbe {
-    type Call = turn_verbs::Call;
+impl Handler for PassProbe {
+    type Call = pass_verbs::Call;
     fn name(&self) -> &str {
-        "turn_probe.tools"
+        "pass_probe.tools"
     }
     fn man(&self) -> &'static str {
         "A test stand-in."
     }
     fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
-        turn_verbs::VERBS
+        pass_verbs::VERBS
     }
     fn dynamic_verbs(&self, agent: &Agent) -> Vec<fantastic_kernel::DynVerb> {
-        turn_verbs::dynamic_verbs(agent)
+        pass_verbs::dynamic_verbs(agent)
     }
     fn record(&self) -> &'static fantastic_kernel::RecordDecl {
         fantastic_kernel::fixture_record!()
@@ -274,7 +274,7 @@ impl Handler for TurnProbe {
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         match call {
-            turn_verbs::Call::Turn(t) => {
+            pass_verbs::Call::Pass(t) => {
                 if self.busy.swap(true, Ordering::SeqCst) {
                     return Ok(Some(json!({"error": "busy"})));
                 }
@@ -285,11 +285,11 @@ impl Handler for TurnProbe {
                 self.busy.store(false, Ordering::SeqCst);
                 Ok(Some(json!({"answered": true})))
             }
-            turn_verbs::Call::Status(_) => Ok(Some(
+            pass_verbs::Call::Status(_) => Ok(Some(
                 json!({"generating": self.busy.load(Ordering::SeqCst)}),
             )),
-            turn_verbs::Call::Reflect(_) => Ok(Some(
-                json!({"id": id.0, "sentence": "turn probe", "verbs": {}}),
+            pass_verbs::Call::Reflect(_) => Ok(Some(
+                json!({"id": id.0, "sentence": "pass probe", "verbs": {}}),
             )),
         }
     }
@@ -304,11 +304,11 @@ impl Handler for TurnProbe {
     }
 }
 
-/// The connection drops while the peer's call is mid-turn on a local agent: the
-/// turn ends through `cancel` (its state released), so after a reconnect the
+/// The connection drops while the peer's call is mid-pass on a local agent: the
+/// pass ends through `cancel` (its state released), so after a reconnect the
 /// next call is served and `status` is idle.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_drop_mid_turn_releases_the_called_agent() {
+async fn a_drop_mid_pass_releases_the_called_agent() {
     let tmp = TempDir::new().unwrap();
     let busy = Arc::new(AtomicBool::new(false));
     let started = Arc::new(tokio::sync::Notify::new());
@@ -318,8 +318,8 @@ async fn a_drop_mid_turn_releases_the_called_agent() {
     });
     kernel.bundles.register(WS_HANDLER_MODULE, WsBridgeBundle);
     kernel.bundles.register(
-        "turn_probe.tools",
-        TurnProbe {
+        "pass_probe.tools",
+        PassProbe {
             busy: Arc::clone(&busy),
             started: Arc::clone(&started),
         },
@@ -335,33 +335,33 @@ async fn a_drop_mid_turn_releases_the_called_agent() {
     );
     fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
-    let bid = id_for("brg_dropturn", &tmp);
+    let bid = id_for("brg_droppass", &tmp);
     create_bridge(&kernel, &bid, "stand_in", "memory").await;
     let agent = ask(
         &kernel,
         "kernel_state",
-        json!({"type": "create_agent", "parent_id": bid, "handler_module": "turn_probe.tools",
-               "id": format!("turner_{bid}")}),
+        json!({"type": "create_agent", "parent_id": bid, "handler_module": "pass_probe.tools",
+               "id": format!("passer_{bid}")}),
     )
     .await;
     assert!(agent.get("error").is_none(), "{agent}");
-    let target = format!("turner_{bid}");
+    let target = format!("passer_{bid}");
     let peer = inject_one(&AgentId::from(bid.as_str()));
     let mut events = kernel.ensure_inbox(&AgentId::from(bid.as_str()));
     let booted = ask(&kernel, &bid, json!({"type": "boot"})).await;
     assert_eq!(booted["booted"], true, "{booted}");
 
-    // the peer's call starts a turn that does not end on its own
+    // the peer's call starts a pass that does not end on its own
     peer.send_frame(
-        json!({"type": "call", "id": "peer-turn-1", "target": target,
-                           "payload": {"type": "turn", "park": true}}),
+        json!({"type": "call", "id": "peer-pass-1", "target": target,
+                           "payload": {"type": "pass", "park": true}}),
     )
     .await
     .unwrap();
     started.notified().await;
-    assert!(busy.load(Ordering::SeqCst), "the turn is in flight");
+    assert!(busy.load(Ordering::SeqCst), "the pass is in flight");
 
-    // the connection drops mid-turn; `bridge_down` is the leg's last word, after
+    // the connection drops mid-pass; `bridge_down` is the leg's last word, after
     // the in-flight dispatch has been ended
     peer.close().await;
     loop {
@@ -375,7 +375,7 @@ async fn a_drop_mid_turn_releases_the_called_agent() {
     }
     assert!(
         !busy.load(Ordering::SeqCst),
-        "the drop ended the turn cleanly: its state is released"
+        "the drop ended the pass cleanly: its state is released"
     );
     assert_eq!(
         ask(&kernel, &target, json!({"type": "status"})).await["generating"],
@@ -387,8 +387,8 @@ async fn a_drop_mid_turn_releases_the_called_agent() {
     let again = ask(&kernel, &bid, json!({"type": "reconnect"})).await;
     assert_eq!(again["booted"], true, "{again}");
     peer.send_frame(
-        json!({"type": "call", "id": "peer-turn-2", "target": target,
-                           "payload": {"type": "turn"}}),
+        json!({"type": "call", "id": "peer-pass-2", "target": target,
+                           "payload": {"type": "pass"}}),
     )
     .await
     .unwrap();

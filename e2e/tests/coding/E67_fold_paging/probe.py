@@ -1,7 +1,7 @@
 """coding/fold_paging — N folds, choose the right one, open only it.
 
 Sixteen tiny tasks, PLANTED as finished roots (each read one file with its own checksum
-line and ended in `done`); the first live turn folds them. The final message asks for
+line and ended in `done`); the first live pass folds them. The final message asks for
 task #3's checksum. Scored:
 exact answer, the descended fold is the one covering task 3, and at most two folds were
 opened — opening four is paging, not choosing.

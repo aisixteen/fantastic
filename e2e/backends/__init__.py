@@ -9,7 +9,7 @@ So the choice lives HERE, once. A probe asks for `backend()` and gets an object
 that knows how to describe itself as a record and what it needs before it can
 run. Adding a backend is adding a file, not editing ten probes.
 
-NO PROVIDER IS BUILT HERE. ai_core builds an agent's provider for every turn from
+NO PROVIDER IS BUILT HERE. ai_core builds an agent's provider for every pass from
 its live record; a reader wraps THAT build (`helpers.kernel.wrap_with`). A
 connect-time build only duplicated it. A plug a runtime cannot run (FM on python:
 no such bundle in python's catalog) fails at the kernel instead — its first call
@@ -38,7 +38,7 @@ from helpers.creds import KEYED, credentials
 #:
 #: THIS IS THE OUTPUT RESERVE, NOT THE WINDOW. The endpoint enforces
 #: `max_tokens + prompt <= context` (262144 here), so the cap is a JOINT budget:
-#: at 260_000 only 2144 tokens are left for the prompt and EVERY turn 400s on the
+#: at 260_000 only 2144 tokens are left for the prompt and EVERY pass 400s on the
 #: first send —
 #:   "you requested 260000 output tokens and your prompt contains at least 2145
 #:    input tokens, for a total of at least 262145"
@@ -46,7 +46,7 @@ from helpers.creds import KEYED, credentials
 #: 260_000, which is why the window looks like a valid cap and is not.
 #:
 #: 65536 sits comfortably above anything observed — the largest legitimate
-#: authoring turn measured ~34k CHARACTERS, on the order of 9k tokens — and still
+#: authoring pass measured ~34k CHARACTERS, on the order of 9k tokens — and still
 #: leaves ~196k for the conversation, more prompt room than any lane has used.
 #: The env var overrides for one deliberate run; nothing declares it per test.
 THINK_BUDGET = 65_536
@@ -63,7 +63,7 @@ class Backend:
     model: str
     #: record fields beyond `handler_module`/`model` (endpoint, sidecars)
     extra: dict[str, Any] = field(default_factory=dict)
-    #: env vars that must be set, with the reason, checked before any turn
+    #: env vars that must be set, with the reason, checked before any pass
     requires: tuple[tuple[str, str], ...] = ()
     #: the ref this plug's key is read from in the run's `creds` store
     #: (`helpers/creds.py`), or None for a keyless plug. The backend never reads
@@ -241,7 +241,7 @@ def _vllm() -> Backend:
 ANTHROPIC_OUTPUT_CAP = 32_000
 
 #: The caching modes the anthropic backend takes (`none` sends every row with no marks,
-#: between turns, `provider_cache` reuses the prompt prefix the provider caches).
+#: between passes, `provider_cache` reuses the prompt prefix the provider caches).
 ANTHROPIC_CACHING = ("none", "provider_cache")
 
 
@@ -312,8 +312,8 @@ class _FoundationModels(Backend):
 
 
 #: THE FM SYSTEM BLOCK — the record's `system_prompt`, which replaces the default
-#: block on every turn. The on-device window is 4096 tokens and the default block
-#: does not fit it: every turn would be refused `context_insufficient` before the
+#: block on every pass. The on-device window is 4096 tokens and the default block
+#: does not fit it: every pass would be refused `context_insufficient` before the
 #: model ran. The file keeps the default block's essentials only — the call
 #: grammar, replies, await/done, reflect. It names no agent id: `record()` is not
 #: told which agent it builds.

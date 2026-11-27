@@ -1,4 +1,4 @@
-"""kernel/failed_turn_retry — a failed pass is retried only by `transport_retries`,
+"""kernel/failed_pass_retry — a failed pass is retried only by `transport_retries`,
 inside the pass (#533, #795). NO MODEL.
 
 A scripted OpenAI-compatible server fails the way a provider does, for the kernel's
@@ -44,9 +44,9 @@ class CuttingVllm(VllmMock):
     """The vllm mock, plus a stream cut at the output bound: an answer starting with
     `<cut>` streams the rest, then ends with `finish_reason: length`."""
 
-    def turn(self, h, req, text):
+    def on_pass(self, h, req, text):
         if not text.startswith(CUT):
-            return super().turn(h, req, text)
+            return super().on_pass(h, req, text)
         from mocks import halves, sse
 
         def chunk(delta, finish=None):
@@ -74,7 +74,7 @@ def main() -> int:
     name, _ = runtime(REPO, RUNTIME)
     spec = ensure_runtime(REPO, name)
     m = CuttingVllm(model=MODEL).start()
-    work = Path(tempfile.mkdtemp(prefix="e2e-failed-turn-"))
+    work = Path(tempfile.mkdtemp(prefix="e2e-failed-pass-"))
     hk = HostKernel(spec, work).boot()
     root = hk.root_id
     bad: list[str] = []
@@ -84,13 +84,13 @@ def main() -> int:
         if not cond:
             bad.append(what)
 
-    def turns_at_least(n: int, bound: float = 60) -> list[dict]:
+    def passes_at_least(n: int, bound: float = 60) -> list[dict]:
         end = time.monotonic() + bound
         while time.monotonic() < end:
-            if len(m.turns()) >= n:
+            if len(m.passes()) >= n:
                 break
             time.sleep(0.05)
-        return m.turns()
+        return m.passes()
 
     def idle(bound: float = 60) -> bool:
         end = time.monotonic() + bound
@@ -106,7 +106,7 @@ def main() -> int:
 
     def say(text: str) -> None:
         out = hk.send(AI, {"type": "send", "text": text})
-        # a failed turn's reply may carry the error; only a refusal of the send fails
+        # a failed pass's reply may carry the error; only a refusal of the send fails
         need("chat's verb" not in str(out), f"the send reached the chat: {str(out)[:160]}")
 
     try:
@@ -126,23 +126,23 @@ def main() -> int:
         # ── 1 · an error reply, retried on the link inside the pass ──────
         m.error(500, times=1).reply("Recovered.\n" + DONE)
         say("first")
-        turns_at_least(2)
+        passes_at_least(2)
         need(idle(), "1: the chain settles")
         time.sleep(0.5)
-        turns = m.turns()
-        need(len(turns) == 2, f"1: the failed request and its link retry: {len(turns)} requests")
-        need(bool(turns) and turns[0]["answered"] == 500, "1: the first request was answered with the error")
+        passes = m.passes()
+        need(len(passes) == 2, f"1: the failed request and its link retry: {len(passes)} requests")
+        need(bool(passes) and passes[0]["answered"] == 500, "1: the first request was answered with the error")
         need(not error_rows(), f"1: the retried pass answered, no error row: {error_rows()}")
 
         # ── 2 · a stream cut at max_tokens ────────────────────────────────
         m.clear()
         m.reply(CUT + "a long answer that never finishes", "Recovered.\n" + DONE)
         say("second")
-        turns_at_least(1)
+        passes_at_least(1)
         need(idle(), "2: the chain settles")
         time.sleep(1.0)
-        turns = m.turns()
-        need(len(turns) == 1, f"2: a cut is no link failure, one request: {len(turns)} requests")
+        passes = m.passes()
+        need(len(passes) == 1, f"2: a cut is no link failure, one request: {len(passes)} requests")
         rows = error_rows()
         need(len(rows) == 1 and "max_tokens" in str(rows[0]),
              f"2: one error row naming max_tokens: {rows}")
@@ -151,14 +151,14 @@ def main() -> int:
         m.clear()
         m.error(500, times=None)
         say("third")
-        turns_at_least(1 + RETRIES)
+        passes_at_least(1 + RETRIES)
         need(idle(), "3: the pass ends (the agent has no task in `ps`)")
         time.sleep(1.0)
-        n = len(m.turns())
+        n = len(m.passes())
         need(n == 1 + RETRIES,
              f"3: exactly 1 + transport_retries ({1 + RETRIES}) requests, no hang: {n}")
         m.error(None)
-        need(idle(5) and len(m.turns()) == n, "3: no request follows (the pass failed)")
+        need(idle(5) and len(m.passes()) == n, "3: no request follows (the pass failed)")
         need(len(error_rows()) == 2, f"3: the failed pass wrote its error row: {len(error_rows())}")
     finally:
         hk.close()

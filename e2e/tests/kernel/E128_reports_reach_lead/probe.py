@@ -141,9 +141,9 @@ def main() -> int:
 
         out = hk.send(LEAD, {"type": "send", "text": f"Expect three reports ({TOKEN})."})
         need(out.get("accepted") is True, f"the kick is accepted: {str(out)[:200]}")
-        need(until("the lead's first pass", lambda: len(lead_m.turns()) >= 1) and idle(),
+        need(until("the lead's first pass", lambda: len(lead_m.passes()) >= 1) and idle(),
              "the lead answered the kick and is idle")
-        kicked = len(lead_m.turns())
+        kicked = len(lead_m.passes())
 
         # the three workers are asked AT ONCE: their reports land close together
         outs: dict[str, dict] = {}
@@ -159,14 +159,14 @@ def main() -> int:
         for w in WORKERS:
             need((outs.get(w) or {}).get("accepted") is True, f"{w}'s task is accepted: {str(outs.get(w))[:160]}")
         need(until("every report in the lead's requests",
-                   lambda: all(any(report(w) in u for t in lead_m.turns() for u in users(t["body"])) for w in WORKERS))
+                   lambda: all(any(report(w) in u for t in lead_m.passes() for u in users(t["body"])) for w in WORKERS))
              and idle(), "the lead read every report and every AI is quiet")
         time.sleep(0.5)  # a stray extra pass would show here
 
-        turns = lead_m.turns()
-        after = turns[kicked:]
+        passes = lead_m.passes()
+        after = passes[kicked:]
         for i, t in enumerate(after):
-            print(f"  ── lead pass {i + 1} after the kick: new user turns ──\n"
+            print(f"  ── lead pass {i + 1} after the kick: new user messages ──\n"
                   + "\n".join("     " + ln for u in fresh(t["body"]) for ln in u[:300].splitlines()), flush=True)
         need(1 <= len(after) <= len(WORKERS),
              f"the lead ran 1..{len(WORKERS)} passes over the reports (coalesced, one per arrival at most): {len(after)}")
@@ -177,7 +177,7 @@ def main() -> int:
             seen_before = {w for w in WORKERS for tt in after[:i] for u in users(tt["body"]) if report(w) in u}
             news = [w for w in WORKERS if w not in seen_before and any(report(w) in u for u in users(t["body"]))]
             need(bool(news), f"lead pass {i + 1} reads a report for the first time: {news}")
-        hist = users(turns[-1]["body"]) if turns else []
+        hist = users(passes[-1]["body"]) if passes else []
         for w in WORKERS:
             held = [u for u in hist if report(w) in u]
             need(len(held) == 1, f"the lead's history holds {w}'s report once: {len(held)}")
@@ -185,7 +185,7 @@ def main() -> int:
                  f"it is a message of its own from {w}: {held[0][:80] if held else ''!r}")
             first = next((i for i, t in enumerate(after) if any(report(w) in u for u in users(t["body"]))), None)
             need(first is not None, f"a lead pass read {w}'s report: first in pass {first}")
-            n = len(work_m[w].turns())
+            n = len(work_m[w].passes())
             need(n == 1, f"{w} made exactly one request (its send's ack woke nothing): {n}")
         tasks = hk.send("kernel", {"type": "ps"}).get("tasks") or []
         mine = [t for t in tasks if t.get("agent") in (LEAD, *WORKERS, *PROVS.values())]

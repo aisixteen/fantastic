@@ -4,7 +4,7 @@ id: run_service
 group: canvas
 title: "an AI starts a server through an exec agent, reports its port, stops it"
 runner: probe.py
-costs: turns
+costs: passes
 limits:
   total_seconds: 600
   quiet_seconds: 30

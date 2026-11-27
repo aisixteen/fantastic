@@ -84,7 +84,7 @@ pub(crate) fn limits(meta: &Map<String, Value>) -> Limits {
     }
 }
 
-/// The images a turn attached: their parts and what the row says about them.
+/// The images a message attached: their parts and what the row says about them.
 #[derive(Clone, Debug)]
 pub(crate) struct Attached {
     /// `{type, needs, ref, media_type, width, height, bytes, hash}` each.
@@ -107,7 +107,7 @@ impl Attached {
     }
 }
 
-/// `row` with the images of its turn, when it attached any.
+/// `row` with the images of its message, when it attached any.
 pub(crate) fn stamped(row: Value, attached: Option<&Attached>) -> Value {
     match attached {
         Some(a) => a.stamp(row),
@@ -125,7 +125,7 @@ pub(crate) fn parts_of(row: &Value) -> Option<&Vec<Value>> {
 // ── the capability map ───────────────────────────────────────────────────────
 
 /// Keep the chat's `provider_capabilities` right for its provider and model, as a STEP
-/// (#795): the provider is asked (`capabilities`) at the first turn of an incarnation and
+/// (#795): the provider is asked (`capabilities`) at the first pass of an incarnation and
 /// whenever `provider_id` or `model` changed since, and its answer is the next step; the
 /// record is written only when the map is not what it holds. A provider that does not
 /// answer leaves what is there (a provider that was swapped for one that does not answer

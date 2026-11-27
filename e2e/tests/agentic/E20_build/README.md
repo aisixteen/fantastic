@@ -27,15 +27,15 @@ SCORING is three HARD checks, and the third is the one with teeth:
   3. THE CANARY — the harness writes a FOURTH file with a fresh random number and
      RE-RUNS the program (the same `start` command, against the file on disk). The
      stored total must become the NEW true total. This separates the two ways to
-     satisfy (2): a model that read the three files in its own turns and wrote the
+     satisfy (2): a model that read the three files in its own passes and wrote the
      sum itself passes (1) and (2) and FAILS HERE, and so does a program that
      hardcoded the number it happened to see.
      It asks for a PROGRAM, not a service. Nothing has to stay running between the
-     model's turn and this one — an earlier revision demanded that, which was the
+     model's pass and this one — an earlier revision demanded that, which was the
      harness inventing a requirement the task never stated and then grading against it.
 
 SOFT — observed, never asserted: did a plan appear anywhere, how much planning
-language showed up, and whether the last turn reported back in prose.
+language showed up, and whether the last pass reported back in prose.
 
 ## Files
 
@@ -58,7 +58,7 @@ cd src/lib/python && uv run python -u ../../../e2e/tests/agentic/E20_build/probe
 cd src/lib/python && uv run python ../../../e2e/run.py --id build
 ```
 
-The self-test costs no model turns:
+The self-test costs no model passes:
 
 ```sh
 cd src/lib/python && uv run python -u ../../../e2e/tests/agentic/E20_build/selftest.py

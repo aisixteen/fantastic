@@ -44,7 +44,7 @@ from helpers import Limits, connect, drive, lines  # noqa: E402
 
 # Generous budget: the polyglot set is the HARD subset; a from-scratch
 # parser/solver needs many fix-rerun cycles. Overridable via env as usual.
-GYM_LIMITS = dict(max_turns=45, idle=90.0, no_progress=12)
+GYM_LIMITS = dict(max_passes=45, idle=90.0, no_progress=12)
 from helpers.kernel import home, open_kernel  # noqa: E402
 
 BENCH = E2E.parent / "tmp" / "repos" / "polyglot-benchmark"

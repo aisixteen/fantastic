@@ -25,7 +25,7 @@ SCORING is split, deliberately:
           which the AI writes. The trap is symmetric: opening everything fails
           exactly like opening nothing, so a line on all three is not a shortcut.
   SOFT  — observations, reported but never asserted: did a plan artifact appear
-          anywhere, and did the last turn report back in prose.
+          anywhere, and did the last pass report back in prose.
 
 ## Files
 

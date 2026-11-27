@@ -1,5 +1,5 @@
-//! context_strategy `none` — registry-level checks. The turn-refusal test lives in
-//! `tests.rs` as `an_over_budget_turn_is_refused_under_none` (it needs that module's helpers).
+//! context_strategy `none` — registry-level checks. The pass-refusal test lives in
+//! `tests.rs` as `an_over_budget_pass_is_refused_under_none` (it needs that module's helpers).
 
 use crate::strategies::{is_known_strategy, STRATEGY_NAMES};
 

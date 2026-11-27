@@ -44,7 +44,7 @@ pub(crate) enum ScriptEvent {
 ///
 /// SHARED between every `send` on that agent — the bundle builds a fresh
 /// `MockProvider` per dispatch, so the script box must outlive the dispatch or a
-/// chain's second turn replays the FIRST pass. It did: the old mock cloned the
+/// chain's second pass replays the FIRST pass. It did: the old mock cloned the
 /// script per send AND returned an empty pass once exhausted, so an over-eager
 /// chain — the exact failure the routing tests exist to catch — silently PASSED
 /// with no visible symptom. The request log is the fix: `passes()` is python's
@@ -53,7 +53,7 @@ pub(crate) enum ScriptEvent {
 pub(crate) struct MockScript {
     passes: std::sync::Mutex<std::collections::VecDeque<Vec<ScriptEvent>>>,
     /// Every `chat()` served, in order — the model-view message list it was
-    /// handed. Turn 2's entry is how a test proves a reply actually came back.
+    /// handed. Pass 2's entry is how a test proves a reply actually came back.
     requests: std::sync::Mutex<Vec<Vec<Value>>>,
     delay: Duration,
     /// Answers a request before the queue does when it returns `Some` — python's
@@ -530,7 +530,7 @@ impl Handler for MockBundle {
 
     /// The backend has no `interrupt` of its own any more: an in-flight `send`
     /// IS a kernel task, killed by the substrate's `cancel`. This is the hook
-    /// the kernel runs first — close the turn out for the caller.
+    /// the kernel runs first — close the pass out for the caller.
     async fn on_cancel(
         &self,
         agent_id: &AgentId,
@@ -712,7 +712,7 @@ async fn add_peer(kernel: &Arc<Kernel>, tmp: &TempDir, primary: &AgentId) -> Age
 ///
 /// `context_window` is EXPLICIT, and that is not decoration: the default is 4096,
 /// the default system block now carries the `send` how-to as well as
-/// the context section (`res/default/howto_context.txt`), and a chain's second turn would die on
+/// the context section (`res/default/howto_context.txt`), and a chain's second pass would die on
 /// `context_insufficient` — which looks exactly like a routing bug. python
 /// documents the same trap at `test_send_to.py:53-66`.
 async fn add_backend(kernel: &Arc<Kernel>, id: &str, file_id: &str) -> AgentId {
@@ -724,7 +724,7 @@ async fn add_backend(kernel: &Arc<Kernel>, id: &str, file_id: &str) -> AgentId {
 async fn add_backend_on(kernel: &Arc<Kernel>, id: &str, file_id: &str, module: &str) -> AgentId {
     // The conversation lives in the memory store the record names — wired both
     // ways (python `_testkit.memory_meta`). Deny-all otherwise: the backend
-    // streams its turn to `cli` and names its leg, each an explicit grant.
+    // streams its pass to `cli` and names its leg, each an explicit grant.
     let memory = fantastic_ram_store::test_support::memory_meta(
         kernel,
         id,
@@ -884,11 +884,11 @@ async fn send_streams_tokens_and_emits_done() {
     assert!(phases.contains("done"), "missing done: {phases:?}");
 }
 
-/// A reasoning turn: the RAW completion (thinking included) is what streams; the
+/// A reasoning pass: the RAW completion (thinking included) is what streams; the
 /// caller's reply is the ANSWER only (thinking never leaves the agent); the ROUTER dispatches only the ANSWER's calls and the DURABLE
-/// turn is the answer (only the answer acts). A call written
+/// pass is the answer (only the answer acts). A call written
 /// mid-thought is thinking — it never runs and is never stored. The answer ends with
-/// `done`, so no reminder starts a second turn.
+/// `done`, so no reminder starts a second pass.
 #[tokio::test]
 async fn thinking_is_streamed_raw_but_neither_dispatched_nor_persisted() {
     let tmp = TempDir::new().unwrap();
@@ -944,9 +944,9 @@ async fn thinking_is_streamed_raw_but_neither_dispatched_nor_persisted() {
         "a call written inside thinking was dispatched"
     );
 
-    // The DURABLE turn is stripped — no marker, no deliberation, no mid-thought
+    // The DURABLE row is stripped — no marker, no deliberation, no mid-thought
     // call text; just the answer.
-    // Through `recall`, which pages the DURABLE turns: `history` is the digest.
+    // Through `recall`, which pages the DURABLE rows: `history` is the digest.
     let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(backend.clone(), json!({"type": "recall"}))])
         .await
         .remove(0)
@@ -970,10 +970,10 @@ async fn thinking_is_streamed_raw_but_neither_dispatched_nor_persisted() {
 
 /// An attempt spent ENTIRELY reasoning is an answer with no call (#795): it is
 /// DISCARDED — durable history holds nothing of it, no empty assistant row a
-/// later turn would read as an answer — and RE-ASKED inside its pass with the
+/// later pass would read as an answer — and RE-ASKED inside its pass with the
 /// no-call report.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_thinking_only_turn_is_discarded_and_rerolled() {
+async fn a_thinking_only_pass_is_discarded_and_rerolled() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "thonly").await;
     let s = script(
@@ -1023,7 +1023,7 @@ async fn a_thinking_only_turn_is_discarded_and_rerolled() {
 
 // ── Context Protocol: budget primitives + strategies (no kernel) ─────
 
-fn turn(role: &str, content: &str) -> Value {
+fn role_msg(role: &str, content: &str) -> Value {
     json!({"role": role, "content": content})
 }
 
@@ -1031,7 +1031,7 @@ fn body(n: usize, size: usize) -> Vec<Value> {
     (0..n)
         .map(|i| {
             let role = if i % 2 == 0 { "user" } else { "assistant" };
-            turn(role, &format!("turn{i}-{}", "x".repeat(size)))
+            role_msg(role, &format!("pass{i}-{}", "x".repeat(size)))
         })
         .collect()
 }
@@ -1343,7 +1343,7 @@ fn safe_client_strips_python_whitespace() {
 #[test]
 fn context_estimate_and_budget() {
     use crate::context::{budget, estimate_one, estimate_tokens, resolve_context_window};
-    assert!(estimate_one(&turn("user", &"x".repeat(400))) >= 100);
+    assert!(estimate_one(&role_msg("user", &"x".repeat(400))) >= 100);
     assert!(estimate_tokens(&body(4, 100)) > estimate_tokens(&body(2, 100)));
     let mut m = Map::new();
     m.insert("context_window".into(), json!(8000));
@@ -1381,8 +1381,8 @@ async fn compact_returns_projection_with_summary() {
     let proj = crate::model_format::pass::settled(&pass, None, |p| crate::strategies::compact(&b, 4, 1_000_000, p)).await;
     assert_eq!(proj.summary.as_deref(), Some("SUMMARY"));
     assert!(!proj.omitted_marker);
-    // recent verbatim, NO fabricated summary turn in the body — plus the PINNED first
-    // turn (the task framing, which the overflow split would otherwise take first).
+    // recent verbatim, NO fabricated summary message in the body — plus the PINNED first
+    // message (the task framing, which the overflow split would otherwise take first).
     let mut want = vec![b[0].clone()];
     want.extend(b[b.len() - 4..].to_vec());
     assert_eq!(proj.body, want);
@@ -1394,7 +1394,7 @@ fn truncate_returns_projection_no_summary() {
     let proj = crate::strategies::truncate(&b, 1_000_000, &crate::context::estimate_one);
     assert!(proj.omitted_marker && proj.summary.is_none());
     assert_eq!(proj.body[0], b[0]); // first kept
-    assert_eq!(proj.body[proj.body.len() - 1], b[b.len() - 1]); // live turn kept
+    assert_eq!(proj.body[proj.body.len() - 1], b[b.len() - 1]); // live message kept
 }
 
 #[test]
@@ -1424,7 +1424,7 @@ fn context_notice_shapes() {
         "{c}"
     );
     assert!(!c.contains("{type:'recall'"), "{c}");
-    assert!(c.contains("7 earlier turn"));
+    assert!(c.contains("7 earlier message"));
     assert!(
         !c.contains("STRIPPED"),
         "no stripped line when nothing was stripped: {c}"
@@ -1543,8 +1543,8 @@ async fn history_persists_and_round_trips() {
     // who wrote it, ids from the kernel's one counter. Agent id is conversation
     // id, so one list is what every reader gets.
     let rows = conversation(&kernel, &backend).await;
-    // ONE ROW PER TURN — list index == store index (recall/reaction paging).
-    // Two turns: the ping and the answer that ended the chain.
+    // ONE ROW PER MESSAGE — list index == store index (recall/reaction paging).
+    // Two messages: the ping and the answer that ended the chain.
     assert_eq!(rows.len(), 2, "one row per message: {rows:#?}");
     assert_eq!(rows[0]["role"], "user");
     assert_eq!(rows[0]["content"], "ping");
@@ -1751,10 +1751,10 @@ async fn status_during_in_flight_shows_phase() {
 // Mirrors `bundled_agents/ai/ollama/ollama_backend/tests/test_send_to.py`, which
 // is canonical. Every agent here sets `context_window` explicitly (see
 // `add_backend`) — the default is smaller than the system block once
-// the `send` how-to is in it, and a second turn dying on `context_insufficient`
+// the `send` how-to is in it, and a second pass dying on `context_insufficient`
 // looks exactly like a routing bug.
 
-/// The model emits a send; it really runs; its REPLY comes back as the next turn,
+/// The model emits a send; it really runs; its REPLY comes back as the next pass,
 /// tagged so the model can tell it from a human's message.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_model_call_is_dispatched_and_the_result_returns() {
@@ -1787,26 +1787,26 @@ async fn a_model_call_is_dispatched_and_the_result_returns() {
     assert_eq!(
         s.passes_served(),
         2,
-        "one call = one follow-up turn, then it stopped"
+        "one call = one follow-up pass, then it stopped"
     );
-    let turn2 = s.request(1);
+    let pass2 = s.request(1);
     // PID, then target AND verb — a bare `[reply to core]` is unmatchable with two in
     // flight, and target+verb alone is not unique either
-    // ...then `↑<turn>`, the assistant row this reply answers — python's tag,
+    // ...then `↑<row>`, the assistant row this reply answers — python's tag,
     // the link the fold machinery derives chains from.
     assert!(
-        turn2.contains(" \u{b7} kernel_state list_agents \u{b7} \u{2191}")
-            && turn2.contains("[reply to "),
-        "untagged reply: {turn2}"
+        pass2.contains(" \u{b7} kernel_state list_agents \u{b7} \u{2191}")
+            && pass2.contains("[reply to "),
+        "untagged reply: {pass2}"
     );
     assert!(
-        turn2.contains("agents"),
-        "the real list_agents result must be in the turn: {turn2}"
+        pass2.contains("agents"),
+        "the real list_agents result must be in the pass: {pass2}"
     );
 }
 
-/// THE regression. A self-addressed reply must QUEUE behind the current turn, not
-/// deadlock on the FIFO guard the turn already holds — `BackendState::lock` is a
+/// THE regression. A self-addressed reply must QUEUE behind the current pass, not
+/// deadlock on the FIFO guard the pass already holds — `BackendState::lock` is a
 /// non-reentrant `tokio::sync::Mutex`, so a re-entrant await would stall until the
 /// 180s send ceiling. Wrapped in a 5s timeout: failing FAST is the signal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1845,12 +1845,12 @@ async fn a_self_chain_does_not_deadlock() {
 
 /// The chain carries NO `_call_stack`, and that is deliberate: the guard's own
 /// cycle rule would read a `reply_to:self` hop as a loop and kill the chain on
-/// turn 2. python's `_deliver` does not carry it either, so its guard is inert on
+/// pass 2. python's `_deliver` does not carry it either, so its guard is inert on
 /// this path by construction.
 ///
 /// Written so the failure mode is unambiguous: the inbound send arrives WITH a
 /// chain (`["upstream"]`), so if routing propagated it the follow-up would carry
-/// this agent's own id and turn 2 would return `cycle detected` instead of calling
+/// this agent's own id and pass 2 would return `cycle detected` instead of calling
 /// the provider. Two passes prove it did not.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_self_chain_carries_no_call_stack() {
@@ -1995,7 +1995,7 @@ async fn discarding_a_reply_must_be_said_explicitly() {
     assert_eq!(
         s.passes_served(),
         1,
-        "an explicit null must mean no follow-up turn"
+        "an explicit null must mean no follow-up pass"
     );
 }
 
@@ -2028,11 +2028,11 @@ async fn a_failed_call_comes_back_to_the_model() {
         until_passes(&s, 2).await,
         "the failure never reached the model"
     );
-    let turn2 = s.request(1).to_lowercase();
-    assert!(turn2.contains("no_such_agent"), "{turn2}");
+    let pass2 = s.request(1).to_lowercase();
+    assert!(pass2.contains("no_such_agent"), "{pass2}");
     assert!(
-        turn2.contains("error") || turn2.contains("unknown"),
-        "not an error: {turn2}"
+        pass2.contains("error") || pass2.contains("unknown"),
+        "not an error: {pass2}"
     );
 }
 
@@ -2056,11 +2056,11 @@ async fn a_call_with_no_target_is_reported_not_swallowed() {
         .remove(0)
         .result;
     assert!(until_passes(&s, 2).await, "the bad call was swallowed");
-    let turn2 = s.request(1);
-    assert!(turn2.contains("a send names its target"), "{turn2}");
+    let pass2 = s.request(1);
+    assert!(pass2.contains("a send names its target"), "{pass2}");
     assert!(
-        turn2.contains("<target_id>agent id</target_id>") && turn2.contains("<to><item>"),
-        "it must state the fix, not just the fault: {turn2}"
+        pass2.contains("<target_id>agent id</target_id>") && pass2.contains("<to><item>"),
+        "it must state the fix, not just the fault: {pass2}"
     );
 }
 
@@ -2085,11 +2085,11 @@ async fn a_send_with_no_payload_names_what_is_missing() {
         until_passes(&s, 2).await,
         "the payload-less send was swallowed"
     );
-    let turn2 = s.request(1);
-    assert!(turn2.contains("no payload"), "{turn2}");
+    let pass2 = s.request(1);
+    assert!(pass2.contains("no payload"), "{pass2}");
     assert!(
-        turn2.contains("totals"),
-        "it must name the agent it was addressed to: {turn2}"
+        pass2.contains("totals"),
+        "it must name the agent it was addressed to: {pass2}"
     );
 }
 
@@ -2114,13 +2114,13 @@ async fn an_unparseable_call_reaches_the_model_as_an_error() {
         .result;
     assert!(
         until_passes(&s, 2).await,
-        "the malformed call produced no next turn"
+        "the malformed call produced no next pass"
     );
     assert!(s.request(1).contains("NOT dispatched"), "{}", s.request(1));
 }
 
 /// Malformed reports come FIRST and come even when a sibling call parsed fine: a
-/// partially-read turn dispatched half the model's intent, and which half was lost
+/// partially-read pass dispatched half the model's intent, and which half was lost
 /// is not something it can infer from the replies it got.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_broken_call_beside_a_good_one_is_still_reported() {
@@ -2165,19 +2165,19 @@ async fn a_verb_in_the_tool_slot_is_refused_by_name() {
         .remove(0)
         .result;
     assert!(until_passes(&s, 2).await, "the refusal never came back");
-    let turn2 = s.request(1);
-    assert!(turn2.contains("`reflect` is not a tool"), "{turn2}");
+    let pass2 = s.request(1);
+    assert!(pass2.contains("`reflect` is not a tool"), "{pass2}");
     assert!(
-        turn2.contains("<type>reflect</type>"),
-        "it must show where the verb goes: {turn2}"
+        pass2.contains("<type>reflect</type>"),
+        "it must show where the verb goes: {pass2}"
     );
     assert!(
-        turn2.contains("send, done, inquiry_answer"),
-        "it must name the closed set: {turn2}"
+        pass2.contains("send, done, inquiry_answer"),
+        "it must name the closed set: {pass2}"
     );
 }
 
-/// A failed pass routes nothing (#533, #795): it is not re-run as a turn of its own,
+/// A failed pass routes nothing (#533, #795): it is not re-run as a pass of its own,
 /// and its own output is never dispatched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_error_reply_does_not_route() {
@@ -2285,7 +2285,7 @@ async fn a_projection_refusal_fails_the_pass_in_the_seams_words() {
             v.get("type").and_then(Value::as_str) == Some("status")
                 && v.get("phase").and_then(Value::as_str) == Some("done")
         }),
-        "no turn opened, so nothing closes one: {evs:#?}"
+        "no pass opened, so nothing closes one: {evs:#?}"
     );
     assert!(
         evs.iter().any(|v| {
@@ -2302,7 +2302,7 @@ async fn a_projection_refusal_fails_the_pass_in_the_seams_words() {
 /// error reply by the kernel's dispatch, so it routes back on its own; a PANIC is
 /// re-raised into the caller, which is why the router catches it. Unguarded, a
 /// handler that raises (a `file_bridge` whose root cannot be resolved) leaves
-/// the model with no reply, no error and no further turn — the run stops and
+/// the model with no reply, no error and no further pass — the run stops and
 /// looks finished. An exception is a result; the model can act on one and cannot
 /// act on silence.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2368,7 +2368,7 @@ async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
         &backend,
         vec![
             pass(call_envelope(&raiser, json!({"type": "reflect"}), None)),
-            // ends the chain explicitly — a silent turn is now nudged again
+            // ends the chain explicitly — a silent pass is now nudged again
             pass("saw it <call name=\"done\"></call>"),
         ],
         Duration::ZERO,
@@ -2384,10 +2384,10 @@ async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
         until_passes(&s, 2).await,
         "the error killed the chain instead of routing"
     );
-    let turn2 = s.request(1);
+    let pass2 = s.request(1);
     assert!(
-        turn2.contains("root cannot be resolved"),
-        "it must carry what actually went wrong: {turn2}"
+        pass2.contains("root cannot be resolved"),
+        "it must carry what actually went wrong: {pass2}"
     );
 
     // ② a handler that PANICS. Same contract, and the panic must not take the
@@ -2411,10 +2411,10 @@ async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
         until_passes(&s2, 2).await,
         "the panic killed the chain instead of routing"
     );
-    let panic_turn = s2.request(1);
+    let panic_pass = s2.request(1);
     assert!(
-        panic_turn.contains("the handler died outright") && panic_turn.contains("raised"),
-        "a panic is a result too: {panic_turn}"
+        panic_pass.contains("the handler died outright") && panic_pass.contains("raised"),
+        "a panic is a result too: {panic_pass}"
     );
 }
 
@@ -2533,7 +2533,7 @@ async fn routing_is_its_own_ps_row() {
 // ─── the end-of-pass contract: DONE is explicit; silence is re-asked ─────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn silent_chain_turns_are_nudged_until_a_call_or_done() {
+async fn silent_chain_passes_are_nudged_until_a_call_or_done() {
     // The model is RE-ASKED UNTIL IT CALLS, inside its pass (#795): a silent answer
     // does not end the chain, and the attempts bound it.
     let tmp = TempDir::new().unwrap();
@@ -2577,7 +2577,7 @@ async fn silent_chain_turns_are_nudged_until_a_call_or_done() {
 /// (#795; a tiny thinking budget, then a clean `stop` with no answer; failing it
 /// outright would end a long chain).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_dead_turn_is_discarded_and_rerolled() {
+async fn a_dead_pass_is_discarded_and_rerolled() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "dead_think").await;
     let mut rx = rebind_backend_inbox(&kernel, &backend);
@@ -2732,8 +2732,8 @@ async fn a_done_call_ends_the_chain_without_a_nudge() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_first_turn_with_no_call_is_nudged_too() {
-    // NOT an exemption for prose. A first turn from a person that decides on a
+async fn a_first_pass_with_no_call_is_nudged_too() {
+    // NOT an exemption for prose. A first pass from a person that decides on a
     // call in thought and never emits it is reminded exactly once, and `done`
     // closes it.
     let tmp = TempDir::new().unwrap();
@@ -2757,11 +2757,11 @@ async fn a_first_turn_with_no_call_is_nudged_too() {
     assert_eq!(
         s.passes_served(),
         2,
-        "the silent turn earns one reminder, and `done` ends it"
+        "the silent pass earns one reminder, and `done` ends it"
     );
 }
 
-// ── the batch: one deadline, one stamp, one token per turn ───────────
+// ── the batch: one deadline, one stamp, one token per pass ───────────
 
 /// EVERY dispatched model call carries the AI layer's per-call deadline. The
 /// KERNEL defaults nothing, so without it a call to a handler that never
@@ -2806,22 +2806,22 @@ async fn every_model_call_carries_the_layer_default_timeout() {
         until_passes(&sa, 1).await,
         "the timed-out call produced no block at all — the batch hung"
     );
-    let turn = sa.request(0);
+    let pass_req = sa.request(0);
     // The sender is told its message hit the deadline and went to the dead
     // letter (#568), with the kernel's `reason` and `task_id` kept.
     assert!(
-        turn.contains("hit its 0.2s deadline"),
-        "the block must REPORT the deadline: {turn}"
+        pass_req.contains("hit its 0.2s deadline"),
+        "the block must REPORT the deadline: {pass_req}"
     );
     assert!(
-        turn.contains("dead letter"),
-        "must name the dead letter: {turn}"
+        pass_req.contains("dead letter"),
+        "must name the dead letter: {pass_req}"
     );
     assert!(
-        turn.contains("<reason>timeout</reason>"),
-        "must keep the reason: {turn}"
+        pass_req.contains("<reason>timeout</reason>"),
+        "must keep the reason: {pass_req}"
     );
-    assert!(turn.contains("<task_id>"), "must carry task_id: {turn}");
+    assert!(pass_req.contains("<task_id>"), "must carry task_id: {pass_req}");
 }
 
 /// A `timeout` that is not a number is REFUSED by name where the call is read —
@@ -2868,14 +2868,14 @@ async fn a_malformed_timeout_arg_is_refused_by_name() {
         until_passes(&sa, 1).await,
         "the kernel's refusal must reach the model as a block"
     );
-    let turn = sa.request(0);
+    let pass_req = sa.request(0);
     assert!(
-        turn.contains("timeout must be number"),
-        "must carry the refusal naming the argument: {turn}"
+        pass_req.contains("timeout must be number"),
+        "must carry the refusal naming the argument: {pass_req}"
     );
     assert!(
-        turn.contains("<arg>timeout</arg>"),
-        "must name the argument: {turn}"
+        pass_req.contains("<arg>timeout</arg>"),
+        "must name the argument: {pass_req}"
     );
 }
 
@@ -2920,21 +2920,21 @@ async fn a_reply_to_naming_no_agent_dispatches_nothing_and_says_so() {
         until_passes(&sa, 1).await,
         "the refusal must reach the model"
     );
-    let turn = sa.request(0);
+    let pass_req = sa.request(0);
     assert!(
-        turn.contains("reply_to='1001' names no agent, so nothing was dispatched"),
-        "{turn}"
+        pass_req.contains("reply_to='1001' names no agent, so nothing was dispatched"),
+        "{pass_req}"
     );
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(sb.passes_served(), 0, "the call must not have run");
 }
 
-/// A turn whose calls all carried `reply_to:null` DISPATCHED REAL WORK. It is
-/// owed no reply, and it is not a silent turn: the gate is python's `not calls
-/// and not units`, never the blocks, so the model is never told "your turn
-/// emitted no <call> element" about a turn that did.
+/// A pass whose calls all carried `reply_to:null` DISPATCHED REAL WORK. It is
+/// owed no reply, and it is not a silent pass: the gate is python's `not calls
+/// and not units`, never the blocks, so the model is never told "your pass
+/// emitted no <call> element" about a pass that did.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn all_fire_and_forget_calls_are_not_a_silent_turn() {
+async fn all_fire_and_forget_calls_are_not_a_silent_pass() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp, "rt_faf").await;
     let b = add_peer(&kernel, &tmp, &a).await;
@@ -2955,7 +2955,7 @@ async fn all_fire_and_forget_calls_are_not_a_silent_turn() {
         vec![pass("nothing lands here")],
         Duration::ZERO,
     );
-    // A CHAIN turn (its incoming text is a delivered reply) — exactly the turn the
+    // A CHAIN pass (its incoming text is a delivered reply) — exactly the pass the
     // nudge exists for, so nothing but the dispatch can be what keeps it quiet.
     let _ = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
@@ -2972,14 +2972,14 @@ async fn all_fire_and_forget_calls_are_not_a_silent_turn() {
     assert_eq!(
         sa.passes_served(),
         1,
-        "a dispatching turn must not be nudged"
+        "a dispatching pass must not be nudged"
     );
     assert_eq!(sb.passes_served(), 0, "and reaches nobody else");
 }
 
 /// Two reads through the agent's own file leg — files of `chars` each — at a
 /// 4.5k window; the two reply rows that came back, and the inline cap.
-async fn two_reads_turn(tag: &str, frac: f64) -> (Vec<String>, i64) {
+async fn two_reads_pass(tag: &str, frac: f64) -> (Vec<String>, i64) {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, tag).await;
     let _ = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
@@ -3035,7 +3035,7 @@ async fn two_reads_turn(tag: &str, frac: f64) -> (Vec<String>, i64) {
 /// cap is held and stubbed by its origin line; the stored message stays within the cap.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_inline_cap_bounds_each_reply() {
-    let (replies, cap) = two_reads_turn("rt_batchcap", 1.2).await;
+    let (replies, cap) = two_reads_pass("rt_batchcap", 1.2).await;
     for r in &replies {
         assert!(r.contains("NOT inlined"), "{r}");
         assert!(!r.contains(&"a".repeat(100)) && !r.contains(&"b".repeat(100)), "{r}");
@@ -3048,7 +3048,7 @@ async fn the_inline_cap_bounds_each_reply() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replies_that_fit_together_are_all_inline() {
-    let (replies, _) = two_reads_turn("rt_batchfit", 0.3).await;
+    let (replies, _) = two_reads_pass("rt_batchfit", 0.3).await;
     let all = replies.join("\n\n");
     assert!(!all.contains("NOT inlined"), "{all}");
     assert!(all.contains(&"a".repeat(100)) && all.contains(&"b".repeat(100)), "{all}");
@@ -3082,35 +3082,35 @@ async fn the_batch_stamp_lives_inside_the_reply_tag() {
         .result;
     assert!(until_passes(&s, 2).await, "the batch never came back");
     assert!(settle(&kernel).await);
-    let turn2 = reply_rows(&kernel, &backend).await.join("\n\n");
+    let pass2 = reply_rows(&kernel, &backend).await.join("\n\n");
     assert!(
-        turn2.contains(" · 1 of 2 in batch ") && turn2.contains(" · 2 of 2 in batch "),
-        "the stamp must be composed into the tag: {turn2}"
+        pass2.contains(" · 1 of 2 in batch ") && pass2.contains(" · 2 of 2 in batch "),
+        "the stamp must be composed into the tag: {pass2}"
     );
     assert!(
-        !turn2.contains("[1 of 2 in batch"),
-        "no trailing stamp line may survive: {turn2}"
+        !pass2.contains("[1 of 2 in batch"),
+        "no trailing stamp line may survive: {pass2}"
     );
 }
 
 /// Read the newest batch token out of a request. Anchored on the STAMP (`1 of 2 in
 /// batch …`), not on the words: the system block teaches the shape, so a bare
 /// `in batch ` search finds the prompt's own `<token>` placeholder first.
-fn batch_token_of(turn: &str) -> String {
+fn batch_token_of(pass_req: &str) -> String {
     const MARK: &str = "1 of 2 in batch ";
-    let at = turn
+    let at = pass_req
         .rfind(MARK)
-        .unwrap_or_else(|| panic!("no batch stamp in: {turn}"))
+        .unwrap_or_else(|| panic!("no batch stamp in: {pass_req}"))
         + MARK.len();
-    turn[at..].chars().take(4).collect()
+    pass_req[at..].chars().take(4).collect()
 }
 
-/// A FRESH token per turn, never derived from the batch's own content
-/// (destinations, counts, body lengths): two turns that made the SAME calls would
+/// A FRESH token per pass, never derived from the batch's own content
+/// (destinations, counts, body lengths): two passes that made the SAME calls would
 /// collide — the exact confusion the token exists to end: a model that read one
 /// file twice would see the same batch token both times.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn two_identical_turns_get_different_batch_tokens() {
+async fn two_identical_passes_get_different_batch_tokens() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_tok").await;
     let twice = format!(
@@ -3146,7 +3146,7 @@ async fn two_identical_turns_get_different_batch_tokens() {
         .collect();
     assert!(
         tokens.len() >= 2,
-        "two identical turns must be distinguishable at a glance: {tokens:?}"
+        "two identical passes must be distinguishable at a glance: {tokens:?}"
     );
 }
 
@@ -3183,16 +3183,16 @@ async fn reflect_replies_carry_no_cut_notice() {
         .remove(0)
         .result;
     assert!(until_passes(&s, 2).await, "the reflect never came back");
-    let turn2 = s.request(1);
+    let pass2 = s.request(1);
     // A reflect is MUTABLE state and stays whole: it carries
     // no cut notice — only a `docs` reply does.
     assert!(
-        turn2.contains("mb_rt_nudge"),
-        "the reflect came back: {turn2}"
+        pass2.contains("mb_rt_nudge"),
+        "the reflect came back: {pass2}"
     );
     assert!(
-        !turn2.contains("[transient"),
-        "a reflect is never cut: {turn2}"
+        !pass2.contains("[transient"),
+        "a reflect is never cut: {pass2}"
     );
 }
 
@@ -3320,7 +3320,7 @@ fn only_failed_and_timed_out_count_as_a_failed_handoff() {
 
 /// The reaction cursor is the DURABLE STORE's length, not the model view's. The
 /// view is deduped/trimmed, so counting it puts the cursor short by exactly the
-/// turns the trimmers dropped — and `derive_reaction` then scans assistant turns
+/// messages the trimmers dropped — and `derive_reaction` then scans assistant messages
 /// written BEFORE the notice and scores a reaction that never happened.
 #[tokio::test]
 async fn the_compaction_cursor_is_the_store_length_not_the_view() {
@@ -3331,15 +3331,15 @@ async fn the_compaction_cursor_is_the_store_length_not_the_view() {
     // ① the store length is what `assemble_messages` reports.
     let stale = "[reply to ks:a1 · core reflect]\nOLD TREE";
     let fresh = "[reply to ks:a2 · core reflect]\nNEW TREE";
-    let turns = vec![
-        turn("user", stale),
-        turn("assistant", "noted"),
-        turn("user", fresh),
-        turn("assistant", "noted again"),
+    let history = vec![
+        role_msg("user", stale),
+        role_msg("assistant", "noted"),
+        role_msg("user", fresh),
+        role_msg("assistant", "noted again"),
     ];
     fantastic_kernel::test_support::as_agent(
         backend.clone(),
-        crate::memory::save_history(&backend, &kernel, &turns),
+        crate::memory::save_history(&backend, &kernel, &history),
     )
     .await
     .expect("store append");
@@ -3355,12 +3355,12 @@ async fn the_compaction_cursor_is_the_store_length_not_the_view() {
     )
     .await
     .expect("store read");
-    assert_eq!(store_len, 4, "the STORE keeps every turn");
+    assert_eq!(store_len, 4, "the STORE keeps every row");
     let _ = messages;
 
     // ② and the mark records THAT number, not the view's length.
     let provider: Arc<dyn Provider> = Arc::new(SummaryProvider("SUMMARY"));
-    let mut fat = vec![turn("system", "sys")];
+    let mut fat = vec![role_msg("system", "sys")];
     fat.extend(body(60, 8000));
     let n = fat.len();
     let _ = fantastic_kernel::test_support::as_agent(
@@ -3383,16 +3383,16 @@ async fn the_compaction_cursor_is_the_store_length_not_the_view() {
     assert_eq!(
         mark,
         Some((store_len, "probe".to_string())),
-        "the cursor is the store length (view body was {} turns)",
+        "the cursor is the store length (view body was {} messages)",
         n - 1
     );
 }
 
-/// `recall` answers the turn WHOLE. Rust capped each recalled turn at 2000
+/// `recall` answers the row WHOLE. Rust capped each recalled row at 2000
 /// chars while python returned it verbatim — same verb, same store, two different
 /// replies, and the cut half is exactly what a model pages back FOR.
 #[tokio::test]
-async fn recall_returns_the_turn_whole() {
+async fn recall_returns_the_row_whole() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rec_whole").await;
     script(&backend, vec![pass("noted")], Duration::ZERO);
@@ -3425,7 +3425,7 @@ async fn recall_returns_the_turn_whole() {
     );
 }
 
-/// SEVEN PARALLEL CALLS, NO `reply_to` — a well-formed turn batching seven
+/// SEVEN PARALLEL CALLS, NO `reply_to` — a well-formed pass batching seven
 /// `reflect` sends with the key omitted must not end the chain with NOTHING
 /// back: no reply block, no error, no timeout, no cancel. An omitted key means
 /// the model gets its own answer back, so every one of these is owed a block.
@@ -3433,7 +3433,7 @@ async fn recall_returns_the_turn_whole() {
 async fn a_batch_of_calls_without_reply_to_all_come_back() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp, "rt_batch").await;
-    // The follow-up turn is what proves delivery: the blocks arrive as ONE
+    // The follow-up pass is what proves delivery: the blocks arrive as ONE
     // message and the model is asked again.
     let sa = script(
         &a,
@@ -3466,7 +3466,7 @@ async fn a_batch_of_calls_without_reply_to_all_come_back() {
     .await;
     assert!(
         until_passes(&sa, 1).await,
-        "seven dispatched calls produced NO follow-up turn — the replies were dropped"
+        "seven dispatched calls produced NO follow-up pass — the replies were dropped"
     );
     assert!(settle(&kernel).await);
     let replies = reply_rows(&kernel, &a).await;
@@ -3494,8 +3494,8 @@ async fn routing_survives_the_dispatch_that_spawned_it() {
         vec![pass(&first), pass("seen <call name=\"done\"></call>")],
         Duration::ZERO,
     );
-    // ONE send, exactly as a caller makes it. Turn 1 emits the batch; the
-    // follow-up turn only happens if the spawned routing delivered.
+    // ONE send, exactly as a caller makes it. Pass 1 emits the batch; the
+    // follow-up pass only happens if the spawned routing delivered.
     let _ = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
             a.clone(),
             json!({"type": "send", "text": "build it", "client_id": "probe"}),
@@ -3503,7 +3503,7 @@ async fn routing_survives_the_dispatch_that_spawned_it() {
         .await;
     assert!(
         until_passes(&sa, 2).await,
-        "turn 2 never ran — the detached routing did not deliver after its \
+        "pass 2 never ran — the detached routing did not deliver after its \
          dispatch returned (passes={})",
         sa.passes_served()
     );
@@ -3511,10 +3511,10 @@ async fn routing_survives_the_dispatch_that_spawned_it() {
 
 /// SEVEN DIFFERENT TARGETS, ONE OF THEM ANOTHER AI — the live shape.
 ///
-/// The two tests above batch calls at ONE plain target and pass. The turn that
+/// The two tests above batch calls at ONE plain target and pass. The pass that
 /// actually died reflected seven DISTINCT agents, and one of them (`brain`) is a
 /// second inference unit: dispatching it starts a generation of its own, and
-/// routing awaits the whole batch. If that peer's turn does not settle, the
+/// routing awaits the whole batch. If that peer's pass does not settle, the
 /// batch never completes and nothing is ever delivered — with no error to read.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_batch_that_includes_a_peer_ai_still_delivers() {
@@ -3522,7 +3522,7 @@ async fn a_batch_that_includes_a_peer_ai_still_delivers() {
     let (kernel, a) = mk_kernel(&tmp, "rt_peer").await;
     let brain = add_peer(&kernel, &tmp, &a).await;
     let leg = format!("ff_{}", a.as_str());
-    // `brain` answers its own turn; the builder batches it alongside plain reads.
+    // `brain` answers its own pass; the builder batches it alongside plain reads.
     let _sb = script(&brain, vec![pass("brain says hi")], Duration::ZERO);
     let mut envs: Vec<String> = (0..6)
         .map(|_| call_envelope(&leg, json!({"type": "reflect"}), None))
@@ -3547,7 +3547,7 @@ async fn a_batch_that_includes_a_peer_ai_still_delivers() {
         .await;
     assert!(
         until_passes(&sa, 2).await,
-        "turn 2 never ran — a batch containing a peer AI delivered nothing \
+        "pass 2 never ran — a batch containing a peer AI delivered nothing \
          (passes={})",
         sa.passes_served()
     );
@@ -3591,7 +3591,7 @@ async fn done_leaves_the_agent_idle_and_the_next_message_wakes_it() {
 }
 
 /// Something is QUEUED for the agent when its pass ends with `done`: the queued
-/// message is the next turn.
+/// message is the next pass.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn done_with_a_message_queued_and_the_queue_wakes_it() {
     let tmp = TempDir::new().unwrap();
@@ -3622,7 +3622,7 @@ async fn done_with_a_message_queued_and_the_queue_wakes_it() {
         .result;
     let _ = first.await.expect("first send");
     tokio::time::sleep(Duration::from_millis(400)).await;
-    assert_eq!(s.passes_served(), 2, "the queued message is the next turn");
+    assert_eq!(s.passes_served(), 2, "the queued message is the next pass");
     assert!(s.request(1).contains("two"), "{}", s.request(1));
 }
 
@@ -3761,7 +3761,7 @@ async fn a_pass_whose_calls_reply_elsewhere_leaves_the_agent_idle() {
     let elsewhere = format!(
         r#"<call name="send"><routing><target_id>{peer}</target_id><reply_to>null</reply_to></routing><payload><type>send</type><text>hi</text></payload></call>"#
     );
-    let s = script(&backend, vec![pass(elsewhere), pass("second turn")], Duration::ZERO);
+    let s = script(&backend, vec![pass(elsewhere), pass("second pass")], Duration::ZERO);
     let _r = script(&peer, vec![pass(r#"answered <call name="done"></call>"#)], Duration::ZERO);
     let first = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(
         backend.clone(),
@@ -4010,8 +4010,8 @@ async fn a_to_list_fans_out_one_copy_per_recipient_carrying_the_list() {
         .remove(0)
         .result;
     assert!(until_passes(&fb, 1).await, "the peer never got its copy");
-    let peer_turn = fb.request(0);
-    assert!(peer_turn.contains("CANDIDATE 586"), "{peer_turn}");
+    let peer_pass = fb.request(0);
+    assert!(peer_pass.contains("CANDIDATE 586"), "{peer_pass}");
     // Its OWN copy reached `a` too — a fan-out addresses every name on the list,
     // including the sender when the sender lists itself.
     assert!(until_passes(&fa, 2).await, "the sender never got its copy");
@@ -4021,7 +4021,7 @@ async fn a_to_list_fans_out_one_copy_per_recipient_carrying_the_list() {
 /// a MODEL is handed (python's, heads capped, bodies behind `pull`), `messages`
 /// is the full text a SPAWNED runtime's harness has no other way to read.
 #[tokio::test]
-async fn history_answers_the_digest_and_the_full_turns() {
+async fn history_answers_the_digest_and_the_full_rows() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "hdig").await;
     let long = format!("{}{}", "x".repeat(275), r#"<call name="done"></call>"#);
@@ -4057,7 +4057,7 @@ async fn history_answers_the_digest_and_the_full_turns() {
         vec!["rows".to_string(), "next".to_string(), "total".to_string()],
         "{h:#?}"
     );
-    // The whole text is still one call away — `recall` pages the durable turn.
+    // The whole text is still one call away — `recall` pages the durable row.
     let r = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(backend, json!({"type": "recall"}))])
         .await
         .remove(0)
@@ -4325,7 +4325,7 @@ async fn the_cli_caller_round_trips_through_the_cli_agent() {
 // through the kernel, the way an agent reaches them.
 // ─────────────────────────────────────────────────────────────────
 
-/// A test that wants a history writes one rather than acting out ten turns.
+/// A test that wants a history writes one rather than acting out ten passes.
 /// The agent's CONVERSATION — its rows in its memory store, as it appended them,
 /// minus its `view` rows (python `_fake.rows_of`). Read as the agent itself: the
 /// store keys every row by its writer.
@@ -4369,7 +4369,7 @@ async fn put_row(kernel: &Arc<Kernel>, agent: &AgentId, row: Value) -> i64 {
 #[tokio::test]
 async fn grep_finds_the_line_inside_a_body_that_was_never_pulled() {
     // THE OPERATION THE MODEL ACTUALLY WANTS. Without it a model spends long
-    // thinking turns byte-scanning one large body in small windows hunting a
+    // thinking passes byte-scanning one large body in small windows hunting a
     // single line. "Find the line that mentions X" is one call.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "grep").await;
@@ -4510,7 +4510,7 @@ async fn a_fold_id_in_grep_scope_descends_to_its_members() {
 
 #[tokio::test]
 async fn context_recall_fits_the_head_and_writes_the_view_it_chose() {
-    // THE VIEW ARRAY IS THE STATE. Without it the next turn (and the next
+    // THE VIEW ARRAY IS THE STATE. Without it the next pass (and the next
     // PROCESS) rebuilds a freshly-guessed prefix, and every cached token is lost.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "ctxrecall").await;
@@ -4722,10 +4722,10 @@ async fn context_recall_folds_a_head_longer_than_the_budget() {
     assert_eq!(
         ids[0]["id"].as_i64(),
         Some(goal),
-        "the goal turn is always in"
+        "the goal message is always in"
     );
     assert!(ids.iter().any(|e| e["res"] == "fold"), "{ids:?}");
-    // NOTHING FELL OUT UNMARKED: every turn is in the view or under a fold in it
+    // NOTHING FELL OUT UNMARKED: every message is in the view or under a fold in it
     let in_view: std::collections::HashSet<i64> =
         ids.iter().filter_map(|e| e["id"].as_i64()).collect();
     let fold_ids: Vec<i64> = ids
@@ -4748,7 +4748,7 @@ async fn context_recall_folds_a_head_longer_than_the_budget() {
             "row {id} fell out: {ids:?}"
         );
     }
-    // the turn's caller is told, as by a projection
+    // the pass's caller is told, as by a projection
     let mut evs = Vec::new();
     while let Some(v) = agent_rx.try_recv() {
         if v.payload["type"] == "context" {
@@ -4917,7 +4917,7 @@ async fn a_fold_projection_over_budget_writes_folds() {
 /// written (but the message, stored when it arrived) or dropped. python:
 /// `test_an_over_budget_turn_is_refused_under_none`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_over_budget_turn_is_refused_under_none() {
+async fn an_over_budget_pass_is_refused_under_none() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "nonerefuse").await;
     // budget = window - reserve = 4000 tokens.
@@ -4938,7 +4938,7 @@ async fn an_over_budget_turn_is_refused_under_none() {
         .await;
     }
     let s = script(&backend, vec![pass("never reached")], Duration::ZERO);
-    // The boot-owed recall would write a recall row on the first turn; this test
+    // The boot-owed recall would write a recall row on the first pass; this test
     // is about the seam alone, so settle it first.
     *crate::state::state_for(&backend).recall_due.lock().unwrap() = false;
     let mut rx = rebind_backend_inbox(&kernel, &backend);
@@ -5013,7 +5013,7 @@ async fn successive_fold_projections_do_not_nest_into_a_chain() {
     // The strategy folds the VIEW ARRAY, as python does, never the whole store:
     // on the view an old fold's members are absent and `render` does not
     // re-place it at the head. Fed the whole store, three adjacent folds wrap
-    // into a deeper one every other turn and depth runs away. This pins the
+    // into a deeper one every other pass and depth runs away. This pins the
     // python shape: depth stays flat.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "folddepth").await;
@@ -5279,7 +5279,7 @@ fn recent_n_is_an_integer_and_its_range_is_the_records() {
 }
 
 #[test]
-fn inquiry_turn_text_renders_options_and_the_action() {
+fn inquiry_pass_text_renders_options_and_the_action() {
     let inquiry: crate::declared::Inquiry = serde_json::from_value(json!({
         "text": "pick",
         "options": ["a", "b"],
@@ -5296,7 +5296,7 @@ fn inquiry_turn_text_renders_options_and_the_action() {
 
 /// INQUIRY, FULLY ASYNC — python `test_inquiry_async.py`. The
 /// primary asks its peer; the inquiry is ACCEPTED at once, the peer answers in a
-/// LATER turn of its own chain, and the answer reaches the primary as a message
+/// LATER pass of its own chain, and the answer reaches the primary as a message
 /// under the inquiry's pid. `steps` are the peer's passes after the question.
 async fn inquiry_round(
     tag: &str,
@@ -5434,14 +5434,14 @@ async fn an_inquiry_is_accepted_and_answered_later_under_its_pid() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_receiver_may_work_for_several_turns_before_answering() {
+async fn the_receiver_may_work_for_several_passes_before_answering() {
     let look =
         "<call name=\"send\"><routing><target_id>kernel</target_id></routing><payload><type>reflect</type><tier>oneliners</tier></payload></call>";
     let (_tmp, a, r) =
         inquiry_round("inq_work", vec![look.to_string(), answer_call("ship it")]).await;
     assert!(
         r.request(1).contains("kernel reflect"),
-        "the peer worked a turn first"
+        "the peer worked a pass first"
     );
     assert!(
         a.request(2).contains("<answer>ship it</answer>"),
@@ -5615,7 +5615,7 @@ async fn recall_empty_page_says_why() {
         .result;
     assert_eq!(r["messages"], json!([]));
     assert_eq!(
-        r["note"], "query 'zzz' matched none of the 1 stored turns.",
+        r["note"], "query 'zzz' matched none of the 1 stored messages.",
         "python's note names no client: {r:#?}"
     );
 }
@@ -5756,7 +5756,7 @@ async fn a_null_context_strategy_is_reported_raw_and_refused() {
 async fn a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on() {
     // A rebooted agent woken by answers to calls its PREVIOUS incarnation made
     // would finish THAT work instead of the new instruction. The reply is kept as
-    // a row — real data — but runs no turn.
+    // a row — real data — but runs no pass.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "late").await;
     let s = script(&backend, vec![pass("ack")], Duration::ZERO);
@@ -5794,7 +5794,7 @@ async fn a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on() {
     )
     .await;
     assert!(settle(&kernel).await, "the agent never went quiet");
-    assert_eq!(s.passes_served(), 0, "no turn ran for the late reply");
+    assert_eq!(s.passes_served(), 0, "no pass ran for the late reply");
     let rows = fantastic_kernel::test_support::as_agent(
         backend.clone(),
         crate::memory::load_history(&backend, &kernel, false),
@@ -5808,7 +5808,7 @@ async fn a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on() {
         "[late reply — answered a call of a chain that has ended; \
          recorded, not acted on]\n[reply to 1 · n r]\nlate"
     );
-    // A reply from THIS incarnation runs a turn.
+    // A reply from THIS incarnation runs a pass.
     fantastic_kernel::test_support::as_agent(
         AgentId::from(backend.as_str()),
         crate::route::deliver(
@@ -5824,7 +5824,7 @@ async fn a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on() {
     )
     .await;
     assert!(settle(&kernel).await, "the agent never went quiet");
-    assert!(s.passes_served() >= 1, "a live reply is a turn");
+    assert!(s.passes_served() >= 1, "a live reply is a pass");
 }
 
 /// Bodies are scanned in the order they ARRIVED (python's `_mem.bodies` dict,
@@ -6015,7 +6015,7 @@ async fn a_non_string_type_tags_the_reply_with_python_str() {
         .await;
     assert!(
         until_passes(&s, 2).await,
-        "the reply must come back as a turn"
+        "the reply must come back as a pass"
     );
     let seen = s.request(1);
     assert!(
@@ -6028,7 +6028,7 @@ async fn a_non_string_type_tags_the_reply_with_python_str() {
 async fn the_seam_keeps_the_goal_the_strategies_pinned() {
     // `project_context` appends the real notice and then trims to fit. Trimming
     // from the FRONT — exactly where `compact`/`truncate` just pinned the goal
-    // turn — would silently drop the one turn the whole run serves in a snug
+    // pass — would silently drop the one pass the whole run serves in a snug
     // window, in BOTH strategies. python trims from the MIDDLE first and only
     // takes the goal as a last resort, loudly.
     let goal = "GOAL-SENTINEL: build the widget and report when done";
@@ -6084,7 +6084,7 @@ async fn the_seam_keeps_the_goal_the_strategies_pinned() {
             assert!(
                 out.iter()
                     .any(|m| m["content"].as_str().unwrap_or("").contains(goal)),
-                "{strategy}@{window}: the pinned goal turn was dropped by the seam"
+                "{strategy}@{window}: the pinned goal message was dropped by the seam"
             );
         }
     }
@@ -6092,10 +6092,10 @@ async fn the_seam_keeps_the_goal_the_strategies_pinned() {
 
 /// The kernel's execution rows are the KERNEL's (RAM, then its root store) and
 /// never land under the agent's key; and a row without a chat `role` the agent
-/// writes to its own store (a note to itself) is memory, not a turn. Python
+/// writes to its own store (a note to itself) is memory, not a message. Python
 /// `test_kernel_rows_and_role_less_notes_never_become_turns`.
 #[tokio::test]
-async fn kernel_rows_and_role_less_notes_never_become_turns() {
+async fn kernel_rows_and_role_less_notes_never_become_messages() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "hidebk").await;
     // A real dispatch AT the backend — the kernel writes a `call` row about it.
@@ -6152,7 +6152,7 @@ async fn kernel_rows_and_role_less_notes_never_become_turns() {
             .map(|r| r["content"].clone())
             .collect::<Vec<_>>(),
         vec![json!("hello")],
-        "only the turn is in the conversation"
+        "only the message is in the conversation"
     );
     let behind = fantastic_kernel::test_support::as_agent(
         backend.clone(),
@@ -6185,7 +6185,7 @@ fn two_send_ids_differ_and_do_not_ascend() {
     assert_ne!(sorted, ids, "send ids ascend like a counter: {ids:?}");
 }
 
-/// python `secrets.token_hex(2)` — 4 hex characters, drawn fresh per turn.
+/// python `secrets.token_hex(2)` — 4 hex characters, drawn fresh per pass.
 #[test]
 fn two_batch_tokens_differ_and_are_four_hex() {
     let a: Vec<String> = (0..64)
@@ -6242,7 +6242,7 @@ fn a_peer_sends_payload_keeps_pythons_key_order() {
 /// (kernel) call ids; the answer's after them. So the user row's id is below the
 /// reflect's call id, and that below the assistant's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_turns_row_ids_are_minted_after_the_assembly_reflects() {
+async fn the_passes_row_ids_are_minted_after_the_assembly_reflects() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_order").await;
     let _s = script(
@@ -6272,7 +6272,7 @@ async fn the_turns_row_ids_are_minted_after_the_assembly_reflects() {
         })
         .filter_map(|row| row.get("id").and_then(Value::as_i64))
         .min()
-        .expect("assembly reflects this agent every turn");
+        .expect("assembly reflects this agent every pass");
     let user = rows
         .iter()
         .filter(|row| row.get("role") == Some(&json!("user")))
@@ -6476,7 +6476,7 @@ fn backend_state_is_per_agent_and_drop_frees_the_slot_not_the_incarnation() {
 /// Delete-time teardown (python `test_delete_drops_every_row_but_the_incarnation`):
 /// `delete_agent` runs the backend's `on_delete`, which drops every per-id table,
 /// so the id re-created later starts clean; the incarnation stays monotonic, so a
-/// reply to a call the deleted agent made never becomes a live turn of the new one.
+/// reply to a call the deleted agent made never becomes a live pass of the new one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delete_drops_every_row_but_the_incarnation() {
     let tmp = TempDir::new().unwrap();
@@ -6654,9 +6654,9 @@ mod stopped;
 /// The thinking cap per pass and the harness cut (#782).
 #[path = "tests_thinking_cap.rs"]
 mod thinking_cap;
-/// The pass path of a turn and of its helpers; retries inside the turn (#766).
-#[path = "tests_turn_retry.rs"]
-mod turn_retry;
+/// The pass path of a pass and of its helpers; retries inside the pass (#766).
+#[path = "tests_pass_retry.rs"]
+mod pass_retry;
 /// Token accounting, chat-side: `used` and `window` (#766).
 #[path = "tests_used.rs"]
 mod used;
@@ -6664,7 +6664,7 @@ mod used;
 /// The AI-to-AI send deadline, dead letter and withdrawal (#568).
 #[path = "tests_deadline.rs"]
 mod deadline;
-/// An inquiry whose recipient's turn fails tells the asker (#722).
+/// An inquiry whose recipient's pass fails tells the asker (#722).
 #[path = "tests_inquiry_fail.rs"]
 mod inquiry_fail;
 /// Thinking never leaves the agent that produced it.
@@ -6704,7 +6704,7 @@ fn last_in(s: &MockScript, n: usize) -> String {
         .unwrap_or_default()
 }
 
-/// One scripted turn `first` (built from a self-`reflect` envelope), then `done`;
+/// One scripted pass `first` (built from a self-`reflect` envelope), then `done`;
 /// returns the script once its second pass was served.
 async fn answer_only(
     tag: &str,
@@ -6762,7 +6762,7 @@ async fn a_draft_only_in_thinking_does_not_run() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn calls_only_in_thinking_make_a_dead_turn() {
+async fn calls_only_in_thinking_make_a_dead_pass() {
     // Nothing of it runs; the empty answer is re-asked with the no-call report (#795).
     let (_t, s) = answer_only("ao3", |r, _| format!("<think>{r}</think>")).await;
     let next = last_in(&s, 1);
@@ -6935,16 +6935,16 @@ async fn an_empty_wrapper_is_reported_by_name_not_only_reminded() {
 }
 
 /// A model stuck on one broken shape still ends: every attempt is malformed, so the
-/// harness stops the turn after `1 + CALL_RETRIES` attempts (#766), and nothing more is
+/// harness stops the pass after `1 + CALL_RETRIES` attempts (#766), and nothing more is
 /// asked.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn broken_only_turns_count_toward_giving_up() {
+async fn broken_only_passes_count_toward_giving_up() {
     let cap = 1 + crate::constants::CALL_RETRIES;
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "cc_c").await;
     let s = script(
         &backend,
-        // Broken, but no foreign tag: a stream-cut turn gives up sooner (#499).
+        // Broken, but no foreign tag: a stream-cut pass gives up sooner (#499).
         (0..cap + 5)
             .map(|_| pass("<call name=\"send\">oops<routing><target_id>files</target_id></routing></call>"))
             .collect(),
@@ -7010,7 +7010,7 @@ async fn the_no_call_report_is_never_stored_and_the_task_is_not_a_notice() {
 }
 
 /// A batch with a reply is not a notice. (A report on malformed calls is no batch any
-/// more: it is re-asked inside the turn and never stored, #766.)
+/// more: it is re-asked inside the pass and never stored, #766.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_batch_with_a_reply_is_not_a_notice() {
     let tmp = TempDir::new().unwrap();
@@ -7179,14 +7179,14 @@ async fn an_inline_send_is_refused_and_nothing_reaches_the_target() {
         until_passes(&s, 2).await,
         "the refusal must reach the model"
     );
-    let turn = s.request(1);
+    let pass_req = s.request(1);
     assert!(
-        turn.contains("`<target_id>` directly in the call"),
-        "{turn}"
+        pass_req.contains("`<target_id>` directly in the call"),
+        "{pass_req}"
     );
     assert!(
-        turn.contains("<routing><target_id>agent id</target_id></routing>"),
-        "the refusal shows the routing form: {turn}"
+        pass_req.contains("<routing><target_id>agent id</target_id></routing>"),
+        "the refusal shows the routing form: {pass_req}"
     );
     assert!(
         got.lock().unwrap().is_empty(),
@@ -7262,11 +7262,11 @@ async fn a_routing_name_in_the_payload_of_a_routed_call_is_delivered() {
         )]))
         .await;
     assert!(until_passes(&s, 2).await, "the reply must reach the model");
-    let turn = s.request(1);
-    assert!(!turn.contains("NOT dispatched"), "{turn}");
+    let pass_req = s.request(1);
+    assert!(!pass_req.contains("NOT dispatched"), "{pass_req}");
     assert!(
-        turn.contains("make notes"),
-        "the routing title labels the reply: {turn}"
+        pass_req.contains("make notes"),
+        "the routing title labels the reply: {pass_req}"
     );
     assert_eq!(
         *got.lock().unwrap(),
@@ -7407,8 +7407,8 @@ fn standing_pins_the_task_the_live_root_and_the_newest_fold() {
     assert!(crate::retrieval::standing(&no_roots).is_empty());
 }
 
-/// The restart, then the first turn after it: the model-view request of that turn.
-async fn restarted_turn_sees(clear_first: bool, task_text: &str) -> String {
+/// The restart, then the first pass after it: the model-view request of that pass.
+async fn restarted_pass_sees(clear_first: bool, task_text: &str) -> String {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, if clear_first { "r218c" } else { "r218" }).await;
     driver_store(&kernel, &backend, clear_first, task_text).await;
@@ -7434,7 +7434,7 @@ async fn restarted_turn_sees(clear_first: bool, task_text: &str) -> String {
         .await
         .remove(0)
         .result;
-    assert!(until_passes(&sc, 2).await, "the turn did not run");
+    assert!(until_passes(&sc, 2).await, "the pass did not run");
     let reqs = sc.requests.lock().unwrap().clone();
     reqs.iter()
         .find(|m| {
@@ -7444,18 +7444,18 @@ async fn restarted_turn_sees(clear_first: bool, task_text: &str) -> String {
                 == Some("system")
         })
         .map(|m| serde_json::to_string(m).unwrap())
-        .unwrap_or_else(|| panic!("no turn request among {} passes", reqs.len()))
+        .unwrap_or_else(|| panic!("no pass request among {} passes", reqs.len()))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_restarted_agent_still_sees_the_turn_that_set_its_task() {
-    let t = restarted_turn_sees(false, DRIVER_TASK).await;
+async fn a_restarted_agent_still_sees_the_pass_that_set_its_task() {
+    let t = restarted_pass_sees(false, DRIVER_TASK).await;
     assert!(t.contains("ROLE-MARKER-218"), "{}", &t[..t.len().min(3000)]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_restart_after_a_clear_keeps_the_task_given_after_it() {
-    let t = restarted_turn_sees(true, DRIVER_TASK).await;
+    let t = restarted_pass_sees(true, DRIVER_TASK).await;
     assert!(
         t.contains("ROLE-MARKER-218"),
         "{}",
@@ -7467,9 +7467,9 @@ async fn a_restart_after_a_clear_keeps_the_task_given_after_it() {
 async fn pinning_stays_within_half_the_target_and_newest_rows_still_fill() {
     // A task root far bigger than any pin cap is NOT pinned (the cap holds), so it
     // cannot starve the newest-first fill: the newest polling row still reaches the
-    // first turn after the restart, and the giant root does not.
+    // first pass after the restart, and the giant root does not.
     let giant = format!("GIANT-218 {}", "y".repeat(1_000_000));
-    let t = restarted_turn_sees(false, &giant).await;
+    let t = restarted_pass_sees(false, &giant).await;
     assert!(!t.contains("GIANT-218"), "an oversized root was pinned");
     assert!(t.contains("Polling job 59"), "the newest rows did not fill");
 }
@@ -7950,7 +7950,7 @@ async fn an_ai_chat_holds_the_conversation_and_completes_through_its_provider() 
         .result;
     assert!(
         rows.to_string().contains("hi"),
-        "the first turn is still the chat's: {rows}"
+        "the first row is still the chat's: {rows}"
     );
 }
 
@@ -8023,10 +8023,10 @@ async fn a_chats_call_is_judged_by_the_chats_grants_not_its_providers() {
     );
 }
 
-/// A turn another agent STARTS is still the chat's own: its calls are judged by the
+/// A pass another agent STARTS is still the chat's own: its calls are judged by the
 /// chat's grants, not by the grants of whoever sent the message that woke it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_turn_woken_by_a_broad_agent_keeps_the_chats_own_grants() {
+async fn a_pass_woken_by_a_broad_agent_keeps_the_chats_own_grants() {
     let tmp = TempDir::new().unwrap();
     let kernel = base_kernel(&tmp, |k| {
         k.bundles.register("echo_provider.tools", EchoProvider);

@@ -5,16 +5,16 @@ One mock per provider, and on the PACKAGED host of `RUNTIME`
 (rust), every call through `web_rest`, one provider agent per provider (and an `ai_chat.tools` chat completing through it) whose record
 names the mock's `url` and an env-backed credential ref pinned to its host. The
 record leaves to the server what the backend reads from it (vllm: model,
-context_window, kv_slots; ollama: model; anthropic: context_window, and the turn's
+context_window, kv_slots; ollama: model; anthropic: context_window, and the pass's
 max_tokens the chat names none of), so each probe path is exercised. Per provider:
 
-  1. a turn answers the mock's text, and the server-read fields land on the record;
+  1. a pass answers the mock's text, and the server-read fields land on the record;
   2. the key arrives on EVERY request, in the provider's header;
-  3. an HTTP 500 → the turn fails loud, naming the status; the next turn works;
-  4. a refused key (the mock's 401) → the turn fails loud;
+  3. an HTTP 500 → the pass fails loud, naming the status; the next pass works;
+  4. a refused key (the mock's 401) → the pass fails loud;
   5. the key never lands in the ledger, nor in any file of the state folder
      (records, store tables, the message log);
-  6. the turn's `status` `done` carries the usage the mock reported —
+  6. the pass's `status` `done` carries the usage the mock reported —
      `prompt_tokens`, `completion_tokens` (not estimated), `gen_seconds`,
      `context_window` — watched over the ws face.
 
@@ -54,8 +54,8 @@ RUNTIME = os.environ.get("RUNTIME", "")
 KEY = "mock-e2e-" + secrets.token_hex(12)
 KEY_VAR = "E2E_MOCK_KEY"
 # A mock reply that ends the chain: a prose answer with no call gets a "no call was
-# dispatched" reminder turn, which keeps the chain alive and HOLDS the probe's next send
-# (its answer is then the chain's, not the turn's own). `done` ends the chain at once.
+# dispatched" reminder pass, which keeps the chain alive and HOLDS the probe's next send
+# (its answer is then the chain's, not the pass's own). `done` ends the chain at once.
 DONE = '<call name="done"></call>'
 #: A sibling of the providers and chats under `rest`, holding no line: what it
 #: relays (`send`) is gated as itself.
@@ -170,7 +170,7 @@ def main() -> int:
                             can={"memory": ALL, pid: PROVIDER})
             need(rec.get("id") == aid, f"{p}: create chat: {str(rec)[:200]}")
 
-            # 1 · a turn answers the mock's text; the server-read fields land
+            # 1 · a pass answers the mock's text; the server-read fields land
             word = f"MOCK-{p.upper()}-{secrets.token_hex(3)}"
             m.reply(word + DONE)
             m.prompt_tokens, m.completion_tokens = 1234, 56
@@ -179,7 +179,7 @@ def main() -> int:
             out = run_pass(hk, aid, {"type": "send", "text": "say the word", "client_id": "tab1"})
             events = out["events"]
             need(word in str(out.get("response")) and not out.get("error"),
-                 f"{p}: the turn answers the mock's text: {str(out)[:200]}")
+                 f"{p}: the pass answers the mock's text: {str(out)[:200]}")
             # THE RECORD as stored: a backend's own reflect reply does not carry every
             # record field (kv_slots), and the read fields land on the record's next save
             end = time.monotonic() + 10
@@ -206,7 +206,7 @@ def main() -> int:
                 + ("" if d else f" — every done seen: {done} · {len(events)} events"),
             )
             probes = sorted({r['path'] for r in m.requests if r['kind'] == 'probe'})
-            print(f"     probes: {probes}  turns: {len(m.turns())}", flush=True)
+            print(f"     probes: {probes}  passes: {len(m.passes())}", flush=True)
 
             # 2 · the key on every request
             need(m.requests and all(k == KEY for k in m.keys()),  # noqa: SIM118 (a mock method)
@@ -215,10 +215,10 @@ def main() -> int:
                  f"{p}: no request to a path the mock does not serve: "
                  f"{[r['path'] for r in m.requests if r['kind'] == 'other']}")
 
-            # 3 · an HTTP 500 on every try fails the turn loud (a backend may retry
-            #     a 5xx: the tries are counted, not assumed); the next turn works
-            #     A failed turn is retried on its own (#533): the error stays until the
-            #     retried failures run out (gave_up), so the next turn is a fresh chain.
+            # 3 · an HTTP 500 on every try fails the pass loud (a backend may retry
+            #     a 5xx: the tries are counted, not assumed); the next pass works
+            #     A failed pass is retried on its own (#533): the error stays until the
+            #     retried failures run out (gave_up), so the next pass is a fresh chain.
             def idle(who: str, bound: float = 60) -> bool:
                 end = time.monotonic() + bound
                 while time.monotonic() < end:
@@ -227,24 +227,24 @@ def main() -> int:
                     time.sleep(0.05)
                 return False
 
-            before = len(m.turns())
+            before = len(m.passes())
             m.error(500, times=None)
             out = run_pass(hk, aid, {"type": "send", "text": "again"})
             idle(aid)
             m.error(None)
             need(bool(out.get("error")) and "500" in json.dumps(out),
-                 f"{p}: HTTP 500 → the turn fails naming it "
-                 f"({len(m.turns()) - before} tries): {str(out)[:240]}")
+                 f"{p}: HTTP 500 → the pass fails naming it "
+                 f"({len(m.passes()) - before} tries): {str(out)[:240]}")
             m.reply("BACK" + DONE)
             out = run_pass(hk, aid, {"type": "send", "text": "again"})
             need("BACK" in str(out.get("response")) and not out.get("error"),
-                 f"{p}: the next turn works: {str(out)[:160]}")
+                 f"{p}: the next pass works: {str(out)[:160]}")
 
-            # 4 · a refused key fails the turn loud
+            # 4 · a refused key fails the pass loud
             m.require_key("not-" + KEY)
             out = run_pass(hk, aid, {"type": "send", "text": "again"})
             need(bool(out.get("error")) and "401" in json.dumps(out),
-                 f"{p}: a refused key (401) → the turn fails: {str(out)[:240]}")
+                 f"{p}: a refused key (401) → the pass fails: {str(out)[:240]}")
             m.require_key(KEY)
 
         # 5 · the key never in the ledger (`rest`'s own executions), nor in any file of

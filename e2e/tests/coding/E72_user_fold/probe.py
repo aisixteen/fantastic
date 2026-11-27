@@ -1,8 +1,8 @@
 """coding/user_fold — folding on a person's say-so, any time, with NO extra verb.
 
 The reads are PLANTED (rules, then the fillers). The human's squeeze is the agent's `context_window` at 9000 for
-the first live turn (below that the system block alone trips `too_small` and nothing folds); the watermark fires on
-that turn and folds; once a fold is in the store the window is restored through the existing `update_agent`. Scored: a
+the first live pass (below that the system block alone trips `too_small` and nothing folds); the watermark fires on
+that pass and folds; once a fold is in the store the window is restored through the existing `update_agent`. Scored: a
 fold landed while the window was shrunk, and the four rules still bind at the end.
 """
 from __future__ import annotations
@@ -55,7 +55,7 @@ async def main():
         rules = rules_for(tok, KEYS)
         Path("rules.md").write_text("# Rules\n\n" + "\n".join(f"- {d}:\n\n      {ln}\n" for d, ln in rules))
         plant_fillers(N, pad_to=3000)
-        task = (f"Read `rules.md`, then `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER TURN. Then write "
+        task = (f"Read `rules.md`, then `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER PASS. Then write "
                 f"`report.md` through `notes` listing every filler, obeying every rule. Then {DONE}.")
         await fixture(root, FB)
         results = []
@@ -72,7 +72,7 @@ async def main():
             rs = asyncio.create_task(_restore())
             path, text = reads[-1]
             tail = read_reply(path, text, rows[-1]["id"])
-            # the agent is created squeezed: its first live turn is the one that folds
+            # the agent is created squeezed: its first live pass is the one that folds
             results.append(await run_arm(root, core, BK, FB, aid, strategy, extra, tail, "report.md",
                                          via=None, window=SQUEEZED))
             rs.cancel()

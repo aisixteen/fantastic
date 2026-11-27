@@ -138,7 +138,7 @@ async fn the_endpoints_count_calibrates_the_estimate() {
 }
 
 #[tokio::test]
-async fn a_turn_records_what_the_endpoint_reported() {
+async fn a_pass_records_what_the_endpoint_reported() {
     let tmp = TempDir::new().unwrap();
     let (kernel, ai) = mk_kernel(&tmp, "reported").await;
     set_meta(
@@ -213,15 +213,15 @@ async fn a_row_another_writer_appends_reaches_the_next_head_read() {
     );
 }
 
-/// A provider that writes a row to its agent's store MID-TURN — what the
+/// A provider that writes a row to its agent's store MID-PASS — what the
 /// projection's fold or view does — before answering.
-struct MidTurnWriter {
+struct MidPassWriter {
     kernel: Arc<Kernel>,
     agent: AgentId,
 }
 
 #[async_trait]
-impl Provider for MidTurnWriter {
+impl Provider for MidPassWriter {
     async fn chat(
         &self,
         _messages: &[Value],
@@ -247,13 +247,13 @@ impl Provider for MidTurnWriter {
     }
 }
 
-/// A row saved MID-TURN must not end up behind the turn's own rows in id order:
+/// A row saved MID-PASS must not end up behind the pass's own rows in id order:
 /// the store returns id order, the cache append order.
 #[tokio::test]
-async fn a_turns_rows_are_minted_when_appended_so_id_order_is_append_order() {
+async fn a_pass_rows_are_minted_when_appended_so_id_order_is_append_order() {
     let tmp = TempDir::new().unwrap();
     let (kernel, ai) = mk_kernel(&tmp, "midturn").await;
-    let provider: Arc<dyn Provider> = Arc::new(MidTurnWriter {
+    let provider: Arc<dyn Provider> = Arc::new(MidPassWriter {
         kernel: Arc::clone(&kernel),
         agent: ai.clone(),
     });
@@ -335,7 +335,7 @@ async fn watch_announces_each_appended_row_until_unwatch() {
 // ── fail loud: no store, no conversation ───────────────────────────────
 
 /// An AI agent whose record names no `memory_store_id` refuses at boot and fails
-/// its turn — nothing falls back to RAM.
+/// its pass — nothing falls back to RAM.
 #[tokio::test]
 async fn an_agent_without_a_memory_store_fails_loud() {
     let tmp = TempDir::new().unwrap();

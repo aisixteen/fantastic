@@ -136,7 +136,7 @@ pub struct PartPublisher {
     kernel: Arc<Kernel>,
     self_id: AgentId,
     client_id: String,
-    /// THE ANCHOR: the message this turn answers (python `re=current_task()`) —
+    /// THE ANCHOR: the message this pass answers (python `re=current_task()`) —
     /// where a consumer places the draft in its own (possibly folded) history.
     re: Option<i64>,
     /// `(stream_id, part, text)` held, in insertion order (python's dict).
@@ -149,7 +149,7 @@ impl PartPublisher {
     pub const BATCH: Duration = Duration::from_millis(50);
 
     /// A publisher for one pass of `self_id`, answering `client_id`; `re` is the
-    /// message this turn answers (`part_start` carries it).
+    /// message this pass answers (`part_start` carries it).
     #[must_use]
     pub fn new(kernel: Arc<Kernel>, self_id: AgentId, client_id: String, re: Option<i64>) -> Self {
         Self {

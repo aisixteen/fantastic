@@ -51,7 +51,7 @@ Partial-JSON crates checked (1.12, crates.io, 2026-11-24):
   to `name` and `arguments.routing.target_id`.
 
 JSON-repair crates checked (2026-11-25, crates.io API; behaviour run on the GPU run's
-agentic_advanced.new_tool turn 14 send, JSON missing one closing brace):
+agentic_advanced.new_tool pass 14 send, JSON missing one closing brace):
 - jsonrepair-rs 0.2.6 (MIT, 2026-10-09; 0.2.7 2026-11-16; 166k downloads; no dependency
   without its serde feature): adds the one `}` before the trailing newline, the rest
   byte for byte. TAKEN, pinned at 0.2.6, applied only when serde_json does not read the

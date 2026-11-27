@@ -11,7 +11,7 @@ On the PACKAGED rust host, every call through `web_rest`:
      the root's; a sample answers `reflect`;
   3. REST: 500 `reflect` POSTs over 16 client threads, every one answered;
   4. ONE BATCH: an AI agent (`vllm_backend` against a scripted local server),
-     holding one `reflect` line per target, answers one turn with 500 `<call>`s — ONE kernel batch of 500 items to 500
+     holding one `reflect` line per target, answers one pass with 500 `<call>`s — ONE kernel batch of 500 items to 500
      hydrated agents; each reply is its own message (`k of 500 in batch …`, #795),
      read by the passes that follow, coalesced (a reply landing while a pass works
      waits for the ONE next pass): every reply read once, by few passes. Timed from
@@ -174,7 +174,7 @@ def main() -> int:
              f"{N_REST} REST reflects (16 threads) in {nums['rest_500']:.2f}s = "
              f"{N_REST / max(nums['rest_500'], 1e-9):.0f}/s; wrong {len(wrong)} {wrong[:3]}")
 
-        # 4 · one batch of 500 from an AI turn
+        # 4 · one batch of 500 from an AI pass
         batch = [pool_id(i) for i in range(N_BATCH)]
         # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it
         rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV,
@@ -211,12 +211,12 @@ def main() -> int:
 
         end = t_sent + BOUNDS["batch_500"] * 2
         while time.monotonic() < end and not (
-                len(m.turns()) >= 2 and sorted(set(read_replies(m.turns()[-1]))) == batch and quiet()):
+                len(m.passes()) >= 2 and sorted(set(read_replies(m.passes()[-1]))) == batch and quiet()):
             time.sleep(0.02)
         nums["batch_500"] = time.monotonic() - t_sent
-        turns = m.turns()
-        last = read_replies(turns[-1]) if len(turns) >= 2 else []
-        need(len(turns) >= 2 and nums["batch_500"] <= BOUNDS["batch_500"],
+        passes = m.passes()
+        last = read_replies(passes[-1]) if len(passes) >= 2 else []
+        need(len(passes) >= 2 and nums["batch_500"] <= BOUNDS["batch_500"],
              f"one batch of {N_BATCH} dispatched and its replies read in "
              f"{nums['batch_500']:.2f}s = {N_BATCH / max(nums['batch_500'], 1e-9):.0f} items/s")
         need(sorted(last) == batch,
@@ -224,7 +224,7 @@ def main() -> int:
              f"{len(set(last))} distinct")
         # REPORTED: how many passes read the replies (a reply landing while a pass works
         # waits for the one next pass); the bound only catches one pass per reply
-        passes = len(turns) - 1
+        passes = len(passes) - 1
         nums["batch_passes"] = passes
         need(1 <= passes <= N_BATCH // 4,
              f"the replies are read by coalesced passes, not one pass per reply: {passes}")

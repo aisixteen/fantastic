@@ -12,12 +12,12 @@ the server.
 The script, one model answer per request:
 
   1. `<call name="send">` → `reflect` on the root: dispatched; its result comes
-     back as the NEXT request's last user turn, `[reply to <pid> · kernel_state
+     back as the NEXT request's last user message, `[reply to <pid> · kernel_state
      reflect]` carrying the root's id and NOT its guid (the root's runtime frame
      is the operator's; the AI holds `call: [reflect]` on the root);
   2. a `write` to a file_bridge, `bytes` verbatim: the file lands on disk with
      exactly those bytes; the next request carries the `write` reply;
-  3-5 are ONE turn, re-asked inside it (#766: at most `1 + CALL_RETRIES` = 3
+  3-5 are ONE pass, re-asked inside it (#766: at most `1 + CALL_RETRIES` = 3
   attempts, `constants.rs` `CALL_RETRIES = 2`):
   3. attempt 1, a call written WRONG — a `<tool_call><function=call name="send">`
      wrapper: the attempt fails at the first foreign tag, nothing after it is read;
@@ -31,11 +31,11 @@ The script, one model answer per request:
   5. attempt 3, a call INSIDE the thought (`reasoning_content`) and a real call in
      the answer (`reflect` on the files): accepted; the call in the thought is not
      dispatched (no file); request 6 carries the reflect reply, its history holds the
-     answer without the thought (stripped before the turn is stored, shown as its
+     answer without the thought (stripped before the pass is stored, shown as its
      `<thought …/>` marker on the next user-side message) and NOTHING of attempts 1
      and 2: neither attempt nor report is stored or re-sent;
-  6-7 are ONE turn (#795): 6. an answer with no call (prose only): re-asked inside
-     the turn — request 7 is request 6's messages, then the answer and the no-call
+  6-7 are ONE pass (#795): 6. an answer with no call (prose only): re-asked inside
+     the pass — request 7 is request 6's messages, then the answer and the no-call
      report (`[no call was dispatched]`); nothing of it is stored;
   7. a plain answer + `done`: the chain ends — no further request reaches the
      server once the agent has nothing in flight.
@@ -96,15 +96,15 @@ def main() -> int:
         if not cond:
             bad.append(what)
 
-    def turns_at_least(n: int, bound: float = 60) -> list[dict]:
-        """Poll (bounded) until the server has seen `n` turn requests."""
+    def passes_at_least(n: int, bound: float = 60) -> list[dict]:
+        """Poll (bounded) until the server has seen `n` pass requests."""
         end = time.monotonic() + bound
         while time.monotonic() < end:
-            got = m.turns()
+            got = m.passes()
             if len(got) >= n:
                 return got
             time.sleep(0.05)
-        return m.turns()
+        return m.passes()
 
     def idle(bound: float = 60) -> bool:
         """Poll (bounded) until the AI has no task in flight (`ps`)."""
@@ -122,7 +122,7 @@ def main() -> int:
         # 2 · a file write, bytes verbatim
         (f'<call name="send">\n<routing><target_id>{FILES}</target_id></routing>\n<payload><type>write</type>\n'
          f'<path>out.txt</path>\n<bytes>{TOKEN}\n"quoted" & <raw></bytes></payload>\n</call>'),
-        # 3 · attempt 1 of one turn: a call written wrong, failed at the first foreign tag
+        # 3 · attempt 1 of one pass: a call written wrong, failed at the first foreign tag
         ('I will write it.\n<tool_call><function=call name="send"><target_id>files'
          '</target_id><type>write</type><path>bad.txt</path></function></tool_call>'),
         # 4 · attempt 2: an envelope with text outside a tag
@@ -132,7 +132,7 @@ def main() -> int:
          '<type>write</type><path>think.txt</path><bytes>x</bytes></payload></call> but I will not.'
          f'</think>Thinking it over.\n<call name="send"><routing><target_id>{FILES}</target_id></routing>'
          '<payload><type>reflect</type></payload></call>'),
-        # 6 · attempt 1 of the next turn: prose only, no call (re-asked inside the turn)
+        # 6 · attempt 1 of the next pass: prose only, no call (re-asked inside the pass)
         'Let me look at that reply first.',
         # 7 · a plain answer, and the chain ends
         'All finished: the file is written.\n<call name="done"></call>',
@@ -165,16 +165,16 @@ def main() -> int:
         m.reply(*script)
         out = hk.send(AI, {"type": "send", "text": f"Write {TOKEN} to out.txt."})
         need(not out.get("error"), f"the send is accepted: {str(out)[:200]}")
-        turns = turns_at_least(len(script))
+        passes = passes_at_least(len(script))
         need(idle(), "the chain settles (no AI task left in `ps`)")
-        turns = m.turns()
-        for i, t in enumerate(turns):
-            print(f"  ── request {i + 1}: last user turn ──\n"
+        passes = m.passes()
+        for i, t in enumerate(passes):
+            print(f"  ── request {i + 1}: last user message ──\n"
                   + "\n".join("     " + ln for ln in last_user(t["body"])[:400].splitlines()),
                   flush=True)
-        need(len(turns) == len(script),
-             f"one request per scripted answer, none after `done`: {len(turns)} for {len(script)}")
-        u = [last_user(t["body"]) for t in turns] + [""] * len(script)
+        need(len(passes) == len(script),
+             f"one request per scripted answer, none after `done`: {len(passes)} for {len(script)}")
+        u = [last_user(t["body"]) for t in passes] + [""] * len(script)
 
         # 1 → 2 (the guid half is checked once the kernel is down, from its state folder)
         req2 = u[1]
@@ -187,9 +187,9 @@ def main() -> int:
              f"the write landed verbatim: {body!r}")
         need("[reply to " in u[2] and f"{FILES} write" in u[2],
              f"request 3 carries the write reply: {u[2][:160]!r}")
-        # 3 → 4 → 5: one turn, re-asked inside it (#766)
+        # 3 → 4 → 5: one pass, re-asked inside it (#766)
         msgs = [[(x.get("role"), x.get("content")) for x in (t["body"].get("messages") or [])]
-                for t in turns] + [[]] * len(script)
+                for t in passes] + [[]] * len(script)
         need(not (work / "files" / "bad.txt").exists(), "a call written wrong ran nothing")
         need("[malformed call — nothing ran] line 2, col 12" in u[3] and "^~" in u[3]
              and "write it as:" in u[3] and '<call name="send">' in u[3],
@@ -210,7 +210,7 @@ def main() -> int:
         need(not (work / "files" / "think.txt").exists(),
              "a call inside the thought was not dispatched")
         gone = ("I will write it.", "<tool_call>", "oops", "[malformed call", "text outside a tag")
-        later = json.dumps([[x for x in r if x[0] != "system"] for r in msgs[5:len(turns)]])
+        later = json.dumps([[x for x in r if x[0] != "system"] for r in msgs[5:len(passes)]])
         need(not any(g in later for g in gone),
              f"no request after the accepted attempt holds attempt 1, attempt 2 or a report: "
              f"{[g for g in gone if g in later]}")
@@ -218,18 +218,18 @@ def main() -> int:
         need(not any(g in stored for g in gone),
              f"the store holds neither failed attempt nor a report: "
              f"{[g for g in gone if g in stored]}")
-        hist = json.dumps((turns[5]["body"].get("messages") if len(turns) > 5 else None) or [])
+        hist = json.dumps((passes[5]["body"].get("messages") if len(passes) > 5 else None) or [])
         need("Thinking it over." in hist and "think.txt" not in hist,
-             "the thought is stripped before the turn is stored: request 6 holds the "
+             "the thought is stripped before the pass is stored: request 6 holds the "
              "answer, not the thought")
         need(u[5].startswith("<thought id=")
              and not any("<thought id=" in str(m.get("content", ""))
-                         for m in turns[5]["body"]["messages"] if m.get("role") == "assistant"),
+                         for m in passes[5]["body"]["messages"] if m.get("role") == "assistant"),
              "request 6 shows the thought as its marker, at the top of the next user-side "
              "message and in no assistant message")
         need("[reply to " in u[5] and f"{FILES} reflect" in u[5],
              f"request 6 carries the reflect reply of the accepted attempt: {u[5][:160]!r}")
-        # 6 → 7: one turn, the call-less answer re-asked inside it (#795)
+        # 6 → 7: one pass, the call-less answer re-asked inside it (#795)
         need(u[6].startswith("[no call was dispatched]"),
              f"request 7 carries the no-call report: {u[6][:160]!r}")
         need(len(msgs[6]) == len(msgs[5]) + 2 and msgs[6][:-2] == msgs[5]
@@ -238,11 +238,11 @@ def main() -> int:
         need("Let me look at that reply first." not in json.dumps(history()),
              "the call-less answer is not stored")
         # across the run
-        bodies = [t["body"] for t in turns]
+        bodies = [t["body"] for t in passes]
         need(all(b.get("stream") is True and b.get("model") == MODEL and "tools" not in b
                  for b in bodies),
              "every request: streamed, the record's model, no `tools` array")
-        probes = sorted({r["path"] for r in m.requests if r["kind"] != "turn"})
+        probes = sorted({r["path"] for r in m.requests if r["kind"] != "pass"})
         need(not probes, f"nothing read from the server (every field set): {probes}")
     finally:
         hk.close()

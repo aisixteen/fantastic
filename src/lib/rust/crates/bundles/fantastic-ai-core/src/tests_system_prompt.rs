@@ -1,8 +1,8 @@
 //! THE RECORD'S `system_prompt`: set on an ai_core
-//! agent's record it REPLACES the default system block on EVERY turn — a main
-//! turn, a self-delivery, a turn woken by a reply. Precedence: the per-call
+//! agent's record it REPLACES the default system block on EVERY pass — a main
+//! pass, a self-delivery, a pass woken by a reply. Precedence: the per-call
 //! argument (that delivery) > the record field > the default block; the record
-//! is read LIVE, so an `update_agent` lands on the next turn. Python
+//! is read LIVE, so an `update_agent` lands on the next pass. Python
 //! `ai_core/core.py:_assemble`.
 
 use super::*;
@@ -32,7 +32,7 @@ async fn say(kernel: &Arc<Kernel>, backend: &AgentId, payload: Value) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_record_prompt_is_the_system_block_of_a_main_and_a_reply_woken_turn() {
+async fn the_record_prompt_is_the_system_block_of_a_main_and_a_reply_woken_pass() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "sp_rec").await;
     let r = set_record_prompt(&kernel, &backend, json!("You are the record's role.")).await;
@@ -50,14 +50,14 @@ async fn the_record_prompt_is_the_system_block_of_a_main_and_a_reply_woken_turn(
         Duration::ZERO,
     );
     say(&kernel, &backend, json!({"type": "send", "text": "go"})).await;
-    assert!(until_passes(&s, 2).await, "the reply never woke a turn");
+    assert!(until_passes(&s, 2).await, "the reply never woke a pass");
     assert_eq!(system_of(&s, 0), "You are the record's role.");
-    // turn 2 is the one the list_agents reply woke
+    // pass 2 is the one the list_agents reply woke
     assert!(s.request(1).contains("[reply to "), "{}", s.request(1));
     assert_eq!(system_of(&s, 1), "You are the record's role.");
 }
 
-/// A send carries no system prompt: the block is the record's, the same for every turn.
+/// A send carries no system prompt: the block is the record's, the same for every pass.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_send_takes_no_system_prompt() {
     let tmp = TempDir::new().unwrap();
@@ -77,7 +77,7 @@ async fn a_send_takes_no_system_prompt() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_update_agent_lands_on_the_next_turn_and_null_restores_the_default() {
+async fn an_update_agent_lands_on_the_next_pass_and_null_restores_the_default() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "sp_upd").await;
     let s = script(
@@ -118,11 +118,11 @@ async fn an_update_agent_lands_on_the_next_turn_and_null_restores_the_default() 
     );
 }
 
-/// `context_recall` budgets the body against the block the turn will actually
+/// `context_recall` budgets the body against the block the pass will actually
 /// carry — a short record prompt leaves more room than the default block
 /// (python `test_recall_sizes_the_block_the_turn_uses`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn recall_sizes_the_block_the_turn_uses() {
+async fn recall_sizes_the_block_the_pass_uses() {
     let tmp = TempDir::new().unwrap();
     let mut budgets = Vec::new();
     for (name, prompt) in [("rc_default", None), ("rc_short", Some("R"))] {

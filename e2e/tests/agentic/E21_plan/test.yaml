@@ -8,11 +8,11 @@ runner: probe.py
 # `RUNTIME` is the plug the probe reads: the rust host, spawned and driven over
 # REST. The Python product keeps the old grant model (#170).
 runtimes: [rust]
-costs: turns
+costs: passes
 limits:
   idle_seconds: 40
-  max_turns: 40
-  no_progress_turns: 32
-  turn_chars: 120000
-  turn_seconds: 600
+  max_passes: 40
+  no_progress_passes: 32
+  pass_chars: 120000
+  pass_seconds: 600
 env: {}

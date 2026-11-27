@@ -34,13 +34,13 @@ ERROR_CODES = {401: "invalid_api_key", 429: "rate_limit_exceeded", 500: "server_
 
 class ResponsesMock(MockServer):
     base_path = "/v1/responses"
-    turn_path = "/v1/responses"
+    pass_path = "/v1/responses"
 
     def error_body(self, status, message):
         return {"error": {"message": message, "type": ERROR_TYPES.get(status, "server_error"),
                           "param": None, "code": ERROR_CODES.get(status)}}
 
-    def turn(self, h, req, text):
+    def on_pass(self, h, req, text):
         rid, mid = "resp_" + uuid.uuid4().hex, "msg_" + uuid.uuid4().hex
         created = time.time()
         seq = iter(range(1 << 30))

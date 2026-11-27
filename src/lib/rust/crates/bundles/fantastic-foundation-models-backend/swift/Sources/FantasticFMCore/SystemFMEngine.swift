@@ -9,8 +9,8 @@
 // One generation = one FRESH `LanguageModelSession`, built from a transcript
 // that replays the conversation faithfully:
 //   instructions  → `Transcript.Entry.instructions` (first, only when non-empty)
-//   user turn     → `Transcript.Entry.prompt`
-//   assistant turn→ `Transcript.Entry.response`
+//   user message     → `Transcript.Entry.prompt`
+//   assistant message→ `Transcript.Entry.response`
 // then `streamResponse(to: prompt)`. The session holds no state between
 // generations — the conversation lives in the caller's memory store, and the
 // caller hands it back every time.
@@ -113,7 +113,7 @@ public struct SystemFMEngine: FMEngine {
         }
 
         /// The transcript the session is rebuilt from — instructions first (when
-        /// any), then every prior turn in order.
+        /// any), then every prior message in order.
         @available(macOS 26.0, *)
         static func transcript(_ request: FMRequest) -> Transcript {
             var entries: [Transcript.Entry] = []
@@ -124,12 +124,12 @@ public struct SystemFMEngine: FMEngine {
                             segments: [.text(Transcript.TextSegment(content: request.instructions))],
                             toolDefinitions: [])))
             }
-            for turn in request.turns {
+            for message in request.messages {
                 let segments: [Transcript.Segment] = [
-                    .text(Transcript.TextSegment(content: turn.content))
+                    .text(Transcript.TextSegment(content: message.content))
                 ]
                 // `validate` admitted only the two roles.
-                if turn.role == "user" {
+                if message.role == "user" {
                     entries.append(.prompt(Transcript.Prompt(segments: segments)))
                 } else {
                     entries.append(.response(Transcript.Response(assetIDs: [], segments: segments)))

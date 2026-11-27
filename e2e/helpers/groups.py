@@ -44,7 +44,7 @@ def master_prompt(
     barely with `max_groups`.
 
     A worker is a PAIR (#632): the chat `<p><k>_worker` (`ai_chat.tools`), which takes
-    the task through `send` and completes each turn through the provider its
+    the task through `send` and completes each pass through the provider its
     `provider_id` names, and that provider `<p><k>_worker_prov`, created UNDER the chat
     so the chat reaches it by position. `worker_chat` / `worker_provider` are the record
     fields each half gets verbatim (the chat's handler, memory store and window; the
@@ -79,7 +79,7 @@ def master_prompt(
         f"`provider_id` = `{p}<k>_worker_prov`. Its `can` is set for you (the memory "
         f"store, and `queue` for its report).\n"
         f"  `{p}<k>_worker_prov`: the worker's provider, the agent its `provider_id` "
-        f"names, which completes each of its turns. `parent_id` = `{p}<k>_worker`; "
+        f"names, which completes each of its passes. `parent_id` = `{p}<k>_worker`; "
         f"copy these fields verbatim: {prov_fields}. Its `can` is set for you.\n"
         f"  `{p}<k>_editor`: `parent_id` = `{p}<k>_worker`, handler_module "
         f"`file_bridge.tools`, root `{queue_dir}/<task>`, allow [\".\"].\n"

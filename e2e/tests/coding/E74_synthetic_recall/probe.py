@@ -3,7 +3,7 @@
 A realistic conversation is written into the agent's MEMORY STORE from above BEFORE the
 agent exists: a goal, twelve digested reads (their bodies were never kept — each reply
 is its origin line), two folds whose summaries carry a RULE and a FACT. Then the agent
-is created; its boot is lazy, so its FIRST TURN reads the head and runs `context_recall`,
+is created; its boot is lazy, so its FIRST PASS reads the head and runs `context_recall`,
 which fits the head to the budget and asks the model what it wants in full. Scored on
 the persisted view (it exists, fits, holds both folds, carries a why), on the recall
 row, and on a task that needs the rule and the fact — with no file re-read.
@@ -58,7 +58,7 @@ async def main():
         # ── the planted history ──────────────────────────────────────────────
         mint = root.ctx.mint_id  # ids come from the kernel's one counter, planted or not
         goal = {"role": "user", "id": mint(), "parent": None,
-                "content": "Survey filler_0..11 one per turn, then write report.md listing every file."}
+                "content": "Survey filler_0..11 one per pass, then write report.md listing every file."}
         rows, ids = [goal], []
         prev = goal["id"]
         for i in range(12):
@@ -85,7 +85,7 @@ async def main():
         from helpers import drive
         await drive(conn, task, client_id=AID, via="user")
         await conn.close()
-        # THE FIRST TURN rebuilt the view (lazy boot → context_recall on turn one).
+        # THE FIRST PASS rebuilt the view (lazy boot → context_recall on pass one).
         view = await read_view(core, root, AID)
         rows_after = await store_rows(root, core, AID)
         recalls = [m for m in rows_after if m.get("kind") == "recall"]
@@ -101,7 +101,7 @@ async def main():
         rereads = len([c for c in ctx_score.calls_made(mine, verb="read") if str(c["payload"].get("path", "")).startswith("filler_")])
         opens = body.strip().splitlines()[0].strip() == f"## {rule_tok}" if body.strip() else False
         checks = [
-            ("a view was persisted on the first turn", bool(view)),
+            ("a view was persisted on the first pass", bool(view)),
             ("the view fits the budget", fits),
             ("the view holds both folds", has_folds),
             ("the view carries a why", bool((view or {}).get("why"))),

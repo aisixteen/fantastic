@@ -5,11 +5,11 @@ group: memory
 title: "map-once: a large read reply folds to the type's marker after its answer; asked for a line only its body holds, the model unfolds it with `recall` and its id, reads no file again, answers with the line, and no answer of its own opens with a time or a marker"
 runner: probe.py
 runtimes: [rust]
-costs: turns
+costs: passes
 limits:
   idle_seconds: 90
-  max_turns: 24
-  no_progress_turns: 32
-  turn_chars: 60000
-  turn_seconds: 300
+  max_passes: 24
+  no_progress_passes: 32
+  pass_chars: 60000
+  pass_seconds: 300
 env: {}

@@ -29,8 +29,8 @@ iframe: the probe reads it through CDP, as the chat probes read a chat). Seeded:
      outline is a ray running round the tile (the accent over the faint selected line);
    - Done: a call that completed: ✓ on ok, kept after the call;
    - Failed: the retried stream dies again: × on error, kept (#795: nothing re-runs it);
-   - an empty answer is no call: re-asked inside its turn (Working, `retrying`), every
-     attempt empty, then the harness stops the turn (Failed), read from the row's drawn
+   - an empty answer is no call: re-asked inside its pass (Working, `retrying`), every
+     attempt empty, then the harness stops the pass (Failed), read from the row's drawn
      states (a MutationObserver);
    - a hand-off: A sends B a slow message and ends its answer with `done` (#795): B thinking,
      A's own call done; B's answer wakes A: Working, then Done, read from the drawn states;

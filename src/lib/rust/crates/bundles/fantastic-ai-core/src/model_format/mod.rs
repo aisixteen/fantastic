@@ -72,7 +72,7 @@ pub(crate) enum Out {
         target: Option<String>,
     },
     /// The call that follows was read after a repair of the closing brackets and braces
-    /// at the end of its JSON, nothing else (`hermes`): the turn's `repaired` trace event.
+    /// at the end of its JSON, nothing else (`hermes`): the pass's `repaired` trace event.
     Repaired {
         /// The closers added, in order (empty when none were).
         added: String,
@@ -189,7 +189,7 @@ pub(crate) struct Markers {
     pub(crate) notice_omitted: &'static str,
     /// Its line on stripped bodies (`{stripped}`, `{bytes}`).
     pub(crate) notice_stripped: &'static str,
-    /// Its last line: how to page turns back, in the type's call form.
+    /// Its last line: how to page messages back, in the type's call form.
     pub(crate) notice_tail: &'static str,
 }
 
@@ -254,7 +254,7 @@ pub(crate) const NOTICE_OMITTED: &str = include_str!("res/shared/notice_omitted.
 pub(crate) const NOTICE_STRIPPED: &str = include_str!("res/shared/notice_stripped.txt");
 /// The re-ask after the harness cut a pass's thinking at its cap (`{budget}`, #782).
 pub(crate) const NOTICE_THINKING_CUT: &str = include_str!("res/shared/notice_thinking_cut.txt");
-/// The harness's `stop` reason after a second thinking cut in one turn (`{budget}`, #782).
+/// The harness's `stop` reason after a second thinking cut in one pass (`{budget}`, #782).
 pub(crate) const STOP_REASON_THINKING: &str = include_str!("res/shared/stop_reason_thinking.txt");
 
 /// A shared section's text, `None` for one that is the type's own.

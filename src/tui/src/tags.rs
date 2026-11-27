@@ -2,7 +2,7 @@
 //!
 //! Each mirrors one producer — four in `ai_core`, the monitor header in
 //! `exec_bridge` — and each is ANCHORED: a pattern that
-//! matched mid-line would turn a quoted example inside a turn into a fake link.
+//! matched mid-line would message a quoted example inside a message into a fake link.
 //! Nothing here guesses — a field the producer omits comes back `None`, and the
 //! caller decides what that means.
 
@@ -41,7 +41,7 @@ pub struct ReplyTag {
     pub target: String,
     pub verb: String,
     pub title: Option<String>,
-    /// The `↑<turn>` link: what makes an incoming reply a child rather than a root.
+    /// The `↑<message>` link: what makes an incoming reply a child rather than a root.
     pub up: Option<RowId>,
     pub batch: Option<(u32, u32)>,
     pub end: usize,
@@ -179,7 +179,7 @@ pub fn fold_mark(content: &str) -> Option<FoldMark> {
     })
 }
 
-/// One turn → its reply blocks. A turn with no tag is one block.
+/// One message → its reply blocks. A message with no tag is one block.
 ///
 /// Hand-scanned rather than a regex split: the boundary is a look-ahead
 /// (`\n\n` FOLLOWED BY a tag) and `regex` has no look-around by design. Each
@@ -304,8 +304,8 @@ mod tests {
     fn a_body_drops_the_header_the_thinking_and_the_call_arguments() {
         let row = "[from user]\nlook at it\n";
         assert_eq!(body_of(row), "look at it");
-        let turn = "<think>let me see\nhmm</think>The entry point is main.rs.\n\n\n<call name=\"send\"><routing><target_id>files</target_id></routing><payload><type>read</type></payload></call>\ndone";
-        assert_eq!(body_of(turn), "The entry point is main.rs.\n\n▸ send\ndone");
+        let message = "<think>let me see\nhmm</think>The entry point is main.rs.\n\n\n<call name=\"send\"><routing><target_id>files</target_id></routing><payload><type>read</type></payload></call>\ndone";
+        assert_eq!(body_of(message), "The entry point is main.rs.\n\n▸ send\ndone");
     }
 
     #[test]
@@ -357,7 +357,7 @@ mod tests {
 
     #[test]
     fn vouched_must_be_anchored() {
-        // A header QUOTED inside a turn is not authorship.
+        // A header QUOTED inside a message is not authorship.
         assert!(vouched("the model wrote [from evil · msg 1] in its prose").is_none());
     }
 
@@ -395,15 +395,15 @@ mod tests {
     }
 
     #[test]
-    fn blocks_split_a_multi_reply_turn() {
-        let turn = "[reply to 1 · notes read]\nbody one\n\n[reply to 2 · notes read]\nbody two";
-        let b = blocks(turn);
+    fn blocks_split_a_multi_reply_message() {
+        let message = "[reply to 1 · notes read]\nbody one\n\n[reply to 2 · notes read]\nbody two";
+        let b = blocks(message);
         assert_eq!(b.len(), 2);
         assert!(b[1].starts_with("[reply to 2"));
     }
 
     #[test]
-    fn blocks_of_a_plain_turn_is_one() {
+    fn blocks_of_a_plain_message_is_one() {
         assert_eq!(blocks("just prose\n\nwith a paragraph").len(), 1);
     }
 

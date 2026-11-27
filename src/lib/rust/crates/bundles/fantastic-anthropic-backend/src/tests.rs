@@ -80,9 +80,9 @@ async fn api(status: u16, body: String) -> (MockServer, String) {
     (srv, ep)
 }
 
-/// The first error a turn raises, whether the provider refuses at the send
+/// The first error a pass raises, whether the provider refuses at the send
 /// or the stream fails mid-answer (#198).
-async fn turn_error(p: &AnthropicProvider) -> ProviderError {
+async fn pass_error(p: &AnthropicProvider) -> ProviderError {
     let msgs = [json!({"role": "user", "content": "hi"})];
     match p.chat(&msgs, None).await {
         Err(e) => e,
@@ -92,7 +92,7 @@ async fn turn_error(p: &AnthropicProvider) -> ProviderError {
                     return e;
                 }
             }
-            panic!("the turn raised no error");
+            panic!("the pass raised no error");
         }
     }
 }
@@ -100,21 +100,21 @@ async fn turn_error(p: &AnthropicProvider) -> ProviderError {
 #[tokio::test]
 async fn connect_failure_is_transport() {
     let p = provider("http://127.0.0.1:1/v1/messages", Arc::new(Key));
-    assert!(turn_error(&p).await.is_transient());
+    assert!(pass_error(&p).await.is_transient());
 }
 
 #[tokio::test]
 async fn http_529_is_transport() {
     let (_srv, ep) = api(529, String::new()).await;
     let p = provider(&ep, Arc::new(Key));
-    assert!(turn_error(&p).await.is_transient());
+    assert!(pass_error(&p).await.is_transient());
 }
 
 #[tokio::test]
 async fn http_400_is_not_transport() {
     let (_srv, ep) = api(400, "bad request".into()).await;
     let p = provider(&ep, Arc::new(Key));
-    assert!(!turn_error(&p).await.is_transient());
+    assert!(!pass_error(&p).await.is_transient());
 }
 
 fn provider(endpoint: &str, key: Arc<dyn KeySource>) -> AnthropicProvider {
@@ -197,8 +197,8 @@ async fn drain(p: &AnthropicProvider, max_tokens: Option<i64>) -> Result<String,
 }
 
 #[test]
-fn system_is_one_string_and_turns_of_one_role_merge() {
-    let (system, turns) = to_messages(&[
+fn system_is_one_string_and_messages_of_one_role_merge() {
+    let (system, messages) = to_messages(&[
         json!({"role": "system", "content": "a"}),
         json!({"role": "user", "content": "u1"}),
         json!({"role": "system", "content": "b"}),
@@ -207,7 +207,7 @@ fn system_is_one_string_and_turns_of_one_role_merge() {
     ]);
     assert_eq!(system, "a\n\nb");
     assert_eq!(
-        turns,
+        messages,
         vec![
             json!({"role": "user", "content": "u1\n\nu2"}),
             json!({"role": "assistant", "content": "x"}),
@@ -271,10 +271,10 @@ async fn the_key_rides_as_x_api_key_only_when_named() {
     let (srv, ep) = api(200, sse(&events)).await;
     drain(&provider(&ep, Arc::new(Key)), None)
         .await
-        .expect("turn");
+        .expect("pass");
     drain(&provider(&ep, Arc::new(NoKey)), None)
         .await
-        .expect("turn");
+        .expect("pass");
     let reqs = srv.received_requests().await.unwrap_or_default();
     assert_eq!(
         reqs[0]
@@ -333,7 +333,7 @@ async fn a_stream_that_goes_quiet_fails_after_the_idle_window() {
 }
 
 /// Headers that never come are the same stall: the window runs from the request,
-/// and the turn fails naming the stall, not a connect error (#177).
+/// and the pass fails naming the stall, not a connect error (#177).
 #[tokio::test]
 async fn an_endpoint_that_never_answers_fails_after_the_idle_window() {
     let (ep, server) = stalling_endpoint(None).await;
@@ -397,7 +397,7 @@ async fn a_refused_key_says_to_name_credentials() {
 }
 
 #[tokio::test]
-async fn a_cut_main_turn_fails_and_a_cut_side_call_is_its_answer() {
+async fn a_cut_main_pass_fails_and_a_cut_side_call_is_its_answer() {
     let mut events = vec![start(), text("half")];
     events.extend(stop("max_tokens"));
     let (_srv, ep) = api(200, sse(&events)).await;
@@ -603,7 +603,7 @@ async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_send_reads_the_api_first_and_a_no_turn_verb_reads_nothing() {
+async fn a_send_reads_the_api_first_and_a_no_pass_verb_reads_nothing() {
     let tmp = TempDir::new().unwrap();
     let (srv, ep) = models(200, entry()).await;
     let kernel = mk(&tmp, &ep).await;
@@ -611,14 +611,14 @@ async fn a_send_reads_the_api_first_and_a_no_turn_verb_reads_nothing() {
         call(&kernel, "a1", json!({"type": verb})).await;
     }
     assert!(srv.received_requests().await.unwrap_or_default().is_empty());
-    // the provider's turn (`complete`) reads the API first
+    // the provider's pass (`complete`) reads the API first
     call(
         &kernel,
         "a1",
         json!({"type": "complete", "messages": [{"role": "user", "content": "hi"}], "rid": "r"}),
     )
     .await;
-    // the window is the provider's, written back; a turn's output budget is the pass's
+    // the window is the provider's, written back; a pass's output budget is the pass's
     let rec = helpers::agent_meta(&AgentId::from("a1"), &kernel);
     assert_eq!(rec["context_window"], json!(200_000), "{rec:?}");
     assert!(rec.get("max_tokens").is_none(), "{rec:?}");
@@ -631,7 +631,7 @@ fn entry_max(max: i64) -> Value {
     json!({"id": MODEL, "max_input_tokens": 200_000, "max_tokens": max})
 }
 
-/// A POST answer that says it was asked: the turn runs after `send` has replied, so
+/// A POST answer that says it was asked: the pass runs after `send` has replied, so
 /// the test waits on this, not on a clock.
 struct Asked(Arc<tokio::sync::Notify>, String);
 impl wiremock::Respond for Asked {
@@ -648,7 +648,7 @@ async fn sent_max_tokens(model: &str, extra: Value, max: i64) -> Value {
     sent_body(model, extra, max, json!({})).await["max_tokens"].clone()
 }
 
-/// The whole POST body a turn sends. A non-empty `chat` object is set on the paired
+/// The whole POST body a pass sends. A non-empty `chat` object is set on the paired
 /// ai_chat first (its `caching` places the marks).
 async fn sent_body(model: &str, extra: Value, max: i64, chat: Value) -> Value {
     sent_body_over(model, extra, max, chat, json!({})).await
@@ -706,7 +706,7 @@ async fn sent_body_over(model: &str, extra: Value, max: i64, chat: Value, raw: V
     .await;
     tokio::time::timeout(Duration::from_secs(30), asked.notified())
         .await
-        .expect("the turn sent its request");
+        .expect("the pass sent its request");
     let reqs = srv.received_requests().await.unwrap_or_default();
     let post = reqs
         .iter()
@@ -715,7 +715,7 @@ async fn sent_body_over(model: &str, extra: Value, max: i64, chat: Value, raw: V
     serde_json::from_slice(&post.body).expect("json body")
 }
 
-/// `mk_with`, with a memory store the agent may use — a turn needs one to run — and no
+/// `mk_with`, with a memory store the agent may use — a pass needs one to run — and no
 /// `max_tokens` unless `extra` names one.
 async fn mk_unbounded_store(tmp: &TempDir, endpoint: &str, id: &str, extra: Value) -> Arc<Kernel> {
     let mut kernel = Kernel::new();
@@ -805,7 +805,7 @@ async fn the_chats_max_tokens_and_temperature_ride_the_request() {
     assert_eq!((b["max_tokens"].clone(), b["temperature"].clone()), (json!(40000), json!(0.4)), "{b}");
 }
 
-/// #632: a turn's output budget is the chat's, else the API's; a `max_tokens` left on the
+/// #632: a pass's output budget is the chat's, else the API's; a `max_tokens` left on the
 /// provider's record (written before the field moved) never stands in for it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_max_tokens_left_on_the_provider_is_not_sent() {
@@ -946,9 +946,9 @@ fn the_backend_adds_no_mark_of_its_own() {
 
 #[test]
 fn every_agent_mark_is_forwarded_where_it_was_put() {
-    // [primer rows][fold][fold][task rows]: the primer's row is the assistant turn
-    // "p2"; the fold rows and the task rows are one merged user turn, and the marker
-    // lands at the end of the last fold's text, not at the end of that merged turn.
+    // [primer rows][fold][fold][task rows]: the primer's row is the assistant message
+    // "p2"; the fold rows and the task rows are one merged user message, and the marker
+    // lands at the end of the last fold's text, not at the end of that merged message.
     let p = provider("http://x/v1/messages", Arc::new(NoKey));
     let msgs = flagged_sys(&[
         ("user", "p1", None),
@@ -982,8 +982,8 @@ fn every_agent_mark_is_forwarded_where_it_was_put() {
 }
 
 #[test]
-fn the_split_turns_concatenate_to_exactly_the_merged_string() {
-    // The block texts of a merged turn, joined, are the string the turn was before
+fn the_split_messages_concatenate_to_exactly_the_merged_string() {
+    // The block texts of a merged message, joined, are the string the message was before
     // any split: no byte added or lost, wherever a flag falls. And no block is blank:
     // the API refuses a whitespace-only text block, so a flagged row followed by empty
     // rows must not leave a trailing "\n\n" block of its own.
@@ -1003,7 +1003,7 @@ fn the_split_turns_concatenate_to_exactly_the_merged_string() {
         (&["one", "", ""], &[Some("cache_mark"), None, None]),
         (&["", "one", ""], &[None, Some("cache_mark"), None]),
         (&["one", ""], &[Some("cache_mark"), Some("cache_mark")]),
-        // a flagged row that is only whitespace, first in its turn, opens no block
+        // a flagged row that is only whitespace, first in its message, opens no block
         // of its own (the API refuses a blank block): it joins the next text
         (&[" ", "two"], &[Some("cache_mark"), None]),
         (
@@ -1025,7 +1025,7 @@ fn the_split_turns_concatenate_to_exactly_the_merged_string() {
         let plain = to_messages(&msgs).1;
         let merged = plain[0]["content"]
             .as_str()
-            .expect("plain turn")
+            .expect("plain message")
             .to_string();
         let blocks = b["messages"][0]["content"].clone();
         let joined: String = match &blocks {
@@ -1723,7 +1723,7 @@ fn the_record_refuses_a_bad_caching_mode_or_primer_or_price() {
 }
 
 /// A kernel with the agent [`STALL_AGENT`] on a memory store, its record naming `endpoint` and
-/// the given extra fields — the whole turn runs through ai-core, the read clock
+/// the given extra fields — the whole pass runs through ai-core, the read clock
 /// included (#177).
 async fn mk_with_store(tmp: &TempDir, endpoint: &str, extra: Value, chat_extra: Value) -> Arc<Kernel> {
     let mut kernel = Kernel::new();
@@ -1768,7 +1768,7 @@ async fn mk_with_store(tmp: &TempDir, endpoint: &str, extra: Value, chat_extra: 
     }
     let r = call(&kernel, "kernel_state", payload).await;
     assert_eq!(r["id"], json!(STALL_AGENT), "{r}");
-    // the turn's output budget is the chat's (#632): named, so no model entry is read; the
+    // the pass's output budget is the chat's (#632): named, so no model entry is read; the
     // chat's own fields (`chat_extra`) are its record's too
     let chat = pair_chat(&kernel, &AgentId::from(STALL_AGENT)).await;
     let mut up = json!({"type": "update_agent", "id": chat.as_str(), "max_tokens": 1000});
@@ -1780,19 +1780,19 @@ async fn mk_with_store(tmp: &TempDir, endpoint: &str, extra: Value, chat_extra: 
     kernel
 }
 
-/// The process-global turn state is keyed by agent id, so this turn has an id of
+/// The process-global pass state is keyed by agent id, so this pass has an id of
 /// its own: no other test's `a1` can hold its lock or its in-flight entry.
-const STALL_AGENT: &str = "stall_turn";
+const STALL_AGENT: &str = "stall_pass";
 
 /// THE WHOLE PATH (#177): a stream that answers its first events and then goes
-/// silent ends its turn after the record's `stream_idle_seconds`. The turn stores
-/// an error row naming the stall, `status` reports the turn done with
+/// silent ends its pass after the record's `stream_idle_seconds`. The pass stores
+/// an error row naming the stall, `status` reports the pass done with
 /// `reason='error'` and nothing generating.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_stalled_api_stream_ends_the_turn_with_an_error_row() {
+async fn a_stalled_api_stream_ends_the_pass_with_an_error_row() {
     let (ep, server) = stalling_endpoint(Some(sse(&[start(), text("half")]))).await;
     let tmp = TempDir::new().unwrap();
-    // the failed turn is not re-run (#795): its error row and status end it
+    // the failed pass is not re-run (#795): its error row and status end it
     let kernel = mk_with_store(&tmp, &ep, json!({"stream_idle_seconds": 0.2}), json!({})).await;
     let started = std::time::Instant::now();
     let r = call(
@@ -2055,15 +2055,15 @@ async fn restart(tmp: &TempDir, id: &str) -> Arc<Kernel> {
 }
 
 /// One request's stream: 100 uncached input, 400 written, 1000 read, `out` output.
-fn turn_events(out: i64) -> String {
+fn pass_events(out: i64) -> String {
     let mut ev = vec![usage_start(100, 400, 1000), text("ok")];
     ev.extend(usage_stop(out));
     sse(&ev)
 }
 
-/// One turn through the agent's own provider, as a send runs it (the chat's `max_tokens`
+/// One pass through the agent's own provider, as a send runs it (the chat's `max_tokens`
 /// laid over the record), stream drained.
-async fn turn(kernel: &Arc<Kernel>, id: &str) {
+async fn pass(kernel: &Arc<Kernel>, id: &str) {
     // the provider's pass runs in its own dispatch: what it writes is its own send
     fantastic_kernel::test_support::as_agent(AgentId::from(id), async {
         let mut pass = helpers::agent_meta(&AgentId::from(id), kernel);
@@ -2096,10 +2096,10 @@ fn priced() -> Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn usage_survives_a_restart() {
     let tmp = TempDir::new().unwrap();
-    let (_srv, ep) = api(200, turn_events(35)).await;
+    let (_srv, ep) = api(200, pass_events(35)).await;
     let kernel = boot_disk(&tmp).await;
     create_disk_agent(&kernel, "u_restart", &ep, json!({})).await;
-    turn(&kernel, "u_restart").await;
+    pass(&kernel, "u_restart").await;
     let agent_dir = tmp.path().join(".fantastic/agents/u_restart");
     assert!(
         agent_dir.join("usage.json").is_file(),
@@ -2115,9 +2115,9 @@ async fn usage_survives_a_restart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn usage_survives_a_restart_through_the_params_store() {
     let tmp = TempDir::new().unwrap();
-    let (_srv, ep) = api(200, turn_events(35)).await;
+    let (_srv, ep) = api(200, pass_events(35)).await;
     let kernel = mk_unbounded_store(&tmp, &ep, "u_store", json!({})).await;
-    turn(&kernel, "u_store").await;
+    pass(&kernel, "u_store").await;
     assert!(
         !usage_file_of(&AgentId::from("u_store"), &kernel).is_some_and(|p| p.is_file()),
         "this agent has no usage file"
@@ -2128,8 +2128,8 @@ async fn usage_survives_a_restart_through_the_params_store() {
     assert_eq!(got["requests"], json!(1), "{got}");
     assert_eq!(got["output_tokens"], json!(35), "{got}");
     assert_eq!(got["cache_read_tokens"], json!(1000), "{got}");
-    // a new turn adds to what the store held
-    turn(&kernel, "u_store").await;
+    // a new pass adds to what the store held
+    pass(&kernel, "u_store").await;
     forget_counts("u_store");
     let got = call(&kernel, "u_store", json!({"type": "usage"})).await;
     assert_eq!(got["requests"], json!(2), "{got}");
@@ -2144,15 +2144,15 @@ async fn usage_survives_a_restart_through_the_params_store() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn usage_since_boot_starts_at_zero() {
     let tmp = TempDir::new().unwrap();
-    let (_srv, ep) = api(200, turn_events(35)).await;
+    let (_srv, ep) = api(200, pass_events(35)).await;
     let kernel = boot_disk(&tmp).await;
     create_disk_agent(&kernel, "u_since", &ep, json!({})).await;
-    turn(&kernel, "u_since").await;
+    pass(&kernel, "u_since").await;
     let kernel = restart(&tmp, "u_since").await;
     let r = call(&kernel, "u_since", json!({"type": "reflect"})).await;
     assert_eq!(r["usage"]["requests"], json!(1), "{r}");
     assert_eq!(r["usage_since_boot"]["requests"], json!(0), "{r}");
-    turn(&kernel, "u_since").await;
+    pass(&kernel, "u_since").await;
     let r = call(&kernel, "u_since", json!({"type": "reflect"})).await;
     assert_eq!(r["usage"]["requests"], json!(2), "{r}");
     assert_eq!(r["usage_since_boot"]["requests"], json!(1), "{r}");
@@ -2161,10 +2161,10 @@ async fn usage_since_boot_starts_at_zero() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn usage_reset_clears_it() {
     let tmp = TempDir::new().unwrap();
-    let (_srv, ep) = api(200, turn_events(35)).await;
+    let (_srv, ep) = api(200, pass_events(35)).await;
     let kernel = boot_disk(&tmp).await;
     create_disk_agent(&kernel, "u_reset", &ep, priced()).await;
-    turn(&kernel, "u_reset").await;
+    pass(&kernel, "u_reset").await;
     let pre = call(&kernel, "u_reset", json!({"type": "usage_reset"})).await;
     assert_eq!(pre["requests"], json!(1), "{pre}");
     let now = call(&kernel, "u_reset", json!({"type": "usage"})).await;
@@ -2178,15 +2178,15 @@ async fn usage_reset_clears_it() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cost_usd_accumulates_across_a_restart() {
     let tmp = TempDir::new().unwrap();
-    let (_srv, ep) = api(200, turn_events(35)).await;
+    let (_srv, ep) = api(200, pass_events(35)).await;
     let kernel = boot_disk(&tmp).await;
     create_disk_agent(&kernel, "u_cost", &ep, priced()).await;
-    turn(&kernel, "u_cost").await;
+    pass(&kernel, "u_cost").await;
     let one = call(&kernel, "u_cost", json!({"type": "usage"})).await["cost_usd"]
         .as_f64()
         .expect("cost_usd");
     let kernel = restart(&tmp, "u_cost").await;
-    turn(&kernel, "u_cost").await;
+    pass(&kernel, "u_cost").await;
     let two = call(&kernel, "u_cost", json!({"type": "usage"})).await["cost_usd"]
         .as_f64()
         .expect("cost_usd");
@@ -2198,7 +2198,7 @@ async fn cost_usd_accumulates_across_a_restart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_corrupt_usage_file_starts_clean() {
     let tmp = TempDir::new().unwrap();
-    let (_srv, ep) = api(200, turn_events(35)).await;
+    let (_srv, ep) = api(200, pass_events(35)).await;
     let kernel = boot_disk(&tmp).await;
     create_disk_agent(&kernel, "u_corrupt", &ep, json!({})).await;
     let file = tmp.path().join(".fantastic/agents/u_corrupt/usage.json");
@@ -2207,9 +2207,9 @@ async fn a_corrupt_usage_file_starts_clean() {
     let got = call(&kernel, "u_corrupt", json!({"type": "usage"})).await;
     assert!(got.get("reason").is_none(), "{got}");
     assert_eq!(got["requests"], json!(0), "{got}");
-    turn(&kernel, "u_corrupt").await;
+    pass(&kernel, "u_corrupt").await;
     let written: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap())
-        .expect("the turn rewrites a valid file");
+        .expect("the pass rewrites a valid file");
     assert_eq!(written["requests"], json!(1), "{written}");
 }
 
@@ -2228,7 +2228,7 @@ fn the_sidecar_keeps_the_one_hour_write_count() {
     assert_eq!((old.cache_write_1h, old.long_cache_write_1h), (0, 0));
 }
 
-fn turn_events_as(model: &str, out: i64) -> String {
+fn pass_events_as(model: &str, out: i64) -> String {
     let mut ev = vec![usage_start_as(model, 100, 400, 1000), text("ok")];
     ev.extend(usage_stop(out));
     sse(&ev)
@@ -2314,10 +2314,10 @@ async fn cache_counts_land_on_the_model_that_spent_them() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn by_model_survives_a_restart() {
     let tmp = TempDir::new().unwrap();
-    let (_srv, ep) = api(200, turn_events_as("claude-haiku-5-5", 35)).await;
+    let (_srv, ep) = api(200, pass_events_as("claude-haiku-5-5", 35)).await;
     let kernel = boot_disk(&tmp).await;
     create_disk_agent(&kernel, "m_restart", &ep, json!({})).await;
-    turn(&kernel, "m_restart").await;
+    pass(&kernel, "m_restart").await;
     let before = call(&kernel, "m_restart", json!({"type": "usage"})).await;
     let kernel = restart(&tmp, "m_restart").await;
     let after = call(&kernel, "m_restart", json!({"type": "usage"})).await;
@@ -2341,13 +2341,13 @@ async fn by_model_survives_a_restart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn usage_reset_true_zeroes_the_boot_counts_per_model() {
     let tmp = TempDir::new().unwrap();
-    let (_srv, ep) = api(200, turn_events_as("claude-haiku-5-5", 35)).await;
+    let (_srv, ep) = api(200, pass_events_as("claude-haiku-5-5", 35)).await;
     let kernel = boot_disk(&tmp).await;
     create_disk_agent(&kernel, "m_reset", &ep, json!({})).await;
-    turn(&kernel, "m_reset").await;
-    // a restart: that turn becomes the base; the next one is this boot's own
+    pass(&kernel, "m_reset").await;
+    // a restart: that pass becomes the base; the next one is this boot's own
     let kernel = restart(&tmp, "m_reset").await;
-    turn(&kernel, "m_reset").await;
+    pass(&kernel, "m_reset").await;
     let got = call(&kernel, "m_reset", json!({"type": "usage", "reset": true})).await;
     assert_eq!(
         got["by_model"]["claude-haiku-5-5"]["requests"],
@@ -2361,7 +2361,7 @@ async fn usage_reset_true_zeroes_the_boot_counts_per_model() {
     );
     let after = call(&kernel, "m_reset", json!({"type": "usage"})).await;
     assert_eq!(after["usage_since_boot"]["by_model"], json!({}), "{after}");
-    // the total keeps the base (the turn before the restart): only the boot counts went
+    // the total keeps the base (the pass before the restart): only the boot counts went
     assert_eq!(after["requests"], json!(1), "{after}");
     assert_eq!(
         after["by_model"]["claude-haiku-5-5"]["requests"],
@@ -2373,10 +2373,10 @@ async fn usage_reset_true_zeroes_the_boot_counts_per_model() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn usage_reset_verb_zeroes_by_model_and_the_file() {
     let tmp = TempDir::new().unwrap();
-    let (_srv, ep) = api(200, turn_events_as("claude-haiku-5-5", 35)).await;
+    let (_srv, ep) = api(200, pass_events_as("claude-haiku-5-5", 35)).await;
     let kernel = boot_disk(&tmp).await;
     create_disk_agent(&kernel, "m_zero", &ep, json!({})).await;
-    turn(&kernel, "m_zero").await;
+    pass(&kernel, "m_zero").await;
     let pre = call(&kernel, "m_zero", json!({"type": "usage_reset"})).await;
     assert_eq!(
         pre["by_model"]["claude-haiku-5-5"]["requests"],
@@ -2585,7 +2585,7 @@ async fn complete_as(kernel: &Arc<Kernel>, provider: &str, chat: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn by_agent_keeps_a_deleted_agent_survives_a_restart_and_resets() {
     let tmp = TempDir::new().unwrap();
-    let (_srv, ep) = api(200, turn_events(35)).await;
+    let (_srv, ep) = api(200, pass_events(35)).await;
     let kernel = boot_disk(&tmp).await;
     let extra = json!({"context_window": 200000, "prices": {"claude-test-5": {"input": 3.0, "output": 15.0}}});
     create_disk_agent(&kernel, "g_prov", &ep, extra).await;
@@ -2660,7 +2660,7 @@ async fn by_agent_keeps_a_deleted_agent_survives_a_restart_and_resets() {
 
 // ─── the imageless golden (#622) ────────────────────────────────────────────
 
-/// A fixed imageless conversation, marks and merged turns included.
+/// A fixed imageless conversation, marks and merged messages included.
 fn golden_messages() -> Vec<Value> {
     let mut m = flagged_sys(&[
         ("user", "p1", None),
@@ -2700,10 +2700,10 @@ fn an_image_part_becomes_a_base64_block_before_the_text_of_its_message() {
             {"type": "image", "ref": 7, "media_type": "image/png", "width": 2, "height": 1}]}),
         json!({"role": "assistant", "content": "ok"}),
     ];
-    let (system, _, turns) = to_wire(&messages, true, &one_image(7, "image/png", b"\x89PNG"));
+    let (system, _, messages) = to_wire(&messages, true, &one_image(7, "image/png", b"\x89PNG"));
     assert_eq!(system, "s");
     assert_eq!(
-        turns,
+        messages,
         vec![
             json!({"role": "user", "content": [
                 {"type": "text", "text": "before"},
@@ -2725,8 +2725,8 @@ fn an_image_row_with_no_text_sends_no_blank_text_block_and_keeps_its_mark() {
     let mut imgs = Images::default();
     imgs.0
         .insert("a".into(), ("image/jpeg".into(), vec![1, 2, 3]));
-    let (_, _, turns) = to_wire(&messages, true, &imgs);
-    let blocks = turns[0]["content"].as_array().expect("blocks");
+    let (_, _, messages) = to_wire(&messages, true, &imgs);
+    let blocks = messages[0]["content"].as_array().expect("blocks");
     assert_eq!(blocks[0]["type"], json!("image"));
     assert_eq!(blocks[1]["text"], json!("\n\nx"));
     assert_eq!(blocks[1]["cache_control"], json!({"type": "ephemeral"}));
@@ -3038,15 +3038,15 @@ async fn http_errors_are_classed_by_the_shared_classifier() {
         (404, ErrorClass::Permanent(NOT_FOUND)),
         (429, ErrorClass::Transient),
         (529, ErrorClass::Transient),
-        (400, ErrorClass::Turn),
+        (400, ErrorClass::Pass),
     ] {
         let (_srv, ep) = api(code, "no".into()).await;
         let p = provider(&ep, Arc::new(Key));
-        assert_eq!(turn_error(&p).await.class, want, "HTTP {code}");
+        assert_eq!(pass_error(&p).await.class, want, "HTTP {code}");
     }
 }
 
-/// A key the API refuses (401/403) on the pre-turn read is PERMANENT through the shared
+/// A key the API refuses (401/403) on the pre-pass read is PERMANENT through the shared
 /// classifier (`provider::read_reason`): the verb's refusal is `unauthorized`, so the chain
 /// gives up at once instead of retrying the read every pass.
 #[tokio::test]

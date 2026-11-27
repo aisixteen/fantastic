@@ -1,6 +1,6 @@
 """memory/context_fold — a fold on a LIVE agent leaves the rows before the range alone.
 
-Python runtime, NO MODEL: a stub provider answers six live turns. The operator
+Python runtime, NO MODEL: a stub provider answers six live passes. The operator
 folds the 3rd and 4th conversation rows with `context_fold` and a given summary.
 Scored: the reply, the fold row, every row before and after the range byte-identical
 in the store, the next prompt (rows before the range unchanged, one fold line in place
@@ -38,7 +38,7 @@ async def _call(root, payload):
     return (await root.send([{"target": "ai", "payload": payload}]))[0]["result"]
 
 
-async def _turn(root, text):
+async def _pass(root, text):
     r = await _call(root, {"type": "send", "text": text})
     assert not (isinstance(r, dict) and r.get("error")), r
     for _ in range(200):
@@ -47,7 +47,7 @@ async def _turn(root, text):
             await asyncio.sleep(0.2)
             if not await _live_tasks(root, "ai"):
                 return
-    raise AssertionError("the turn never went quiet")
+    raise AssertionError("the pass never went quiet")
 
 
 def _dump(rows):
@@ -72,15 +72,15 @@ async def main():
         assert not r.get("error"), r
         await memory.open_ingress(root, memory.MEMORY, "ai")
         for i in range(6):
-            await _turn(root, f"task step {i}")
+            await _pass(root, f"task step {i}")
 
         before = await store_rows(root, core, "ai")
         ids = [r["id"] for r in before]
-        k = 4  # the 5th and 6th conversation rows: the 3rd turn's two rows, four rows before
+        k = 4  # the 5th and 6th conversation rows: the 3rd pass's two rows, four rows before
         F, T = ids[k], ids[k + 1]
         snap = _dump(before)
         n_before = len(_Stub.seen)
-        await _turn(root, "probe before the fold")
+        await _pass(root, "probe before the fold")
         pre_prompt = _texts(_Stub.seen[-1])
 
         out = await _call(root, {"type": "context_fold", "from": F, "to": T,
@@ -92,7 +92,7 @@ async def main():
         prefix = [i for i in ids if i < F]
         tail = [i for i in ids if i > T]
 
-        await _turn(root, "probe after the fold")
+        await _pass(root, "probe after the fold")
         post_prompt = _texts(_Stub.seen[-1])
         # the prompt: everything the model saw before the range, in the same place
         fold_line = next((t for t in post_prompt if t.startswith("[fold ")), "")

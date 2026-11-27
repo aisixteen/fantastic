@@ -153,13 +153,13 @@ def main() -> int:
             time.sleep(0.05)
         return False
 
-    def turns_at_least(n: int, bound: float = 90) -> list[dict]:
+    def passes_at_least(n: int, bound: float = 90) -> list[dict]:
         end = time.monotonic() + bound
         while time.monotonic() < end:
-            if len(m.turns()) >= n:
+            if len(m.passes()) >= n:
                 break
             time.sleep(0.05)
-        return m.turns()
+        return m.passes()
 
     can = {"memory": ALL, ROOT: line_call("reflect", "reload_bundle"),
            BUNDLES: ALL, PROV: PROVIDER}
@@ -214,24 +214,24 @@ def main() -> int:
                                    f"of a text; no such agent exists. Answer with the "
                                    f"SHA-256 of {TOKEN}."})
         need(out.get("accepted") is True, f"the send is accepted: {short(out)}")
-        turns_at_least(len(script))
+        passes_at_least(len(script))
         end = time.monotonic() + 60
         while time.monotonic() < end and len(served) < len(script):
             time.sleep(0.05)
         need(idle(), "the chain settles (no AI task left in `ps`)")
-        turns = list(served)
-        for i, t in enumerate(m.turns()):
+        passes = list(served)
+        for i, t in enumerate(m.passes()):
             tail = (t["body"].get("messages") or [])[-5:]
             print(f"  ── request {i + 1}: its last messages ──\n" + "\n".join(
                 f"     {x.get('role')}: " + str(x.get("content"))[:150].replace("\n", " ⏎ ")
                 for x in tail), flush=True)
-        all_turns = [t["body"] for t in m.turns()]
-        last_at = max((i for i, b in enumerate(all_turns) if turns and b == turns[-1]), default=-1)
-        after_done = len(all_turns) - 1 - last_at
-        need(len(turns) == len(script) and after_done == 0,
+        all_passes = [t["body"] for t in m.passes()]
+        last_at = max((i for i, b in enumerate(all_passes) if passes and b == passes[-1]), default=-1)
+        after_done = len(all_passes) - 1 - last_at
+        need(len(passes) == len(script) and after_done == 0,
              f"one scripted answer per whole set of replies, none after `done`: "
-             f"{len(turns)} for {len(script)}, {after_done} after")
-        u = ["\n".join(since_answer(t)) for t in turns] + [""] * len(script)
+             f"{len(passes)} for {len(script)}, {after_done} after")
+        u = ["\n".join(since_answer(t)) for t in passes] + [""] * len(script)
 
         # 1 · the files
         for p, b in files.items():
@@ -293,7 +293,7 @@ def main() -> int:
                        .get("schemas") or {})
 
         s = score(ai=AI, digest=DIGEST, before=before, records=recs,
-                  turns=[str(r.get("content")) for r in rows if r.get("role") == "assistant"],
+                  replies=[str(r.get("content")) for r in rows if r.get("role") == "assistant"],
                   held=rows, catalog=cat.get("bundles") or [],
                   bundle_verbs=folder_verbs(cat.get("bundles") or [], work),
                   schemas={i: verbs_of(i) for i in recs if i not in before})

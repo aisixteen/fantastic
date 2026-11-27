@@ -105,7 +105,7 @@ async def plant(
     (the kernel stays the only allocator), then `dump` → those rows dropped, `rows`
     added under `<guid>|<aid>` with the minted ids (a row's `refs` become its
     `fold_refs`) → `inject`. The agent's in-memory head is not touched — plant before
-    its first turn, as in process.
+    its first pass, as in process.
 
     `remap` (over the wire): the rows carry PLACEHOLDER ids — every row is minted a
     real one, and `remap(row, {placeholder: real})` rewrites each row's references
@@ -237,7 +237,7 @@ async def watch_store_writers(port: int, root_id: str) -> None:
 async def watch_store_grants(root: Any, readers: list[str], *, every: float = 5.0) -> None:
     """Print the named readers' line targets every time they CHANGE, with the elapsed
     time — run as a background task for the length of a run, so a line that
-    disappears is pinned to the moment (and the transcript turn) it went. Cancel
+    disappears is pinned to the moment (and the transcript pass) it went. Cancel
     to stop."""
     import asyncio
     import time

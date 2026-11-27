@@ -5,14 +5,14 @@ group: agentic_advanced
 title: three solvers, three oracles, one code — the harness builds and kicks off; the swarm solves
 runner: probe.py
 runtimes: [rust]
-costs: turns
+costs: passes
 # THREE LANES inside one test: the solvers share the proxy. Run alone.
 long: true
 limits:
   idle_seconds: 60
-  max_turns: 50
-  no_progress_turns: 0
-  turn_chars: 120000
-  turn_seconds: 600
+  max_passes: 50
+  no_progress_passes: 0
+  pass_chars: 120000
+  pass_seconds: 600
 env: {FANTASTIC_AI_SEND_TIMEOUT: "420", UNATTENDED: "1200"}
 exclusive: true   # runs a team of AIs that takes every model slot: alone, after the pool (e2e/run.py)

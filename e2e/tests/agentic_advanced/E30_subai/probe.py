@@ -2,7 +2,7 @@
 
     cd src/lib/python && uv run python -u ../../../e2e/run.py --group agentic_advanced --id subai --lanes 1
 
-The probes so far all end when the model's turn ends. This one asks for something
+The probes so far all end when the model's pass ends. This one asks for something
 that OUTLIVES the conversation AND has a mind inside it: the
 creator must CREATE a new AI agent and a new code agent, aim the clock at the AI,
 and put the knowledge (the multiplier) in the code. Every tick: clock → sub-AI →
@@ -30,7 +30,7 @@ SCORING — four HARD checks, and the last two are what make it more than probe 
                  the recurrence is aimed at its own work, not at a fixture.
   3. IT RUNS UNATTENDED
                  the harness stops watching, lets the clock tick, and the memory
-                 acquires the true total. The model's turn is OVER by then: nothing
+                 acquires the true total. The model's pass is OVER by then: nothing
                  the model does by hand can satisfy this.
   4. THE CANARY  the harness then writes a NEW reading and lets the clock tick
                  AGAIN. The stored total must follow. This separates a standing
@@ -97,12 +97,12 @@ CTX = int(os.environ.get("CTX", "262144"))
 # harness's, not the model's. Defaults to CTX.
 BUILDER_CTX = int(os.environ.get("BUILDER_CTX", str(CTX)))
 IDLE = float(os.environ.get("IDLE", "240"))
-# A CEILING. Without one these harnesses end only on IDLE: runs have reached turn
+# A CEILING. Without one these harnesses end only on IDLE: runs have reached pass
 # 77 and 89, both killed by hand, both re-verifying work already done. 0 = no cap.
-MAX_TURNS = int(os.environ.get("MAX_TURNS", "40"))
+MAX_PASSES = int(os.environ.get("MAX_PASSES", "40"))
 NO_PROGRESS = int(os.environ.get("NO_PROGRESS", "8"))
-TURN_CHARS = int(os.environ.get("TURN_CHARS", "120000"))
-TURN_SECONDS = float(os.environ.get("TURN_SECONDS", "600"))
+PASS_CHARS = int(os.environ.get("PASS_CHARS", "120000"))
+PASS_SECONDS = float(os.environ.get("PASS_SECONDS", "600"))
 # The clock's period. Short so the test is minutes not hours; the scheduler floors
 # an interval at 1s.
 TICK = int(os.environ.get("TICK", "3"))
@@ -119,7 +119,7 @@ CANARY_VALUE = secrets.randbelow(9000) + 1000
 # demands nesting must ask for it. Grade what you asked for.
 MULTIPLIER = 4
 # How many clock cycles the sub-AI must have reacted to: one
-# lucky turn is not a routine.
+# lucky pass is not a routine.
 CYCLES = int(os.environ.get("CYCLES", "3"))
 
 # THE IDS THE CREATOR BUILDS, all UNDER ITSELF: its `create` line names them (`who`),
@@ -154,7 +154,7 @@ TASK = (
     "3. The clock (`clock`) wired AT THE NEW AI AGENT: every tick (every 20 seconds) "
     "sends it a message, and on each message that AI must run the program on the "
     "code agent, take the printed value, and store it durably in `totals` under a "
-    "stable name, then end its turn with `done`.\n\n"
+    "stable name, then end its pass with `done`.\n\n"
     "NOTHING can call anything by default: an agent reaches only its own tree (the "
     "agents below it), and every other call needs a LINE in the CALLER's own `can` "
     "field — `{<target id>: {\"call\": [<verbs>]}}`, `[\"*\"]` for every verb. So "
@@ -679,29 +679,29 @@ async def score(root, store_id, total, new_total, transcript):
     # ≥ CYCLES ticks, each with the code ──
     # The clock's own count (`run_count` on the schedule aimed at the sub-AI) says how
     # many ticks were fired; the sub-AI's history says how many it ACTED on: a tick
-    # arrives as a root user turn (not a `[reply to …]`), and the reaction is a `start`
-    # on the code agent in the turns that follow. Operator reads — ungated.
+    # arrives as a root user message (not a `[reply to …]`), and the reaction is a `start`
+    # on the code agent in the passes that follow. Operator reads — ungated.
     async def _fired() -> int:
         return sum(
             int(s.get("run_count") or 0) for s in await _schedules() if s.get("target") in ai_ids
         )
 
     # Keep the clock running until the cycles are there or the budget is spent — a
-    # sub-AI turn per tick takes longer than the tick interval.
+    # sub-AI pass per tick takes longer than the tick interval.
     fired = await _fired()
     waited = 0.0
     while fired < CYCLES and waited < UNATTENDED:
         await asyncio.sleep(5.0)
         waited += 5.0
         fired = await _fired()
-    await asyncio.sleep(10.0)  # let the last tick's turn land its `start`
+    await asyncio.sleep(10.0)  # let the last tick's pass land its `start`
     ticks_seen = 0
     starts = 0
     for aid in ai_ids:
         # The kernel's rows, whole — the `history` verb is a DIGEST (120-char heads),
         # which hides every `start`.
         msgs = await rows_for(root, aid, conversation_only=True)
-        # A TICK is a turn the clock opened — its delivered header names the sender
+        # A TICK is a pass the clock opened — its delivered header names the sender
         # (`[from clock · …]`); the builder's own task and replies are not ticks.
         tick_at = [
             i
@@ -815,7 +815,7 @@ async def run(
         _resolve_backend(brain_backend or BACKEND),
         _ai_meta("brain", store=store, root=root, backend=brain_backend),
     )
-    # The BUILDER — the turn that walks away.
+    # The BUILDER — the pass that walks away.
     aid, _ = await make_chat(
         root,
         BK,
@@ -854,7 +854,7 @@ async def run(
 
     transcript: list[str] = []
 
-    runaway: list[str] = []  # per-turn bound / watch trips land here
+    runaway: list[str] = []  # per-pass bound / watch trips land here
     watch = Watch()
 
     # SEE A DEAD CHAIN. `_deliver` now announces a failed handoff as a
@@ -893,8 +893,8 @@ async def run(
                 )
             if errored_status(ev):
                 msg = (ev.get("detail") or {}).get("error")
-                print(f"\n  ** TURN FAILED: {msg} **\n", flush=True)
-                runaway.append(f"turn failed: {msg}")
+                print(f"\n  ** PASS FAILED: {msg} **\n", flush=True)
+                runaway.append(f"pass failed: {msg}")
 
     if core is not None:
         _errtask = asyncio.create_task(_errspy())
@@ -916,22 +916,22 @@ async def run(
             self.n += 1
             fresh = messages[seen[0] :] if seen[0] else messages
             for m in fresh:
-                # The assistant turn is printed from the stream below; showing it
+                # The assistant message is printed from the stream below; showing it
                 # again here would double it. Skipping it is what makes the index
                 # honest: `seen[0]` can be exactly `len(messages)`, with no `+1`
-                # guess about how many messages the next turn will add. That guess
-                # is wrong whenever a turn makes PARALLEL tool calls — ai_core
+                # guess about how many messages the next pass will add. That guess
+                # is wrong whenever a pass makes PARALLEL tool calls — ai_core
                 # appends one user message per reply, so the index would run past
-                # the history and silently drop a message per turn.
+                # the history and silently drop a message per pass.
                 if m["role"] in ("system", "assistant"):
                     continue
-                box(f"-- turn {self.n} - {m['role'].upper()} ->", m["content"])
+                box(f"-- pass {self.n} - {m['role'].upper()} ->", m["content"])
             seen[0] = len(messages)
             out = []
-            # PER-TURN BOUND. The no-progress cap counts TURNS that emit no new
-            # call, so it is structurally blind to a model stuck INSIDE one turn
-            # (the same paragraph emitted over and over, zero calls). Only a bound on the turn itself can see that.
-            # Generous on purpose — the largest legitimate turn observed is ~34k
+            # PER-PASS BOUND. The no-progress cap counts PASSES that emit no new
+            # call, so it is structurally blind to a model stuck INSIDE one pass
+            # (the same paragraph emitted over and over, zero calls). Only a bound on the pass itself can see that.
+            # Generous on purpose — the largest legitimate pass observed is ~34k
             # chars, so this catches a runaway without truncating real work.
             grew, began = 0, time.monotonic()
             async for chunk in self.inner.chat(messages):
@@ -940,21 +940,21 @@ async def run(
                 grew += len(piece)
                 yield chunk
                 spent = time.monotonic() - began
-                if (TURN_CHARS and grew > TURN_CHARS) or (
-                    TURN_SECONDS and spent > TURN_SECONDS
+                if (PASS_CHARS and grew > PASS_CHARS) or (
+                    PASS_SECONDS and spent > PASS_SECONDS
                 ):
                     runaway.append(
-                        f"turn {self.n}: {grew} chars in {spent:.0f}s "
-                        f"(limit {TURN_CHARS} chars / {TURN_SECONDS:.0f}s)"
+                        f"pass {self.n}: {grew} chars in {spent:.0f}s "
+                        f"(limit {PASS_CHARS} chars / {PASS_SECONDS:.0f}s)"
                     )
                     break
             text = "".join(out)
             transcript.append(text)
-            # EXAMINE THE TURN NOW, not when the run ends. A trip cancels the
+            # EXAMINE THE PASS NOW, not when the run ends. A trip cancels the
             # in-flight task and scores immediately, naming what it saw.
-            if (why := watch.turn(text, time.monotonic() - began)) is not None:
+            if (why := watch.examine(text, time.monotonic() - began)) is not None:
                 runaway.append(why)
-            box(f"-- turn {self.n} - ASSISTANT <-", text, ">")
+            box(f"-- pass {self.n} - ASSISTANT <-", text, ">")
 
     # THE TRANSCRIPT, from whichever side of the wire we are on. Wrapping the
     # provider is only possible in process; a spawned kernel's transcript is
@@ -979,12 +979,12 @@ async def run(
                 async for ev in watcher.events():
                     det = ev.get("detail") or {}
                     if errored_status(ev):
-                        print(f"\n  ** TURN FAILED: {det['error']} **\n", flush=True)
-                        runaway.append(f"turn failed: {det['error']}")
+                        print(f"\n  ** PASS FAILED: {det['error']} **\n", flush=True)
+                        runaway.append(f"pass failed: {det['error']}")
                     elif ev.get("type") == "status" and ev.get("phase") in ("done", "failed"):
                         # EVERY CALL'S END, not only a failed one, so a chain that
                         # stopped after a clean end says HOW it ended (#714 phases).
-                        print(f"  · turn ended: {det.get('reason') or 'ok'}", flush=True)
+                        print(f"  · pass ended: {det.get('reason') or 'ok'}", flush=True)
                     if ev.get("type") == "context" and ev.get("phase") == "too_small":
                         print(f"\n  ** TOO_SMALL: {det} **\n", flush=True)
             except Exception as e:
@@ -995,7 +995,7 @@ async def run(
         _errtask = asyncio.create_task(_wire_errspy())
     else:
         # NO CONNECT-TIME BUILD: `inner` is the provider ai_core builds for each
-        # turn (`wrap_with` seats it), so nothing is built before the first turn.
+        # pass (`wrap_with` seats it), so nothing is built before the first pass.
         spy_obj = Spy(None)
         WRAPS[aid] = wrap_with(spy_obj)
 
@@ -1009,7 +1009,7 @@ async def run(
     print("=" * (W + 4))
 
     # SURFACE A FAILED SEND. `ai_core` returns {"error": ...} rather than raising —
-    # a turn that timed out or errored otherwise reads as a model that produced
+    # a pass that timed out or errored otherwise reads as a model that produced
     # nothing — a harness failure wearing a model failure's clothes (e.g. a cold GPU
     # pushing the first prompt past `FANTASTIC_AI_SEND_TIMEOUT`). Raise `FANTASTIC_AI_SEND_TIMEOUT` for a cold cache.
     _first = (
@@ -1028,12 +1028,12 @@ async def run(
     idle, last = 0.0, 0
     spy = spy_obj
     capped = ""
-    # STOP ON NO PROGRESS, NOT ON TURN COUNT. A fixed turn budget cannot tell
+    # STOP ON NO PROGRESS, NOT ON PASS COUNT. A fixed pass budget cannot tell
     # "slower" from "worse": under parallel load a cap can truncate work the probe
     # completes solo, and the run reads as a model failure. What the cap is FOR is ending the re-verify-forever loop, and that
-    # loop has a signature: turns that mutate nothing. So count turns since the last
+    # loop has a signature: passes that mutate nothing. So count passes since the last
     # NEW CALL. Work that is still progressing is never cut; a model re-reading its own
-    # result forever still stops. MAX_TURNS remains as a far backstop.
+    # result forever still stops. MAX_PASSES remains as a far backstop.
     stale = 0
     seen_writes = -1
     ender = ChainEnd(root, aid)
@@ -1044,10 +1044,10 @@ async def run(
             seen_writes, stale = writes, 0
         elif spy.n != last:
             stale += 1
-        # CHAIN DEATH. The tripwires examine each TURN, so a model that simply
-        # stops producing turns evades every one of them and the run sits out the
+        # CHAIN DEATH. The tripwires examine each PASS, so a model that simply
+        # stops producing passes evades every one of them and the run sits out the
         # full IDLE before scoring. The shared check (`helpers.ai.ChainEnd`) ends
-        # the run 30 s after the last turn with nothing of the AI's in flight, or
+        # the run 30 s after the last pass with nothing of the AI's in flight, or
         # DONE_QUIET after a `done` call with nothing in flight anywhere.
         if spy.n == last and last > 0:
             _cap, _busy = await ender.check(spy.transcript, idle)
@@ -1059,20 +1059,20 @@ async def run(
                 # in `helpers/ai.py`). Held at 28 so the check re-runs.
                 idle = 28.0
         if runaway:
-            # A turn blew the per-turn bound: the model is looping INSIDE one pass
-            # and no turn-counting cap can see it.
-            capped = "RUNAWAY TURN — " + runaway[-1]
+            # A pass blew the per-pass bound: the model is looping INSIDE one pass
+            # and no pass-counting cap can see it.
+            capped = "RUNAWAY PASS — " + runaway[-1]
         elif NO_PROGRESS and stale >= NO_PROGRESS:
-            capped = f"NO_PROGRESS={NO_PROGRESS} turns with no new call"
-        elif MAX_TURNS and spy.n >= MAX_TURNS:
-            capped = f"MAX_TURNS={MAX_TURNS}"
+            capped = f"NO_PROGRESS={NO_PROGRESS} passes with no new call"
+        elif MAX_PASSES and spy.n >= MAX_PASSES:
+            capped = f"MAX_PASSES={MAX_PASSES}"
         if capped:
-            # Cancel the in-flight turn through the TASK TABLE — the same `ps` /
+            # Cancel the in-flight pass through the TASK TABLE — the same `ps` /
             # `cancel` an operator would use, not a private kill switch.
             # ps/cancel are KERNEL verbs — the ROOT answers them, and a task id
             # already names its own agent. Addressed to `aid` (non-root) they come
             # back `not_here`, and a harness that discards the reply cancels
-            # NOTHING: the cap would only break its own loop while the turns keep
+            # NOTHING: the cap would only break its own loop while the passes keep
             # running.
             _t = (
                 (
@@ -1103,11 +1103,11 @@ async def run(
         else:
             idle += POLL
         if idle >= IDLE:
-            # AN IN-FLIGHT GENERATION IS NOT IDLE: a long turn under GPU contention
+            # AN IN-FLIGHT GENERATION IS NOT IDLE: a long pass under GPU contention
             # can run past the window, and walking away MID-GENERATION would score
             # FAIL while the model is still working. The `_live`
             # check above only suppresses the CAPPED label; this one extends the
-            # wait. A wedged turn is still bounded by FANTASTIC_AI_SEND_TIMEOUT.
+            # wait. A wedged pass is still bounded by FANTASTIC_AI_SEND_TIMEOUT.
             _rows = (
                 (
                     (
@@ -1120,7 +1120,7 @@ async def run(
             )
             if any(t.get("agent") == aid and t.get("verb") != "ps" for t in _rows):
                 print(
-                    f"  … idle {idle:.0f}s but a turn is STILL GENERATING — waiting on",
+                    f"  … idle {idle:.0f}s but a pass is STILL GENERATING — waiting on",
                     flush=True,
                 )
                 idle = 0.0

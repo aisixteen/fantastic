@@ -1,6 +1,6 @@
 //! Model switches (#766, W11): M6-M13, M15, M17, M18 of spec 2.1, and H1-H5, H14 of 2.4.
 //!
-//! A view is driven through the chat's render cache as the turn drives it
+//! A view is driven through the chat's render cache as the pass drives it
 //! ([`super::tests_cache`]), with the real adapters; a case that reads a trace row or the
 //! model id of a pass runs the real pass path (`run_generation`) over the scripted
 //! endpoint of [`super::tests_trace`].
@@ -99,7 +99,7 @@ fn stored() -> Vec<(i64, &'static str, String)> {
     ]
 }
 
-/// The arriving message: the `keep` template the turn puts on a folding reply.
+/// The arriving message: the `keep` template the pass puts on a folding reply.
 fn arriving() -> String {
     format!(
         "Далі.\n{}",
@@ -156,7 +156,7 @@ fn read_back(reader: &dyn Reader, rendered: &str) -> String {
 
 // M6
 /// A switch inside one type: no row rendered, every entry and link kept, the same bytes,
-/// `render_warm {rows: 0}`; at the turn, no `model_switched`.
+/// `render_warm {rows: 0}`; at the pass, no `model_switched`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn same_type_keeps_all() {
     assert_eq!(type_of(shipped(), QWEN25), hermes::NAME);
@@ -178,7 +178,7 @@ async fn same_type_keeps_all() {
     assert_eq!(names(&next.events), ["render_warm"]);
     assert_eq!(next.events[0]["rows"], json!(0));
 
-    // the turn: the record's model moves inside the type
+    // the pass: the record's model moves inside the type
     let tmp = TempDir::new().unwrap();
     let (kernel, _) = crate::tests::mk_kernel(&tmp, "sw_m6_base").await;
     let a = chat_on(
@@ -340,7 +340,7 @@ fn no_foreign_form_left() {
 
 // M10
 /// An id that holds an earlier rule's substring and a later one's: the first rule's type
-/// is used, and the turn's trace rows name it.
+/// is used, and the pass's trace rows name it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unexpected_match_is_traced() {
     let id = "NousResearch/Hermes-Qwen3-Coder-7B";

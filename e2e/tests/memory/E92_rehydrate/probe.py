@@ -4,7 +4,7 @@ The directory holds a previous run's records: the root (its guid, and the id bou
 `next_id` — past every seeded id), the store, an AI agent, a worker. The
 store's tables are INJECTED before `kernel_start`: the AI's conversation (a goal, a
 stretch cleared by a clear-fold, then a fold and a live tail), and the kernel's own rows (a named execution that completed,
-one that failed and was never acked). Scored after the start and ONE stubbed turn:
+one that failed and was never acked). Scored after the start and ONE stubbed pass:
 the AI's view is rebuilt from its head (the fold visible as its one-line row, nothing
 from before the clear), grep reaches behind the clear, `ledger` reads the kernel's
 rows back (the dead letter still dead), and the named execution is not re-run."""
@@ -108,7 +108,7 @@ async def main():
         injected = await memory.inject(root, _tables())
         started = await root.ctx.start(boot_all=True)
         WRAPS["ai"] = replace_with(_Stub())
-        turn = (await root.send([{"target": "ai", "payload": {"type": "send", "text": "status?"}}]))[0]
+        one_pass = (await root.send([{"target": "ai", "payload": {"type": "send", "text": "status?"}}]))[0]
         await asyncio.sleep(0.3)
         sent = "\n".join(str(m.get("content")) for m in _Stub.seen)
         view = await memory.latest_view(root, "ai")
@@ -118,16 +118,16 @@ async def main():
         led = (await root.send([{"target": "kernel", "payload": {"type": "ledger"}}]))[0]["result"]["executions"]
         by = {e["id"]: e for e in led}
         again = (await root.send([{"target": "worker", "payload": {"type": "work"}, "id": "nightly"}]))[0]
-        print(f"     injected={injected} started={started.get('started')} turn={turn['status']} "
+        print(f"     injected={injected} started={started.get('started')} pass={one_pass['status']} "
               f"view={len((view or {}).get('ids') or [])} recall={len(recall)} grep={grep.get('total')} "
               f"ledger={[(e['id'], e['status']) for e in led if e['id'] < 1000]} again={again['result']}")
         checks = [
             ("the seeded tables were injected before the start", injected == {"rows": 12}),
             ("the kernel started on the seeded store", started.get("started") is True),
-            ("the first turn ran", turn["status"] == "completed"),
+            ("the first pass ran", one_pass["status"] == "completed"),
             ("the model saw the fold as its one-line row", '[fold 106 · 2 refs' in sent),
             ("nothing from before the clear reached the model", "ORCHID-7" not in sent),
-            ("the view was rebuilt on the first turn", bool(view) and bool(recall)),
+            ("the view was rebuilt on the first pass", bool(view) and bool(recall)),
             ("grep reaches behind the clear", (grep.get("total") or 0) >= 1),
             ("the ledger reads the kernel's rows back", by.get(200, {}).get("status") == "completed"),
             ("the dead letter is still dead", by.get(202, {}).get("status") == "failed" and not by[202].get("acked")),

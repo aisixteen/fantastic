@@ -17,7 +17,7 @@ Three properties worth stating, because each replaces something that bit:
     a free test (`costs: free`) takes no lane and runs at once, one per test.
   * EVERY RUN KEEPS ITS LOG. `runs/<stamp>/<group>.<id>.log` (`:` spelled `@`) holds the full
     transcript. A failure you cannot re-read is a failure you cannot diagnose —
-    and these cost real turns, so re-running to look again is not free.
+    and these cost real passes, so re-running to look again is not free.
 """
 
 from __future__ import annotations
@@ -82,10 +82,10 @@ def limit_env(t: dict) -> dict:
 
 LIMIT_ENV = (
     ("idle_seconds", "IDLE"),
-    ("max_turns", "MAX_TURNS"),
-    ("no_progress_turns", "NO_PROGRESS"),
-    ("turn_chars", "TURN_CHARS"),
-    ("turn_seconds", "TURN_SECONDS"),
+    ("max_passes", "MAX_PASSES"),
+    ("no_progress_passes", "NO_PROGRESS"),
+    ("pass_chars", "PASS_CHARS"),
+    ("pass_seconds", "PASS_SECONDS"),
 )
 
 
@@ -179,7 +179,7 @@ def load_suite() -> list[dict]:
             spec = SCENARIO_RUNNERS[rt]
             # DERIVED OVERRIDE. A scenario is shared, but a runtime can need a
             # different budget for the SAME work — the compiled kernels drive
-            # `exec_bridge` through start/poll, which costs turns the in-process
+            # `exec_bridge` through start/poll, which costs passes the in-process
             # path does not. `overrides: {rust: {limits: {...}}}` adjusts the
             # BUDGET without forking the scenario; anything that changed the
             # TASK would make the columns incomparable, which is the whole thing
@@ -207,8 +207,8 @@ def load_suite() -> list[dict]:
                     "extra_env": spec.get("env", {}),
                     "args": args,
                     "runtime": rt,
-                    # A scripted scenario spends no turns and says so.
-                    "costs": doc.get("costs", "turns"),
+                    # A scripted scenario spends no passes and says so.
+                    "costs": doc.get("costs", "passes"),
                     "limits": limits,
                     "env": {**(doc.get("env") or {}), **(over.get("env") or {})},
                     "title": f"{doc.get('title', '')} [{rt}]",
@@ -234,7 +234,7 @@ def load_suite() -> list[dict]:
                         "id": f"{doc['id']}:{rt}",
                         "dir": d,
                         "module": d / doc.get("runner", "probe.py"),
-                        "costs": doc.get("costs", "turns"),
+                        "costs": doc.get("costs", "passes"),
                         "runtime": rt,
                         "env": {**(doc.get("env") or {}), "RUNTIME": rt},
                         "title": f"{doc.get('title', '')} [{rt}]",
@@ -246,7 +246,7 @@ def load_suite() -> list[dict]:
                     **doc,
                     "dir": d,
                     "module": d / doc.get("runner", "probe.py"),
-                    "costs": doc.get("costs", "turns"),
+                    "costs": doc.get("costs", "passes"),
                 }
             )
         if st := doc.get("selftest"):
@@ -351,7 +351,7 @@ def select(tests, groups, ids, backend_name, include_free, runtimes=(), excluded
     return picked
 
 
-# LONG TESTS SHARE THE MODEL. On one RTX6000, six long lanes push single turns past the
+# LONG TESTS SHARE THE MODEL. On one RTX6000, six long lanes push single passes past the
 # proxy's 180 s limit; at 1–2 lanes they do not. A test marked `long: true` in its test.yaml takes one of these two
 # slots FIRST, then a lane; short tests use the lanes freely.
 LONG_LANES = 2
@@ -366,12 +366,12 @@ def longest_first(tests) -> list[dict]:
 
 # SHORTEST FIRST (`--order short`): the smallest tests first, so a broken basic shows up in the
 # first minutes of a model run. Size: `long: true` tests after all others; then the `duration:`
-# hint (seconds), else the turn budget `limits.max_turns`, else `limits.seconds`; a test that
+# hint (seconds), else the pass budget `limits.max_passes`, else `limits.seconds`; a test that
 # declares none goes after the sized ones.
 def shortest_first(tests) -> list[dict]:
     def size(t: dict) -> tuple:
         lim = t.get("limits") or {}
-        guess = t.get("duration") or lim.get("max_turns") or lim.get("seconds")
+        guess = t.get("duration") or lim.get("max_passes") or lim.get("seconds")
         return (bool(t.get("long")), guess is None, float(guess or 0))
     return sorted(tests, key=size)
 
@@ -693,7 +693,7 @@ async def main() -> int:
         action="store_true",
         help="VIRTUAL RUN — resolve everything and print the exact command, env "
         "overrides and log path for each test, then spend nothing. These "
-        "tests cost real model turns, so being able to see the whole plan "
+        "tests cost real model passes, so being able to see the whole plan "
         "before paying for it is not a convenience.",
     )
     a = ap.parse_args()
@@ -717,7 +717,7 @@ async def main() -> int:
                 return 1
             os.environ[var] = str(path)
 
-    # A FREE-ONLY run spends no model turns, so it needs no model plug: naming
+    # A FREE-ONLY run spends no model passes, so it needs no model plug: naming
     # a BACKEND for it would be a lie about what the run uses. Any run that can
     # select a paid test still resolves it, and still fails loud when unset.
     bk = _NoBackend() if a.only_free and not os.environ.get("BACKEND") else resolve_backend()
@@ -820,7 +820,7 @@ async def main() -> int:
                     + " ".join(f"{k}={v}" for k, v in sorted(env_over.items()))
                 )
             print(f"      log: runs/<stamp>/{log_name(t['group'] + '.' + t['id'])}")
-        print(f"\n  nothing was run · {len(picked)} tests would spend model turns")
+        print(f"\n  nothing was run · {len(picked)} tests would spend model passes")
         return 0
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -833,7 +833,7 @@ async def main() -> int:
     #
     # `ensure_runtime` inside every cell would run concurrent builds that
     # serialise on the build lock (cargo's), and that time would be
-    # charged to the cells — making a runtime look slower than its per-turn
+    # charged to the cells — making a runtime look slower than its per-pass
     # latency, and failing long scenarios under many lanes.
     prebuilt = sorted(
         {t["runtime"] for t in picked if t.get("runtime") in HOST_RUNTIMES}

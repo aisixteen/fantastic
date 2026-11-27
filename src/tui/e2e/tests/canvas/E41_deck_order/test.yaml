@@ -4,7 +4,7 @@ id: deck_order
 group: canvas
 title: "an AI reads a two-language slide deck: its order and what is missing"
 runner: probe.py
-costs: turns
+costs: passes
 limits:
   total_seconds: 600
   quiet_seconds: 30

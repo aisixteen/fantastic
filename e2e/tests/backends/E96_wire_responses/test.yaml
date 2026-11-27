@@ -5,7 +5,7 @@ group: backends
 title: "OpenAI Responses wire, raw: non-stream + stream shape, reasoning channel, max_output_tokens cut ends response.incomplete, refusals"
 runner: probe.py
 only_backend: responses
-costs: turns
+costs: passes
 limits:
   idle_seconds: 90
-  turn_seconds: 300
+  pass_seconds: 300

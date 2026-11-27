@@ -2,7 +2,7 @@
 
 Sixteen reads. After the eighth the agent is deleted and re-created on the same id: its
 rows and view stay in its memory store (delete_agent keep_memory:true keeps store data), while reply
-bodies — held in RAM only — are gone. The boot is lazy; the first turn after it reads
+bodies — held in RAM only — are gone. The boot is lazy; the first pass after it reads
 the head and runs `context_recall`. Scored: the report lists all sixteen, reads after
 the reboot do not repeat the first eight, and the post-reboot view is a subset of the
 store.
@@ -51,7 +51,7 @@ async def main():
         await fixture(root, FB)
         from helpers import ctx_score, drive
         from helpers.facts_arm import connect_arm
-        half = (f"Read ONLY `filler_0.txt` through `filler_7.txt` (eight files) through `notes`, ONE PER TURN. "
+        half = (f"Read ONLY `filler_0.txt` through `filler_7.txt` (eight files) through `notes`, ONE PER PASS. "
                 f"Do NOT read filler_8 or beyond, do NOT write anything. After filler_7, {DONE}.")
         # PHASE ONE, PLANTED: the instruction, eight reads, the model's `done`.
         rows = planted_reads(root.ctx.mint_id, half, file_reads([f"filler_{i}.txt" for i in range(8)]),
@@ -64,19 +64,19 @@ async def main():
         reads_before = len(ctx_score.calls_made(before, target="notes", verb="read"))
         # ── REBOOT ───────────────────────────────────────────────────────────
         conn = await reboot_agent(root, core, BK, FB, AID, STRATEGY, EXTRA, watch_conn=conn)
-        # WHAT WAS READ IS MEASURED, NOT ASSUMED. Phase one is bounded at 14 turns, so the
+        # WHAT WAS READ IS MEASURED, NOT ASSUMED. Phase one is bounded at 14 passes, so the
         # first instruction is usually unfinished; a second instruction that claims "you
         # already have 0..7" is false and the model rightly re-reads the gap. Name the files it has; ask for the rest.
         have = sorted({i for i in range(N) for c in ctx_score.calls_made(before, target="notes", verb="read")
                        if f"filler_{i}.txt" in str(c["payload"])})
         have_txt = ", ".join(f"filler_{i}.txt" for i in have) or "none"
         rest = (f"Continue. Files you ALREADY read (in your history — do NOT re-read them): {have_txt}. "
-                f"Read every OTHER file of `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER TURN. "
+                f"Read every OTHER file of `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER PASS. "
                 f"Then write `report.md` through `notes` listing ALL {N} files you read across both instructions, "
                 f"one per line. Then {DONE}.")
         await drive(conn, rest, client_id=AID, via="user")
         await conn.close()
-        # THE BOOT IS LAZY: the first turn after it read the head and rebuilt the view.
+        # THE BOOT IS LAZY: the first pass after it read the head and rebuilt the view.
         view = await read_view(core, root, AID)
         store_ids = {m.get("id") for m in await store_rows(root, core, AID)}
         view_ok = bool(view) and all(e["id"] in store_ids for e in view["ids"])

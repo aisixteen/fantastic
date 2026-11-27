@@ -3,7 +3,7 @@
 //!
 //! A rule-for-rule port of python's
 //! `bundled_agents/ai/ai_core/src/ai_core/tool_parse.py`, which is canonical.
-//! The e2e harness parses THIS runtime's turns with THAT parser
+//! The e2e harness parses THIS runtime's passes with THAT parser
 //! (`e2e/helpers/watch.py` imports it whatever the runtime is), so the bar is
 //! byte compatibility, not merely "a tag parser".
 //!

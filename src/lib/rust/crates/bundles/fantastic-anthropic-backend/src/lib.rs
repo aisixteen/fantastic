@@ -6,7 +6,7 @@
 //! streamed text, as for every backend.
 //!
 //! - ONE `system` string, top level — every system message joined; `messages` holds
-//!   only `user` / `assistant`, consecutive turns of one role merged.
+//!   only `user` / `assistant`, consecutive messages of one role merged.
 //! - `max_tokens` on every request (the API requires it): the calling chat's (#632;
 //!   left out, read from the model entry and bounded, [`server`]), or a side call's
 //!   own bound. `temperature` is the chat's too, sent only when it sets one.
@@ -64,7 +64,7 @@ const USAGE_FILE: &str = "usage.json";
 
 /// The API version every request names.
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
-/// Seconds to reach the API. The stream has no read clock: the turn's one bound is
+/// Seconds to reach the API. The stream has no read clock: the pass's one bound is
 /// ai-core's send timeout.
 pub const CONNECT_TIMEOUT: f64 = 15.0;
 /// Below this no thinking is asked for: the API needs `budget_tokens >= 1024`.
@@ -75,34 +75,34 @@ const CFG: BackendConfig = BackendConfig {
     model_window: fantastic_ai_core::constants::DEFAULT_CONTEXT_WINDOW,
 };
 
-/// ai-core's messages → (`system`, the user/assistant turns): every system message
-/// joins the one `system` string; consecutive turns of one role merge, blank-line
+/// ai-core's messages → (`system`, the user/assistant messages): every system message
+/// joins the one `system` string; consecutive messages of one role merge, blank-line
 /// separated. Python `to_messages`. The cache marks are not read: see [`to_wire`].
 #[must_use]
 pub fn to_messages(messages: &[Value]) -> (String, Vec<Value>) {
-    let (system, _, turns) = to_wire(messages, false, &Images::default());
-    (system, turns)
+    let (system, _, messages) = to_wire(messages, false, &Images::default());
+    (system, messages)
 }
 
 /// ai-core's messages → (`system`, whether a non-empty system message carried
-/// `cache_mark`, the turns as the request sends them). `marks` reads `cache_mark`; off,
-/// it is ignored and the turns are the plain merged strings.
+/// `cache_mark`, the messages as the request sends them). `marks` reads `cache_mark`; off,
+/// it is ignored and the messages are the plain merged strings.
 ///
-/// With `marks`, a merged turn whose rows carry flags is cut into text blocks at the
+/// With `marks`, a merged message whose rows carry flags is cut into text blocks at the
 /// end of each flagged row's text, so the marker lands there, not at the end of the
-/// merged turn. The block texts concatenate to the merged string exactly: the blank
+/// merged message. The block texts concatenate to the merged string exactly: the blank
 /// line that joins two rows opens the next block, and is never dropped. The one
 /// exception is a trailing blank line with no row after it, which closes the block
 /// before it (see [`cut_blocks`]), so that marker sits a blank line after its text.
 ///
 /// A message may carry `images`: its image parts (`{type: "image", ref, media_type, ..}`),
 /// whose bytes came on the binary path for this request ([`Images`]). Each becomes a
-/// base64 image block placed before the text of that message, and the turn's `content`
+/// base64 image block placed before the text of that message, and the message's `content`
 /// is then the array of blocks. A message with no image renders exactly as before.
 fn to_wire(messages: &[Value], marks: bool, images: &Images) -> (String, bool, Vec<Value>) {
     let mut system_marked = false;
     let mut systems: Vec<String> = Vec::new();
-    let mut turns: Vec<(String, Vec<Row>)> = Vec::new();
+    let mut merged: Vec<(String, Vec<Row>)> = Vec::new();
     for m in messages {
         let role = m.get("role").and_then(Value::as_str).unwrap_or("");
         let content = match m.get("content") {
@@ -123,28 +123,28 @@ fn to_wire(messages: &[Value], marks: bool, images: &Images) -> (String, bool, V
                     systems.push(content);
                 }
             }
-            "user" | "assistant" => match turns.last_mut() {
+            "user" | "assistant" => match merged.last_mut() {
                 Some((r, rows)) if r == role => rows.push((content, marked, blocks)),
-                _ => turns.push((role.to_string(), vec![(content, marked, blocks)])),
+                _ => merged.push((role.to_string(), vec![(content, marked, blocks)])),
             },
             _ => {}
         }
     }
-    let turns = turns
+    let merged = merged
         .into_iter()
-        .map(|(role, rows)| json!({"role": role, "content": turn_content(&rows)}))
+        .map(|(role, rows)| json!({"role": role, "content": message_content(&rows)}))
         .collect();
-    (systems.join("\n\n"), system_marked, turns)
+    (systems.join("\n\n"), system_marked, merged)
 }
 
-/// One row of a merged turn: its text, whether it carries `cache_mark`, its image blocks.
+/// One row of a merged message: its text, whether it carries `cache_mark`, its image blocks.
 type Row = (String, bool, Vec<Value>);
 
-/// One merged turn's `content`: the plain string when no row in it is flagged, else
-/// its text blocks, the marked ones carrying the cache marker. A turn with an image
+/// One merged message's `content`: the plain string when no row in it is flagged, else
+/// its text blocks, the marked ones carrying the cache marker. A message with an image
 /// is always the array of blocks: each image row opens a run that starts with its
 /// image blocks, then its text (and the rows after it up to the next image row).
-fn turn_content(rows: &[Row]) -> Value {
+fn message_content(rows: &[Row]) -> Value {
     if rows.iter().any(|(_, _, imgs)| !imgs.is_empty()) {
         let mut out: Vec<Value> = Vec::new();
         let mut run: Vec<(String, bool)> = Vec::new();
@@ -264,12 +264,12 @@ fn take_images(agent: &str, rid: &str) -> Images {
         .unwrap_or_default()
 }
 
-/// A merged turn cut at the end of each flagged row: `(block text, ends a flagged
+/// A merged message cut at the end of each flagged row: `(block text, ends a flagged
 /// row)`. A flagged row with no text (empty) opens no block of its own and carries no
 /// marker; its text is none, so nothing is lost by it. A cut also needs the block so
 /// far to hold text, so no cut block is blank: the API refuses a whitespace-only text
 /// block. A flagged row whose text is only whitespace, reached while the block is
-/// still blank (it opens its turn or follows blank rows), therefore carries no marker
+/// still blank (it opens its message or follows blank rows), therefore carries no marker
 /// either; its text joins the block that follows it. The tail after the last cut can
 /// be blank separators only (a flagged row followed by empty rows): those separators
 /// join the block before them. The marker then sits after the blank line that followed
@@ -1000,12 +1000,12 @@ impl AnthropicProvider {
     /// The request body. Python `AnthropicProvider.body`.
     fn body(&self, messages: &[Value], max_tokens: Option<i64>) -> Value {
         // the agent's marks, exactly: none of the backend's own
-        let (system, system_marked, turns) = to_wire(messages, true, &self.images);
+        let (system, system_marked, messages) = to_wire(messages, true, &self.images);
         let call_max = max_tokens.unwrap_or(self.max_tokens);
         let mut body = Map::new();
         body.insert("model".into(), json!(self.model));
         body.insert("max_tokens".into(), json!(call_max));
-        body.insert("messages".into(), Value::Array(turns));
+        body.insert("messages".into(), Value::Array(messages));
         body.insert("stream".into(), json!(true));
         if !system.is_empty() {
             let system = if system_marked {
@@ -1156,7 +1156,7 @@ fn consume_sse(
     report: ReportCell,
     usage: Arc<Mutex<Usage>>,
     endpoint: String,
-    main_turn_max: Option<i64>,
+    main_pass_max: Option<i64>,
     stream_idle: Duration,
     log: StreamLog,
 ) -> ProviderStream {
@@ -1172,7 +1172,7 @@ fn consume_sse(
             stopped: false,
             stored: false,
             endpoint,
-            main_turn_max,
+            main_pass_max,
             cur_model: log.model.clone(),
             log,
             cur: RequestCounts::default(),
@@ -1196,7 +1196,7 @@ fn consume_sse(
                 }
                 // THE READ CLOCK: a body that goes quiet for the idle window is a
                 // stalled stream — the connection is dropped with this stream and
-                // the turn fails with the error row, instead of holding the lock
+                // the pass fails with the error row, instead of holding the lock
                 // until the send ceiling (#177).
                 let chunk = match within(stream_idle, inner.next()).await {
                     Ok(chunk) => chunk,
@@ -1216,7 +1216,7 @@ fn consume_sse(
                     Err(_) => {
                         finished = true;
                         pending.push_back(Err(ProviderError::transport(format!(
-                            "{NAME}: {} dropped the stream mid-answer; this turn is NOT \
+                            "{NAME}: {} dropped the stream mid-answer; this pass is NOT \
                              complete",
                             st.endpoint
                         ))));
@@ -1295,8 +1295,8 @@ struct SseState {
     /// The running total is already in the params store for this request.
     stored: bool,
     endpoint: String,
-    /// `Some(bound)` on a MAIN turn, where a cut is a failure.
-    main_turn_max: Option<i64>,
+    /// `Some(bound)` on a MAIN pass, where a cut is a failure.
+    main_pass_max: Option<i64>,
     log: StreamLog,
     cur: RequestCounts,
     /// The model the open request's response names (`message_start`), or the log's.
@@ -1319,7 +1319,7 @@ impl SseState {
         let evt: Value = serde_json::from_str(data).map_err(|e| ProviderError {
             message: e.to_string(),
             kind: "JSONDecodeError",
-            class: fantastic_ai_core::provider::ErrorClass::Turn,
+            class: fantastic_ai_core::provider::ErrorClass::Pass,
         })?;
         match evt.get("type").and_then(Value::as_str).unwrap_or("") {
             "message_start" => {
@@ -1440,7 +1440,7 @@ impl SseState {
     /// Rewrite the agent's sidecar with the running total: the base plus this
     /// process's counts. Every count change is persisted by the event that makes it,
     /// so a stream that dies mid-answer keeps what it had billed. A write error does
-    /// not fail the turn: it is kept in `Usage` and reported, as the usage log's is.
+    /// not fail the pass: it is kept in `Usage` and reported, as the usage log's is.
     fn persist(&self) {
         let Some(path) = &self.log.persist_to else {
             return;
@@ -1465,7 +1465,7 @@ impl SseState {
 
     /// Write the running total to the agent's params store (a provider with none keeps
     /// none) — a write, A STEP (#795): the stream goes on, and a write error, when its
-    /// settle says so, is kept in `Usage` and reported; it does not fail the turn. It
+    /// settle says so, is kept in `Usage` and reported; it does not fail the pass. It
     /// runs in the provider's own task, so the write is the provider's.
     async fn store_total(&self) {
         let id = AgentId::from(self.log.agent_id.as_str());
@@ -1480,7 +1480,7 @@ impl SseState {
     }
 
     /// Append this request's own counts as one JSON line to the usage log. A write
-    /// error does not fail the turn: it is kept in `Usage` and reported.
+    /// error does not fail the pass: it is kept in `Usage` and reported.
     fn write_usage_line(&self) {
         let Some(path) = &self.log.path else {
             return;
@@ -1519,7 +1519,7 @@ impl SseState {
         }
         if !self.stopped {
             out.push_back(Err(ProviderError::raised(format!(
-                "{NAME}: the stream from {} ended without message_stop; this turn is NOT \
+                "{NAME}: the stream from {} ended without message_stop; this pass is NOT \
                  complete",
                 self.endpoint
             ))));
@@ -1532,9 +1532,9 @@ impl SseState {
             .stop_reason
             .as_deref()
             == Some("max_tokens");
-        if let (true, Some(bound)) = (cut, self.main_turn_max) {
+        if let (true, Some(bound)) = (cut, self.main_pass_max) {
             out.push_back(Err(ProviderError::raised(format!(
-                "{NAME}: the turn was cut at max_tokens={bound} (stop_reason=max_tokens) — it \
+                "{NAME}: the pass was cut at max_tokens={bound} (stop_reason=max_tokens) — it \
                  did not finish; raise the chat's max_tokens, or lower thinking_budget"
             ))));
         }
@@ -1849,7 +1849,7 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
         .unwrap_or("")
         .trim()
         .to_string();
-    // what the provider's record leaves to the API (a turn's max_tokens is the chat's)
+    // what the provider's record leaves to the API (a pass's max_tokens is the chat's)
     let left: Vec<&str> = server::missing(&merged)
         .into_iter()
         .filter(|f| *f != "max_tokens")
@@ -1865,7 +1865,7 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
     None
 }
 
-/// The model's effort per turn.
+/// The model's effort per pass.
 #[derive(Debug, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
@@ -1902,10 +1902,10 @@ pub struct AnthropicRecord {
     /// The model's input window (tokens); left out, read from the API (max_input_tokens).
     #[schemars(range(min = 1))]
     pub context_window: Option<i64>,
-    /// Extended thinking per turn (tokens, at least the API's floor); sent only below the turn's max_tokens; not for 4.7+ or 5.x models: use thinking_display and effort.
+    /// Extended thinking per pass (tokens, at least the API's floor); sent only below the pass's max_tokens; not for 4.7+ or 5.x models: use thinking_display and effort.
     #[schemars(range(min = 1024))]
     pub thinking_budget: Option<i64>,
-    /// The model's effort per turn, sent as output_config.effort.
+    /// The model's effort per pass, sent as output_config.effort.
     pub effort: Option<Effort>,
     /// Adaptive thinking with its text shown (summarized) or hidden (omitted).
     pub thinking_display: Option<ThinkingDisplay>,
@@ -2123,7 +2123,7 @@ async fn run_verb(agent_id: &AgentId, call: declared::Call, kernel: &Arc<Kernel>
             // A `complete` takes its request's images out of the stash here, before any
             // path that can refuse or fail it, so none keeps them.
             let images = take_images(agent_id.as_str(), &a.rid);
-            // The API is read for what the record leaves to it before a turn runs (with
+            // The API is read for what the record leaves to it before a pass runs (with
             // the key read for it, a step); an API that does not answer refuses the verb,
             // naming the field. The model of the pass, as `complete` resolves it: the
             // call's, else the default.

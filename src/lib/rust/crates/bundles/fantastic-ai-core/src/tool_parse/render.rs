@@ -111,7 +111,7 @@ fn render_reply_field(name: &str, value: &Value) -> String {
 /// `str(v)` and not JSON: a float is python's repr (`1e-05`, `1e+16`, `inf`,
 /// `nan`), and a structure the notation cannot say is python's own repr
 /// (`{'a': 1}`). Rust's `ryu` digits (`0.00001`, `1e16`) and compact JSON objects
-/// were a second dialect the model read on exactly those turns.
+/// were a second dialect the model read on exactly those passes.
 fn flat_text(v: &Value) -> String {
     match v {
         Value::Null => String::new(),

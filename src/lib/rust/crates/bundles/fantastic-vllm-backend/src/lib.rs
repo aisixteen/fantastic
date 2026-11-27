@@ -12,8 +12,8 @@
 //!
 //! - THE THOUGHT CHANNEL. With `--reasoning-parser qwen3` the thought streams
 //!   as `delta.reasoning_content` (some versions: `delta.reasoning`) and only
-//!   the answer as `delta.content`. Reading `content` alone drops whole turns.
-//! - A DEAD TURN — all thinking, no answer — is the worst outcome in an agent
+//!   the answer as `delta.content`. Reading `content` alone drops whole passes.
+//! - A DEAD PASS — all thinking, no answer — is the worst outcome in an agent
 //!   loop. `thinking_token_budget` is vLLM's hard stop for it: once spent, vLLM
 //!   injects the end-of-reasoning token and the model continues into the
 //!   answer. It must be BELOW `max_tokens` or it never fires.
@@ -198,7 +198,7 @@ impl SessionTable {
                     // python raises its own `KvSlotsFull(RuntimeError)`, and a
                     // raise renders as `<class name>: <message>`.
                     kind: "KvSlotsFull",
-                    class: fantastic_ai_core::provider::ErrorClass::Turn,
+                    class: fantastic_ai_core::provider::ErrorClass::Pass,
                 });
             }
             if !self.live.is_empty() {
@@ -257,9 +257,9 @@ fn role(m: &Value) -> Option<&str> {
     m.get("role").and_then(Value::as_str)
 }
 
-/// A conversation's identity: its system text + first user turn.
+/// A conversation's identity: its system text + first user message.
 ///
-/// That is the PREFIX vLLM caches, and it is stable across turns because the
+/// That is the PREFIX vLLM caches, and it is stable across passes because the
 /// history is append-only. When compaction rewrites it, the key changes — and
 /// so has the prefix, so the old cache no longer applies: counting it as a new
 /// conversation is the truth, and the stale one ages out of the table.
@@ -290,7 +290,7 @@ pub const MESSAGE_OVERHEAD: i64 = 16;
 
 /// An UPPER bound on the prompt's tokens: every byte of each message's role and
 /// content (a byte-level BPE token is at least one byte) plus
-/// [`MESSAGE_OVERHEAD`] per message. Never below the server's count, so a turn it
+/// [`MESSAGE_OVERHEAD`] per message. Never below the server's count, so a pass it
 /// lets keep its `max_tokens` fits the window. python `prompt_bound`.
 #[must_use]
 pub fn prompt_bound(messages: &[Value]) -> i64 {
@@ -312,7 +312,7 @@ pub fn prompt_bound(messages: &[Value]) -> i64 {
 }
 
 /// Every system message merged into ONE at index 0 (Qwen's template refuses a
-/// system message anywhere else); the other turns keep their order.
+/// system message anywhere else); the other messages keep their order.
 #[must_use]
 pub fn one_system_message(messages: &[Value]) -> Vec<Value> {
     let systems: Vec<String> = messages
@@ -428,7 +428,7 @@ struct VllmProvider {
     max_tokens: i64,
     /// The record's `context_window`. vLLM counts the prompt AND the output against
     /// one window, so a cap the prompt leaves no room for is refused (HTTP 400). A
-    /// turn whose `max_tokens` could overrun it — [`prompt_bound`] plus `max_tokens`
+    /// pass whose `max_tokens` could overrun it — [`prompt_bound`] plus `max_tokens`
     /// past the window — sends NO max_tokens: vLLM then gives it exactly what the
     /// prompt leaves (a cap of nearly the whole window would be refused once a
     /// prompt is in it).
@@ -455,16 +455,16 @@ impl VllmProvider {
     /// The `thinking_token_budget` to send on a call bounded by `call_max`
     /// (python `VllmProvider._budget_for`):
     ///
-    /// - a MAIN turn sends the chat's budget as it carries it when it is below
+    /// - a MAIN pass sends the chat's budget as it carries it when it is below
     ///   `call_max` — the chat keeps it below its `max_tokens`, so it can fire;
-    /// - otherwise (a main turn bounded at or below it by the server's window, or
+    /// - otherwise (a main pass bounded at or below it by the server's window, or
     ///   any budget on a bounded SIDE CALL such as a fold summary) it is
     ///   `min(budget, call_max / 2)`, so at least half of the call's output is
     ///   left for the answer (a rule of thumb, not tuned) — 8192 on a ~2000-token
     ///   fold summary becomes 1000 instead of refusing the fold;
     /// - below [`BUDGET_FLOOR`] NO budget is sent at all: a few tokens of
     ///   thinking is no thinking — the model stops with thinking only and no
-    ///   answer (a dead turn).
+    ///   answer (a dead pass).
     fn budget_for(&self, call_max: i64, side_call: bool) -> Result<Option<i64>, ProviderError> {
         let Some(budget) = self.budget else {
             return Ok(None);
@@ -594,7 +594,7 @@ fn classify(
         let why = cause.map(|c| format!(" (cause: {c})")).unwrap_or_default();
         ProviderError::transport(format!(
             "{NAME}: {endpoint} dropped the stream mid-answer — vLLM died or \
-             restarted{why}; this turn is NOT complete"
+             restarted{why}; this pass is NOT complete"
         ))
     }
 }
@@ -631,7 +631,7 @@ impl Provider for VllmProvider {
         max_tokens: Option<i64>,
     ) -> Result<ProviderStream, ProviderError> {
         // `max_tokens` bounds a side call (a fold summary); absent, the
-        // chat's `max_tokens` (else the server's default) bounds the turn.
+        // chat's `max_tokens` (else the server's default) bounds the pass.
         let call_max = max_tokens.unwrap_or(self.max_tokens);
         // a per-call bound marks a SIDE CALL (a fold summary)
         let body = self.body(messages, call_max, max_tokens.is_some())?;
@@ -704,7 +704,7 @@ impl Provider for VllmProvider {
             usage_of(&self.agent_id),
             self.endpoint.clone(),
             (self.connect_timeout, self.read_clock),
-            // a MAIN turn (no per-call bound) must not end on a cut — see `end`
+            // a MAIN pass (no per-call bound) must not end on a cut — see `end`
             max_tokens.is_none().then_some(call_max),
         ))
     }
@@ -719,12 +719,12 @@ fn consume_sse(
     usage: Arc<Mutex<Usage>>,
     endpoint: String,
     timeouts: (f64, f64),
-    main_turn_max: Option<i64>,
+    main_pass_max: Option<i64>,
 ) -> ProviderStream {
     let inner = resp.bytes_stream();
     let init = (
         inner,
-        SseState::new(report, usage, endpoint, timeouts, main_turn_max),
+        SseState::new(report, usage, endpoint, timeouts, main_pass_max),
         VecDeque::new(),
         false,
     );
@@ -809,7 +809,7 @@ fn consume_sse(
     ))
 }
 
-/// Per-line SSE decode state — the buffer, the per-TURN thought span, and
+/// Per-line SSE decode state — the buffer, the per-PASS thought span, and
 /// whether vLLM ever said the answer was finished.
 struct SseState {
     buf: Vec<u8>,
@@ -820,12 +820,12 @@ struct SseState {
     saw_finish: bool,
     endpoint: String,
     timeouts: (f64, f64),
-    /// `Some(bound)` on a MAIN turn (the record's `max_tokens`), where a cut
+    /// `Some(bound)` on a MAIN pass (the record's `max_tokens`), where a cut
     /// is a failure; `None` on a bounded side call, where it is the answer.
-    main_turn_max: Option<i64>,
+    main_pass_max: Option<i64>,
     /// OpenAI-style servers send the model's calls as `delta.tool_calls`
     /// pieces (#186): collected here, rendered as call text when the stream
-    /// ends, so a native call never vanishes into a dead turn.
+    /// ends, so a native call never vanishes into a dead pass.
     tool_calls: Vec<(String, String)>,
 }
 
@@ -835,7 +835,7 @@ impl SseState {
         usage: Arc<Mutex<Usage>>,
         endpoint: String,
         timeouts: (f64, f64),
-        main_turn_max: Option<i64>,
+        main_pass_max: Option<i64>,
     ) -> Self {
         Self {
             buf: Vec::new(),
@@ -845,7 +845,7 @@ impl SseState {
             saw_finish: false,
             endpoint,
             timeouts,
-            main_turn_max,
+            main_pass_max,
             tool_calls: Vec::new(),
         }
     }
@@ -895,11 +895,11 @@ impl SseState {
         if data.is_empty() {
             return Ok(false);
         }
-        // python `json.loads` raises on a malformed line — the turn fails.
+        // python `json.loads` raises on a malformed line — the pass fails.
         let obj: Value = serde_json::from_str(data).map_err(|e| ProviderError {
             message: e.to_string(),
             kind: "JSONDecodeError",
-            class: fantastic_ai_core::provider::ErrorClass::Turn,
+            class: fantastic_ai_core::provider::ErrorClass::Pass,
         })?;
         // `usage.prompt_tokens` and a `length` finish → `max_tokens`
         fantastic_ai_core::think::note_openai_usage(&obj, &self.report);
@@ -972,7 +972,7 @@ impl SseState {
             out.push_back(Ok(ProviderEvent::Token(m.to_string())));
         }
         // A native call the server parsed for us becomes fantastic call text,
-        // so the turn is not read as thinking-only (#186).
+        // so the pass is not read as thinking-only (#186).
         if !self.tool_calls.is_empty() {
             let mut rendered: Vec<String> = Vec::new();
             for (name, args) in &self.tool_calls {
@@ -1003,16 +1003,16 @@ impl SseState {
         if !self.saw_finish {
             out.push_back(Err(ProviderError::transport(format!(
                 "{NAME}: the stream from {} ended without a finish_reason — vLLM died \
-                 mid-answer; this turn is NOT complete",
+                 mid-answer; this pass is NOT complete",
                 self.endpoint
             ))));
             return;
         }
         // A CUT: a BOUNDED SIDE CALL (a fold summary, which passed its own
         // `max_tokens`) that stopped at its bound got what it asked for — an
-        // answer; its caller reads the stop reason. A MAIN turn that hit the
+        // answer; its caller reads the stop reason. A MAIN pass that hit the
         // record's `max_tokens` did not finish, and returned as if it had, it
-        // parses as a truncated envelope (or, on vLLM, a turn of pure
+        // parses as a truncated envelope (or, on vLLM, a pass of pure
         // thinking) and the chain dies downstream with the cause hidden — so it
         // fails, naming the cut. Same contract as every other backend (python
         // `VllmProvider.chat`).
@@ -1023,9 +1023,9 @@ impl SseState {
             .stop_reason
             .as_deref()
             == Some("max_tokens");
-        if let (true, Some(bound)) = (cut, self.main_turn_max) {
+        if let (true, Some(bound)) = (cut, self.main_pass_max) {
             out.push_back(Err(ProviderError::raised(format!(
-                "{NAME}: the turn was cut at max_tokens={bound} (finish_reason=length) — \
+                "{NAME}: the pass was cut at max_tokens={bound} (finish_reason=length) — \
                  it did not finish; raise the chat's max_tokens, or lower \
                  thinking_token_budget / reasoning_effort"
             ))));
@@ -1035,8 +1035,8 @@ impl SseState {
 
 // ─── the record ─────────────────────────────────────────────────────────────
 
-/// A count the turn runs on — set on the provider's record, or read from the server
-/// before the turn ([`server::resolve`]); fails the turn loud otherwise.
+/// A count the pass runs on — set on the provider's record, or read from the server
+/// before the pass ([`server::resolve`]); fails the pass loud otherwise.
 fn required_int(meta: &Map<String, Value>, key: &str) -> Result<i64, ProviderError> {
     match meta.get(key).and_then(Value::as_i64) {
         Some(n) => Ok(n),
@@ -1233,7 +1233,7 @@ pub struct VllmRecord {
     /// The vLLM server's /v1 URL.
     #[schemars(length(min = 1))]
     pub endpoint: String,
-    /// The served model name; left out, read from the server before a turn and written here.
+    /// The served model name; left out, read from the server before a pass and written here.
     pub model: Option<String>,
     /// The server's window (tokens); left out, read from the server (max_model_len).
     #[schemars(range(min = 1))]
@@ -1257,7 +1257,7 @@ pub struct VllmRecord {
     /// Seconds to wait on a generation.
     #[schemars(schema_with = "read_timeout_seconds", default = "default_read_timeout")]
     pub read_timeout: Option<f64>,
-    /// The read clock on the answer stream: seconds with no byte from the server (headers included) before the turn is judged stalled; default read_timeout.
+    /// The read clock on the answer stream: seconds with no byte from the server (headers included) before the pass is judged stalled; default read_timeout.
     #[schemars(schema_with = "fantastic_ai_core::record::positive_seconds")]
     #[serde(default)]
     pub stream_idle_seconds: Option<f64>,
@@ -1368,7 +1368,7 @@ impl Handler for VllmBundle {
             Call::Boot(_) => verbs::boot(agent_id, kernel).await,
             Call::UsageVerb(a) => usage_reply(agent_id.as_str(), a.reset == Some(true)),
             Call::Complete(a) => {
-                // A verb that runs a turn first reads what the record leaves to the server
+                // A verb that runs a pass first reads what the record leaves to the server
                 // (with the key read for it, a step); a server that does not answer
                 // refuses the verb, naming the field.
                 let (id, k) = (agent_id.clone(), Arc::clone(kernel));

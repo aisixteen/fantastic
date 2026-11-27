@@ -282,7 +282,7 @@ fn root_line_is_written_as_at_root() {
 fn runtime_fields_are_dropped() {
     let ex = export(&tree(
         json!({"guid": "g-123", "pid": 7, "version": 2, "created_at": 1, "updated_at": 2, "ts": 3,
-               "seen_ts": 4, "last_turn": "x", "last_error": "e", "boot_error": "e", "rows": [1],
+               "seen_ts": 4, "last_pass": "x", "last_error": "e", "boot_error": "e", "rows": [1],
                "history": ["hello there"], "cache": {}, "usage": {"in": 1}, "keep": "yes"}),
         json!({}),
         json!({}),

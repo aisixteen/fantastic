@@ -5,12 +5,12 @@ group: coding
 title: "four roots sent over time, four clean reports, a question about an early one answered from the store"
 runner: probe.py
 runtimes: [rust]
-costs: turns
+costs: passes
 long: true  # > 8 min measured; at most 2 run at once (run.py LONG_LANES)
 limits:
   idle_seconds: 60
-  max_turns: 100
-  no_progress_turns: 32
-  turn_chars: 60000
-  turn_seconds: 300
+  max_passes: 100
+  no_progress_passes: 32
+  pass_chars: 60000
+  pass_seconds: 300
 env: {E2E_WINDOW: "32000"}  # 32k ONLY: a multi-root test needs room; at 12k the model loses every deliverable

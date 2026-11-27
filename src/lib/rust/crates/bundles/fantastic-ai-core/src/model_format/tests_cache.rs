@@ -1,6 +1,6 @@
 //! The render cache (#766, W5, W6): K1-K35, K39-K53 of spec 2.2.
 //!
-//! A pass is driven here as the turn drives it: `messages` in flight (the view with each
+//! A pass is driven here as the pass drives it: `messages` in flight (the view with each
 //! row's `id` and the form it took), mapped under a type declared with the renderer
 //! under test, and the chat's bound. The counting renderer wraps a text in its type's
 //! name, so a render is seen and counted.
@@ -199,7 +199,7 @@ pub(super) fn finish<H: Hasher>(v: View<'_, H>) -> Done {
     let (rows, kept, kept_endpoint, cold, links) =
         (v.rows, v.kept, v.kept_endpoint, v.cold, v.links.clone());
     let mut ev = trace::Events::default();
-    let dropped = v.finish(&mut ev, "turn");
+    let dropped = v.finish(&mut ev, "pass");
     Done {
         messages,
         rows,
@@ -1659,8 +1659,8 @@ pub(super) fn hermes_pass(
     (pass, state)
 }
 
-/// One turn's view on `pass`, built as `run_generation` builds it, run to its end.
-pub(super) fn turn_of(pass: &super::pass::Pass, messages: &[Value]) -> Done {
+/// One pass's view on `pass`, built as `run_generation` builds it, run to its end.
+pub(super) fn pass_view(pass: &super::pass::Pass, messages: &[Value]) -> Done {
     finish(pass.view(messages, &Map::new()))
 }
 
@@ -1683,8 +1683,8 @@ fn called_rows(n: i64) -> Vec<(i64, String)> {
 }
 
 // K34
-/// A fold summary inside a turn is a task pass: it inserts, drops and evicts nothing,
-/// and the turn after it renders what it would have with no task pass.
+/// A fold summary inside a pass is a task pass: it inserts, drops and evicts nothing,
+/// and the pass after it renders what it would have with no task pass.
 #[tokio::test]
 async fn task_pass_leaves_cache() {
     let rows = called_rows(8);
@@ -1694,7 +1694,7 @@ async fn task_pass_leaves_cache() {
 
     let provider = Canned::new("TITLE\n\nthe summary");
     let (pass, state) = hermes_pass(provider.clone(), "k34_task");
-    let a = turn_of(&pass, &first);
+    let a = pass_view(&pass, &first);
     assert!(a.cold && a.rows == rows.len());
     let before = state.render_cache.stats();
     let span: Vec<Value> = first[1..first.len() - 1].to_vec();
@@ -1706,13 +1706,13 @@ async fn task_pass_leaves_cache() {
         before,
         "the task pass inserts, drops and evicts nothing"
     );
-    let b = turn_of(&pass, &second);
+    let b = pass_view(&pass, &second);
 
-    // the same two turns with no task pass between them
+    // the same two passes with no task pass between them
     let (control, _) = hermes_pass(Canned::new("x"), "k34_control");
-    let _ = turn_of(&control, &first);
-    let c = turn_of(&control, &second);
-    assert_eq!(b.rows, 1, "the turn's warm count: its one new row");
+    let _ = pass_view(&control, &first);
+    let c = pass_view(&control, &second);
+    assert_eq!(b.rows, 1, "the pass's warm count: its one new row");
     assert_eq!(
         (b.rows, b.kept, b.cold, &b.dropped),
         (c.rows, c.kept, c.cold, &c.dropped)
@@ -1729,7 +1729,7 @@ async fn task_pass_leaves_cache() {
 /// released, its chain kept), and both views equal the two passes run one after the
 /// other.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn queued_turn_serial() {
+async fn queued_pass_serial() {
     let first = conv(&refs(&called_rows(6)), "go");
     let second = conv(&refs(&called_rows(8)), "next");
 
@@ -1756,7 +1756,7 @@ async fn queued_turn_serial() {
             // the next pass starts once the one in flight ended
             ended_rx.await.unwrap();
             let at_start = state.render_cache.stats();
-            (at_start, turn_of(&pass, &second))
+            (at_start, pass_view(&pass, &second))
         }
     });
     assert!(
@@ -1771,8 +1771,8 @@ async fn queued_turn_serial() {
     assert_eq!(state.render_cache.stats().pins, 0);
 
     let (serial, _) = hermes_pass(Canned::new("ok"), "k35_serial");
-    let sa = turn_of(&serial, &first);
-    let sb = turn_of(&serial, &second);
+    let sa = pass_view(&serial, &first);
+    let sb = pass_view(&serial, &second);
     assert_eq!(a.messages, sa.messages);
     assert_eq!(b.messages, sb.messages);
     assert_eq!((b.rows, b.kept, b.cold), (sb.rows, sb.kept, sb.cold));

@@ -34,7 +34,7 @@ task: >-
   you mint must make the SECOND press harmless.
 
 limits:
-  max_turns: 4
+  max_passes: 4
   idle_seconds: 60
 
 roster:

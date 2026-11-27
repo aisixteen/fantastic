@@ -1,11 +1,11 @@
 //! THE TRACES (#766, spec 1.10): the chat's own record of its passes, local only.
 //!
-//! A turn collects its events in RAM ([`Events`]): the render's `render_cold` or
+//! A pass collects its events in RAM ([`Events`]): the render's `render_cold` or
 //! `render_warm` and its `cache_dropped`, each failed attempt's `retry`, each call read
 //! after a closers-only repair of its JSON (`repaired {attempt, added}`), the `stop`, the
-//! endpoint's `prefix_cache`, a `model_switched`. They are written at the turn's end, in
-//! ONE `append` under the chat's own key, after the turn's rows are stored
-//! ([`write`]); a cancelled turn or a dead process writes none. A trace row is
+//! endpoint's `prefix_cache`, a `model_switched`. They are written at the pass's end, in
+//! ONE `append` under the chat's own key, after the pass's rows are stored
+//! ([`write`]); a cancelled pass or a dead process writes none. A trace row is
 //! `{kind: "trace", event, mode, type, content: "", client_id, row?, ..}`: no `role`, so
 //! it is in no conversation and no model view; an empty `content`, so a store `search`
 //! never finds it. The head cache skips it (`memory.rs`), a fork copies none
@@ -14,7 +14,7 @@
 //! The rows are capped ([`TRACE_CAP`]): after the append, the oldest beyond the cap are
 //! read and pruned by their ids. The chat keeps the count in RAM, read from the store
 //! once per process; only the chat writes its own key and a fork copies no trace row,
-//! so the count stays true. A refused trace write never fails the turn. Nothing is sent
+//! so the count stays true. A refused trace write never fails the pass. Nothing is sent
 //! anywhere.
 
 use std::sync::Arc;
@@ -30,7 +30,7 @@ use crate::state::BackendState;
 /// The `kind` of a trace row.
 pub(crate) const KIND: &str = "trace";
 
-/// One turn's trace rows, in the order they happened.
+/// One pass's trace rows, in the order they happened.
 #[derive(Debug, Default)]
 pub(crate) struct Events {
     rows: Vec<Value>,
@@ -38,7 +38,7 @@ pub(crate) struct Events {
 
 impl Events {
     /// Add one event: `{kind: "trace", event, mode, type, content: "", ..fields}`. The
-    /// send's `client_id` and the stored row's id are added when the turn writes them
+    /// send's `client_id` and the stored row's id are added when the pass writes them
     /// ([`write`]). A field named like a fixed key is not taken.
     pub(crate) fn push(
         &mut self,
@@ -65,9 +65,9 @@ impl Events {
     }
 }
 
-/// THE TURN'S EVENTS, taken in order: the turn's pass's (its helpers' included), then
+/// THE PASS'S EVENTS, taken in order: the pass's pass's (its helpers' included), then
 /// those of the pass a type restart ran under (Q26), which took the earlier ones over.
-pub(crate) fn of_turn(pass: &Pass, restarted: Option<&Pass>) -> Vec<Value> {
+pub(crate) fn of_pass(pass: &Pass, restarted: Option<&Pass>) -> Vec<Value> {
     let mut rows = pass.take_events().into_rows();
     if let Some(next) = restarted {
         rows.extend(next.take_events().into_rows());
@@ -124,10 +124,10 @@ pub(crate) fn note_switch(pass: &Pass, from: Option<String>) {
         json!(pass.model.clone().unwrap_or_default()),
     );
     pass.events()
-        .push(Mode::Turn.name(), pass.kind, "model_switched", fields);
+        .push(Mode::Pass.name(), pass.kind, "model_switched", fields);
 }
 
-/// A `stop` the model wrote in the turn's stored `answer` (1.8): its `stop {reason}`
+/// A `stop` the model wrote in the pass's stored `answer` (1.8): its `stop {reason}`
 /// event on `pass`, with no `errors` (those are the harness's, when it wrote the stop).
 /// The first `stop` call counts; one with no non-empty reason is none.
 pub(crate) fn note_model_stop(pass: &Pass, answer: &str) {
@@ -147,14 +147,14 @@ pub(crate) fn note_model_stop(pass: &Pass, answer: &str) {
     let mut fields = Map::new();
     fields.insert("reason".into(), json!(reason));
     pass.events()
-        .push(Mode::Turn.name(), pass.kind, "stop", fields);
+        .push(Mode::Pass.name(), pass.kind, "stop", fields);
 }
 
-/// THE TURN'S TRACE ROWS, written as STEPS (#795): `events` with the send's `client_id`
-/// and, when the turn stored one, its assistant row's id as `row`, in one `append` under
+/// THE PASS'S TRACE ROWS, written as STEPS (#795): `events` with the send's `client_id`
+/// and, when the pass stored one, its assistant row's id as `row`, in one `append` under
 /// the chat's key; then the oldest beyond the cap pruned by id. Each store call is one
 /// step; `next` runs when the write ended. A refusal anywhere ends the write and never
-/// reaches the turn.
+/// reaches the pass.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn write<R, F, Fut>(
     self_id: &AgentId,

@@ -1,5 +1,5 @@
 //! Token accounting, chat-side (#766, spec 1.7 and 2.8): `attributes.used` `{pass,
-//! running}` with `{turn: {accepted, rejected}, task, total}` of four counts each, and
+//! running}` with `{pass: {accepted, rejected}, task, total}` of four counts each, and
 //! `attributes.window`, attempt 1's prompt side. Every case drives the real pass path
 //! (`run_generation`, the task pass) over a provider that reports per request, like the
 //! remote provider: it clears the prompt and cache counts before each request
@@ -239,7 +239,7 @@ async fn answers(kernel: &Arc<Kernel>, agent: &AgentId, provider: &Arc<Metered>)
     }
 }
 
-/// A task pass of `agent`'s chat outside a turn: the summarizer over one row.
+/// A task pass of `agent`'s chat outside a pass: the summarizer over one row.
 async fn summarize(kernel: &Arc<Kernel>, agent: &AgentId, provider: &Arc<Metered>) -> String {
     let p: Arc<dyn Provider> = Arc::clone(provider) as Arc<dyn Provider>;
     let state = crate::state::state_for(agent);
@@ -328,7 +328,7 @@ fn calib(agent: &AgentId) -> Option<f64> {
 }
 
 // U1
-/// One attempt that reports: its counts are `turn.accepted`, nothing else is counted,
+/// One attempt that reports: its counts are `pass.accepted`, nothing else is counted,
 /// and the window is its prompt side.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn one_attempt() {
@@ -338,10 +338,10 @@ async fn one_attempt() {
     answers(&kernel, &a, &p).await;
     let row = last_row(&kernel, &a).await;
     let pass = pass_of(&row);
-    assert_eq!(pass["turn"]["accepted"], c(100, 40, 600, 300), "{row}");
-    assert_eq!(pass["turn"]["rejected"], zero());
+    assert_eq!(pass["pass"]["accepted"], c(100, 40, 600, 300), "{row}");
+    assert_eq!(pass["pass"]["rejected"], zero());
     assert_eq!(pass["task"], zero());
-    assert_eq!(pass["total"], pass["turn"]["accepted"]);
+    assert_eq!(pass["total"], pass["pass"]["accepted"]);
     assert_eq!(
         row["attributes"]["window"],
         json!({"prompt": 100, "cache_read": 600, "cache_write": 300})
@@ -349,7 +349,7 @@ async fn one_attempt() {
 }
 
 // U2
-/// Three attempts, the third accepted: the first two are `turn.rejected`, the window is
+/// Three attempts, the third accepted: the first two are `pass.rejected`, the window is
 /// attempt 1's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retries_split() {
@@ -365,14 +365,14 @@ async fn retries_split() {
     let row = last_row(&kernel, &a).await;
     let pass = pass_of(&row);
     assert_eq!(
-        pass["turn"]["rejected"],
+        pass["pass"]["rejected"],
         add(&c(800, 30, 200, 0), &c(200, 35, 900, 0))
     );
-    assert_eq!(pass["turn"]["accepted"], c(200, 7, 1000, 0));
+    assert_eq!(pass["pass"]["accepted"], c(200, 7, 1000, 0));
     assert_eq!(pass["task"], zero());
     assert_eq!(
         pass["total"],
-        add(&pass["turn"]["rejected"], &pass["turn"]["accepted"])
+        add(&pass["pass"]["rejected"], &pass["pass"]["accepted"])
     );
     assert_eq!(
         row["attributes"]["window"],
@@ -381,7 +381,7 @@ async fn retries_split() {
 }
 
 // U3
-/// A turn the harness stopped: nothing accepted, every attempt rejected.
+/// A pass the harness stopped: nothing accepted, every attempt rejected.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn harness_stop_accepts_nothing() {
     let tmp = TempDir::new().unwrap();
@@ -396,12 +396,12 @@ async fn harness_stop_accepts_nothing() {
     assert!(matches!(g, Ok(Generation::Stopped { .. })), "not stopped");
     let row = last_row(&kernel, &a).await;
     let pass = pass_of(&row);
-    assert_eq!(pass["turn"]["accepted"], zero(), "{row}");
+    assert_eq!(pass["pass"]["accepted"], zero(), "{row}");
     let mut want = zero();
     for i in 0..n {
         want = add(&want, &c(100 + i as i64, 10, 0, 0));
     }
-    assert_eq!(pass["turn"]["rejected"], want);
+    assert_eq!(pass["pass"]["rejected"], want);
     assert_eq!(pass["total"], want);
     // the stopped row carries the window too: attempt 1's
     assert_eq!(row["attributes"]["window"], json!({"prompt": 100}));
@@ -417,7 +417,7 @@ async fn no_report_no_stale_count() {
     let (kernel, a) = mk_kernel(&tmp, "u_stale").await;
     let p = Metered::new(vec![
         Step::says(DONE, rep(500, 99, None, None)),
-        // the link fails: the turn fails, nothing of it is read
+        // the link fails: the pass fails, nothing of it is read
         Step::link_fails(),
         // a whole stream whose reply wrote nothing: completion 99 is still there
         Step::unsettled(DONE),
@@ -451,12 +451,12 @@ async fn no_cache_counts() {
     let p = Metered::new(vec![Step::says(DONE, rep(400, 12, None, None))]);
     answers(&kernel, &a, &p).await;
     let row = last_row(&kernel, &a).await;
-    assert_eq!(pass_of(&row)["turn"]["accepted"], c(400, 12, 0, 0));
+    assert_eq!(pass_of(&row)["pass"]["accepted"], c(400, 12, 0, 0));
     assert_eq!(row["attributes"]["window"], json!({"prompt": 400}));
 }
 
 // U6
-/// Five turns, two of them with task passes (one inside the turn, one outside): each
+/// Five passes, two of them with task passes (one inside the pass, one outside): each
 /// row's `running` is the sum of every `pass` so far, per part and per count.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn running_is_the_sum() {
@@ -469,10 +469,10 @@ async fn running_is_the_sum() {
         Step::says(DONE, rep(110, 11, Some(6), None)),
         // 2: plain
         Step::says(DONE, rep(120, 12, None, Some(7))),
-        // a task pass outside a turn, then 3
+        // a task pass outside a pass, then 3
         Step::says("SUMMARY", rep(50, 5, None, None)),
         Step::says(DONE, rep(130, 13, None, None)),
-        // 4: a recall owed, so a task pass inside the turn first
+        // 4: a recall owed, so a task pass inside the pass first
         Step::says("{}", rep(60, 6, None, None)),
         Step::says(DONE, rep(140, 14, Some(1), Some(1))),
         // 5
@@ -492,14 +492,14 @@ async fn running_is_the_sum() {
     for row in &rows {
         let pass = pass_of(row);
         sum = json!({
-            "accepted": add(&sum["accepted"], &pass["turn"]["accepted"]),
-            "rejected": add(&sum["rejected"], &pass["turn"]["rejected"]),
+            "accepted": add(&sum["accepted"], &pass["pass"]["accepted"]),
+            "rejected": add(&sum["rejected"], &pass["pass"]["rejected"]),
             "task": add(&sum["task"], &pass["task"]),
             "total": add(&sum["total"], &pass["total"]),
         });
         let running = running_of(row);
-        assert_eq!(running["turn"]["accepted"], sum["accepted"], "{row}");
-        assert_eq!(running["turn"]["rejected"], sum["rejected"], "{row}");
+        assert_eq!(running["pass"]["accepted"], sum["accepted"], "{row}");
+        assert_eq!(running["pass"]["rejected"], sum["rejected"], "{row}");
         assert_eq!(running["task"], sum["task"], "{row}");
         assert_eq!(running["total"], sum["total"], "{row}");
     }
@@ -533,8 +533,8 @@ async fn running_survives_restart() {
 }
 
 // U8
-/// A thinking-only attempt, a link failure after a reported attempt and a cancelled turn store no
-/// assistant row: their counts are `turn.rejected` of the next row's pass, and the sum
+/// A thinking-only attempt, a link failure after a reported attempt and a cancelled pass store no
+/// assistant row: their counts are `pass.rejected` of the next row's pass, and the sum
 /// over the rows is still the running sum.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pending_lands_on_next_row() {
@@ -546,7 +546,7 @@ async fn pending_lands_on_next_row() {
         Step::says("<think>hmm</think>", rep(20, 2, None, None)),
         Step::says(FOREIGN, rep(30, 3, None, None)),
         Step::link_fails(),
-        // a reported bad attempt, then the turn is cancelled mid-stream
+        // a reported bad attempt, then the pass is cancelled mid-stream
         Step::says(FOREIGN, rep(40, 4, None, None)),
         Step::hangs(),
         // the next stored row
@@ -556,13 +556,13 @@ async fn pending_lands_on_next_row() {
     assert!(generate(&kernel, &a, &p).await.is_err(), "the link failed");
     let cancelled =
         tokio::time::timeout(Duration::from_millis(500), generate(&kernel, &a, &p)).await;
-    assert!(cancelled.is_err(), "the turn was cancelled");
+    assert!(cancelled.is_err(), "the pass was cancelled");
     answers(&kernel, &a, &p).await;
     let rows = assistant_rows(&kernel, &a).await;
     assert_eq!(rows.len(), 2);
     let pass = pass_of(&rows[1]);
-    assert_eq!(pass["turn"]["accepted"], c(50, 5, 0, 0));
-    assert_eq!(pass["turn"]["rejected"], c(20 + 30 + 40, 2 + 3 + 4, 0, 0));
+    assert_eq!(pass["pass"]["accepted"], c(50, 5, 0, 0));
+    assert_eq!(pass["pass"]["rejected"], c(20 + 30 + 40, 2 + 3 + 4, 0, 0));
     assert_eq!(
         running_of(&rows[1])["total"],
         add(&pass_of(&rows[0])["total"], &pass["total"])
@@ -602,7 +602,7 @@ async fn window_calibrates() {
 }
 
 // U10
-/// The cost is priced from `used.pass.total`, the turn's attempts and the task pass
+/// The cost is priced from `used.pass.total`, the pass's attempts and the task pass
 /// both; a model with no price entry is `{unpriced: true}` as before.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cost_from_total() {
@@ -650,27 +650,27 @@ async fn cost_from_total() {
 }
 
 // U11
-/// Cleanliness, `turn.rejected / (turn.accepted + turn.rejected)` over the four counts,
-/// equals the hand-computed value for a retried turn (U2) and a stopped one (U3); the
+/// Cleanliness, `pass.rejected / (pass.accepted + pass.rejected)` over the four counts,
+/// equals the hand-computed value for a retried pass (U2) and a stopped one (U3); the
 /// task counts do not move it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cleanliness_ratio() {
     let ratio = |pass: &Value| {
-        let r = total_of(&pass["turn"]["rejected"]) as f64;
-        let ok = total_of(&pass["turn"]["accepted"]) as f64;
+        let r = total_of(&pass["pass"]["rejected"]) as f64;
+        let ok = total_of(&pass["pass"]["accepted"]) as f64;
         r / (r + ok)
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp, "u_clean").await;
     let n = 1 + crate::constants::CALL_RETRIES;
     let mut steps = vec![
-        // a task pass, then U2's turn
+        // a task pass, then U2's pass
         Step::says("SUMMARY", rep(900, 90, None, None)),
         Step::says(FOREIGN, rep(100, 10, None, None)),
         Step::says(FOREIGN, rep(100, 10, None, None)),
         Step::says(DONE, rep(100, 20, None, None)),
     ];
-    // U3's turn
+    // U3's pass
     steps.extend((0..n).map(|_| Step::says(FOREIGN, rep(100, 10, None, None))));
     let p = Metered::new(steps);
     summarize(&kernel, &a, &p).await;
@@ -693,10 +693,10 @@ async fn cleanliness_ratio() {
 }
 
 // U12
-/// A task pass inside a turn, before its attempt 1 (the owed recall): its counts are in
-/// `pass.task` and `total`; the window, the calibration and `turn` hold nothing of it.
+/// A task pass inside a pass, before its attempt 1 (the owed recall): its counts are in
+/// `pass.task` and `total`; the window, the calibration and `pass` hold nothing of it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn task_inside_turn() {
+async fn task_inside_pass() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp, "u_task_in").await;
     let state = crate::state::state_for(&a);
@@ -713,9 +713,9 @@ async fn task_inside_turn() {
     let row = last_row(&kernel, &a).await;
     let pass = pass_of(&row);
     assert_eq!(pass["task"], c(200, 30, 100, 0), "{row}");
-    assert_eq!(pass["turn"]["accepted"], c(1000, 10, 0, 0));
-    assert_eq!(pass["turn"]["rejected"], zero());
-    assert_eq!(pass["total"], add(&pass["task"], &pass["turn"]["accepted"]));
+    assert_eq!(pass["pass"]["accepted"], c(1000, 10, 0, 0));
+    assert_eq!(pass["pass"]["rejected"], zero());
+    assert_eq!(pass["total"], add(&pass["task"], &pass["pass"]["accepted"]));
     assert_eq!(row["attributes"]["window"], json!({"prompt": 1000}));
     assert_eq!(*state.reported.lock().unwrap(), Some(1000));
     let est = crate::context::estimate_tokens(&p.asked()[2]).max(1);
@@ -744,8 +744,8 @@ async fn no_usage_report() {
     let row = last_row(&kernel, &a).await;
     let pass = pass_of(&row);
     for part in [
-        &pass["turn"]["accepted"],
-        &pass["turn"]["rejected"],
+        &pass["pass"]["accepted"],
+        &pass["pass"]["rejected"],
         &pass["task"],
         &pass["total"],
     ] {
@@ -775,17 +775,17 @@ async fn cache_counts_exceed_prompt() {
     answers(&kernel, &a, &p).await;
     let row = last_row(&kernel, &a).await;
     let pass = pass_of(&row);
-    assert_eq!(pass["turn"]["rejected"], c(0, 5, 80, 50), "{row}");
-    assert_eq!(pass["turn"]["accepted"]["prompt"], json!(0));
+    assert_eq!(pass["pass"]["rejected"], c(0, 5, 80, 50), "{row}");
+    assert_eq!(pass["pass"]["accepted"]["prompt"], json!(0));
     assert_eq!(
         row["attributes"]["window"],
         json!({"prompt": 0, "cache_read": 80, "cache_write": 50})
     );
     for k in ["prompt", "completion", "cache_read", "cache_write"] {
-        let parts = pass["turn"]["accepted"][k]
+        let parts = pass["pass"]["accepted"][k]
             .as_i64()
             .unwrap()
-            .saturating_add(pass["turn"]["rejected"][k].as_i64().unwrap())
+            .saturating_add(pass["pass"]["rejected"][k].as_i64().unwrap())
             .saturating_add(pass["task"][k].as_i64().unwrap());
         assert_eq!(pass["total"][k].as_i64().unwrap(), parts, "{k}");
     }
@@ -858,7 +858,7 @@ async fn pending_lost_on_crash() {
     answers(&kernel, &a, &p).await;
     let rows = assistant_rows(&kernel, &a).await;
     assert_eq!(rows.len(), 3);
-    assert_eq!(pass_of(&rows[1])["turn"]["rejected"], zero(), "lost");
+    assert_eq!(pass_of(&rows[1])["pass"]["rejected"], zero(), "lost");
     for i in 1..3 {
         assert_eq!(
             running_of(&rows[i])["total"],
@@ -872,10 +872,10 @@ async fn pending_lost_on_crash() {
 }
 
 // U18
-/// A harness-stopped turn, then the next send: the stopped row carries `used` with
+/// A harness-stopped pass, then the next send: the stopped row carries `used` with
 /// nothing accepted, and the next row's `running` includes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stopped_turn_counts() {
+async fn stopped_pass_counts() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp, "u_stopped").await;
     let n = 1 + crate::constants::CALL_RETRIES;
@@ -891,10 +891,10 @@ async fn stopped_turn_counts() {
     answers(&kernel, &a, &p).await;
     let rows = assistant_rows(&kernel, &a).await;
     assert_eq!(rows.len(), 2);
-    assert_eq!(pass_of(&rows[0])["turn"]["accepted"], zero());
+    assert_eq!(pass_of(&rows[0])["pass"]["accepted"], zero());
     let n = n as i64;
     assert_eq!(
-        pass_of(&rows[0])["turn"]["rejected"],
+        pass_of(&rows[0])["pass"]["rejected"],
         c(100 * n, 10 * n, 0, 0)
     );
     assert_eq!(
@@ -902,13 +902,13 @@ async fn stopped_turn_counts() {
         add(&pass_of(&rows[0])["total"], &pass_of(&rows[1])["total"])
     );
     assert_eq!(
-        running_of(&rows[1])["turn"]["rejected"],
+        running_of(&rows[1])["pass"]["rejected"],
         c(100 * n, 10 * n, 0, 0)
     );
 }
 
 // U19
-/// A type restart inside a turn: the discarded attempt is `turn.rejected`, and the
+/// A type restart inside a pass: the discarded attempt is `pass.rejected`, and the
 /// window is the restarted sequence's attempt 1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_counts() {
@@ -929,17 +929,17 @@ async fn restart_counts() {
     );
     let row = last_row(&kernel, &a).await;
     let pass = pass_of(&row);
-    assert_eq!(pass["turn"]["rejected"], c(100, 10, 0, 0), "{row}");
-    assert_eq!(pass["turn"]["accepted"], c(200, 20, 0, 0));
+    assert_eq!(pass["pass"]["rejected"], c(100, 10, 0, 0), "{row}");
+    assert_eq!(pass["pass"]["accepted"], c(200, 20, 0, 0));
     assert_eq!(row["attributes"]["window"], json!({"prompt": 200}));
 }
 
 // U20
-/// A task pass outside a turn: `compose` of the `context_recall` verb, and the fold
+/// A task pass outside a pass: `compose` of the `context_recall` verb, and the fold
 /// summarizer on the chat's pass. Its counts wait, then land in `pass.task` of the next
 /// stored row; the running sum holds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn task_outside_turn() {
+async fn task_outside_pass() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp, "u_task_out").await;
     let p = Metered::new(vec![
@@ -971,7 +971,7 @@ async fn task_outside_turn() {
     let rows = assistant_rows(&kernel, &a).await;
     assert_eq!(rows.len(), 2);
     assert_eq!(pass_of(&rows[1])["task"], c(340, 34, 0, 0), "{}", rows[1]);
-    assert_eq!(pass_of(&rows[1])["turn"]["accepted"], c(200, 20, 0, 0));
+    assert_eq!(pass_of(&rows[1])["pass"]["accepted"], c(200, 20, 0, 0));
     assert_eq!(
         running_of(&rows[1])["total"],
         add(&pass_of(&rows[0])["total"], &pass_of(&rows[1])["total"])
@@ -983,7 +983,7 @@ async fn task_outside_turn() {
 }
 
 // U21
-/// A task pass that fails on the link or is cancelled adds nothing, and the turn's
+/// A task pass that fails on the link or is cancelled adds nothing, and the pass's
 /// attempt after it reads only its own report.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_task_adds_nothing() {
@@ -1007,12 +1007,12 @@ async fn failed_task_adds_nothing() {
     answers(&kernel, &a, &p).await;
     let row = last_row(&kernel, &a).await;
     assert_eq!(pass_of(&row)["task"], zero(), "{row}");
-    assert_eq!(pass_of(&row)["turn"]["accepted"], c(200, 20, 0, 0));
+    assert_eq!(pass_of(&row)["pass"]["accepted"], c(200, 20, 0, 0));
     assert_eq!(pass_of(&row)["total"], c(200, 20, 0, 0));
 }
 
 // U22
-/// A `stop` the model writes is a well-formed call the chat took: `turn.accepted`.
+/// A `stop` the model writes is a well-formed call the chat took: `pass.accepted`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn model_stop_is_accepted() {
     let tmp = TempDir::new().unwrap();
@@ -1023,12 +1023,12 @@ async fn model_stop_is_accepted() {
     let p = Metered::new(vec![Step::says(&stop, rep(100, 10, None, None))]);
     answers(&kernel, &a, &p).await;
     let row = last_row(&kernel, &a).await;
-    assert_eq!(pass_of(&row)["turn"]["accepted"], c(100, 10, 0, 0), "{row}");
-    assert_eq!(pass_of(&row)["turn"]["rejected"], zero());
+    assert_eq!(pass_of(&row)["pass"]["accepted"], c(100, 10, 0, 0), "{row}");
+    assert_eq!(pass_of(&row)["pass"]["rejected"], zero());
 }
 
 // U23
-/// The shape: `pass` and `running` have exactly `turn.accepted`, `turn.rejected`,
+/// The shape: `pass` and `running` have exactly `pass.accepted`, `pass.rejected`,
 /// `task` and `total`, each exactly the four counts; `total` is the sum of the others.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn used_shape() {
@@ -1051,11 +1051,11 @@ async fn used_shape() {
     assert_eq!(keys(used), ["pass", "running"]);
     let four = ["cache_read", "cache_write", "completion", "prompt"];
     for group in [&used["pass"], &used["running"]] {
-        assert_eq!(keys(group), ["task", "total", "turn"]);
-        assert_eq!(keys(&group["turn"]), ["accepted", "rejected"]);
+        assert_eq!(keys(group), ["pass", "task", "total"]);
+        assert_eq!(keys(&group["pass"]), ["accepted", "rejected"]);
         for part in [
-            &group["turn"]["accepted"],
-            &group["turn"]["rejected"],
+            &group["pass"]["accepted"],
+            &group["pass"]["rejected"],
             &group["task"],
             &group["total"],
         ] {
@@ -1063,7 +1063,7 @@ async fn used_shape() {
             assert!(four.iter().all(|k| part[*k].is_i64()), "{part}");
         }
         let sum = add(
-            &add(&group["turn"]["accepted"], &group["turn"]["rejected"]),
+            &add(&group["pass"]["accepted"], &group["pass"]["rejected"]),
             &group["task"],
         );
         assert_eq!(group["total"], sum);

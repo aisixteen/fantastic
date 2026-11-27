@@ -3,15 +3,15 @@
 
 a) a fresh project SEEDS it with ai_core's default block as placeholders
    (`{self}`, `{howto}`) and the CLI's building rules — so the first
-   turn's system block is the default one (who it is, the tree, the how-tos)
+   pass's system block is the default one (who it is, the tree, the how-tos)
    and the rules;
 b) a canvas AI names it (`system_prompt_file: {bridge: prompt_file, path:
    prompt.md}`) and reads it through the bridge, as itself;
-c) an EDIT of the file is the block from the next turn on — no restart; the
+c) an EDIT of the file is the block from the next pass on — no restart; the
    placeholders are still filled (its own id), the replaced default is gone.
 
 The model is the parity chat stub: it records each request and answers in plain
-text (a turn ends)."""
+text (a pass ends)."""
 
 from __future__ import annotations
 
@@ -55,8 +55,8 @@ def main() -> bool:
     stub = OpenAIChatStub(_Rec(rig.art / "stub"), "stub", port)
     systems: list[str] = []
     #: each request's newest message, beside its system block: a plain answer
-    #: starts the runtime's no-call reminders, turns of their own, so "the next
-    #: request" may be one of those — a turn is found by what it answers
+    #: starts the runtime's no-call reminders, passes of their own, so "the next
+    #: request" may be one of those — a pass is found by what it answers
     lasts: list[str] = []
 
     def responder(req: dict, _raw: bytes):
@@ -77,14 +77,14 @@ def main() -> bool:
     info: dict = {}
     secs = rig.limits["seconds"]
 
-    async def turns(n: int) -> bool:
+    async def passes(n: int) -> bool:
         for _ in range(secs * 2):
             if len(systems) >= n:
                 return True
             await asyncio.sleep(0.5)
         return False
 
-    async def turn_of(words: str, start: int) -> int | None:
+    async def pass_of(words: str, start: int) -> int | None:
         """The index of the first request from `start` on answering `words`."""
         for _ in range(secs * 2):
             hit = next((i for i in range(start, len(lasts)) if words in lasts[i]), None)
@@ -101,10 +101,10 @@ def main() -> bool:
             r["seeded"] = seeded.startswith("{self}\n\n{howto}\n\n## Building here\n") and "create_agent" in seeded
             await open_chat(pg, 400, 300)
             await say(pg, "hello")
-            r["turn1"] = await turns(1)
+            r["pass1"] = await passes(1)
             s1 = systems[0] if systems else ""
-            info["turn1"] = s1[:300]
-            r["turn1_default"] = "You are `" in s1 and "## Reaching other agents" in s1 and "{self}" not in s1 and "## Building here" in s1
+            info["pass1"] = s1[:300]
+            r["pass1_default"] = "You are `" in s1 and "## Reaching other agents" in s1 and "{self}" not in s1 and "## Building here" in s1
             # b) the AI names the file
             import yaml
             recs = [yaml.safe_load(p.read_text()) or {} for p in (rig.proj / ".fantastic" / "agents").rglob("agent.yaml")]
@@ -112,17 +112,17 @@ def main() -> bool:
             info["ai"] = rec.get("id")
             r["ai_names_file"] = rec.get("file_bridge_id") == "prompt_file" and rec.get("system_prompt_file") == "prompt.md"
             r["records_persist"] = "persist through 'prompt_file' failed" not in (rig.proj / ".fantastic" / "cli" / "kernel.log").read_text(errors="ignore")
-            # c) an edit is the block on the next turn: the turn that answers "again"
+            # c) an edit is the block on the next pass: the pass that answers "again"
             await asyncio.sleep(4)
             before = len(systems)
             prompt.write_text(f"{MARK} — you are on a test canvas.\n\n{{self}}\n")
             await asyncio.sleep(1.5)
             await say(pg, "again")
-            at = await turn_of("again", before)
-            r["turn2"] = at is not None
+            at = await pass_of("again", before)
+            r["pass2"] = at is not None
             s2 = systems[at] if at is not None else ""
-            info["turn2"] = s2[:300]
-            r["turn2_edited"] = s2.startswith(MARK) and f"You are `{rec.get('id', '?')}`" in s2 and "## Reaching other agents" not in s2
+            info["pass2"] = s2[:300]
+            r["pass2_edited"] = s2.startswith(MARK) and f"You are `{rec.get('id', '?')}`" in s2 and "## Reaching other agents" not in s2
 
     try:
         asyncio.run(drive())

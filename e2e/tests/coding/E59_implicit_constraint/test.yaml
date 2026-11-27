@@ -5,12 +5,12 @@ group: coding
 title: constraints in PROSE — one positive, one negative with the forbidden string planted as bait
 runner: probe.py
 runtimes: [rust]
-costs: turns
+costs: passes
 hard_stop_minutes: 30  # two arms in one run: an exception to run.py's 15-min stop
 limits:
   idle_seconds: 60
-  max_turns: 50
-  no_progress_turns: 32
-  turn_chars: 60000
-  turn_seconds: 300
+  max_passes: 50
+  no_progress_passes: 32
+  pass_chars: 60000
+  pass_seconds: 300
 env: {E2E_WINDOW: "6000"}  # 6k: the leaner system block leaves 12k peaks under the fold trigger

@@ -4,7 +4,7 @@ id: embed_live
 group: canvas
 title: "an AI embeds a running service in a panel"
 runner: probe.py
-costs: turns
+costs: passes
 limits:
   total_seconds: 600
   quiet_seconds: 30

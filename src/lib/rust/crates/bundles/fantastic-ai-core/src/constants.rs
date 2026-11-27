@@ -30,7 +30,7 @@ pub const DEFAULT_CONTEXT_WINDOW: i64 = 131_072;
 /// Never project to a budget below this.
 pub const BUDGET_FLOOR: i64 = 256;
 
-// ─── the turn loop (python core.py) ─────────────────────────────────────────
+// ─── the pass loop (python core.py) ─────────────────────────────────────────
 
 /// Fold rows between automatic recalls. Python `RECALL_EVERY`.
 pub const RECALL_EVERY: usize = 3;
@@ -51,18 +51,18 @@ pub const SEND_TIMEOUT_SECS: f64 = 600.0;
 /// The output budget a request carries when the record names no `max_tokens`
 /// (#495): bounded, so a degenerate generation is cut by the model's own stop
 /// long before [`SEND_TIMEOUT_SECS`] instead of asking for the model's maximum.
-pub const DEFAULT_TURN_TOKENS: i64 = 260_000;
+pub const DEFAULT_PASS_TOKENS: i64 = 260_000;
 
 /// THE DEFAULT THINKING CAP PER PASS (#782): the `thinking_token_budget` a chat sends
 /// when its record names none (`null` on the record is no cap). One answer on a
 /// hermes-type model thought 16-18k tokens (227 s) under the old 16000 default, one
 /// repeating a paragraph for 71k characters, and stalled its whole team; a medium-effort
-/// agent turn thinks ~900 tokens, so 8192 only stops a runaway. Fitted below a chat's own
+/// agent pass thinks ~900 tokens, so 8192 only stops a runaway. Fitted below a chat's own
 /// `max_tokens` ([`crate::record::knobs_of`]); a server that cannot enforce it is cut by
 /// the harness ([`crate::remote_provider::complete`]).
 pub const DEFAULT_THINKING_BUDGET: i64 = 8192;
 
-/// The default `max_tokens` for a record that names none: [`DEFAULT_TURN_TOKENS`],
+/// The default `max_tokens` for a record that names none: [`DEFAULT_PASS_TOKENS`],
 /// plus the record's thinking budget when it sets one (thinking is spent out of
 /// the same budget), never above `model_max` — the model's own maximum.
 #[must_use]
@@ -70,7 +70,7 @@ pub fn default_max_tokens(thinking_budget: Option<i64>, model_max: i64) -> i64 {
     thinking_budget
         .unwrap_or(0)
         .max(0)
-        .saturating_add(DEFAULT_TURN_TOKENS)
+        .saturating_add(DEFAULT_PASS_TOKENS)
         .min(model_max)
 }
 
@@ -117,7 +117,7 @@ pub const SUMMARY_INPUT_CAP: usize = 24_000;
 /// MEASURED, not guessed. It was 80 against a real envelope of ~132, and that
 /// 50-token shortfall was not harmless: it put the strategy's projection just
 /// over budget, which woke the seam's backstop, which trims from the FRONT —
-/// where `compact` had just pinned the goal turn. The under-reserve was
+/// where `compact` had just pinned the goal message. The under-reserve was
 /// therefore the mechanism that undid "PIN THE GOAL". Re-measure this if the
 /// notice text changes. Python `ai_core/strategies/base.py`.
 pub const NOTICE_ENVELOPE_RESERVE: i64 = 160;
@@ -138,7 +138,7 @@ pub const MAX_TITLE: usize = 140;
 /// it, minus the index) puts short, user-heavy chat spans on a tiny floor the
 /// model overshoots, and nothing folds.
 pub const SUMMARY_BUDGET: i64 = 1024;
-/// Re-summarises after the first answer; past them the fold fails LOUD (the turn
+/// Re-summarises after the first answer; past them the fold fails LOUD (the pass
 /// ends `reason: fold_summary`), never a silent unfolded span.
 pub const SUMMARY_RETRIES: usize = 3;
 /// THE THINKING ALLOWANCE on a summary call's `max_tokens`.
@@ -168,7 +168,7 @@ pub const AUTOFOLD_AT: usize = 16_000;
 pub const KEEP_SUMMARY_MAX: usize = 300;
 /// Adjacent folds at the head of the view before they fold as a group.
 ///
-/// THREE, not four. A real run folds at most once per turn — each projection
+/// THREE, not four. A real run folds at most once per pass — each projection
 /// drops the view under the watermark and stops — so the head accumulates folds
 /// one at a time and this threshold is the whole story. At four it never fires:
 /// the head ends `levels [1]` and grows one fold per span forever, which is the
@@ -178,9 +178,9 @@ pub const KEEP_SUMMARY_MAX: usize = 300;
 /// than one level per cut.
 pub const FOLD_RUN: usize = 3;
 
-/// How many times a turn re-asks its model after an answer with a malformed or foreign
+/// How many times a pass re-asks its model after an answer with a malformed or foreign
 /// call, or with no call (#766 Q1, #795): at most `1 + CALL_RETRIES` attempts per sequence. After the last one
-/// failed the harness stops the turn with the `stop` call; the model is not asked again.
+/// failed the harness stops the pass with the `stop` call; the model is not asked again.
 pub const CALL_RETRIES: usize = 2;
 
 // ─── inline agent views (#339) ──────────────────────────────────────────────
@@ -208,7 +208,7 @@ pub const RENDER_CACHE_BYTES: usize = 256 * 1024 * 1024;
 
 // ─── traces (#766) ──────────────────────────────────────────────────────────
 
-/// How many trace rows one chat keeps in its store (Q4): after a turn's append, the
+/// How many trace rows one chat keeps in its store (Q4): after a pass's append, the
 /// oldest beyond this are pruned by id. 0 writes none.
 pub const TRACE_CAP: usize = 1000;
 

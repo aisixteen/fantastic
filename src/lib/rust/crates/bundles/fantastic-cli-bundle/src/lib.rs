@@ -105,7 +105,7 @@ pub enum StatusPhase {
 pub enum ContextPhase {
     /// Older messages were folded away.
     Compacted,
-    /// The context window is too small for the turn.
+    /// The context window is too small for the pass.
     TooSmall,
 }
 

@@ -65,7 +65,7 @@ async fn messages(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
 }
 
 /// Alternating user/assistant rows, each with its own text; their ids in order.
-async fn turns(kernel: &Arc<Kernel>, agent: &AgentId, texts: &[&str]) -> Vec<i64> {
+async fn send_all(kernel: &Arc<Kernel>, agent: &AgentId, texts: &[&str]) -> Vec<i64> {
     let mut ids = Vec::new();
     for (i, t) in texts.iter().enumerate() {
         let role = if i % 2 == 0 { "user" } else { "assistant" };
@@ -105,7 +105,7 @@ async fn the_default_range_is_the_rows_after_the_last_clear() {
     // No `from`/`to`: the range starts after the clear and ends at the last row.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "cf_default").await;
-    turns(&kernel, &backend, &["old one", "old two"]).await;
+    send_all(&kernel, &backend, &["old one", "old two"]).await;
     let clear = verb(
         &kernel,
         &backend,
@@ -113,7 +113,7 @@ async fn the_default_range_is_the_rows_after_the_last_clear() {
     )
     .await;
     let cleared = clear["cleared"].as_i64().expect("the clear row");
-    let ids = turns(&kernel, &backend, &["task one", "task two", "task three"]).await;
+    let ids = send_all(&kernel, &backend, &["task one", "task two", "task three"]).await;
 
     let out = verb(
         &kernel,
@@ -141,7 +141,7 @@ async fn the_default_range_is_the_rows_after_the_last_clear() {
     assert_eq!(
         msgs.len(),
         4,
-        "system, clear, fold, the next turn: {msgs:?}"
+        "system, clear, fold, the next pass: {msgs:?}"
     );
 }
 
@@ -149,7 +149,7 @@ async fn the_default_range_is_the_rows_after_the_last_clear() {
 async fn an_explicit_middle_range_leaves_the_rows_around_it_in_place() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "cf_middle").await;
-    let ids = turns(&kernel, &backend, &SIX).await;
+    let ids = send_all(&kernel, &backend, &SIX).await;
     let before = messages(&kernel, &backend).await;
 
     let out = verb(
@@ -174,7 +174,7 @@ async fn an_explicit_middle_range_leaves_the_rows_around_it_in_place() {
         .as_str()
         .unwrap()
         .starts_with(&format!("[fold {fid} ·")));
-    // the rows after the range, then the next turn, in place
+    // the rows after the range, then the next pass, in place
     assert_eq!(
         after[4..],
         before[5..],
@@ -200,7 +200,7 @@ async fn an_explicit_middle_range_leaves_the_rows_around_it_in_place() {
 async fn a_given_summary_is_used_verbatim_with_no_provider_call() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "cf_verbatim").await;
-    let ids = turns(&kernel, &backend, &SIX[..2]).await;
+    let ids = send_all(&kernel, &backend, &SIX[..2]).await;
     let s = script(&backend, vec![], Duration::ZERO);
     let summary = "  Verbatim title \n\n  exact body, kept as given  ";
 
@@ -230,7 +230,7 @@ async fn a_given_summary_is_used_verbatim_with_no_provider_call() {
 async fn an_absent_summary_calls_the_summarizer_once() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "cf_absent").await;
-    let ids = turns(&kernel, &backend, &SIX[..2]).await;
+    let ids = send_all(&kernel, &backend, &SIX[..2]).await;
     let s = script(
         &backend,
         vec![pass("Summarised title\n\nASKED: the parser\nDONE: read it")],
@@ -256,7 +256,7 @@ async fn an_absent_summary_calls_the_summarizer_once() {
 async fn a_summarizer_that_gives_nothing_folds_the_titles_and_says_so() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "cf_degraded").await;
-    turns(&kernel, &backend, &SIX[..2]).await;
+    send_all(&kernel, &backend, &SIX[..2]).await;
     script(&backend, vec![pass("   ")], Duration::ZERO);
 
     let out = verb(&kernel, &backend, json!({"type": "context_fold"})).await;
@@ -276,7 +276,7 @@ async fn a_summarizer_that_gives_nothing_folds_the_titles_and_says_so() {
 async fn history_fold_returns_the_members_of_an_operator_fold() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "cf_history").await;
-    let ids = turns(&kernel, &backend, &SIX[..4]).await;
+    let ids = send_all(&kernel, &backend, &SIX[..4]).await;
     let out = verb(
         &kernel,
         &backend,
@@ -302,7 +302,7 @@ async fn history_fold_returns_the_members_of_an_operator_fold() {
 async fn grep_reaches_the_rows_an_operator_fold_hides() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "cf_grep").await;
-    let ids = turns(&kernel, &backend, &SIX).await;
+    let ids = send_all(&kernel, &backend, &SIX).await;
     verb(
         &kernel,
         &backend,
@@ -323,7 +323,7 @@ async fn grep_reaches_the_rows_an_operator_fold_hides() {
 async fn a_range_refuses_an_empty_range_and_an_id_outside_the_view() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "cf_refuse").await;
-    let ids = turns(&kernel, &backend, &SIX[..4]).await;
+    let ids = send_all(&kernel, &backend, &SIX[..4]).await;
 
     let empty = verb(
         &kernel,
@@ -362,7 +362,7 @@ async fn a_range_refuses_an_empty_range_and_an_id_outside_the_view() {
 async fn a_range_refuses_to_cross_a_fold_or_a_clear() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "cf_cross").await;
-    let ids = turns(&kernel, &backend, &SIX[..5]).await;
+    let ids = send_all(&kernel, &backend, &SIX[..5]).await;
     verb(
         &kernel,
         &backend,
@@ -385,7 +385,7 @@ async fn a_range_refuses_to_cross_a_fold_or_a_clear() {
 
     let clear = verb(&kernel, &backend, json!({"type": "context_clear"})).await;
     let cleared = clear["cleared"].as_i64().unwrap();
-    let after = turns(&kernel, &backend, &["after one", "after two"]).await;
+    let after = send_all(&kernel, &backend, &["after one", "after two"]).await;
     // the view is [clear, after one, after two]: this range starts on the clear
     let crosses_clear = verb(
         &kernel,
@@ -404,7 +404,7 @@ async fn a_range_refuses_to_cross_a_fold_or_a_clear() {
 async fn a_default_range_after_a_fold_that_ends_the_view_is_empty() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "cf_empty_default").await;
-    turns(&kernel, &backend, &SIX[..2]).await;
+    send_all(&kernel, &backend, &SIX[..2]).await;
     let whole = verb(
         &kernel,
         &backend,
@@ -428,7 +428,7 @@ async fn a_default_range_after_a_fold_that_ends_the_view_is_empty() {
 async fn a_bad_argument_is_refused_by_name() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "cf_bad_args").await;
-    turns(&kernel, &backend, &SIX[..2]).await;
+    send_all(&kernel, &backend, &SIX[..2]).await;
 
     for (args, arg) in [
         (json!({"from": "not an id"}), "from"),
@@ -451,15 +451,15 @@ async fn a_bad_argument_is_refused_by_name() {
 }
 
 #[tokio::test]
-async fn a_turn_running_for_the_agent_refuses_the_fold() {
-    // The FIFO lock is held for the whole turn: a fold now would move the view under it.
+async fn a_pass_running_for_the_agent_refuses_the_fold() {
+    // The FIFO lock is held for the whole pass: a fold now would move the view under it.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "cf_running").await;
-    turns(&kernel, &backend, &SIX[..2]).await;
+    send_all(&kernel, &backend, &SIX[..2]).await;
     let s = script(&backend, vec![pass(DONE)], Duration::from_millis(400));
     let k2 = Arc::clone(&kernel);
     let b2 = backend.clone();
-    let turn = tokio::spawn(async move {
+    let pass_task = tokio::spawn(async move {
         crate::tests::settled(&k2, fantastic_kernel::test_support::send_settled(&k2, vec![Item::new(b2, json!({"type": "send", "text": "go"}))]))
             .await
     });
@@ -471,22 +471,22 @@ async fn a_turn_running_for_the_agent_refuses_the_fold() {
     }
     assert!(
         !s.requests.lock().unwrap().is_empty(),
-        "the turn reached the model"
+        "the pass reached the model"
     );
 
     let out = verb(
         &kernel,
         &backend,
-        json!({"type": "context_fold", "summary": "mid-turn"}),
+        json!({"type": "context_fold", "summary": "mid-pass"}),
     )
     .await;
     assert_eq!(out["reason"], "locked", "{out}");
     assert!(
-        out["error"].as_str().unwrap().contains("a turn is running"),
+        out["error"].as_str().unwrap().contains("a pass is running"),
         "{out}"
     );
 
-    turn.await.unwrap();
+    pass_task.await.unwrap();
     assert!(
         store(&kernel, &backend)
             .await
@@ -501,7 +501,7 @@ async fn a_view_array_naming_a_missing_row_is_no_view() {
     // A stale array (a row the store no longer has) is not the view: the head is.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "cf_stale").await;
-    let ids = turns(&kernel, &backend, &SIX[..3]).await;
+    let ids = send_all(&kernel, &backend, &SIX[..3]).await;
     as_agent(
         backend.clone(),
         crate::memory::save_view(

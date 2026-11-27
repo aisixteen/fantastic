@@ -33,7 +33,7 @@ pytestmark = [
     ),
 ]
 
-# A durable authored agent: on each `ping` inbox turn it echoes back. Proves the
+# A durable authored agent: on each `ping` inbox message it echoes back. Proves the
 # exec_bridge durable-agent + addressable-inbox path loads and boots in-image.
 _ECHO_CODE = (
     "import time\n"
@@ -111,7 +111,7 @@ async def test_container_deloop_backends_and_mind_boot(
 
     # 3) A durable authored agent boots on the script executor + is addressable:
     #    an unknown verb is queued to its running job's inbox (the emergent-loop
-    #    seat — the mind receives turns via on_message).
+    #    seat — the mind receives messages via on_message).
     started = await kernel.call("the_mind", "start", code=_ECHO_CODE)
     assert started.get("job_id"), f"exec_bridge start should return a job_id: {started}"
     ack = await kernel.call("the_mind", "send", type="ping", text="hi", client_id="c")

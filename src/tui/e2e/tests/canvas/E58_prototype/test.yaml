@@ -4,10 +4,10 @@ id: prototype
 group: canvas
 title: "an AI prototypes back end + front end from an empty canvas, wired both ways, then changes it"
 runner: probe.py
-costs: turns
+costs: passes
 limits:
-  # each turn's time; both cut to fit the runner's 15-minute hard stop
-  turn1_seconds: 600
-  turn2_seconds: 150
+  # each pass's time; both cut to fit the runner's 15-minute hard stop
+  pass1_seconds: 600
+  pass2_seconds: 150
   quiet_seconds: 30
 env: {}

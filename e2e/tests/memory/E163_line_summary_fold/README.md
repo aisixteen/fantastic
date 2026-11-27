@@ -12,7 +12,7 @@ the tree state is in the `fantastic` product, not the packaged kernel host: its 
 - L1: each answer writes `<call name="line_summary"><text>LINE-…-k</text></call>`: the chat
   publishes `line_summary_changed {text, ts}` once per line, in order; its `reflect` returns the
   latest as `line_summary {text, ts}`.
-- F1: turns go on until a fold lands (a fold id in the last projection's `view_ids`,
+- F1: passes go on until a fold lands (a fold id in the last projection's `view_ids`,
   `context_status`). Its title (`history {fold}`) is the latest line among its
   members (read back by `recall`); the summariser's ask was the body-only one (no title line),
   and the fold's summary is the mock's body; the next request shows `[fold N · K refs · L1]

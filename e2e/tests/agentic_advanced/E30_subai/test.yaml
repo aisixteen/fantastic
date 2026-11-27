@@ -8,7 +8,7 @@ runner: probe.py
 # `RUNTIME` is the plug the probe reads: the rust host, spawned and driven over
 # REST. The Python product keeps the old grant model (#170).
 runtimes: [rust]
-costs: turns
+costs: passes
 # SINGLE LANE: the routine spawns live AI agents that share the proxy.
 long: true
 # 30 min: it builds live agents, and every docs reply (a reflect with `tier`/`verb`/
@@ -16,10 +16,10 @@ long: true
 hard_stop_minutes: 30
 limits:
   idle_seconds: 60
-  max_turns: 50
-  no_progress_turns: 0   # disabled: planning-heavy — repeated reflects are not "no progress"; max_turns is the backstop
-  turn_chars: 120000
-  turn_seconds: 600
-env: {FANTASTIC_AI_SEND_TIMEOUT: "420", UNATTENDED: "240"}  # the first planning turns run long thinking; 180 s can cut a progressing run
-# No free selftest: a perfect actor for this task needs a live sub-AI turn (costs turns).
+  max_passes: 50
+  no_progress_passes: 0   # disabled: planning-heavy — repeated reflects are not "no progress"; max_passes is the backstop
+  pass_chars: 120000
+  pass_seconds: 600
+env: {FANTASTIC_AI_SEND_TIMEOUT: "420", UNATTENDED: "240"}  # the first planning passes run long thinking; 180 s can cut a progressing run
+# No free selftest: a perfect actor for this task needs a live sub-AI pass (costs passes).
 exclusive: true   # runs a team of AIs that takes every model slot: alone, after the pool (e2e/run.py)

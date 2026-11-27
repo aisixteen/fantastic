@@ -92,7 +92,7 @@ async fn only_a_reply_that_will_fold_carries_the_keep_call_with_its_id() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_turn_of_keep_calls_alone_is_a_turn_with_no_call() {
+async fn a_pass_of_keep_calls_alone_is_a_pass_with_no_call() {
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_kernel(&tmp, "kp_alone").await;
     widen(&kernel, &agent).await;

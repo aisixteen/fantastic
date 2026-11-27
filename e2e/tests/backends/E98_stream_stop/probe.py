@@ -49,7 +49,7 @@ async def main():
         cc[conn.id] = ["stop"]
         root.ctx.update("rx", can_call=cc)
         rx = StreamJunction.watch(root, "rx")
-        turn = asyncio.ensure_future(
+        one_pass = asyncio.ensure_future(
             root.send([{"target": conn.id, "payload": {"type": "send", "text": TASK}}])
         )
         stopped = None
@@ -64,16 +64,16 @@ async def main():
                     stopped = (await root.send(
                         [{"target": conn.id, "payload": {"type": "stop"}}]))[0]["result"]
                 break
-            if turn.done():
+            if one_pass.done():
                 break
-        out = (await asyncio.wait_for(turn, 120))[0]
+        out = (await asyncio.wait_for(one_pass, 120))[0]
         await asyncio.sleep(0.5)
         rx.drain()
         draft = next((d for d in rx.drafts.values() if d.kind == "call"), None)
         rows = await memory.rows_of(root, conn.id, conversation_only=True)
         last = next((r for r in reversed(rows) if r.get("role") == "assistant"), {})
         content = str(last.get("content") or "")
-        print(f"     stop={stopped} turn={out.get('status')} draft={draft and (len(draft.text), draft.ended, draft.aborted, draft.matched)}")
+        print(f"     stop={stopped} pass={out.get('status')} draft={draft and (len(draft.text), draft.ended, draft.aborted, draft.matched)}")
         print(f"     marker={content[:160]!r}")
         checks = [
             ("the draft reached rx before the stop", draft is not None and len(draft.text) >= 300),
@@ -81,7 +81,7 @@ async def main():
             ("the generation settled cancelled", out.get("status") == "cancelled"),
             ("the draft ABORTED (never ended, never matched)",
              draft is not None and draft.aborted == "stopped" and not draft.ended and not draft.matched),
-            ("the turn keeps the marker, not the half answer", content.startswith("[stopped by rx]")),
+            ("the pass keeps the marker, not the half answer", content.startswith("[stopped by rx]")),
             ("the marker names the call that was not sent", "[a send call to rx was not sent]" in content),
         ]
         for name, ok in checks:

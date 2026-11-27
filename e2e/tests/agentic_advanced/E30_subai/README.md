@@ -4,7 +4,7 @@ LIVE TEST 5 — build a SUB-AI that keeps working after you leave.
 
     cd src/lib/python && uv run python -u ../../../e2e/run.py --group agentic_advanced --id subai --lanes 1
 
-The probes so far all end when the model's turn ends. This one asks for something
+The probes so far all end when the model's pass ends. This one asks for something
 that OUTLIVES the conversation: a small specialised agent, wired to compute children,
 that a SCHEDULER drives on a recurrence — with no LLM in the loop at all.
 
@@ -27,7 +27,7 @@ SCORING — four HARD checks, and the last two are what make it more than probe 
                  the recurrence is aimed at its own work, not at a fixture.
   3. IT RUNS UNATTENDED
                  the harness stops watching, lets the clock tick, and the memory
-                 acquires the true total. The model's turn is OVER by then: nothing
+                 acquires the true total. The model's pass is OVER by then: nothing
                  the model does by hand can satisfy this.
   4. THE CANARY  the harness then writes a NEW reading and lets the clock tick
                  AGAIN. The stored total must follow. This separates a standing
@@ -58,7 +58,7 @@ cd src/lib/python && uv run python -u ../../../e2e/tests/agentic_advanced/subai/
 cd src/lib/python && uv run python ../../../e2e/run.py --id subai
 ```
 
-The self-test costs no model turns:
+The self-test costs no model passes:
 
 ```sh
 cd src/lib/python && uv run python -u ../../../e2e/tests/agentic_advanced/subai/selftest.py

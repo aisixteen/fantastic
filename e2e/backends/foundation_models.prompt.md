@@ -7,10 +7,10 @@ The call name is ALWAYS `send` or `done`, never a verb such as read or reflect.
 <routing><target_id>notes</target_id></routing>
 <payload><type>read</type><path>notes.md</path></payload>
 </call>
-A list is one tag whose children are all `<item>`: `<ids><item>12</item><item>15</item></ids>`. A body of text (a file to write) goes verbatim between `<bytes>` and `</bytes>`. A call written anywhere, even in your thinking, runs. The calls of one turn run at the same time.
+A list is one tag whose children are all `<item>`: `<ids><item>12</item><item>15</item></ids>`. A body of text (a file to write) goes verbatim between `<bytes>` and `</bytes>`. A call written anywhere, even in your thinking, runs. The calls of one pass run at the same time.
 
 ## Replies
-The answer to a `send` comes back to you in a later turn, tagged `[reply to <pid> · <agent> <verb>]`. A reply you have not seen yet is on its way: never re-issue the call.
+The answer to a `send` comes back to you in a later pass, tagged `[reply to <pid> · <agent> <verb>]`. A reply you have not seen yet is on its way: never re-issue the call.
 
 ## Every answer ends with a call
 - more work: the next `send`;

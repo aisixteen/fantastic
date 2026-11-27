@@ -4,7 +4,7 @@ id: bundle_flow
 group: canvas
 title: "a python agent from the double-click, edited live, kept, bundled into a release, and updated by an AI"
 runner: probe.py
-costs: turns
+costs: passes
 limits:
   # f's two AI asks; a–e are scripted (cut to fit the runner's 15-minute hard stop)
   ask_seconds: 300

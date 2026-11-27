@@ -1,7 +1,7 @@
 //! FOLDS — a compaction MARK, not a deletion.
 //!
 //! A fold is an ordinary appended row that names the rows it collapses (`refs`),
-//! carries a title (what the model reads every turn), a body (a short summary,
+//! carries a title (what the model reads every pass), a body (a short summary,
 //! pulled if it wants more), and stays one descent from its members:
 //! `grep`/`pull` on a fold id expand to its refs. Nothing is rewritten, nothing
 //! is lost, and the history becomes a tree of marks the model walks down as far
@@ -57,7 +57,7 @@ pub fn row_role(row: &Value) -> &str {
 }
 
 #[must_use]
-/// Is this row a fold MARK (rather than a turn)?
+/// Is this row a fold MARK (rather than a message)?
 pub fn is_fold(row: &Value) -> bool {
     row.get("kind").and_then(Value::as_str) == Some("fold")
 }
@@ -108,7 +108,7 @@ pub fn chains(rows: &[Value]) -> Vec<Vec<usize>> {
     keys.into_iter().map(|k| groups[&k].clone()).collect()
 }
 
-/// A chain is OPEN while its last row is an assistant turn that made a `send` —
+/// A chain is OPEN while its last row is an assistant message that made a `send` —
 /// a reply is still owed. A cancelled or failed call settles as a reply row, so
 /// a cancel closes a chain the same way an answer does.
 #[must_use]
@@ -167,7 +167,7 @@ pub struct FoldRow {
     pub kind: String,
     /// The ids of the rows it collapses.
     pub refs: Vec<i64>,
-    /// What the model reads every turn.
+    /// What the model reads every pass.
     pub title: String,
     /// The summary.
     pub body: String,
@@ -284,7 +284,7 @@ pub fn own_anchor(fold: &Value) -> Option<i64> {
 
 /// A new fold's anchor cannot be known: a member fold with no anchor, a member
 /// row without an int id, or no member at all. Python's `ValueError` out of
-/// `member_anchor` — the turn fails, loud and reported, never a panic.
+/// `member_anchor` — the pass fails, loud and reported, never a panic.
 #[derive(Debug, Clone)]
 pub struct FoldAnchorError(pub String);
 
@@ -302,7 +302,7 @@ impl std::error::Error for FoldAnchorError {}
 ///
 /// # Errors
 /// A member fold without an anchor, a member row without an int id, or no
-/// member — the fold cannot be written, and the turn says so.
+/// member — the fold cannot be written, and the pass says so.
 pub fn member_anchor(rows: &[Value], idxs: &[usize]) -> Result<i64, FoldAnchorError> {
     let mut best: Option<i64> = None;
     for &i in idxs {

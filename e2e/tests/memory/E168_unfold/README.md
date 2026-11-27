@@ -1,6 +1,6 @@
 # `unfold` (E168) — the model unfolds a folded reply with `recall` (map-once)
 
-Real model, Rust lane, `costs: turns`. One AI chat and one `file_bridge` agent (`notes`)
+Real model, Rust lane, `costs: passes`. One AI chat and one `file_bridge` agent (`notes`)
 holding `big.txt`: 100 lines of 800 characters, so the `read` reply (over 64 000
 characters, the autofold size of 16 000 tokens) folds once it is answered. Line 80 is
 `KEY=<token>`, minted at run time: the marker's head (the body's first line) does not
@@ -9,7 +9,7 @@ carry it and the task text never names it.
 Three messages, each driven to the end of its chain:
 
 1. "Read `big.txt` through `notes`. Answer only `ok`." — the reply arrives whole.
-2. An unrelated small task — one more answered turn: the fold is in force.
+2. An unrelated small task — one more answered pass: the fold is in force.
 3. "What is the token on the line that starts with `KEY=` in `big.txt`? Do not read the
    file again." — the body is only in the store: the model must send itself `recall` with
    the folded row's id (the existing verb; the marker in the request spells the call out).

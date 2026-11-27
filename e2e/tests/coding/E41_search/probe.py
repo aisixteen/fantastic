@@ -38,7 +38,7 @@ TASK = (
     "{type:'status', job_id} until it ends, read its output with "
     "{type:'tail', job_id}) to find that line. Then, using "
     "the file agent `notes`, write a file `found.md` whose content is "
-    "just the VALUE (not the whole line). Then stop — a turn with no tool "
+    "just the VALUE (not the whole line). Then stop — a pass with no tool "
     "call ends your run."
 )
 

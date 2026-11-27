@@ -1,7 +1,7 @@
 """coding/nested_folds — folds of folds, with a needle two levels down.
 
 PRESYNTHESIZED: the 32 reads are PLANTED in each arm's memory store — the read calls and
-their replies, the filler text inline — instead of spending 32 live turns producing
+their replies, the filler text inline — instead of spending 32 live passes producing
 them. The subject is unchanged: the FOLD MECHANISM folds that long past — spans fold,
 then folds fold — at a small window, and a marker sits in filler_2, under a level-1 fold
 that may itself sit under a level-2 fold. Scored: the past folded (levels reported), every fold
@@ -46,7 +46,7 @@ def planted_reads(mint) -> list[dict]:
     `read` call and the reply to it, the file's text INLINE (a planted history carries
     its replies inline — bodies are never persisted). Ids from the kernel's counter."""
     goal = {"role": "user", "id": mint(), "parent": None,
-            "content": f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER TURN, "
+            "content": f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER PASS, "
                        "noting anything unusual."}
     rows, prev = [goal], goal["id"]
     for i in range(N):

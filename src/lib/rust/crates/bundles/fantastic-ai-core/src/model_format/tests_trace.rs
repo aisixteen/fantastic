@@ -1,6 +1,6 @@
 //! The traces (#766, W9): E1-E20 and M19 of spec 2.9 and 2.1.
 //!
-//! Every turn here is the real pass path (`run_generation`) over a scripted provider
+//! Every pass here is the real pass path (`run_generation`) over a scripted provider
 //! that reports per request, as the remote provider does. A restart is the chat's state
 //! dropped (`drop_state`) and its head forgotten; on `sqlite_store` the file is closed
 //! too, so the rows come back from disk. A small cap is a test's own
@@ -530,7 +530,7 @@ async fn burst(kernel: &Arc<Kernel>, agent: &AgentId, client: &str, n: usize) {
         fields.insert("rows".into(), json!(i));
         fields.insert("kept".into(), json!(0));
         fields.insert("kept_endpoint".into(), json!(0));
-        ev.push("turn", super::DEFAULT, "render_warm", fields);
+        ev.push("pass", super::DEFAULT, "render_warm", fields);
     }
     let state = crate::state::state_for(agent);
     as_agent(
@@ -540,7 +540,7 @@ async fn burst(kernel: &Arc<Kernel>, agent: &AgentId, client: &str, n: usize) {
     .await;
 }
 
-/// The next turn's messages, as the assembly builds them.
+/// The next pass's messages, as the assembly builds them.
 pub(super) async fn assembled(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
     let state = crate::state::state_for(agent);
     as_agent(
@@ -580,7 +580,7 @@ pub(super) fn stop_call(reason: &str) -> String {
 // ─── E1-E20 ──────────────────────────────────────────────────────────────────
 
 // E1
-/// Every event carries `mode`, `client_id`, `type`, and `row` when the turn stored one;
+/// Every event carries `mode`, `client_id`, `type`, and `row` when the pass stored one;
 /// no `role`, an empty `content`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn each_event_has_ids() {
@@ -604,20 +604,20 @@ async fn each_event_has_ids() {
     );
     for r in &rows {
         assert_eq!(r["kind"], json!("trace"), "{r}");
-        assert_eq!(r["mode"], json!("turn"), "{r}");
+        assert_eq!(r["mode"], json!("pass"), "{r}");
         assert_eq!(r["type"], json!("default"), "{r}");
         assert_eq!(r["row"], json!(mid), "{r}");
         assert_eq!(r["content"], json!(""), "{r}");
         assert!(r.get("role").is_none(), "{r}");
     }
-    // a thinking-only attempt is re-asked inside its turn (#795): a `retry`, and every
-    // row names the row the turn stored
+    // a thinking-only attempt is re-asked inside its pass (#795): a `retry`, and every
+    // row names the row the pass stored
     let (_, mid) = answered(&kernel, &a, &p, "e1_think").await;
     let think = traces_of(&kernel, &a, "e1_think").await;
     assert!(names(&think).contains(&"retry".to_string()), "{think:?}");
     for r in &think {
         assert_eq!(r["row"], json!(mid), "{r}");
-        assert_eq!(r["mode"], json!("turn"), "{r}");
+        assert_eq!(r["mode"], json!("pass"), "{r}");
     }
 }
 
@@ -685,7 +685,7 @@ async fn traces_hidden_from_readers() {
     answered(&kernel, &a, &p, "e3_a").await;
     let (_, last) = answered(&kernel, &a, &p, "e3_b").await;
     let t = ids(&traces(&kernel, &a).await);
-    assert_eq!(t.len(), 2, "one render row per turn");
+    assert_eq!(t.len(), 2, "one render row per pass");
     let is_trace_id = |v: &Value| v.as_i64().is_some_and(|i| t.contains(&i));
 
     // the head cache, loaded and refreshed, and the `rows` verb over it
@@ -789,7 +789,7 @@ async fn cap_holds_under_burst() {
     let p = Scripted::new(PLAIN, vec![]);
     let mut seen: Vec<i64> = Vec::new();
     for round in 0..3 {
-        answered(&kernel, &a, &p, &format!("e4_turn{round}")).await;
+        answered(&kernel, &a, &p, &format!("e4_pass{round}")).await;
         seen.extend(ids(&traces(&kernel, &a).await));
         burst(&kernel, &a, &format!("e4_burst{round}"), cap).await;
         let rows = traces(&kernel, &a).await;
@@ -813,7 +813,7 @@ async fn cap_holds_under_burst() {
 }
 
 // E5
-/// The prune touches no turn and no `view`, `keep` or `mark` row.
+/// The prune touches no chat row and no `view`, `keep` or `mark` row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn prune_spares_other_rows() {
     let tmp = TempDir::new().unwrap();
@@ -902,7 +902,7 @@ async fn traces_survive_restart() {
             &a,
             &kernel,
             json!({"type": "append", "rows": [
-                {"kind": "trace", "event": "planted", "mode": "turn", "type": "default", "content": ""}
+                {"kind": "trace", "event": "planted", "mode": "pass", "type": "default", "content": ""}
             ]}),
         ),
     )
@@ -914,9 +914,9 @@ async fn traces_survive_restart() {
 }
 
 // E7
-/// A refused trace append, and a refused prune: the turn succeeds, its reply unchanged.
+/// A refused trace append, and a refused prune: the pass succeeds, its reply unchanged.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn refused_trace_never_fails_turn() {
+async fn refused_trace_never_fails_pass() {
     let tmp = TempDir::new().unwrap();
     let kernel = base_kernel(&tmp, |k| {
         k.bundles.register(
@@ -1038,9 +1038,9 @@ async fn first_pass_no_switch() {
 }
 
 // E11
-/// A turn cancelled after a retry writes no row, its `retry` included.
+/// A pass cancelled after a retry writes no row, its `retry` included.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cancelled_turn_writes_no_rows() {
+async fn cancelled_pass_writes_no_rows() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp, "tr_e11").await;
     let p = Scripted::new(PLAIN, vec![Step::says(DONE)]);
@@ -1079,7 +1079,7 @@ async fn dropped_why() {
             &conv(&refs(&folded), "go"),
             &Opts::default().form(3, "anchor"),
         )
-        .finish(&mut ev, "turn");
+        .finish(&mut ev, "pass");
     }
     // cut (K13): the row is gone from the view
     {
@@ -1088,7 +1088,7 @@ async fn dropped_why() {
         let all = refs(&rows);
         run(&c, &r, &conv(&all, "go"), &Opts::default());
         let view: Vec<(i64, &str)> = all.iter().copied().filter(|(i, _)| *i != 2).collect();
-        let _ = open(&c, &r, &conv(&view, "go"), &Opts::default()).finish(&mut ev, "turn");
+        let _ = open(&c, &r, &conv(&view, "go"), &Opts::default()).finish(&mut ev, "pass");
     }
     // recall (K11)
     {
@@ -1105,7 +1105,7 @@ async fn dropped_why() {
             &conv(&[(1, "q"), (2, "the whole reply"), (3, "x")], "go"),
             &Opts::default().form(2, "recalled"),
         )
-        .finish(&mut ev, "turn");
+        .finish(&mut ev, "pass");
     }
     // changed (K42): full -> full, other bytes
     {
@@ -1122,7 +1122,7 @@ async fn dropped_why() {
             &conv(&[(1, "q"), (2, "f")], "go"),
             &Opts::default().form(2, "whole"),
         )
-        .finish(&mut ev, "turn");
+        .finish(&mut ev, "pass");
     }
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp, "tr_e12").await;
@@ -1372,8 +1372,8 @@ async fn render_rows_carry_both() {
 }
 
 // E18
-/// A task pass on an endpoint that reports cache counts: inside a turn, one
-/// `prefix_cache` row with `mode: "task"` among the turn's rows; outside a turn, none.
+/// A task pass on an endpoint that reports cache counts: inside a pass, one
+/// `prefix_cache` row with `mode: "task"` among the pass's rows; outside a pass, none.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn task_rows_carry_mode() {
     let tmp = TempDir::new().unwrap();
@@ -1396,9 +1396,9 @@ async fn task_rows_carry_mode() {
     assert_eq!(task.len(), 1, "{rows:?}");
     assert_eq!(task[0]["event"], json!("prefix_cache"));
     assert_eq!(task[0]["cache_read"], json!(100));
-    assert!(rows.iter().any(|r| r["mode"] == json!("turn")), "{rows:?}");
+    assert!(rows.iter().any(|r| r["mode"] == json!("pass")), "{rows:?}");
 
-    // outside a turn: the fold summarizer on a verb's pass
+    // outside a pass: the fold summarizer on a verb's pass
     let before = traces(&kernel, &a).await;
     p.push(vec![Step::says("SUMMARY").reports(rep(
         40,
@@ -1417,16 +1417,16 @@ async fn task_rows_carry_mode() {
     assert_eq!(
         traces(&kernel, &a).await,
         before,
-        "no trace row outside a turn"
+        "no trace row outside a pass"
     );
     answered(&kernel, &a, &p, "e18_next").await;
     let next = traces_of(&kernel, &a, "e18_next").await;
-    assert!(next.iter().all(|r| r["mode"] == json!("turn")), "{next:?}");
+    assert!(next.iter().all(|r| r["mode"] == json!("pass")), "{next:?}");
 }
 
 // E19
 /// A crashed pass, at each point of RS2, RS3 and RS4: the chat's state dropped with no
-/// end-of-turn append. No trace row of that send is stored; the rows of earlier turns are
+/// end-of-pass append. No trace row of that send is stored; the rows of earlier passes are
 /// untouched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crashed_pass_writes_no_rows() {
@@ -1479,17 +1479,17 @@ async fn crashed_pass_writes_no_rows() {
 }
 
 // E20
-/// A clean turn leaves exactly its events, one row each: a cold turn, a warm turn with
-/// one retry, a turn with a drop. Then three restarts with a burst of twice the cap
+/// A clean pass leaves exactly its events, one row each: a cold pass, a warm pass with
+/// one retry, a pass with a drop. Then three restarts with a burst of twice the cap
 /// between them: after every restart the count is read once and stays within the cap;
 /// the survivors are the newest.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn clean_turn_exact_rows_cap_across_restarts() {
+async fn clean_pass_exact_rows_cap_across_restarts() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_hermes(&tmp, "tr_e20").await;
     let p = Scripted::new(QWEN, vec![]);
     let state = crate::state::state_for(&a);
-    // a cold turn
+    // a cold pass
     let (_, mid) = answered(&kernel, &a, &p, "e20_cold").await;
     let rows = traces_of(&kernel, &a, "e20_cold").await;
     assert_eq!(names(&rows), ["render_cold"], "{rows:?}");
@@ -1503,13 +1503,13 @@ async fn clean_turn_exact_rows_cap_across_restarts() {
         ["render_cold"],
         "no entry of the type was hit yet"
     );
-    // a warm turn with one retry: the internal form is foreign to hermes
+    // a warm pass with one retry: the internal form is foreign to hermes
     p.push(vec![Step::raw(DONE), Step::says(DONE)]);
     answered(&kernel, &a, &p, "e20_retry").await;
     let rows = traces_of(&kernel, &a, "e20_retry").await;
     assert_eq!(names(&rows), ["retry", "render_warm"], "{rows:?}");
     assert_eq!(rows[0]["attempt"], json!(1));
-    // a turn with a drop: after a clear, every cached row is cut
+    // a pass with a drop: after a clear, every cached row is cut
     let cached: Vec<i64> = state
         .render_cache
         .stats()
@@ -1619,7 +1619,7 @@ async fn repaired_call_traced() {
     assert_eq!(rows[0]["attempt"], json!(1), "{}", rows[0]);
     assert_eq!(rows[0]["added"], json!("}"), "{}", rows[0]);
     assert_eq!(rows[0]["type"], json!(super::hermes::NAME), "{}", rows[0]);
-    assert_eq!(rows[0]["mode"], json!("turn"), "{}", rows[0]);
+    assert_eq!(rows[0]["mode"], json!("pass"), "{}", rows[0]);
     answered(&kernel, &a, &p, "rp_b").await;
     let rows = traces_of(&kernel, &a, "rp_b").await;
     assert!(!names(&rows).contains(&"repaired".to_string()), "{rows:?}");

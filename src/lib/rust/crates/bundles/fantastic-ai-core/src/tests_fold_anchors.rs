@@ -264,7 +264,7 @@ async fn prompt(kernel: &Arc<Kernel>, agent: &AgentId) -> String {
     .to_string()
 }
 
-/// One projection, as a turn runs it: the message list, then the strategy over it;
+/// One projection, as a pass runs it: the message list, then the strategy over it;
 /// the messages it shapes for the request.
 async fn project(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
     script(
@@ -362,7 +362,7 @@ async fn folded_once(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
 
 #[tokio::test]
 async fn folds_survive_a_projection_over_the_view_array() {
-    // The bug: a turn rebuilt from the view array holds folds without their members,
+    // The bug: a pass rebuilt from the view array holds folds without their members,
     // and the next projection past TRIGGER rendered them nowhere.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = folded_once(&tmp, "fv").await;
@@ -628,7 +628,7 @@ async fn context_forget_include_cleared() {
 /// `context_forget` never moves the store under a pass in flight (#795: nothing waits on
 /// a pass, so it is refused, `locked`, while one runs); once the pass ended it compacts.
 #[tokio::test]
-async fn context_forget_waits_for_a_running_turn() {
+async fn context_forget_waits_for_a_running_pass() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "fw").await;
     let s = script(&backend, vec![pass(DONE)], Duration::from_millis(400));
@@ -642,7 +642,7 @@ async fn context_forget_waits_for_a_running_turn() {
     }
     assert!(
         !s.requests.lock().unwrap().is_empty(),
-        "the turn reached the model"
+        "the pass reached the model"
     );
     let busy = fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(backend.clone(), json!({"type": "context_forget"}))])
         .await
@@ -657,29 +657,29 @@ async fn context_forget_waits_for_a_running_turn() {
     assert!(out.result["pruned"].as_i64().is_some());
 }
 
-// ── the canvas AI cell's S8: folds at a small window, and every turn answers ──
+// ── the canvas AI cell's S8: folds at a small window, and every pass answers ──
 
 /// What the fold's summary side call answers (e2e `ai_cell` S8's responder).
 const S8_SUMMARY: &str =
-    "Filler turns about lorem ipsum\n\nASKED: filler turns\nDONE: answered each\n\
+    "Filler passes about lorem ipsum\n\nASKED: filler passes\nDONE: answered each\n\
                           BINDING: none\nERRORS: none\nOPEN: none";
 
-/// e2e `canvas.ai_cell` S8 as full turns: an AI at a 12000 window on the fold
+/// e2e `canvas.ai_cell` S8 as full passes: an AI at a 12000 window on the fold
 /// strategy (async + titled), eight long answers, each followed by the runtime's
 /// no-call reminder answered `done`. The model's two SIDE calls are answered in
 /// their own shapes — the fold's summary, and the `context_recall` a fold batch
-/// makes due — so neither takes a turn's queued answer. Every turn answers, the
-/// folds land, and the turn after them answers too.
-/// The body's room in S8's window, past its system block: a long turn is about 1 800
+/// makes due — so neither takes a pass's queued answer. Every pass answers, the
+/// folds land, and the pass after them answers too.
+/// The body's room in S8's window, past its system block: a long pass is about 1 800
 /// tokens (its 300-character ask and 6 840-character answer), so 10 000 tokens hold about
-/// five and eight turns overflow it: the folds land.
+/// five and eight passes overflow it: the folds land.
 const S8_BODY_ROOM: i64 = 10_000;
-/// The turns S8 runs at most while it waits for a fold batch to make a recall due: each
-/// turn past the fold makes at least one fold, and RECALL_EVERY of them make one due.
-const S8_TURNS_MAX: usize = 8 + 4 * crate::constants::RECALL_EVERY;
+/// The passes S8 runs at most while it waits for a fold batch to make a recall due: each
+/// pass past the fold makes at least one fold, and RECALL_EVERY of them make one due.
+const S8_PASSES_MAX: usize = 8 + 4 * crate::constants::RECALL_EVERY;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn folds_at_a_small_window_and_every_turn_answers() {
+async fn folds_at_a_small_window_and_every_pass_answers() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "s8").await;
@@ -755,7 +755,7 @@ async fn folds_at_a_small_window_and_every_turn_answers() {
             false
         }
     };
-    let turn = |text: String, reply: String| {
+    let one_pass = |text: String, reply: String| {
         let kernel = Arc::clone(&kernel);
         let backend = backend.clone();
         let s = Arc::clone(&s);
@@ -772,49 +772,49 @@ async fn folds_at_a_small_window_and_every_turn_answers() {
                 .await;
         }
     };
-    // EIGHT LONG TURNS, then on until a fold batch has made a recall due (the debounce
-    // is RECALL_EVERY folds, and how many folds a turn makes is the window's geometry):
-    // the property is that the due recall runs inside a turn, whatever turn that is
-    // the room's comment, checked: eight turns overflow it, four fit
-    let per_turn = crate::context::estimate_one(
-        &json!({"role": "user", "content": format!("turn 0 {}", &long[..300])}),
+    // EIGHT LONG PASSES, then on until a fold batch has made a recall due (the debounce
+    // is RECALL_EVERY folds, and how many folds a pass makes is the window's geometry):
+    // the property is that the due recall runs inside a pass, whatever pass that is
+    // the room's comment, checked: eight passes overflow it, four fit
+    let per_pass = crate::context::estimate_one(
+        &json!({"role": "user", "content": format!("pass 0 {}", &long[..300])}),
     ) + crate::context::estimate_one(
-        &json!({"role": "assistant", "content": format!("S8-turn-0 {long} <call name=\"done\"></call>")}),
+        &json!({"role": "assistant", "content": format!("S8-pass-0 {long} <call name=\"done\"></call>")}),
     );
     assert!(
-        4 * per_turn < S8_BODY_ROOM && S8_BODY_ROOM < 8 * per_turn,
-        "a turn is {per_turn} tokens: the room must hold four and not eight"
+        4 * per_pass < S8_BODY_ROOM && S8_BODY_ROOM < 8 * per_pass,
+        "a pass is {per_pass} tokens: the room must hold four and not eight"
     );
     let mut k = 0;
-    while k < 8 || (recalls.load(Ordering::SeqCst) == 0 && k < S8_TURNS_MAX) {
-        turn(
-            format!("turn {k} {}", &long[..300]),
-            format!("S8-turn-{k} {long} <call name=\"done\"></call>"),
+    while k < 8 || (recalls.load(Ordering::SeqCst) == 0 && k < S8_PASSES_MAX) {
+        one_pass(
+            format!("pass {k} {}", &long[..300]),
+            format!("S8-pass-{k} {long} <call name=\"done\"></call>"),
         )
         .await;
         assert!(
-            answered(format!("S8-turn-{k}")).await,
-            "turn {k} was never answered"
+            answered(format!("S8-pass-{k}")).await,
+            "pass {k} was never answered"
         );
         k += 1;
     }
     let rows = store(&kernel, &backend).await;
     assert!(
         rows.iter().any(is_fold),
-        "long turns at a window of the block plus S8_BODY_ROOM fold"
+        "long passes at a window of the block plus S8_BODY_ROOM fold"
     );
     assert!(
         recalls.load(Ordering::SeqCst) >= 1,
-        "the folds made a context_recall due, and it ran inside a turn"
+        "the folds made a context_recall due, and it ran inside a pass"
     );
-    turn(
+    one_pass(
         "still there?".to_string(),
         "S8-after-fold <call name=\"done\"></call>".to_string(),
     )
     .await;
     assert!(
         answered("S8-after-fold".to_string()).await,
-        "the turn after the folds was never answered"
+        "the pass after the folds was never answered"
     );
 }
 
@@ -850,8 +850,8 @@ fn a_fold_that_cannot_be_placed_is_an_error_not_a_panic() {
 
 #[tokio::test]
 async fn summarize_fold_reports_an_unplaceable_span_before_it_summarizes() {
-    // NO PANIC IN A TURN: a span with a member that has no known place is
-    // `FoldFail::Anchor` — the turn's error — and nothing is asked or written.
+    // NO PANIC IN A PASS: a span with a member that has no known place is
+    // `FoldFail::Anchor` — the pass's error — and nothing is asked or written.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "fa").await;
     let s = script(&backend, Vec::new(), Duration::ZERO);

@@ -111,7 +111,7 @@ async fn the_assistant_row_keeps_used_and_every_row_a_ts() {
     }
     let answer = last_answer(&kernel, &agent).await;
     assert_eq!(
-        answer["attributes"]["used"]["pass"]["turn"]["accepted"],
+        answer["attributes"]["used"]["pass"]["pass"]["accepted"],
         json!({"prompt": 100, "completion": 40, "cache_read": 600, "cache_write": 300})
     );
     assert_eq!(
@@ -138,7 +138,7 @@ async fn the_assistant_row_keeps_used_and_every_row_a_ts() {
     say(&kernel, &agent, "again").await;
     let answer = last_answer(&kernel, &agent).await;
     assert_eq!(
-        answer["attributes"]["used"]["pass"]["turn"]["accepted"],
+        answer["attributes"]["used"]["pass"]["pass"]["accepted"],
         json!({"prompt": 1000, "completion": 40, "cache_read": 0, "cache_write": 0})
     );
     assert_eq!(answer["attributes"]["window"], json!({"prompt": 1000}));
@@ -185,7 +185,7 @@ async fn the_parts_follow_the_request_and_the_request_is_unchanged() {
     assert_eq!(held[0]["ref"], user["id"]);
     assert_eq!(held[0]["form"], "whole");
     assert_eq!(held[1]["ref"], answer["id"]);
-    // the same text, the same hash: the first turn's new input is the user row now,
+    // the same text, the same hash: the first pass's new input is the user row now,
     // its content and nothing else
     assert_eq!(held[0]["hash"], part(&first, "new_input")["hash"]);
     let user_text = user["content"].as_str().unwrap();
@@ -235,7 +235,7 @@ async fn a_stored_row_maps_the_same_on_every_request_and_no_message_opens_with_a
     let s = script(&agent, passes(3), Duration::from_millis(150));
     for text in ["go", "again", "third"] {
         // ONE CHAIN PER AGENT (#227): a send while the last chain is still alive is held
-        // and answered by a wake turn; each turn here is its own chain
+        // and answered by a wake pass; each pass here is its own chain
         until_true("the chain to end", || {
             crate::state::state_for(&agent).is_quiet()
         })
@@ -285,7 +285,7 @@ async fn a_stored_row_maps_the_same_on_every_request_and_no_message_opens_with_a
 /// incoming row, with the ts taken for its first request, and the re-ask's request
 /// shows that row as the first request did.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_dead_turn_keeps_the_ts_of_its_request() {
+async fn a_dead_pass_keeps_the_ts_of_its_request() {
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_kernel(&tmp, "ra_dead_ts").await;
     // each request takes 150 ms, so a ts taken before the first is told from one after
@@ -382,7 +382,7 @@ async fn a_changed_prompt_file_changes_only_the_prompt_file_part() {
     );
     tokio::time::sleep(Duration::from_millis(300)).await;
     std::fs::write(&path, "FILE-B {howto}").unwrap();
-    // the watcher marks the file stale; a later turn reads it again
+    // the watcher marks the file stale; a later pass reads it again
     let mut after = before.clone();
     for _ in 0..10 {
         say(&kernel, &agent, "go").await;
@@ -700,7 +700,7 @@ async fn the_totals_of_a_scripted_run_validate_against_the_request_and_the_provi
         assert!(r.get("error").is_none(), "{r}");
         *s.report.lock().unwrap() = p.report.clone();
         *s.model.lock().unwrap() = p.model.to_string();
-        say(&kernel, &agent, &format!("turn {i}")).await;
+        say(&kernel, &agent, &format!("pass {i}")).await;
     }
     let all = rows(&kernel, &agent).await;
     let answers: Vec<&Value> = all.iter().filter(|r| r["role"] == "assistant").collect();
@@ -886,7 +886,7 @@ async fn a_restart_and_a_compaction_each_start_a_checkpoint_and_the_totals_go_on
 
     // A COMPACTION (the projection that fires on a fat view) clears it too
     let provider: Arc<dyn Provider> = Arc::new(SummaryProvider("SUMMARY"));
-    let mut fat = vec![turn("system", "sys")];
+    let mut fat = vec![role_msg("system", "sys")];
     fat.extend(body(60, 8000));
     fantastic_kernel::test_support::as_agent(
         agent.clone(),

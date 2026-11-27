@@ -1382,7 +1382,7 @@ fn the_catalog_carries_each_backend_kinds_record_schema() {
         .collect();
     assert_eq!(required, ["endpoint", "kv_overflow", "memory_store_id"]);
     // a required field has no default; the counts a record leaves out are read
-    // from the server before a turn — no default either
+    // from the server before a pass — no default either
     assert!(required.iter().all(|n| fields[n].get("default").is_none()));
     for n in ["model", "context_window", "kv_slots"] {
         assert!(fields[n].get("default").is_none(), "{n}");

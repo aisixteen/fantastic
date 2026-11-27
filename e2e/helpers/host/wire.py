@@ -23,7 +23,7 @@ import re
 import time
 from typing import Any
 
-#: Turn text the kernel itself wrote (a routed reply's header), not the model.
+#: Message text the kernel itself wrote (a routed reply's header), not the model.
 _ROUTED = re.compile(r"^\[(reply to|context-notice)")
 
 
@@ -100,9 +100,9 @@ class WireRoot:
 class WireTranscript:
     """The agent's transcript, read from its durable history.
 
-    `n` counts ASSISTANT turns — the same thing the in-process reader counts
+    `n` counts ASSISTANT passes — the same thing the in-process reader counts
     (one per provider pass), so the tripwires and `distinct_calls` see the same
-    numbers on every runtime. Kernel-authored turns (a routed reply's header)
+    numbers on every runtime. Kernel-authored messages (a routed reply's header)
     are user-role and never counted as passes.
     """
 
@@ -135,7 +135,7 @@ class WireTranscript:
         msgs = [m for m in rows if m.get("kind") not in WireCtx.BOOKKEEPING]
         # PRINT BOTH SIDES, count ONE. `n` and `transcript` stay assistant-only so
         # the tripwires and `distinct_calls` see exactly what the in-process
-        # reader sees — but a routed reply arrives as a USER turn, and without
+        # reader sees — but a routed reply arrives as a USER message, and without
         # showing it there is no way to tell "the model got its answer and chose
         # to stop" from "the answer never came back". Both end the chain with
         # nothing in flight and no error.
@@ -148,7 +148,7 @@ class WireTranscript:
             for t in incoming[self._seen_user:]:
                 box("-- USER ->", t, "<")
             self._seen_user = len(incoming)
-        turns = [
+        passes = [
             str(m.get("content") or "")
             for m in msgs
             if m.get("role") == "assistant"
@@ -167,15 +167,15 @@ class WireTranscript:
         # poll again from inside this poll; the 1 s throttle hid that only while a
         # dump took under 1 s, and an hour-long run's dump does not.
         transcript = object.__getattribute__(self, "transcript")
-        if len(turns) > len(transcript):
-            fresh = turns[len(transcript):]
+        if len(passes) > len(transcript):
+            fresh = passes[len(transcript):]
             transcript.extend(fresh)
             self.n = n = len(transcript)
-            # PRINT THE TURN, as the in-process reader does. Without this a wire
+            # PRINT THE PASS, as the in-process reader does. Without this a wire
             # run's log carries a verdict and nothing to explain it — the whole
             # transcript is on the far side of a socket.
             for i, t in enumerate(fresh, start=n - len(fresh) + 1):
-                box(f"-- turn {i} - ASSISTANT <-", t, ">")
+                box(f"-- pass {i} - ASSISTANT <-", t, ">")
 
     @property
     def text(self) -> str:

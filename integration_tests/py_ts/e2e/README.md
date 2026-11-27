@@ -4,7 +4,7 @@ This is the **most expensive** test layer in the repo. It is **NOT** part of
 `pytest`, `npm test`, or the normal `node --test` runs — those stay fast and free.
 This one:
 
-- spends **real inference turns** on a live vLLM server (`vllm_backend`), and
+- spends **real inference passes** on a live vLLM server (`vllm_backend`), and
 - **spawns a fresh "builder" agent** that wires the system **from zero** using only
   `curl` + the system's own readmes (no source, no kernel tools),
 

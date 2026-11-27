@@ -1,4 +1,4 @@
-# `failed_turn_retry` (E137) — a failed pass is retried only on the link (#533, #795)
+# `failed_pass_retry` (E137) — a failed pass is retried only on the link (#533, #795)
 
 Free: no model. A scripted OpenAI-compatible server (`e2e/mocks/vllm.py`; the probe
 adds a stream cut with `finish_reason: length`) plays a provider that fails, on the
@@ -14,6 +14,6 @@ PACKAGED host of `RUNTIME`, over `web_rest`: on both runtimes an `ai_chat.tools`
 
 ```sh
 cd src/lib/python
-uv run python ../../../e2e/run.py --only-free --id failed_turn_retry --lanes 2
-RUNTIME=rust uv run python ../../../e2e/tests/kernel/E137_failed_turn_retry/probe.py
+uv run python ../../../e2e/run.py --only-free --id failed_pass_retry --lanes 2
+RUNTIME=rust uv run python ../../../e2e/tests/kernel/E137_failed_pass_retry/probe.py
 ```

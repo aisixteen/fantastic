@@ -6,12 +6,12 @@ checks the provider AS THE KERNEL USES IT. Three agents on one kernel, one ask e
 
   ai         — reads a planted file through `notes` and reports the code word in it:
                tokens stream on its id, the `<call>` it wrote runs, the reply reaches
-               it, the answer carries the word, the turn ends `done/ok`, and NO stored
+               it, the answer carries the word, the pass ends `done/ok`, and NO stored
                assistant row carries thinking;
-  ai_cut     — the same backend with a 16-token budget: the cut main turn FAILS
+  ai_cut     — the same backend with a 16-token budget: the cut main pass FAILS
                naming the cut (never a fake finish) and stores no assistant row;
   ai_cancel  — a long generation cancelled mid-stream through `ps` → `cancel`: the
-               call settles `cancelled`, the turn closes `done/cancelled`, the token
+               call settles `cancelled`, the pass closes `done/cancelled`, the token
                stream stops, nothing is left in flight.
 """
 
@@ -38,7 +38,7 @@ from helpers.sse import check
 BK = _resolve_backend()
 DONE = M.DONE
 AIS = ["ai", "ai_cut", "ai_cancel"]
-#: A bound the model cannot finish a turn inside, thinking included.
+#: A bound the model cannot finish a pass inside, thinking included.
 CUT_BUDGET = 16
 
 
@@ -112,13 +112,13 @@ async def main():
         said = M.answers(rows)
         toks = _tokens(events["ai"])
         # `drive` reports a chain that simply finished as `CHAIN ENDED — nothing in
-        # flight`; only a runaway / no-progress / max-turns cap or a failed turn is a
+        # flight`; only a runaway / no-progress / max-passes cap or a failed pass is a
         # chain that did not run to its end.
         ended = not capped or capped.startswith("CHAIN ENDED")
         check(checks, "ai: the chain ran to its end", ended and not conn.trips,
               capped or conn.trips[-1:] or "")
         check(checks, "ai: tokens streamed on its id", len(toks) > 0, f"{len(toks)} token events")
-        check(checks, "ai: a turn ended done/ok", "ok" in _done_reasons(events["ai"]),
+        check(checks, "ai: a pass ended done/ok", "ok" in _done_reasons(events["ai"]),
               _done_reasons(events["ai"]))
         reads = [c["payload"].get("path") for c in ctx_score.calls_made(rows, target="notes", verb="read")]
         check(checks, "ai: its <call> to notes.read ran", "probe_code.txt" in reads, reads)
@@ -133,18 +133,18 @@ async def main():
         print(f"     reported_prompt_tokens={st.get('reported_prompt_tokens')} "
               f"calibration={st.get('calibration')}  (reported only)")
 
-        # ── ai_cut: a main turn cut by the budget is an error, never a finish ──
+        # ── ai_cut: a main pass cut by the budget is an error, never a finish ──
         await M.agent(root, core, BK, "ai_cut", record={"max_tokens": CUT_BUDGET})
         spies.append(_spy(root, core, "ai_cut", events["ai_cut"]))
         await asyncio.sleep(1.0)
         out = (await root.send([{"target": "ai_cut", "payload": {
             "type": "send", "text": "Explain in detail how rivers form.", "client_id": "ai_cut"}}]))[0]
-        # THE RESULT CARRIES THE VERDICT on both sides of the wire — a raised turn
+        # THE RESULT CARRIES THE VERDICT on both sides of the wire — a raised pass
         # settles `{error, raised: true}`. (The REST face returns the result alone,
         # not the settle's `status`.)
         res = out.get("result")
         err = str(res)
-        check(checks, "ai_cut: the cut turn FAILED", isinstance(res, dict) and res.get("raised") is True,
+        check(checks, "ai_cut: the cut pass FAILED", isinstance(res, dict) and res.get("raised") is True,
               f"status={out.get('status')} result={err[:80]}")
         check(checks, "ai_cut: the error names the cut", "max_tokens" in err or "max_output_tokens" in err,
               err[:160])
@@ -156,7 +156,7 @@ async def main():
             if _done_reasons(events["ai_cut"], "failed"):
                 break
             await asyncio.sleep(0.1)
-        check(checks, "ai_cut: the turn closed failed/error", "error" in _done_reasons(events["ai_cut"], "failed"),
+        check(checks, "ai_cut: the pass closed failed/error", "error" in _done_reasons(events["ai_cut"], "failed"),
               _done_reasons(events["ai_cut"], "failed"))
         cut_rows = await memory.rows_of(root, "ai_cut", conversation_only=True)
         check(checks, "ai_cut: no assistant row stored",
@@ -191,7 +191,7 @@ async def main():
         late = [1 for t, e in _tokens(events["ai_cancel"]) if t > t_cancel + 0.5]
         check(checks, "ai_cancel: the token stream stopped", streaming and not late,
               f"{len(late)} tokens after cancel")
-        check(checks, "ai_cancel: the turn closed done/cancelled",
+        check(checks, "ai_cancel: the pass closed done/cancelled",
               "cancelled" in _done_reasons(events["ai_cancel"]), _done_reasons(events["ai_cancel"]))
         check(checks, "ai_cancel: nothing left in flight", not await _live_tasks(root, "ai_cancel"))
 

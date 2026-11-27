@@ -39,9 +39,9 @@ pub enum ProjectFail {
     /// The memory store refused a read or a write the projection needed.
     Store(MemoryStoreError),
     /// A fold's summary would not fit its budget after every re-summarise — the
-    /// turn fails loud (python `FoldSummaryError`).
+    /// pass fails loud (python `FoldSummaryError`).
     FoldSummary(crate::strategies::fold::FoldSummaryError),
-    /// A fold's anchor cannot be known — the turn fails loud (python
+    /// A fold's anchor cannot be known — the pass fails loud (python
     /// `member_anchor`'s `ValueError`).
     FoldAnchor(crate::folds::FoldAnchorError),
     /// A summary's task answer has not come yet (#795): the projection's step sends
@@ -73,9 +73,9 @@ impl From<crate::strategies::fold::FoldFail> for ProjectFail {
 }
 
 /// The ONE canonical inbound context-notice — composed at the SEAM from a
-/// strategy's projection artifact. A `role:user` turn (the role every backend
+/// strategy's projection artifact. A `role:user` message (the role every backend
 /// reliably attends to). Carries the protocol affordances: `recall` to page
-/// dropped turns back, and persist-to-memory. Model view ONLY — never the store.
+/// dropped messages back, and persist-to-memory. Model view ONLY — never the store.
 pub fn context_notice(
     strategy: &str,
     summary: Option<&str>,
@@ -255,7 +255,7 @@ async fn ended<R, F, Fut>(
         Ok(Fitted::Shaped(sh)) => sh,
     };
     // THE VIEW ARRAY, written by every projection: what the model sees, at what
-    // resolution — so the next turn (and the next process) rebuilds the same bytes.
+    // resolution — so the next pass (and the next process) rebuilds the same bytes.
     // The fold rows this projection made go in the same append, before it (#766 RS5).
     // `projection.view_ids` below is read after it, so it names the minted ids.
     let ids: Vec<Value> = sh
@@ -300,7 +300,7 @@ fn fit(pass: &Pass, who: &For, messages: &[Value]) -> Result<Fitted, ProjectFail
     let size = |m: &Value| pass.tokens(m);
     let total = |ms: &[Value]| pass.tokens_all(ms);
     // THE BUDGET IN ESTIMATE UNITS: the record's budget, divided by how much the
-    // endpoint's own count exceeded our estimate last turn (`calib`).
+    // endpoint's own count exceeded our estimate last pass (`calib`).
     let calib = state.calib.lock().expect("calib poisoned").unwrap_or(1.0);
     let b = if calib > 0.0 {
         ((agent_budget(&meta, model_window) as f64 / calib) as i64).max(BUDGET_FLOOR)
@@ -324,13 +324,13 @@ fn fit(pass: &Pass, who: &For, messages: &[Value]) -> Result<Fitted, ProjectFail
     let sys_tokens = total(&system_block);
     let body_budget = b - sys_tokens;
     let last_cost = size(&body[body.len() - 1]);
-    // The live user turn AND the notice envelope are both non-negotiable — if
-    // there's no room for BOTH, fail loud (so the trim below never drops the live turn).
+    // The live user message AND the notice envelope are both non-negotiable — if
+    // there's no room for BOTH, fail loud (so the trim below never drops the live message).
     if body_budget < last_cost + NOTICE_ENVELOPE_RESERVE {
         let window = resolve_context_window(&meta, model_window);
         let hint = format!(
             "the system prompt ({sys_tokens} tok) leaves no room in the {window}-token \
-             window for even one turn; reduce agents/menu or raise context_window"
+             window for even one message; reduce agents/menu or raise context_window"
         );
         *state.projection.lock().expect("projection poisoned") =
             Some(json!({"fired": false, "too_small": true}));
@@ -342,7 +342,7 @@ fn fit(pass: &Pass, who: &For, messages: &[Value]) -> Result<Fitted, ProjectFail
                     "context_window": window, "system_tokens": sys_tokens,
                     // WHAT IT COULD NOT FIT — python's detail. A probe reading
                     // `too_small` off the wire needs the size and the head of
-                    // the turn that did not fit, not only the window.
+                    // the message that did not fit, not only the window.
                     "last_message_tokens": last_cost,
                     "last_message_head": body[body.len() - 1].get("content")
                         .map(|c| match c.as_str() {
@@ -376,7 +376,7 @@ fn fit(pass: &Pass, who: &For, messages: &[Value]) -> Result<Fitted, ProjectFail
         })));
     };
     let strat_name = strat_name.to_string();
-    // `none`: never shrink. An over-budget turn is refused here, before any
+    // `none`: never shrink. An over-budget message is refused here, before any
     // model call or row write, and nothing is dropped.
     if strat_name == "none" {
         return Err(ProjectFail::Refusal(json!({
@@ -412,11 +412,11 @@ fn fit(pass: &Pass, who: &For, messages: &[Value]) -> Result<Fitted, ProjectFail
         proj.stripped_bytes,
     );
     // Single budget authority: the strategy reserved the envelope, but guard the
-    // final fit anyway — trim oldest body turns (tool-pairing-safe). Never drop the
-    // last (live) turn: the failsafe above guarantees room for [notice + live turn].
-    // TRIM FROM THE MIDDLE, NOT THE FRONT. `out_body[0]` is the goal turn every
+    // final fit anyway — trim oldest body messages (tool-pairing-safe). Never drop the
+    // last (live) message: the failsafe above guarantees room for [notice + live message].
+    // TRIM FROM THE MIDDLE, NOT THE FRONT. `out_body[0]` is the goal message every
     // strategy deliberately pins (`compact`/`truncate` both put it first) and the
-    // last entry is the live turn. Taking from the front silently undoes the pin —
+    // last entry is the live message. Taking from the front silently undoes the pin —
     // with a snug window the goal sentence would be absent from the projection
     // entirely, in both strategies.
     let mut out_body = std::mem::take(&mut proj.body);
@@ -432,7 +432,7 @@ fn fit(pass: &Pass, who: &For, messages: &[Value]) -> Result<Fitted, ProjectFail
         out_body = next;
     }
     // Last resort, and only when nothing else is left to give: [goal, live] still
-    // over budget. The live turn is what the model must answer, so the goal is
+    // over budget. The live message is what the model must answer, so the goal is
     // what goes — loudly, in the notice's own count, not silently.
     while out_body.len() > 1 && over(&out_body) {
         out_body = out_body[1..].to_vec();
@@ -493,7 +493,7 @@ async fn shown(
         "stripped_bytes": proj.stripped_bytes,
         "folded": proj.folds.len(),
         "unanchored": proj.unanchored,
-        // What the model actually sees this turn — so "after reload it sees only
+        // What the model actually sees this pass — so "after reload it sees only
         // the fold" is measured from the view, never self-reported.
         "view_ids": out_body.iter().filter_map(|m| m.get("id").and_then(Value::as_i64))
             .take(200).collect::<Vec<_>>(),
@@ -502,8 +502,8 @@ async fn shown(
     }));
     // `store_len`, NOT `body.len() - 1`. `body` is the DEDUPED/trimmed model view
     // and `derive_reaction` slices the FULL durable store by this index; whenever
-    // the trimmers dropped whole turns the index came up short by that many, so the
-    // reader scanned an assistant turn written BEFORE the notice and reported a
+    // the trimmers dropped whole messages the index came up short by that many, so the
+    // reader scanned an assistant message written BEFORE the notice and reported a
     // reaction to a compaction the model had not yet seen.
     *state.compaction_mark.lock().expect("mark poisoned") =
         Some((store_len, client_id.to_string()));
@@ -511,8 +511,8 @@ async fn shown(
     *state.prev_request.lock().expect("prev_request poisoned") = None;
     if !proj.folds.is_empty() {
         // "When it feels it folded, it runs context_recall" — at the start of
-        // the next turn, over the new head. DEBOUNCED: every RECALL_EVERY-th
-        // batch (python: 11 folds, 5 recalls in 60 turns before the debounce).
+        // the next pass, over the new head. DEBOUNCED: every RECALL_EVERY-th
+        // batch (python: 11 folds, 5 recalls in 60 passes before the debounce).
         let mut since = state.folds_since.lock().expect("folds_since poisoned");
         *since += proj.folds.len();
         if *since >= RECALL_EVERY {
@@ -576,7 +576,7 @@ pub async fn derive_reaction<R, F, Fut>(
         (true, Some(m)) => m,
         _ => return next(rec, Ok(None)).await,
     };
-    // the durable turns, read by a step (#795)
+    // the durable rows, read by a step (#795)
     let me = self_id.as_str().to_string();
     crate::steps::history(self_id, kernel, rec, move |rec, store| async move {
         let r = store.map(|store| Some(reaction_from(&me, store.get(idx..).unwrap_or_default())));
@@ -585,7 +585,7 @@ pub async fn derive_reaction<R, F, Fut>(
     .await;
 }
 
-/// The reaction read itself, over the durable turns AFTER the notice cursor: did
+/// The reaction read itself, over the durable rows AFTER the notice cursor: did
 /// the model `recall` to its OWN id, or write to memory?
 ///
 /// THE MEMORY VERBS are a file_bridge's MUTATING text verbs (`write`/`edit`/
@@ -594,11 +594,11 @@ pub async fn derive_reaction<R, F, Fut>(
 /// Pure, so the SHAPES it recognizes can be pinned. It reads exactly what
 /// dispatch reads: an UNTERMINATED envelope is no call, so it
 /// is no reaction either.
-pub fn reaction_from(self_id: &str, turns: &[Value]) -> Value {
+pub fn reaction_from(self_id: &str, rows: &[Value]) -> Value {
     let mut recalled = false;
     let mut persisted = false;
     let mut recall_count: u64 = 0;
-    for m in turns {
+    for m in rows {
         if m.get("role").and_then(Value::as_str) != Some("assistant") {
             continue;
         }
@@ -632,7 +632,7 @@ mod tests {
     use super::reaction_from;
     use serde_json::json;
 
-    fn turn(content: &str) -> serde_json::Value {
+    fn message(content: &str) -> serde_json::Value {
         json!({"role": "assistant", "content": content})
     }
 
@@ -640,15 +640,15 @@ mod tests {
     fn the_reaction_reader_sees_what_dispatch_saw() {
         // AN UNTERMINATED ENVELOPE IS NOT A CALL: dispatch
         // skips it, and the reaction reader must see the same thing dispatch saw.
-        let turns = [
-            turn(
+        let rows = [
+            message(
                 r#"<call name="send"><routing><target_id>me</target_id></routing><payload><type>recall</type></payload>"#,
             ),
-            turn(
+            message(
                 r#"<call name="send"><routing><target_id>notes</target_id></routing><payload><type>write</type><path>facts.md</path><bytes>x</bytes></payload></call>"#,
             ),
         ];
-        let r = reaction_from("me", &turns);
+        let r = reaction_from("me", &rows);
         assert_eq!(
             r["recalled"], false,
             "an unterminated recall is no call: {r}"
@@ -658,12 +658,12 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_with_no_call_is_no_reaction() {
-        let turns = [
-            turn("I have finished."),
+    fn a_message_with_no_call_is_no_reaction() {
+        let rows = [
+            message("I have finished."),
             json!({"role": "user", "content": "go"}),
         ];
-        let r = reaction_from("me", &turns);
+        let r = reaction_from("me", &rows);
         assert_eq!(r["recalled"], false);
         assert_eq!(r["persisted"], false);
         assert_eq!(r["recall_count"], 0);
@@ -671,10 +671,10 @@ mod tests {
 
     #[test]
     fn a_recall_addressed_elsewhere_is_not_this_agents_reaction() {
-        let turns = [turn(
+        let rows = [message(
             r#"<call name="send"><routing><target_id>other</target_id></routing><payload><type>recall</type></payload></call>"#,
         )];
-        let r = reaction_from("me", &turns);
+        let r = reaction_from("me", &rows);
         assert_eq!(r["recalled"], false, "{r}");
     }
 }

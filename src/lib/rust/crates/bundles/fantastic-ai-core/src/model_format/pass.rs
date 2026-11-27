@@ -1,13 +1,13 @@
 //! THE PASS PATH (#766, spec 1.5): the one place the chat asks its model.
 //!
 //! A [`Pass`] is built once per pass (in `agent_loop::prepare`) and once per verb that
-//! runs a helper outside a turn (`context_recall`, `context_fold`), and is handed down
+//! runs a helper outside a pass (`context_recall`, `context_fold`), and is handed down
 //! where the provider went before. It holds the chat's provider and state and the model
 //! TYPE of the pass, fixed for its life: the type's declaration ([`Decl`]), which the
 //! map writes every model-visible text from ([`super::map`]).
 //!
 //! Two modes:
-//! - [`Mode::Turn`], the agent's turn: its view mapped for the type through the
+//! - [`Mode::Pass`], the agent's pass: its view mapped for the type through the
 //!   chat's render cache ([`Pass::view`]), one request ([`Pass::request`]), the
 //!   endpoint's report read after the stream ended ([`Pass::report`]).
 //! - [`Mode::Task`], the harness's helpers (the fold summarizer and `compose`): the
@@ -30,9 +30,9 @@
 //! count is never read from a report an earlier request left.
 //!
 //! Both modes hand their counts to the chat's token accounting ([`crate::used`]): a
-//! task pass's go to `task` as it ends; a turn attempt's go to `turn.rejected`
+//! task pass's go to `task` as it ends; a pass attempt's go to `pass.rejected`
 //! ([`Pass::rejected`]) or are held as the accepted one ([`Pass::accepted`]) until the
-//! turn's row is stored.
+//! pass's row is stored.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -51,8 +51,8 @@ use crate::state::BackendState;
 /// Which of the two kinds of model request a pass makes: the `mode` of its trace rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Mode {
-    /// The agent's turn: rendered through the cache, its answer read as calls.
-    Turn,
+    /// The agent's own pass: rendered through the cache, its answer read as calls.
+    Pass,
     /// A harness helper: rendered uncached, its answer plain text.
     Task,
 }
@@ -62,7 +62,7 @@ impl Mode {
     #[must_use]
     pub(crate) fn name(self) -> &'static str {
         match self {
-            Self::Turn => "turn",
+            Self::Pass => "pass",
             Self::Task => "task",
         }
     }
@@ -77,7 +77,7 @@ pub(crate) struct Task {
     pub(crate) report: ProviderReport,
 }
 
-/// One chat's model requests of one turn run, or of one verb.
+/// One chat's model requests of one pass, or of one verb.
 pub(crate) struct Pass {
     /// The chat's provider: the raw-text streamer.
     pub(crate) provider: Arc<dyn Provider>,
@@ -93,8 +93,8 @@ pub(crate) struct Pass {
     pub(crate) model: Option<String>,
     /// The chat record's `provider_id`.
     pub(crate) provider_id: Option<String>,
-    /// The trace events of the pass's requests, both modes, in order: a turn takes
-    /// them at its end; a verb's pass drops them (a task pass outside a turn writes no
+    /// The trace events of the pass's requests, both modes, in order: a pass takes
+    /// them at its end; a verb's pass drops them (a task pass outside a pass writes no
     /// trace row).
     events: Mutex<trace::Events>,
     /// The window estimate of each message mapped so far, by the digest of what it maps
@@ -261,7 +261,7 @@ impl Pass {
 
     /// THE TYPE RESTART (Q26, step 4): the same chat's pass for `model`, the model a
     /// failed attempt's reply named, when its type is not this pass's. The events so far
-    /// move to it, so the turn takes them all at its end. `None`: no model named, or one
+    /// move to it, so the pass takes them all at its end. `None`: no model named, or one
     /// of this pass's own type.
     pub(crate) fn retyped(&self, model: &str) -> Option<Self> {
         if model.is_empty() {
@@ -284,7 +284,7 @@ impl Pass {
         Some(next)
     }
 
-    /// THE TURN'S VIEW (step 3): `messages` in flight (their pieces, their row `id`, the
+    /// THE PASS'S VIEW (step 3): `messages` in flight (their pieces, their row `id`, the
     /// form each took) mapped for the type through the chat's render cache; the bound is
     /// read from `meta`, the chat's record, at every pass. The [`View`] holds the pass's
     /// pins until it is finished or dropped.
@@ -340,7 +340,7 @@ impl Pass {
     /// THE REPORT READ, after a request's stream ended: the endpoint's report. When it
     /// holds cache counts, a `prefix_cache` event carries them as reported, the one
     /// measured value about the endpoint's cache; nothing else reads them as a
-    /// prediction. In a turn, the model the provider names is kept as the chat's
+    /// prediction. In a pass, the model the provider names is kept as the chat's
     /// `model_seen` (spec 1.3).
     pub(crate) fn report(&self, mode: Mode) -> ProviderReport {
         let report = self.provider.report();
@@ -355,19 +355,19 @@ impl Pass {
             self.events()
                 .push(mode.name(), self.kind, "prefix_cache", fields);
         }
-        if mode == Mode::Turn {
+        if mode == Mode::Pass {
             super::rules::note_seen(&self.state, &self.provider.model());
         }
         report
     }
 
-    /// A turn attempt the chat threw away: its counts wait for the next row's
-    /// `turn.rejected` ([`crate::used::reject`]).
+    /// A pass attempt the chat threw away: its counts wait for the next row's
+    /// `pass.rejected` ([`crate::used::reject`]).
     pub(crate) fn rejected(&self, report: &ProviderReport) {
         crate::used::reject(&self.state, report);
     }
 
-    /// The turn attempt the chat took: its counts held until its row is stored
+    /// The pass attempt the chat took: its counts held until its row is stored
     /// ([`crate::used::Accepted`]).
     #[must_use]
     pub(crate) fn accepted(&self, report: &ProviderReport) -> crate::used::Accepted {

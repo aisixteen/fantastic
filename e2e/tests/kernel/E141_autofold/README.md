@@ -19,7 +19,7 @@ page of that size is delivered inline.
 - P3: after the next answer the recall reply is a `<folded … verb="recall" …
   recalled="id B" …/>` marker, and the store row B is still whole.
 - P4: a malformed answer after thinking (a foreign `<invoke name="send">` and 50 closers)
-  is re-asked inside its turn (#766): request 2 is request 1's messages, then the attempt
+  is re-asked inside its pass (#766): request 2 is request 1's messages, then the attempt
   without its thought (read no further than the delta that held the foreign tag) and the
   `[malformed call — nothing ran]` report. The store holds neither.
 - P5: the next send: no request holds the failed attempt, its thought or its report.

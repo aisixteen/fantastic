@@ -2,10 +2,10 @@
 # server plays the model for the kernel's own vllm_backend agent, driven over web_rest.
 id: sqlite_history_restart
 group: kernel
-title: "an agent's history survives a kernel restart on a sqlite_store: one scripted turn on a vllm_backend agent whose memory store is a sqlite_store (the file is the record's path), the kernel is stopped and a NEW one booted on the same dir with nothing injected, the store holds the same rows under the same key with the same ids, the agent's next request carries the first turn (it hydrated its history) and the new rows get ids above the old maximum"
+title: "an agent's history survives a kernel restart on a sqlite_store: one scripted pass on a vllm_backend agent whose memory store is a sqlite_store (the file is the record's path), the kernel is stopped and a NEW one booted on the same dir with nothing injected, the store holds the same rows under the same key with the same ids, the agent's next request carries the first pass (it hydrated its history) and the new rows get ids above the old maximum"
 runner: probe.py
 runtimes: [rust]
 costs: free
 limits:
   idle_seconds: 120
-  turn_seconds: 300
+  pass_seconds: 300

@@ -351,11 +351,11 @@ rules:
       - terminal output is compared as the concatenated data of a step
       - the first two schedule_fired only
       - heartbeat count >= 1
-      - ctx requests aligned by (agent, kind, turn)
+      - ctx requests aligned by (agent, kind, pass)
       - kernel_log compared as ordered lines per emitter prefix
     must_not_hide:
       - C76   # the ORDER of a state stream within one subscription — ONE sock
-      - B2.13 # the token/status event sequence of one turn — ONE sock
+      - B2.13 # the token/status event sequence of one pass — ONE sock
 
   - id: N12
     name: persisted_files
@@ -473,12 +473,12 @@ rules:
     why: >
       A PTY IS A BYTE STREAM, and where it is cut into `output` events is READ
       TIMING, not behaviour. Python's single event loop runs the pty fd callback
-      only after the in-flight write dispatch has finished, so one shell turn's
+      only after the in-flight write dispatch has finished, so one shell pass's
       echo + output + prompt arrive in ONE read and are coalesced BY ACCIDENT;
       the ports read on their own thread and see each write as it lands. No
       runtime has coalescing code, so there is nothing for a port to mirror.
 
-      The runtimes split one shell turn into different numbers of `output` frames
+      The runtimes split one shell pass into different numbers of `output` frames
       while the CONCATENATED BYTES are identical. The frame stream is diffed
       POSITIONALLY, so one extra frame would cascade into every later line.
 
@@ -514,7 +514,7 @@ rules:
       - A14.9    # the PTY output BYTES — the concatenation is compared, always
       - A14.10
       - C76      # the state-stream ORDER within one socket (N11), untouched
-      - B2.13    # a turn's token/status sequence — not `output`, never joined
+      - B2.13    # a pass's token/status sequence — not `output`, never joined
       - A13.17   # the frame TOTAL, recomputed rather than dropped
 
   - id: N18
@@ -564,7 +564,7 @@ rules:
       moves bucket. One line per signature, not one per row.
 
       It is normalised in the HARNESS, not by making the ports' debounce imitate
-      python's event-loop turn boundaries — that would be a new timing contract in
+      python's event-loop pass boundaries — that would be a new timing contract in
       three runtimes, to make a write count match that measures nothing but which
       thread read the rows.
 
@@ -594,7 +594,7 @@ rules:
       - C12   # a row re-parented onto a different kind of row
 
   - id: N19
-    name: row_id_order_within_a_turn
+    name: row_id_order_within_a_pass
     why: >
       N4 numbers a minted row id `<ID#n>` BY FIRST APPEARANCE, i.e. by MINT
       ORDER. This rule throws that numbering away and re-derives it from the ROWS
@@ -609,7 +609,7 @@ rules:
 
       WHY: python's single event loop cannot run a spawned task body until the
       handler that spawned it SUSPENDS; rust's runs concurrently on another
-      thread. Within one turn 2–3 ids are therefore handed out in a different
+      thread. Within one pass 2–3 ids are therefore handed out in a different
       order, and the sequence RE-CONVERGES on the next row — the same rows, the
       same parents, the same content, a permuted id assignment.
 
@@ -657,14 +657,14 @@ rules:
       reordered, a reply crossing an outgoing call → lines
     must_not_hide:
       - C76   # the order of events within one subscription
-      - B2.13 # a turn's token/status sequence
+      - B2.13 # a pass's token/status sequence
       - A13.14
 
   - id: N21
     name: self_reflect_vs_reply_delivery
     why: >
-      An agent busy with one turn is sent a PEER message and, a moment later, the
-      reply its own earlier call was waiting for. The peer turn's self-`reflect`
+      An agent busy with one pass is sent a PEER message and, a moment later, the
+      reply its own earlier call was waiting for. The peer pass's self-`reflect`
       and the reply's DELIVERY race: python records the reflect right after the
       peer `send`; a port may record the reply's `send` and its `queued` status first.
       The first `reflect`
@@ -672,12 +672,12 @@ rules:
       after it — across `send` events and `queued` statuses ONLY.
     scope: [ai_paths/events.json, ai_paths/cases/cycle.json]
     not_reordered: >
-      A `thinking` status in between — the two TURNS ran in the other order. Rust
-      shows exactly that in the cycle case (the reply's turn takes the agent's
+      A `thinking` status in between — the two PASSES ran in the other order. Rust
+      shows exactly that in the cycle case (the reply's pass takes the agent's
       queue first, its `queue_depth`s and `queued` status follow), and it stays
       a diff line: who waits changes the events' CONTENTS, not just their order.
     self_check: diff.py rulecheck — reflect after the reply's delivery → 0
-      lines; the turns in the other order → lines
+      lines; the passes in the other order → lines
     must_not_hide:
       - B2.13
       - B2.14
@@ -687,7 +687,7 @@ rules:
     name: stub_requests_paired_per_agent
     why: >
       `ai_paths` runs TWO AI agents and the stub numbers their requests in
-      ARRIVAL order across both: when `ai2`'s turn reaches the stub before
+      ARRIVAL order across both: when `ai2`'s pass reaches the stub before
       `ai`'s, every number after it shifts, so paired files read as wholly
       different. Each agent's OWN request sequence is a contract and stays
       compared in order: the k-th request of agent X (the `id=<agent>  model=`
@@ -705,7 +705,7 @@ rules:
     name: kv_conversation_digest
     why: >
       `vllm_backend` reflects the endpoint's KV session table, and each live
-      conversation is named by `sha256(system text + first user turn)[:16]`. That
+      conversation is named by `sha256(system text + first user message)[:16]`. That
       prefix embeds values the rules already declare incomparable — the root's
       minted guid (N3), the stub's OS-chosen port (N8), the runtime naming itself
       (N2) — so the id can only differ between two captures of the same tree, and

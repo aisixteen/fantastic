@@ -17,7 +17,7 @@ carries each verb's schema too, so the detail may reach the model without a
 `detailed` pull — the task done is the proof it did. Structural rooms are file legs
 with a `description` — readable in the tree, called by nobody.
 
-SCORED ON THE MODEL'S OWN CALLS (parsed from its turns) and on the FILE:
+SCORED ON THE MODEL'S OWN CALLS (parsed from its passes) and on the FILE:
   1. task done        — `answer.md` on the desk holds the vault's secret;
   2. oneliners first  — a reflect of the vault at the oneliners tier (a plain reflect
                         carries the one-line verbs block) before its first `open`;
@@ -92,8 +92,8 @@ def _calls(transcript: list[str]) -> list[tuple[str, dict]]:
     from ai_core.tool_parse import extract_tool_calls
 
     out: list[tuple[str, dict]] = []
-    for turn in transcript:
-        for c in extract_tool_calls(turn or ""):
+    for one_pass in transcript:
+        for c in extract_tool_calls(one_pass or ""):
             a = c.get("arguments") or {}
             payload = a.get("payload") if isinstance(a.get("payload"), dict) else {}
             out.append((str(a.get("target_id") or ""), payload))
