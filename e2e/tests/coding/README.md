@@ -23,7 +23,7 @@ The byte surface is the `file_bridge` streams; the EDIT organ is the same bridge
 | `repo_map` | organs only, NO map organ (C14) | map a REAL package (aider, local clone) file-by-file — a minted module proves it was built, not recited |
 | `compaction` | Context Protocol: truncate + `recall` (codex compact/truncation) | tiny window drops an early fact; the model recalls it from the whole durable transcript |
 | `memory_distill` | memory as files on a `file_bridge` + the persist-on-notice howto | a fact distilled to `memory.md` is recovered by a COLD, history-less session |
-| `fanout` | batch send + `N of M` reply tags (codex tool_parallelism) | five independent reads in ONE turn's batch, not five turns |
+| `fanout` | batch send + `N of M` reply tags (codex tool_parallelism) | five independent reads in ONE pass's batch, not five passes |
 | `peer_review` | two AI agents + exec_bridge + editor (codex auto_review) | a reviewer agent reads the coder's `git diff` and REJECTS a planted flaw; roles `coder` / `reviewer` take `FANTASTIC_AI_MODEL_CODER` / `_REVIEWER` |
 | `gated_write` | `can` lines + delegation (codex guardian) | the writer holds only `reflect` on the vault, so its write is the unknown answer; a PEER agent holding `update` on the writer's `can` and a line on the vault hands it `write`, and the retry lands |
 | `job_mail` | exec_bridge MAIL over the control fd (codex unified_exec) | the model steers a RUNNING job by mail mid-run; the job writes the mailed token |

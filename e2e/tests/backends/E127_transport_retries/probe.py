@@ -1,4 +1,4 @@
-"""backends/transport_retries — a dropped link is retried visibly, then the turn works. NO MODEL.
+"""backends/transport_retries — a dropped link is retried visibly, then the pass works. NO MODEL.
 
 The vllm mock (`e2e/mocks/vllm.py`) answers HTTP 503, and the kernel's own `vllm_backend`
 agent on the PACKAGED host of `RUNTIME` (rust), every call through `web_rest`, retries:
@@ -6,7 +6,7 @@ agent on the PACKAGED host of `RUNTIME` (rust), every call through `web_rest`, r
   A. one 503, then an answer: two requests, the second carries the `[retry 1/2]` notice
      row, a `retrying` status (attempt 1 of 2, the error naming 503) is emitted, the
      notice is stored, the planted token is the final answer, the agent ends idle;
-  B. a 503 on every try with `transport_retries: 1`: the turn fails loud naming 503
+  B. a 503 on every try with `transport_retries: 1`: the pass fails loud naming 503
      after 1 try + 1 link retry, and nothing re-runs it (#795): two requests, one
      `retrying` status;
   C. a 400 (a model-side refusal) and `transport_retries: 0` on a 503: one request
@@ -92,13 +92,13 @@ def main() -> int:
     def retrying(events: list) -> list[dict]:
         return [e for e in list(events) if e.get("type") == "status" and e.get("phase") == "retrying"]
 
-    def run_turn(text: str):
+    def send_one(text: str):
         """One send (acked, #795), its pass followed to its end (`done`/`failed`) over
         the ws face: the outcome, the pass's events, the requests it made."""
-        before = len(m.turns())
+        before = len(m.passes())
         out = run_pass(hk, AI, {"type": "send", "text": text, "client_id": "tab1"}, bound=15)
         idle()  # the pass's work settles before the next case
-        return out, out["events"], m.turns()[before:]
+        return out, out["events"], m.passes()[before:]
 
     def idle(bound: float = 30) -> bool:
         end = time.monotonic() + bound
@@ -133,11 +133,11 @@ def main() -> int:
         token = "ANSWER-" + secrets.token_hex(4)
         m.error(503, times=1)
         m.reply(f"{token} {DONE}")
-        out, events, turns = run_turn("hello")
+        out, events, passes = send_one("hello")
         need(not out.get("error"), f"A: the send succeeds after the retry: {str(out)[:200]}")
-        need([t["answered"] for t in turns] == [503, 200], f"A: 503 then 200: {[t['answered'] for t in turns]}")
-        second = json.dumps((turns[1]["body"] if len(turns) > 1 else {}).get("messages") or [])
-        first = json.dumps((turns[0]["body"] if turns else {}).get("messages") or [])
+        need([t["answered"] for t in passes] == [503, 200], f"A: 503 then 200: {[t['answered'] for t in passes]}")
+        second = json.dumps((passes[1]["body"] if len(passes) > 1 else {}).get("messages") or [])
+        first = json.dumps((passes[0]["body"] if passes else {}).get("messages") or [])
         need("[retry 1/2]" in second and "[retry 1/2]" not in first,
              "A: the second request carries the [retry 1/2] notice row, the first does not")
         ret = retrying(events)
@@ -151,30 +151,30 @@ def main() -> int:
         # B · a 503 on every try, one retry allowed
         hk.send(root, {"type": "update_agent", "id": AI, "transport_retries": 1})
         m.error(503, times=None)
-        out, events, turns = run_turn("again")
+        out, events, passes = send_one("again")
         m.error(None)
         need(bool(out.get("error")) and "503" in json.dumps(out),
-             f"B: the turn fails loud naming 503: {str(out)[:200]}")
-        need(len(turns) == 2,
-             f"B: 2 requests (1 try + 1 link retry; nothing re-runs the failed turn): "
-             f"{len(turns)}")
+             f"B: the pass fails loud naming 503: {str(out)[:200]}")
+        need(len(passes) == 2,
+             f"B: 2 requests (1 try + 1 link retry; nothing re-runs the failed pass): "
+             f"{len(passes)}")
         need(len(retrying(events)) == 1, f"B: exactly one retrying status: {len(retrying(events))}")
         need(idle(), "B: the agent ends idle")
 
         # C · no retry for a 400, nor with retries off
         hk.send(root, {"type": "update_agent", "id": AI, "transport_retries": 2})
         m.error(400, times=None)
-        out, events, turns = run_turn("bad request")
+        out, events, passes = send_one("bad request")
         m.error(None)
-        need(bool(out.get("error")) and len(turns) == 1 and not retrying(events),
+        need(bool(out.get("error")) and len(passes) == 1 and not retrying(events),
              f"C: a 400 is not link-retried: "
-             f"{len(turns)} request(s), {len(retrying(events))} retrying")
+             f"{len(passes)} request(s), {len(retrying(events))} retrying")
         hk.send(root, {"type": "update_agent", "id": AI, "transport_retries": 0})
         m.error(503, times=None)
-        out, events, turns = run_turn("no retries")
+        out, events, passes = send_one("no retries")
         m.error(None)
-        need(bool(out.get("error")) and len(turns) == 1 and not retrying(events),
-             f"C: transport_retries 0 → a 503 is not link-retried: {len(turns)} request(s)")
+        need(bool(out.get("error")) and len(passes) == 1 and not retrying(events),
+             f"C: transport_retries 0 → a 503 is not link-retried: {len(passes)} request(s)")
     finally:
         hk.close()
         m.stop()

@@ -301,7 +301,7 @@ const VLLM_REQUIRED = ["VLLM_ENDPOINT", "FANTASTIC_AI_MODEL", "VLLM_KV_SLOTS", "
  *  undefined while it is unset (every live-LLM test skips).
  *  `vllm` → vllm_backend: the server's `/v1` URL (`VLLM_ENDPOINT`), the
  *  served model (`FANTASTIC_AI_MODEL`) and the KV session table's size and policy
- *  (`VLLM_KV_SLOTS`, `VLLM_KV_OVERFLOW`) — all required, nothing guessed; a turn's
+ *  (`VLLM_KV_SLOTS`, `VLLM_KV_OVERFLOW`) — all required, nothing guessed; a pass's
  *  `max_tokens` is the e2e suite's one budget (65536, `MAX_TOKENS` overrides).
  *  `ollama` → ollama_backend at the MODEL'S FULL context (gemma4:12b = 262144 /
  *  256K) — proven to fit RAM on the 32GB box (resident KV is usage-based, ~8GB at

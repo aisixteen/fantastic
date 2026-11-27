@@ -6,17 +6,17 @@ the test through `web_rest`. The agent's `memory_store_id` is a
 `sqlite_store` agent `hist` whose file is its record's `path` (`stores/hist.db`).
 
 SCRIPT:
-  1. turn one: the test sends the agent a message carrying a unique token; the model
+  1. pass one: the test sends the agent a message carrying a unique token; the model
      answers with another token and `done`. The store `dump` is read: the agent's rows
      (user, assistant, call) are recorded with their ids.
   2. the kernel process is STOPPED (`hk.close()`) and a NEW one is booted on the SAME
      directory (`hk.boot()`: the tree and the file are all that is shared). Nothing is
      dumped or injected.
-  3. turn two: a second message, a second scripted answer. (The restarted agent first
+  3. pass two: a second message, a second scripted answer. (The restarted agent first
      asks the model to rebuild its working context from the rows it read back; the
      probe answers that request apart, so it takes no scripted answer.)
 
-Checks: the first turn left user and assistant rows under `<guid>|bot`; after the
+Checks: the first pass left user and assistant rows under `<guid>|bot`; after the
 restart the store holds EXACTLY those rows (ids and content); the second request to the
 model carries the first token (the agent hydrated its history from the file); the new
 rows have ids above the old maximum; `stores/hist.db` is a file and the store's
@@ -65,7 +65,7 @@ def last_user(req: dict) -> str:
 def recall_only(req: dict) -> str | None:
     """A restarted agent first asks the model to rebuild its working context from the
     rows it read back: answered here with a plain line, so it never takes a scripted
-    answer meant for a turn."""
+    answer meant for a pass."""
     if "rebuilding your own working context" in last_user(req):
         return "The head is fine as it is."
     return None
@@ -120,11 +120,11 @@ def main() -> int:
                         can={STORE: ALL, PROV: PROVIDER})
         need(rec.get("id") == AI, f"create the agent on that store: {str(rec)[:200]}")
 
-        # ── turn one ─────────────────────────────────────────────────────────
+        # ── pass one ─────────────────────────────────────────────────────────
         m.reply(f"Noted {A1}.{DONE}")
         out = hk.send(AI, {"type": "send", "text": f"Remember {Q1}."})
         need(not out.get("error"), f"the first send is accepted: {str(out)[:200]}")
-        need(idle(), "turn one settles")
+        need(idle(), "pass one settles")
         before = agent_rows()
         text = json.dumps(before)
         need(Q1 in text and A1 in text,
@@ -149,26 +149,26 @@ def main() -> int:
              "every old row is back with the same content")
         need(owners() == old_owners, f"the same owners (same guid): {owners()} vs {old_owners}")
 
-        # ── turn two: the agent hydrated its history ─────────────────────────
-        seen = len(m.turns())
+        # ── pass two: the agent hydrated its history ─────────────────────────
+        seen = len(m.passes())
         m.reply(f"Also noted {A2}.{DONE}")
         out = hk.send(AI, {"type": "send", "text": f"And now {Q2}."})
         need(not out.get("error"), f"the second send is accepted: {str(out)[:200]}")
-        need(idle(), "turn two settles")
-        turns = m.turns()[seen:]
-        need(bool(turns), "the second message reached the model")
-        req = json.dumps(turns[-1]["body"].get("messages") if turns else [])
+        need(idle(), "pass two settles")
+        passes = m.passes()[seen:]
+        need(bool(passes), "the second message reached the model")
+        req = json.dumps(passes[-1]["body"].get("messages") if passes else [])
         need(Q1 in req and A1 in req,
-             "the second request carries the first turn: the agent read its history from the file")
+             "the second request carries the first pass: the agent read its history from the file")
         need(Q2 in req, "…and the new message")
-        for i, t in enumerate(turns):
+        for i, t in enumerate(passes):
             ms = t["body"].get("messages") or []
-            print(f"  ── request {i + 1} of turn two: {len(ms)} messages, last: "
+            print(f"  ── request {i + 1} of pass two: {len(ms)} messages, last: "
                   f"{json.dumps(ms[-1] if ms else None)[:200]}", flush=True)
         final = agent_rows()
         new = [r for r in final if r["id"] not in old_ids]
         need(Q2 in json.dumps(new) and A2 in json.dumps(new),
-             f"the second turn's rows were appended: {len(new)} new rows")
+             f"the second pass's rows were appended: {len(new)} new rows")
         need(bool(new) and min(r["id"] for r in new) > old_max,
              f"new ids are above the old maximum {old_max}: {sorted(r['id'] for r in new)}")
 

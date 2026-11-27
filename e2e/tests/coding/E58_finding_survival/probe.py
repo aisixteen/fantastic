@@ -42,7 +42,7 @@ N = 8
 DONE = 'end your run by calling done — emit <call name="done"></call>'
 TASK = (
     f"Survey the corpus: read `filler_0.txt` through `filler_{N - 1}.txt` ({N} files) "
-    "through the editor `notes`, ONE PER TURN. Some files may carry an audit marker "
+    "through the editor `notes`, ONE PER PASS. Some files may carry an audit marker "
     "line — note anything unusual as you go. Then write `report.md` through `notes`: "
     "list every file you read, one per line, and if any file carried an audit marker, "
     "add the line `marker: <filename> <marker value>`. Do not re-read files. "
@@ -77,7 +77,7 @@ async def main():
         report((recency, facts), lambda a: (
             f"FOUND exact={found(a)[0]}  token anywhere={found(a)[1]}  "
             f"checkpointed the token={any(token in f['text'] for f in a['stored'])}"))
-        def distilled(a):  # the model SAID what the read told it, in its own turn
+        def distilled(a):  # the model SAID what the read told it, in its own pass
             return any(m.get("role") == "assistant" and token in str(m.get("content"))
                        for m in a["msgs"])
 

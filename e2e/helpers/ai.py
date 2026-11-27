@@ -9,14 +9,14 @@ The failure modes it handles:
 
   * `ps`/`cancel` are KERNEL verbs. Addressed to the AI agent they come back
     `not_here`, and a harness that discards the reply cancels NOTHING — capped
-    runs are abandoned, not killed, and their turns keep running.
+    runs are abandoned, not killed, and their passes keep running.
   * A dead chain announces itself as `status(reason=error)` on the AI's own
     inbox. With no subscriber it goes nowhere and a chain that died mid-flight
     reads as a model that chose to stop.
   * `ai_core` RETURNS `{"error": …}` rather than raising, so a first send that
     timed out would score as "the model produced nothing".
-  * A fixed turn budget cannot tell "slower" from "worse" — under parallel load
-    a probe can hit a turn cap mid-work it finishes solo. The cap counts turns
+  * A fixed pass budget cannot tell "slower" from "worse" — under parallel load
+    a probe can hit a pass cap mid-work it finishes solo. The cap counts passes
     since the last NEW call instead.
 
 `can` is a REQUIRED argument (deny-all posture: a new agent holds no lines and
@@ -53,8 +53,8 @@ class Connected:
     trips: list[str] = field(default_factory=list)
     #: Every `context:compacted` event this agent pushed, in order — the ONLY
     #: non-racy record that compaction actually happened. `context_status` reports
-    #: the LAST projection, which is overwritten every turn: a run that compacted
-    #: five times and then ended on a turn that fit reads `fired: False` there. A
+    #: the LAST projection, which is overwritten every pass: a run that compacted
+    #: five times and then ended on a pass that fit reads `fired: False` there. A
     #: probe that scores what survived compaction must first prove there WAS one.
     compactions: list[dict] = field(default_factory=list)
     #: THE STREAM JUNCTION (`helpers/stream.py`) — the agent's streaming parts, as
@@ -63,7 +63,7 @@ class Connected:
     _tasks: list = field(default_factory=list)
 
     @property
-    def turns(self) -> int:
+    def passes(self) -> int:
         return self.proxy.n
 
     @property
@@ -76,7 +76,7 @@ class Connected:
 
 
 # THE CHAT/PROVIDER SPLIT (#615, #632). An AI is TWO agents: the PROVIDER (`<id>_prov`, the
-# backend record: endpoint, model, key, KV slots — its identity) completes turns and holds no
+# backend record: endpoint, model, key, KV slots — its identity) completes passes and holds no
 # conversation; the CHAT (`ai_chat.tools`) holds the conversation, every line and the request
 # knobs it sends with each request (sampling, max_tokens), and completes through the provider
 # its `provider_id` names, by its own line on it (`complete`, `watch`, `capabilities`).
@@ -233,10 +233,10 @@ async def connect(
         )
 
     # THE TRANSCRIPT, from whichever side of the wire we are on. In process the
-    # reader WRAPS the provider, which is what gives it the per-turn tripwires
+    # reader WRAPS the provider, which is what gives it the per-pass tripwires
     # (chars/second bounds) and the system block. Across a socket there is no
     # provider object to wrap, so the same transcript is read from the agent's
-    # own durable history — the numbers `distinct_calls` and the turn tripwires
+    # own durable history — the numbers `distinct_calls` and the pass tripwires
     # see are identical either way.
     if core is None:
         from helpers.host.wire import WireTranscript
@@ -247,7 +247,7 @@ async def connect(
         from helpers.proxy import ProxyReader
 
         # NO CONNECT-TIME BUILD: `inner` is the provider ai_core builds for each
-        # turn (`wrap_with` seats it), so nothing is built before the first turn.
+        # pass (`wrap_with` seats it), so nothing is built before the first pass.
         conn.proxy = ProxyReader(None, L, trips=conn.trips, watch=watch)
         WRAPS[aid] = wrap_with(conn.proxy)
 
@@ -257,8 +257,8 @@ async def connect(
     # SEE A DEAD CHAIN — a failed handoff announces itself as status(error) on
     # the agent's own stream, and with nobody listening it goes nowhere.
     def _failed(msg: str) -> None:
-        print(f"\n  ** TURN FAILED: {msg} **\n", flush=True)
-        conn.trips.append(f"turn failed: {msg}")
+        print(f"\n  ** PASS FAILED: {msg} **\n", flush=True)
+        conn.trips.append(f"pass failed: {msg}")
 
     def _died(ev: dict, det: dict) -> bool:
         """A call that ENDED for any reason but `ok` (#714 phases).
@@ -267,7 +267,7 @@ async def connect(
         retries run out (`gave_up`); `done{reason:"cancelled"}` is a cancel.
         `detail.error` alone is not enough: without this, a chain that died at the
         ceiling and a model that chose to stop write the identical transcript.
-        An answer with no call is re-asked inside its turn (#795) and ends nothing.
+        An answer with no call is re-asked inside its pass (#795) and ends nothing.
         """
         if ev.get("type") != "status":
             return False
@@ -284,7 +284,7 @@ async def connect(
     def _note_end(det: dict) -> None:
         """EVERY CALL'S END, not only a failed one, so a chain that stopped after a
         clean end says HOW it ended."""
-        print(f"  · turn ended: {det.get('reason') or 'ok'}", flush=True)
+        print(f"  · pass ended: {det.get('reason') or 'ok'}", flush=True)
 
     if core is None:
         # THE SAME EVENTS, over the socket. A failed pass announces itself as a
@@ -301,7 +301,7 @@ async def connect(
                     if _errored(ev, det):
                         _failed(str(det["error"]))
                     if _died(ev, det):
-                        _failed(f"turn ended: {det.get('reason')}")
+                        _failed(f"pass ended: {det.get('reason')}")
                     elif _ended(ev):
                         _note_end(det)
                     if ev.get("type") == "context" and ev.get("phase") == "too_small":
@@ -326,7 +326,7 @@ async def connect(
             ev = await q.get()
             det = ev.get("detail") or {}
             if _died(ev, det):
-                _failed(f"turn ended: {det.get('reason')}")
+                _failed(f"pass ended: {det.get('reason')}")
             elif _ended(ev):
                 _note_end(det)
             if _errored(ev, det):
@@ -442,7 +442,7 @@ async def human(
     person is sixteen copies to drift, and the wiring is the part that is easy to
     get wrong: the AI and the human are SIBLINGS, so neither reaches the other by
     position and siblings need a line each way, or the first task is refused and
-    the chain never starts (zero turns, a clean cap, nothing to read).
+    the chain never starts (zero passes, a clean cap, nothing to read).
 
     The AI's `user` line comes from `connect(can=…)` — it belongs to the AI's own
     record, which this helper does not own. Every AI named here must already exist
@@ -476,7 +476,7 @@ DONE_QUIET = 1.0
 TICK = 0.5
 #: Minimum seconds between two `ps` checks of one chain.
 PS_EVERY = 2.0
-#: The model's `done` call, in its last turn.
+#: The model's `done` call, in its last pass.
 _DONE_CALL = re.compile(r'<call\s+name="done"')
 #: Kernel service work and the driver's own calls — never a peer still working.
 _QUIET_VERBS = {"ps", "persist_writer", "flush_executions", "ws_drain", "inbound_call"}
@@ -521,16 +521,16 @@ class QuietWatch:
 class ChainEnd:
     """Has the chain ENDED? The one check every drive loop shares.
 
-    A chain is over when no turn has landed for 30 s and nothing of the AI's is
-    in flight — or, once its last turn called `done`, after DONE_QUIET seconds
-    and nothing in flight ANYWHERE (no sub-AI turn, job or tick of a peer), so a
-    test whose peers still report back keeps the 30 s rule. A chain whose last turn
+    A chain is over when no pass has landed for 30 s and nothing of the AI's is
+    in flight — or, once its last pass called `done`, after DONE_QUIET seconds
+    and nothing in flight ANYWHERE (no sub-AI pass, job or tick of a peer), so a
+    test whose peers still report back keeps the 30 s rule. A chain whose last pass
     called `done` stays open while any peer has work in flight (#795: `done` is
     "nothing more from me now", a peer's report wakes it; the 15-min hard stop still
     bounds it). Waiting the 30 s window after the model has already called done would
     add that much to every test's wall.
 
-    `check` is called only while no new turn has landed; it reads `ps` at most
+    `check` is called only while no new pass has landed; it reads `ps` at most
     every PS_EVERY seconds. Returns (cap, busy): `cap` is the CHAIN ENDED
     reason, `busy` says the AI itself has work in flight.
     """
@@ -571,11 +571,11 @@ class ChainEnd:
         ]
         if (idle < 30 or waiting) and peers:
             return "", False  # said done, and a peer is still working
-        # DUMP THE TABLE. "no turn and nothing in flight" is a conclusion; the
+        # DUMP THE TABLE. "no pass and nothing in flight" is a conclusion; the
         # rows are the evidence. Without them a chain that ended and a detector
         # that fired too early look identical from the transcript.
         return (
-            f"CHAIN ENDED — no turn and nothing in flight after {idle:.0f}s"
+            f"CHAIN ENDED — no pass and nothing in flight after {idle:.0f}s"
             f"{' (the model called done)' if idle < 30 else ''}"
             f" · ps={[(t.get('agent'), t.get('verb')) for t in rows]}"
         ), False
@@ -646,8 +646,8 @@ async def drive(
         elif conn.proxy.n != last:
             stale += 1
 
-        # CHAIN DEATH. The per-turn tripwires only fire when a turn LANDS, so a
-        # model that simply stops producing turns evades all of them and the run
+        # CHAIN DEATH. The per-pass tripwires only fire when a pass LANDS, so a
+        # model that simply stops producing passes evades all of them and the run
         # sits out the full idle window before scoring. See `ChainEnd`.
         if conn.proxy.n == last and last > 0:
             cap, busy = await ender.check(conn.proxy.transcript, idle)
@@ -655,7 +655,7 @@ async def drive(
                 capped = cap
             elif busy and idle >= 30:
                 # A generation IS in flight — that is activity, not idleness.
-                # Without this hold, a single long turn (a big write after a big
+                # Without this hold, a single long pass (a big write after a big
                 # read) could outlive L.idle and the while-condition would exit
                 # SILENTLY mid-generation.
                 # Held at 28 so the in-flight check re-runs; a truly hung task
@@ -664,11 +664,11 @@ async def drive(
                 idle = 28.0
 
         if conn.trips:
-            capped = "RUNAWAY TURN — " + conn.trips[-1]
+            capped = "RUNAWAY PASS — " + conn.trips[-1]
         elif L.no_progress and stale >= L.no_progress:
-            capped = f"NO_PROGRESS={L.no_progress} turns with no new call"
-        elif L.max_turns and conn.proxy.n >= L.max_turns:
-            capped = f"MAX_TURNS={L.max_turns}"
+            capped = f"NO_PROGRESS={L.no_progress} passes with no new call"
+        elif L.max_passes and conn.proxy.n >= L.max_passes:
+            capped = f"MAX_PASSES={L.max_passes}"
 
         if capped:
             # Cancel through the TASK TABLE — the same ps/cancel an operator

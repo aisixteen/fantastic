@@ -2,10 +2,10 @@
 # server plays the model for the kernel's own ai_chat.tools chat over a vllm_backend provider, driven over web_rest.
 id: scripted_ai
 group: kernel
-title: "an AI agent's call loop against a scripted model: a call runs and its reply is the next prompt, a file write lands verbatim, calls written wrong are re-asked inside the turn with the compiler-style report and never stored, a call inside <think> is not dispatched, done ends the chain"
+title: "an AI agent's call loop against a scripted model: a call runs and its reply is the next prompt, a file write lands verbatim, calls written wrong are re-asked inside the pass with the compiler-style report and never stored, a call inside <think> is not dispatched, done ends the chain"
 runner: probe.py
 runtimes: [rust]
 costs: free
 limits:
   idle_seconds: 120
-  turn_seconds: 300
+  pass_seconds: 300

@@ -7,7 +7,7 @@ voids the run — then nothing was at risk.
 
 PRE-SEEDED: the reads are PLANTED — the instruction, each read call and
 its reply inline — and the last reply arrives live, so the run continues that chain: the
-folding and the answer are the model's own, without spending a live turn per file.
+folding and the answer are the model's own, without spending a live pass per file.
 """
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ FB = "foldlong_fb"
 N = 24
 KEYS = ("owner", "build", "rev", "checksum", "region", "lane")
 TASK = (
-    "Work through this sequence through `notes`, ONE file per turn: read `rules_a.md`, "
+    "Work through this sequence through `notes`, ONE file per pass: read `rules_a.md`, "
     "then filler_0..filler_5; read `rules_b.md`, then filler_6..filler_11; read `rules_c.md`, "
     "then filler_12..filler_17; read `rules_d.md`, then filler_18..filler_23. Every rules file "
     "adds rules that bind the final report; all apply. Then write `report.md` through `notes` "

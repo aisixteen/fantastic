@@ -1,16 +1,16 @@
 //! TOKEN ACCOUNTING, chat-side (#766, spec 1.7): one counter for both pass modes.
 //!
-//! Every model request (a turn attempt, a task pass) clears the provider's counts before
+//! Every model request (a pass attempt, a task pass) clears the provider's counts before
 //! it and reads the endpoint's report after its stream ended ([`crate::model_format::pass`]).
 //! [`Counts::of`] takes four disjoint counts from that report: `prompt` (prompt tokens
 //! the cache neither served nor wrote, saturating), `completion`, `cache_read`,
 //! `cache_write`. A request with no report adds nothing: no estimate ever enters here.
 //!
 //! The assistant row keeps `attributes.used = {pass, running}`, each a [`Used`]:
-//! - `turn.accepted`: the attempt whose answer the chat took (a model-written `stop`
-//!   included); nothing in a turn the harness stopped;
-//! - `turn.rejected`: every malformed attempt, the attempt a type restart discarded, all
-//!   attempts of a turn the harness stopped, and the attempts of turns that stored no row;
+//! - `pass.accepted`: the attempt whose answer the chat took (a model-written `stop`
+//!   included); nothing in a pass the harness stopped;
+//! - `pass.rejected`: every malformed attempt, the attempt a type restart discarded, all
+//!   attempts of a pass the harness stopped, and the attempts of passes that stored no row;
 //! - `task`: every task pass since the previous stored assistant row;
 //! - `total`: the sum of the three, per count: the true spend.
 //!
@@ -103,25 +103,25 @@ impl Counts {
     }
 }
 
-/// The turn part of a [`Used`].
+/// The pass part of a [`Used`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-pub(crate) struct Turn {
+pub(crate) struct PassPart {
     /// The attempt whose answer the chat took.
     pub(crate) accepted: Counts,
     /// Every attempt thrown away.
     pub(crate) rejected: Counts,
 }
 
-/// One `pass` or `running` group: `{turn: {accepted, rejected}, task, total}`.
+/// One `pass` or `running` group: `{pass: {accepted, rejected}, task, total}`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct Used {
-    /// The agent's turn attempts.
-    pub(crate) turn: Turn,
+    /// The agent's pass attempts.
+    pub(crate) pass: PassPart,
     /// The harness's helper passes.
     pub(crate) task: Counts,
-    /// `turn.accepted + turn.rejected + task`, per count.
+    /// `pass.accepted + pass.rejected + task`, per count.
     pub(crate) total: Counts,
 }
 
@@ -130,7 +130,7 @@ impl Used {
     #[must_use]
     pub(crate) fn new(accepted: Counts, rejected: Counts, task: Counts) -> Self {
         Self {
-            turn: Turn { accepted, rejected },
+            pass: PassPart { accepted, rejected },
             task,
             total: accepted.plus(rejected).plus(task),
         }
@@ -140,8 +140,8 @@ impl Used {
     #[must_use]
     pub(crate) fn plus(self, other: Self) -> Self {
         Self::new(
-            self.turn.accepted.plus(other.turn.accepted),
-            self.turn.rejected.plus(other.turn.rejected),
+            self.pass.accepted.plus(other.pass.accepted),
+            self.pass.rejected.plus(other.pass.rejected),
             self.task.plus(other.task),
         )
     }
@@ -156,7 +156,7 @@ impl Used {
     #[must_use]
     pub(crate) fn from_value(v: &Value) -> Option<Self> {
         let u: Self = serde_json::from_value(v.clone()).ok()?;
-        Some(Self::new(u.turn.accepted, u.turn.rejected, u.task))
+        Some(Self::new(u.pass.accepted, u.pass.rejected, u.task))
     }
 }
 
@@ -211,14 +211,14 @@ impl Window {
 /// Counts with no row yet: they land on the next stored assistant row's `pass`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Pending {
-    /// Turn attempts thrown away, and the attempts of turns that stored no row.
+    /// Pass attempts thrown away, and the attempts of passes that stored no row.
     pub(crate) rejected: Counts,
     /// Task passes.
     pub(crate) task: Counts,
 }
 
-/// A thrown-away turn attempt's report: its counts wait for the next row's
-/// `turn.rejected`.
+/// A thrown-away pass attempt's report: its counts wait for the next row's
+/// `pass.rejected`.
 pub(crate) fn reject(state: &BackendState, report: &ProviderReport) {
     if let Some(c) = Counts::of(report) {
         let mut p = state.used_pending.lock().expect("used_pending poisoned");
@@ -236,14 +236,14 @@ pub(crate) fn task(state: &BackendState, report: &ProviderReport) {
 
 /// THE ACCEPTED ATTEMPT'S COUNTS, held until its row is stored ([`land`] takes them).
 /// Dropped untaken (a cancel or a store failure before the row), they go
-/// to `turn.rejected` of the next row, as every attempt of a turn that stored no row.
+/// to `pass.rejected` of the next row, as every attempt of a pass that stored no row.
 pub(crate) struct Accepted {
     state: Arc<BackendState>,
     counts: Option<Counts>,
 }
 
 impl Accepted {
-    /// The accepted attempt of `state`'s turn, with its report.
+    /// The accepted attempt of `state`'s pass, with its report.
     #[must_use]
     pub(crate) fn hold(state: &Arc<BackendState>, report: &ProviderReport) -> Self {
         Self {
@@ -303,10 +303,10 @@ pub(crate) fn seed(state: &BackendState, rows: &[Value]) {
     }
 }
 
-/// THE COUNTS OF THE ROW BEING STORED: the accepted attempt's (none for a turn the
+/// THE COUNTS OF THE ROW BEING STORED: the accepted attempt's (none for a pass the
 /// harness stopped) and everything pending. They are taken only once the row is stored
 /// ([`Landing::stored`]): a row the store refused takes nothing, and the accepted
-/// attempt's counts then wait in `turn.rejected` like any turn that stored no row.
+/// attempt's counts then wait in `pass.rejected` like any pass that stored no row.
 #[must_use]
 pub(crate) fn land(state: &Arc<BackendState>, accepted: Option<Accepted>) -> Landing {
     let accepted = accepted.and_then(Accepted::take).unwrap_or_default();

@@ -529,12 +529,12 @@ fn stop_needs_reason() {
 // The how-to teaches `stop` in its section on ending an answer, next to `done` (1.8).
 #[test]
 fn howto_teaches_stop() {
-    let turns = HOWTO_SEND
+    let section = HOWTO_SEND
         .split("## Ending an answer")
         .nth(1)
         .and_then(|s| s.split("\n## ").next())
         .expect("an Ending an answer section");
-    let flat = turns.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat = section.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
         flat.contains(
             "When the work cannot be done, end it with \

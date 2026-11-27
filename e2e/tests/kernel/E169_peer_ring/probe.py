@@ -141,7 +141,7 @@ def main() -> int:
         return hk.quiet(*PEERS)
 
     def passes(p: str) -> list[dict]:
-        return [t for t in mocks[p].turns() if not is_recall(t["body"])]
+        return [t for t in mocks[p].passes() if not is_recall(t["body"])]
 
     try:
         for p in PEERS:

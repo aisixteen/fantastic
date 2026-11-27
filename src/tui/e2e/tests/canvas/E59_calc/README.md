@@ -17,7 +17,7 @@ and `test_calc.py` (its own tests, every function, exit 0 when green).
 | fib_mod | `[n, m]` (n up to 10^18) | F(n) mod m |
 | gcd_lcm | list of integers | `[gcd, lcm]` |
 
-**Checks** (fast — the harness runs the code itself, no extra turn):
+**Checks** (fast — the harness runs the code itself, no extra pass):
 `calc_written` · `tests_written` · `tests_cover` (every fn named in the tests) ·
 `own_tests_pass` (`python3 test_calc.py` exits 0) · `hidden_<fn>` ×6 (two hidden
 vectors each: a 6×6 exact determinant, a 12-digit factorization, F(10^18) mod p …)

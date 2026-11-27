@@ -4,7 +4,7 @@ id: terminal_task
 group: canvas
 title: "an AI uses a canvas terminal to answer about the repo"
 runner: probe.py
-costs: turns
+costs: passes
 limits:
   total_seconds: 600
   quiet_seconds: 30

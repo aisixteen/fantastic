@@ -36,7 +36,7 @@
  *   Every failure after a handle is issued arrives as on_done's `error`
  *   (UTF-8, NUL-terminated): "cancelled" after fm_cancel(); otherwise a
  *   sentence — an unavailable model ("the on-device model is unavailable:
- *   <reason>"), a malformed request ("request_json: ..."), an invalid turn or
+ *   <reason>"), a malformed request ("request_json: ..."), an invalid message or
  *   option, or a generation failure ("the on-device model failed: ..."). The
  *   bundles prefix "foundation_models_backend: " and raise it unchanged.
  * ------------------------------------------------------------------------
@@ -69,12 +69,12 @@ typedef void (*fm_chunk_fn)(void *ctx, const uint8_t *bytes, size_t len);
 
 /* on_done: error == NULL on success, else a borrowed NUL-terminated message.
  * prompt_tokens: the model's own count of the whole prompt (instructions +
- * turns + prompt), or -1 when the SDK reports none (before macOS 27). */
+ * messages + prompt), or -1 when the SDK reports none (before macOS 27). */
 typedef void (*fm_done_fn)(void *ctx, const char *error, int64_t prompt_tokens);
 
 /* Start one generation. request_json (UTF-8, NUL-terminated):
  *   {"instructions": str,                      required ("" for none)
- *    "turns": [{"role": "user"|"assistant",    required ([] for none),
+ *    "messages": [{"role": "user"|"assistant",    required ([] for none),
  *               "content": str}, ...],          replayed in order
  *    "prompt": str,                            required — the text answered
  *    "temperature": number >= 0 | null,        optional — null/absent = model's own

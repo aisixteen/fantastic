@@ -10,9 +10,9 @@
 //! `copy` its rows to the fork's key; the store asks the kernel's generic check
 //! first (the kernel knows no rows).
 //!
-//! A FORK POINT IS ALWAYS A TURN BOUNDARY OUTSIDE A FOLD. `fork {at}` refuses an
-//! `at` that names no row (`not_found`), cuts a turn or a fold (`bad_arg`), and a parent
-//! that is mid-turn (`locked`). `mark` writes a
+//! A FORK POINT IS ALWAYS A PASS BOUNDARY OUTSIDE A FOLD. `fork {at}` refuses an
+//! `at` that names no row (`not_found`), cuts a pass or a fold (`bad_arg`), and a parent
+//! that is mid-pass (`locked`). `mark` writes a
 //! `mark` row only where `fork` would accept it, so a marked point always forks.
 
 use std::collections::HashSet;
@@ -25,7 +25,7 @@ use serde_json::{json, Map, Value};
 use crate::constants::{CACHE_LIFETIME_SECS, MAX_MARKS};
 use crate::folds::{chains, is_fold, is_open, refs_of, row_id};
 use crate::helpers::{agent_meta, now_secs};
-use crate::memory::{store_of, MemoryStoreError, BOOKKEEPING, TURN_ROLES};
+use crate::memory::{store_of, MemoryStoreError, BOOKKEEPING, CHAT_ROLES};
 
 /// Rows that belong to the live state of ONE agent, never to a prefix a fork
 /// inherits: the pause state, the messages held for it, a late arrival, the marks
@@ -53,20 +53,20 @@ fn refuse(verb: &str, code: &str, why: &str, hint: &str, at: Option<i64>) -> Val
 
 /// A pass is running for this agent, or a message waits for its next one: its rows are
 /// moving.
-fn mid_turn(agent_id: &AgentId) -> bool {
+fn mid_pass(agent_id: &AgentId) -> bool {
     let st = crate::state::state_for(agent_id);
     let life = st.life.lock().expect("life poisoned");
     life.running || !life.unread.is_empty()
 }
 
-/// A conversation row: a chat turn (a fold included), not bookkeeping and not
+/// A conversation row: a chat message (a fold included), not bookkeeping and not
 /// one of the agent's own live-state rows.
 fn is_conversation(r: &Value) -> bool {
     row_id(r).is_some()
         && !kind_of(r).is_some_and(|k| BOOKKEEPING.contains(&k) || NOT_COPIED.contains(&k))
         && r.get("role")
             .and_then(Value::as_str)
-            .is_some_and(|role| TURN_ROLES.contains(&role))
+            .is_some_and(|role| CHAT_ROLES.contains(&role))
 }
 
 /// Every leaf (non-fold) id under a fold, through nested folds.
@@ -122,8 +122,8 @@ fn plan(rows: &[Value], at: i64) -> Result<Vec<Value>, NoFork> {
             whole.insert(id);
         }
     }
-    // A turn is a chain of rows linked by `parent`: `at` may not fall inside one,
-    // and an open chain (a reply still owed) is not yet a turn. A fold the fork takes
+    // A pass is a chain of rows linked by `parent`: `at` may not fall inside one,
+    // and an open chain (a reply still owed) is not yet a pass. A fold the fork takes
     // whole sits where its members sat, so it is not a row above `at`.
     let in_chain: Vec<Value> = conv
         .iter()
@@ -140,8 +140,8 @@ fn plan(rows: &[Value], at: i64) -> Result<Vec<Value>, NoFork> {
         if below && (above || is_open(&in_chain, &chain)) {
             return Err(NoFork {
                 code: BAD_ARG,
-                why: format!("row {at} is inside a turn that is not finished"),
-                hint: "fork at the end of a finished turn, or at a `mark`",
+                why: format!("row {at} is inside a pass that is not finished"),
+                hint: "fork at the end of a finished pass, or at a `mark`",
             });
         }
     }
@@ -196,8 +196,8 @@ pub async fn fork(
         return fantastic_kernel::refusal::missing(verb, "at");
     };
     // The rows must not move under the copy.
-    if mid_turn(agent_id) {
-        return parent_mid_turn(agent_id, at);
+    if mid_pass(agent_id) {
+        return parent_mid_pass(agent_id, at);
     }
     // THE ASKER: the create (and its rollback) is sent for whoever asked for the fork
     // ([`Kernel::call_for`]), and checked as that asker.
@@ -304,12 +304,12 @@ fn fork_card(
     Ok(Value::Object(create))
 }
 
-fn parent_mid_turn(agent_id: &AgentId, at: i64) -> Value {
+fn parent_mid_pass(agent_id: &AgentId, at: i64) -> Value {
     refuse(
         "fork",
         LOCKED,
-        &format!("a turn is running for {agent_id}"),
-        "fork once the running turn has answered, or at a `mark`",
+        &format!("a pass is running for {agent_id}"),
+        "fork once the running pass has answered, or at a `mark`",
         Some(at),
     )
 }
@@ -346,7 +346,7 @@ async fn fork_from(
     Value::Null
 }
 
-/// `mark {label, note?, version?}`: mark this agent's own history at a turn
+/// `mark {label, note?, version?}`: mark this agent's own history at a pass
 /// boundary, outside any fold — a point `fork` always accepts. Keeps the last
 /// [`MAX_MARKS`]. Returns `{marked, at, label}`. The store read, the mark's append and
 /// the prune of older marks are steps (#795).
@@ -364,11 +364,11 @@ pub async fn mark(
     let busy = refuse(
         verb,
         LOCKED,
-        &format!("a turn is running for {agent_id}"),
-        "mark once the running turn has answered",
+        &format!("a pass is running for {agent_id}"),
+        "mark once the running pass has answered",
         None,
     );
-    if mid_turn(agent_id) {
+    if mid_pass(agent_id) {
         return busy;
     }
     let settle = crate::steps::deferred(kernel);
@@ -388,7 +388,7 @@ pub async fn mark(
                 verb,
                 NOT_FOUND,
                 "there is nothing in the conversation to mark",
-                "mark after the first turn",
+                "mark after the first pass",
                 None,
             )));
         };
@@ -397,7 +397,7 @@ pub async fn mark(
                 verb,
                 BAD_ARG,
                 &no.why,
-                "mark once the turn has ended",
+                "mark once the pass has ended",
                 Some(at),
             )));
         }

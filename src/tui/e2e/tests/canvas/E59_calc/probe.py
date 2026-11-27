@@ -190,7 +190,7 @@ def main() -> bool:
     async def drive():
         from _lib.dev_surface import click_button
         async with rig.page(1900, 1100) as pg:
-            # THE TURN AS IT GOES (diagnostics): every 30 s, from the SHELL (the
+            # THE PASS AS IT GOES (diagnostics): every 30 s, from the SHELL (the
             # page's CDP socket has one reader), each AI agent's `status`
             samples: list = []
             rig.summary["samples"] = samples
@@ -256,7 +256,7 @@ def main() -> bool:
         except ValueError:
             ui_ok[fn] = False
     r["ui"] = all(clicked) and all(ui_ok.values())
-    rig.summary.update({"answer": said, "turn_quiet": done, "checks": r, "clicked": clicked, "ui": ui, "ui_ok": ui_ok,
+    rig.summary.update({"answer": said, "pass_quiet": done, "checks": r, "clicked": clicked, "ui": ui, "ui_ok": ui_ok,
                         "own_tests_out": out[-1500:], "hidden_out": hidden})
     print(f"ui: {ui}\nown tests rc={rc}")
     return verdict(*rig.finish(all(r.values()), " ".join(f"{k}={'✓' if v else '✗'}" for k, v in r.items())))

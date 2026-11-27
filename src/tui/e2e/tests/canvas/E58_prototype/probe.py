@@ -86,8 +86,8 @@ def main() -> bool:
     async def drive():
         r: dict = {}
         async with rig.page(1900, 1100) as pg:
-            # turn 1: its limit, less turn 2 and both turns' clicks
-            done1, said1 = await ask(pg, 250, 300, ASK, rig.budget(rig.limits["turn1_seconds"], reserve=rig.limits["turn2_seconds"] + 90), rig.limits["quiet_seconds"])
+            # pass 1: its limit, less pass 2 and both passes' clicks
+            done1, said1 = await ask(pg, 250, 300, ASK, rig.budget(rig.limits["pass1_seconds"], reserve=rig.limits["pass2_seconds"] + 90), rig.limits["quiet_seconds"])
             await asyncio.sleep(3)
             scripts = made_script()
             names = [Path(s).name for s in scripts]
@@ -102,13 +102,13 @@ def main() -> bool:
             # it STOPS only if it counted first — holding still never started is no stop
             r["stops"] = r["counts"] and r["stop_clicked"] and await still(pg)
             await say(pg, CHANGE)
-            done2 = await wait_quiet(pg, rig.budget(rig.limits["turn2_seconds"], reserve=45), rig.limits["quiet_seconds"])
+            done2 = await wait_quiet(pg, rig.budget(rig.limits["pass2_seconds"], reserve=45), rig.limits["quiet_seconds"])
             await asyncio.sleep(3)
             r["start2_clicked"] = await click_button(pg, "start")
             r["counts_by_10"] = r["start2_clicked"] and await by_ten(pg, 30)
             r["big_value"] = await big(pg)
             await click_button(pg, "stop")
-            return r, {"turn1_quiet": done1, "turn2_quiet": done2, "scripts": scripts,
+            return r, {"pass1_quiet": done1, "pass2_quiet": done2, "scripts": scripts,
                        "execs": [{"id": e.get("id"), "allowed": e.get("allowed")} for e in execs], "answer1": said1}
     try:
         checks, info = asyncio.run(drive())

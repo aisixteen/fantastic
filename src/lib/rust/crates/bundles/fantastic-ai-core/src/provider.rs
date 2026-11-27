@@ -12,8 +12,8 @@
 //! The provider holds no agent state either — the queue / lock / history /
 //! context management all live in the shared machinery. Its ONE protocol duty is
 //! the reasoning channel: read it and wrap it in
-//! [`crate::think::THINK_OPEN`]/[`crate::think::THINK_CLOSE`] once per turn, or a
-//! reasoning model's whole turn reads as an empty completion.
+//! [`crate::think::THINK_OPEN`]/[`crate::think::THINK_CLOSE`] once per pass, or a
+//! reasoning model's whole pass reads as an empty completion.
 
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
@@ -33,19 +33,19 @@ pub enum ProviderEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorClass {
     /// The LINK failed (connect, stall, dropped stream, HTTP 408/429/5xx): the request
-    /// was fine, so a retry may succeed (#198). `transport_retries` rerun the turn.
+    /// was fine, so a retry may succeed (#198). `transport_retries` rerun the pass.
     Transient,
     /// The same request fails the same way every time (the key refused or missing,
     /// the model unknown or unavailable): never retried — the chain
     /// gives up with the error. Carries the refusal code the wire names it by
     /// ([`fantastic_kernel::refusal`]: `unauthorized`, `not_found`, `disabled`).
     Permanent(&'static str),
-    /// This pass failed (a bad request, a broken stream): never retried; the turn fails
-    /// with its error row, and the next message runs a turn of its own (#795).
-    Turn,
+    /// This pass failed (a bad request, a broken stream): never retried; the pass fails
+    /// with its error row, and the next message runs a pass of its own (#795).
+    Pass,
 }
 
-/// The refusal reason for a provider's READ of its endpoint before a turn (a record
+/// The refusal reason for a provider's READ of its endpoint before a pass (a record
 /// field left to the server: model, window, slots): the HTTP status through the one
 /// classifier — a permanent one (the key, the path) is its permanent code, so the chain
 /// gives up at once; a transient one is `transport_error`; any other answer, or no HTTP
@@ -69,7 +69,7 @@ pub fn http_class(status: u16) -> ErrorClass {
         401 | 403 => ErrorClass::Permanent(UNAUTHORIZED),
         404 => ErrorClass::Permanent(NOT_FOUND),
         408 | 429 | 500..=599 => ErrorClass::Transient,
-        _ => ErrorClass::Turn,
+        _ => ErrorClass::Pass,
     }
 }
 
@@ -88,7 +88,7 @@ pub fn reason_class(reason: Option<&str>) -> ErrorClass {
         Some(DISABLED) => ErrorClass::Permanent(DISABLED),
         Some(UNKNOWN_AGENT) => ErrorClass::Permanent(UNKNOWN_AGENT),
         Some(NOT_ALLOWED) => ErrorClass::Permanent(NOT_ALLOWED),
-        _ => ErrorClass::Turn,
+        _ => ErrorClass::Pass,
     }
 }
 
@@ -109,7 +109,7 @@ pub struct ProviderError {
     /// The python exception class a raise renders as (`RuntimeError`, or
     /// `ValueError` for a record field the backend cannot run without).
     pub kind: &'static str,
-    /// What the failure means for the chain: retried, given up on, or a retry turn.
+    /// What the failure means for the chain: retried, given up on, or a retry pass.
     pub class: ErrorClass,
 }
 
@@ -119,7 +119,7 @@ impl ProviderError {
         Self {
             message: message.into(),
             kind: "RuntimeError",
-            class: ErrorClass::Turn,
+            class: ErrorClass::Pass,
         }
     }
 
@@ -148,7 +148,7 @@ impl ProviderError {
         Self {
             message: message.into(),
             kind: CANCELLED,
-            class: ErrorClass::Turn,
+            class: ErrorClass::Pass,
         }
     }
 
@@ -158,7 +158,7 @@ impl ProviderError {
         Self {
             message: format!("send: timeout after {}s", fantastic_bundle::py_float_repr(secs)),
             kind: TIMED_OUT,
-            class: ErrorClass::Turn,
+            class: ErrorClass::Pass,
         }
     }
 
@@ -180,7 +180,7 @@ impl ProviderError {
         Self {
             message: message.into(),
             kind: "ValueError",
-            class: ErrorClass::Turn,
+            class: ErrorClass::Pass,
         }
     }
 
@@ -209,13 +209,13 @@ impl ProviderError {
 
     /// The wire `reason` of this failure on a `complete` reply ([`reason_class`]
     /// reads it back): `transport_error` for the link, the code of a permanent one,
-    /// none for a turn's own failure.
+    /// none for a pass's own failure.
     #[must_use]
     pub fn reason(&self) -> Option<&'static str> {
         match self.class {
             ErrorClass::Transient => Some(fantastic_kernel::refusal::TRANSPORT_ERROR),
             ErrorClass::Permanent(code) => Some(code),
-            ErrorClass::Turn => None,
+            ErrorClass::Pass => None,
         }
     }
 }
@@ -281,12 +281,12 @@ pub struct Stalled {
 }
 
 impl Stalled {
-    /// The turn's failure: `stream_stalled`, the seconds and the endpoint. A
+    /// The pass's failure: `stream_stalled`, the seconds and the endpoint. A
     /// raise, so the call ends with an error row and `status(failed, reason='error')`.
     #[must_use]
     pub fn error(&self, name: &str, endpoint: &str) -> ProviderError {
         ProviderError::transport(format!(
-            "{name}: stream_stalled — {endpoint} sent no bytes for {}s; this turn is NOT \
+            "{name}: stream_stalled — {endpoint} sent no bytes for {}s; this pass is NOT \
              complete",
             self.idle_secs
         ))
@@ -329,8 +329,8 @@ mod stalled_tests {
             (500, ErrorClass::Transient),
             (503, ErrorClass::Transient),
             (529, ErrorClass::Transient),
-            (400, ErrorClass::Turn),
-            (422, ErrorClass::Turn),
+            (400, ErrorClass::Pass),
+            (422, ErrorClass::Pass),
         ] {
             assert_eq!(http_class(code), want, "HTTP {code}");
             assert_eq!(
@@ -402,11 +402,11 @@ pub trait Provider: Send + Sync {
     /// The upstream model id this provider talks to.
     fn model(&self) -> String;
 
-    /// Whether this provider can run a pass at all — checked FIRST in a turn
+    /// Whether this provider can run a pass at all — checked FIRST in a pass
     /// ([`crate::agent_loop::start`]), before the owed recall, the
-    /// assembly and the projection. `Err` fails the turn with that refusal,
+    /// assembly and the projection. `Err` fails the pass with that refusal,
     /// exactly as a failed pass does. Python `_run` builds its provider before
-    /// anything else and a raise there ends the turn; a provider that knows up
+    /// anything else and a raise there ends the pass; a provider that knows up
     /// front it cannot answer (foundation_models_backend: the on-device model
     /// is unavailable) says so here. Default: ready.
     fn ready(&self) -> Result<(), ProviderError> {

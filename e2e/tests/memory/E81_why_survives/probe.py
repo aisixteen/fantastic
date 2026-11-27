@@ -1,6 +1,6 @@
 """memory/why_survives — compaction keeps the WHY, not only the decision.
 
-A decision and its REASON are told at turn 1; a survey of twelve fillers at a squeezed
+A decision and its REASON are told at pass 1; a survey of twelve fillers at a squeezed
 window makes the conversation fold; asked afterwards (no re-reads), the agent states
 the decision AND the reason."""
 from __future__ import annotations
@@ -36,7 +36,7 @@ async def main():
         await drive(conn, f"A decision for this whole run: we deploy on port {port}. The REASON — keep it, it "
                           f"matters later: the lab firewall `{why}` admits no other port. Acknowledge the "
                           f"decision and its reason in one sentence, then {DONE}", client_id="ai", via="user")
-        await M.ask(root, "ai", f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER TURN, noting "
+        await M.ask(root, "ai", f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER PASS, noting "
                                 f"anything unusual. Do not write anything. After the last one, {DONE}")
         before = await store_rows(root, core, "ai")
         await M.ask(root, "ai", "Without reading anything again: which port did we decide, and WHY? Answer "

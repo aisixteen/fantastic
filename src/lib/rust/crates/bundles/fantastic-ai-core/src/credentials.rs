@@ -27,7 +27,7 @@ use async_trait::async_trait;
 /// The credential field a backend sends as its key.
 pub const FIELD: &str = "api_key";
 
-/// The key could not be read — the turn fails, naming the store and the ref.
+/// The key could not be read — the pass fails, naming the store and the ref.
 /// Python `CredentialError(RuntimeError)`: a raise renders as
 /// `CredentialError: <message>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,7 +73,7 @@ pub trait KeySource: Send + Sync {
     /// The key for a request to `endpoint`, or `None` for no key at all.
     ///
     /// # Errors
-    /// [`CredentialError`] — the turn fails, naming why.
+    /// [`CredentialError`] — the pass fails, naming why.
     async fn key(&self, endpoint: &str) -> Result<Option<String>, CredentialError>;
 }
 

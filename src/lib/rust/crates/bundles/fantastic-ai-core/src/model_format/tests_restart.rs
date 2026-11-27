@@ -22,7 +22,7 @@
 //! - `context_fold` (`retrieval.rs`): the summary (a task pass, or the given text), then
 //!   one append of the fold row and the view row.
 //! - the fold strategy (`projection::project_context`): per folded chain its summary, in
-//!   turn, then one append of every fold row made and the projection's view row.
+//!   pass, then one append of every fold row made and the projection's view row.
 //! - the strip strategy: the view row alone (stubs are a resolution of the view).
 //!
 //! So no point between two writes falls inside a fold: a crash stops before a fold's
@@ -221,7 +221,7 @@ fn chain(agent: &AgentId, kind: &str) -> Vec<Hash> {
         .unwrap_or_else(|| panic!("no kept chain of {kind}"))
 }
 
-/// The first `render_*` trace row of `client`'s turn.
+/// The first `render_*` trace row of `client`'s pass.
 async fn render_row(site: &Site, client: &str) -> Value {
     let rows = traces_of(&site.kernel, &site.agent, client).await;
     rows.iter()
@@ -235,18 +235,18 @@ async fn render_row(site: &Site, client: &str) -> Value {
 }
 
 /// The messages of `msgs` that carry a row id.
-/// The turn requests `p` was asked: the ones with a system message. The others are task
-/// passes: after a restart the first turn runs the recall the boot owes (`recall_due`,
+/// The pass requests `p` was asked: the ones with a system message. The others are task
+/// passes: after a restart the first pass runs the recall the boot owes (`recall_due`,
 /// `verbs.rs` `boot`) through the same provider.
-fn turn_requests(p: &Scripted) -> Vec<Vec<Value>> {
+fn pass_requests(p: &Scripted) -> Vec<Vec<Value>> {
     p.asked()
         .into_iter()
         .filter(|r| r.first().is_some_and(|m| m["role"] == json!("system")))
         .collect()
 }
 
-/// The conversation rows stored after `before` other than the turn's own two: the row
-/// of the recall the boot owes, shown in the turn's view.
+/// The conversation rows stored after `before` other than the pass's own two: the row
+/// of the recall the boot owes, shown in the pass's view.
 async fn owed_rows(kernel: &Arc<Kernel>, agent: &AgentId, before: &[Value]) -> usize {
     let after = max_id(before);
     let new = store(kernel, agent)
@@ -411,8 +411,8 @@ async fn clean_restart_cold_then_warm() {
         assert_eq!(empty_cache(&s.agent), (0, 0, 0), "{kind}");
         let p = Scripted::new(model, vec![]);
         answered(&s.kernel, &s.agent, &p, &format!("{chat}_after")).await;
-        // every stored row the turn showed: the system message and the arriving one aside
-        let n = turn_requests(&p).last().expect("the turn's request").len() - 2;
+        // every stored row the pass showed: the system message and the arriving one aside
+        let n = pass_requests(&p).last().expect("the pass's request").len() - 2;
         let cold = render_row(&s, &format!("{chat}_after")).await;
         assert_eq!(cold["event"], json!("render_cold"), "{kind}: {cold}");
         // every type maps and keeps its rows
@@ -446,7 +446,7 @@ fn boot_script(chat: &str, kind: &str) -> Arc<crate::tests::MockScript> {
     )
 }
 
-/// The turn requests (a system message first) the mock bundle's `script` served.
+/// The pass requests (a system message first) the mock bundle's `script` served.
 fn boot_requests(script: &crate::tests::MockScript) -> Vec<Vec<Value>> {
     (0..script.passes_served())
         .map(|n| script.request_messages(n))
@@ -737,12 +737,12 @@ async fn crash_mid_fold() {
         }
         let before = store(&kernel, &a).await;
         let unfolded = unowned(&assembled(&kernel, &a).await[1..]);
-        let turns: Vec<i64> = before
+        let row_ids: Vec<i64> = before
             .iter()
             .filter(|r| r.get("role").is_some() && r.get("kind").is_none())
             .filter_map(|r| r["id"].as_i64())
             .collect();
-        let mut fold = json!({"type": "context_fold", "from": turns[2], "to": turns[3]});
+        let mut fold = json!({"type": "context_fold", "from": row_ids[2], "to": row_ids[3]});
         match summary {
             Some(s) => fold["summary"] = json!(s),
             None => {
@@ -792,7 +792,7 @@ async fn crash_mid_fold() {
         let before = store(&kernel, &a).await;
         let unfolded = unowned(&assembled(&kernel, &a).await[1..]);
         let p = Scripted::new(PLAIN, vec![]);
-        let _ = generate(&kernel, &a, &p, &format!("{tag}_turn")).await;
+        let _ = generate(&kernel, &a, &p, &format!("{tag}_pass")).await;
         let writes = fold_writes(&store(&kernel, &a).await, max_id(&before));
         assert!(!writes.is_empty(), "{tag}: the projection wrote nothing");
         if strategy == "fold" {
@@ -806,7 +806,7 @@ async fn crash_mid_fold() {
                 "{writes:?}"
             );
         }
-        // the folded state with no crash: the store's own fold writes, its turn rows
+        // the folded state with no crash: the store's own fold writes, its pass rows
         // set aside (they come after the view row)
         every_point(
             &kernel,
@@ -843,7 +843,7 @@ async fn crash_mid_fold() {
             .map(|_| Step::says("CUT-OFF SUMMARY").reports(cut.clone()))
             .collect(),
     );
-    let _ = generate(&kernel, &a, &p, &format!("{tag}_turn")).await;
+    let _ = generate(&kernel, &a, &p, &format!("{tag}_pass")).await;
     for r in store(&kernel, &a).await {
         if r["kind"] == json!("fold") {
             let c = r["content"].as_str().unwrap_or("");
@@ -878,7 +878,7 @@ async fn partial_rows_recover() {
     let pre = unowned(&assembled(&kernel, &a).await[1..]);
     // every shown message is a stored row: the arriving message is a row now (#795)
     let complete = pre.len();
-    let turns: Vec<i64> = base
+    let row_ids: Vec<i64> = base
         .iter()
         .filter(|r| r.get("role").is_some() && r.get("kind").is_none())
         .filter_map(|r| r["id"].as_i64())
@@ -904,12 +904,12 @@ async fn partial_rows_recover() {
     // the listed rows, its members still whole
     let fid = kernel.mint_id();
     let fold = crate::folds::make_fold(
-        &turns[..2],
+        &row_ids[..2],
         "ORPHAN-FOLD",
         "ORPHAN-FOLD body",
         false,
         fid,
-        turns[0],
+        row_ids[0],
         1,
         None,
     );
@@ -932,7 +932,7 @@ async fn partial_rows_recover() {
         .is_some_and(|c| c.contains("ORPHAN-FOLD")));
 
     // a view row that names an absent fold row: a stale array, the store as stored
-    let mut ids: Vec<Value> = turns
+    let mut ids: Vec<Value> = row_ids
         .iter()
         .map(|id| json!({"id": id, "res": "full"}))
         .collect();
@@ -971,7 +971,7 @@ async fn partial_rows_recover() {
     answered(&kernel, &a, &p, "rs6_2").await;
     let before = store(&kernel, &a).await;
     let unfolded = unowned(&assembled(&kernel, &a).await[1..]);
-    let turns: Vec<i64> = before
+    let row_ids: Vec<i64> = before
         .iter()
         .filter(|r| r.get("role").is_some() && r.get("kind").is_none())
         .filter_map(|r| r["id"].as_i64())
@@ -979,7 +979,7 @@ async fn partial_rows_recover() {
     let out = verb(
         &kernel,
         &a,
-        json!({"type": "context_fold", "from": turns[2], "to": turns[3], "summary": "RS6-FOLD"}),
+        json!({"type": "context_fold", "from": row_ids[2], "to": row_ids[3], "summary": "RS6-FOLD"}),
     )
     .await;
     let fid = out["folded"]
@@ -1006,7 +1006,7 @@ async fn partial_rows_recover() {
 
 // ─── RS7 ─────────────────────────────────────────────────────────────────────
 
-/// What the child of RS7 does as `role`: one clean turn on the file store in its folder,
+/// What the child of RS7 does as `role`: one clean pass on the file store in its folder,
 /// its request written to `pre.json`; then a send that streams (or whose re-ask streams)
 /// and never ends, `ready.json` written once it streams. It is killed there.
 async fn rs7_child(role: &str) {
@@ -1601,7 +1601,7 @@ async fn reload_order_kept() {
         answered(&s.kernel, &s.agent, &p, &format!("rs14_{i}")).await;
     }
     let rows = store(&s.kernel, &s.agent).await;
-    let turns: Vec<i64> = rows
+    let row_ids: Vec<i64> = rows
         .iter()
         .filter(|r| r.get("role").is_some() && r.get("kind").is_none())
         .filter_map(|r| r["id"].as_i64())
@@ -1622,7 +1622,7 @@ async fn reload_order_kept() {
                 let out = verb(
                     &s.kernel,
                     &s.agent,
-                    json!({"type": "context_fold", "from": turns[2], "to": turns[3], "summary": "FOLD-RS14"}),
+                    json!({"type": "context_fold", "from": row_ids[2], "to": row_ids[3], "summary": "FOLD-RS14"}),
                 )
                 .await;
                 assert!(out["folded"].is_i64(), "context_fold refused: {out}");
@@ -1713,7 +1713,7 @@ async fn row_during_summary_keeps_its_place() {
     for i in 0..4 {
         answered(&s.kernel, &s.agent, &p, &format!("{tag}_{i}")).await;
     }
-    let turns: Vec<i64> = store(&s.kernel, &s.agent)
+    let row_ids: Vec<i64> = store(&s.kernel, &s.agent)
         .await
         .iter()
         .filter(|r| r.get("role").is_some() && r.get("kind").is_none())
@@ -1728,7 +1728,7 @@ async fn row_during_summary_keeps_its_place() {
     let gate = script.hold_next();
     let fold = {
         let (k, a) = (Arc::clone(&s.kernel), s.agent.clone());
-        let payload = json!({"type": "context_fold", "from": turns[2], "to": turns[3]});
+        let payload = json!({"type": "context_fold", "from": row_ids[2], "to": row_ids[3]});
         tokio::spawn(async move { verb(&k, &a, payload).await })
     };
     assert!(
@@ -1791,7 +1791,7 @@ async fn row_during_summary_keeps_its_place() {
     let out = verb(
         &s.kernel,
         &s.agent,
-        json!({"type": "context_fold", "from": turns[5], "to": turns[6], "summary": "LATER"}),
+        json!({"type": "context_fold", "from": row_ids[5], "to": row_ids[6], "summary": "LATER"}),
     )
     .await;
     let later = out["folded"]
@@ -1804,7 +1804,7 @@ async fn row_during_summary_keeps_its_place() {
     );
     s.stop();
 
-    // the fold strategy: the turn's request shows its folds under their stored ids
+    // the fold strategy: the pass's request shows its folds under their stored ids
     let tag = "rs14_mid_auto";
     let fields = json!({"model": PLAIN, "context_strategy": "fold", "context_window": 4000,
         "output_reserve": 0});
@@ -1816,7 +1816,7 @@ async fn row_during_summary_keeps_its_place() {
     save(&s, &rows).await;
     let before = max_id(&store(&s.kernel, &s.agent).await);
     let p = Scripted::new(PLAIN, vec![]);
-    let _ = generate(&s.kernel, &s.agent, &p, &format!("{tag}_turn")).await;
+    let _ = generate(&s.kernel, &s.agent, &p, &format!("{tag}_pass")).await;
     let pre_rows = store(&s.kernel, &s.agent).await;
     let folds: Vec<&Value> = pre_rows
         .iter()
@@ -1848,7 +1848,7 @@ async fn row_during_summary_keeps_its_place() {
     );
     // the request carries no ids: each fold the projection's view row names is shown
     // under its stored id, and no fold head names a provisional one
-    let req = turn_requests(&p).last().cloned().expect("a turn request");
+    let req = pass_requests(&p).last().cloned().expect("a pass request");
     let text: Vec<&str> = req.iter().filter_map(|m| m["content"].as_str()).collect();
     let provisional = format!("{}-", crate::folds::FOLD_TAG);
     assert!(

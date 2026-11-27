@@ -4,7 +4,7 @@ id: set_scene
 group: canvas
 title: "an AI changes the canvas background (the singleton)"
 runner: probe.py
-costs: turns
+costs: passes
 limits:
   total_seconds: 600
   quiet_seconds: 30

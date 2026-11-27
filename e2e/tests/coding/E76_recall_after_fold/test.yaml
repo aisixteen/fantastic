@@ -5,12 +5,12 @@ group: coding
 title: "every fold batch is followed by a recall; grep answers inline; the marker under a fold comes back"
 runner: probe.py
 runtimes: [rust]
-costs: turns
-long: true  # many lanes push turns past the 180 s proxy limit; at most 2 long run at once
+costs: passes
+long: true  # many lanes push passes past the 180 s proxy limit; at most 2 long run at once
 limits:
   idle_seconds: 60
-  max_turns: 60
-  no_progress_turns: 32
-  turn_chars: 60000
-  turn_seconds: 300
+  max_passes: 60
+  no_progress_passes: 32
+  pass_chars: 60000
+  pass_seconds: 300
 env: {E2E_WINDOW: "6000"}  # 6k: the leaner system block leaves 12k peaks under the fold trigger

@@ -5,12 +5,12 @@ group: coding
 title: "long enough for folds of folds — every level summarized, grep finds a grandchild"
 runner: probe.py
 runtimes: [rust]
-costs: turns
+costs: passes
 long: true  # the live version runs > 8 min; the past is planted — re-measure before dropping this
 limits:
   idle_seconds: 60
-  max_turns: 140
-  no_progress_turns: 32
-  turn_chars: 60000
-  turn_seconds: 300
-env: {E2E_WINDOW: "6000"}  # 6k: at 4.5k a turn of two grep replies did not fit beside the 2.3k system block; fillers still inline (under the cap)
+  max_passes: 140
+  no_progress_passes: 32
+  pass_chars: 60000
+  pass_seconds: 300
+env: {E2E_WINDOW: "6000"}  # 6k: at 4.5k a pass of two grep replies did not fit beside the 2.3k system block; fillers still inline (under the cap)

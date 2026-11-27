@@ -5,10 +5,10 @@ One `ai_chat.tools` chat on the PACKAGED host, its record offering `line_summari
 endpoint is a scripted vLLM mock (`mocks/vllm.py`). The chat's events are watched over the ws
 face. (The sidebar agent that passes the line on lives in the `fantastic` product, not in the
 packaged kernel host these probes boot: its units cover it.) NO MODEL: the mock answers
-each turn from the probe's script, and the chat's own asks by their text — a fold's summariser
+each pass from the probe's script, and the chat's own asks by their text — a fold's summariser
 ask with a summary, a `context_recall` with an empty choice.
 
-`Rig.turn(text, reply)` is one person's message and the model's scripted answer;
+`Rig.exchange(text, reply)` is one person's message and the model's scripted answer;
 `Rig.fold_ids()` the folds in the chat's view now; `Rig.fold(id)` one fold with its members,
 read back through `history {fold}` and `recall`.
 """
@@ -46,8 +46,8 @@ def line(text: str) -> str:
 
 
 def messages(req: dict) -> list:
-    """The chat messages of a request: a recorded turn (`{body: …}`, `mock.turns()`) or the
-    body itself (what the mock's `responder` and `turn` get)."""
+    """The chat messages of a request: a recorded pass (`{body: …}`, `mock.passes()`) or the
+    body itself (what the mock's `responder` and `on_pass` get)."""
     body = req if "messages" in req else (req.get("body") or {})
     return body.get("messages") or []
 
@@ -60,7 +60,7 @@ def content_of(m: dict) -> str:
 
 def own_ask(req: dict) -> str:
     """The text of the chat's own ask (a fold's summariser, a `context_recall`) when `req`
-    is one, else "": the ask's words are in its messages, never in a turn of the chat."""
+    is one, else "": the ask's words are in its messages, never in a message of the chat."""
     text = "\n".join(content_of(m) for m in messages(req))
     return text if FOLD_ASK in text or RECALL_ASK in text else ""
 
@@ -70,9 +70,9 @@ class SizedVllmMock(VllmMock):
     request's characters), not the base mock's fixed 100: the chat calibrates its budget by
     that report, and a tiny one would stretch the 6000 token window past any fold."""
 
-    def turn(self, h, req, text):
+    def on_pass(self, h, req, text):
         self.prompt_tokens = max(1, len(blob(req)) // 4)
-        super().turn(h, req, text)
+        super().on_pass(h, req, text)
 
 
 class Watch:
@@ -130,7 +130,7 @@ class Rig:
         return None
 
     def asks(self, marker: str) -> list[str]:
-        return [a for a in map(own_ask, self.mock.turns()) if FOLD_ASK in a and marker in a]
+        return [a for a in map(own_ask, self.mock.passes()) if FOLD_ASK in a and marker in a]
 
     # ── checks ────────────────────────────────────────────────────────────────
     def need(self, cond: bool, what: str) -> None:
@@ -169,10 +169,10 @@ class Rig:
         return False
 
     def answered(self) -> int:
-        """How many of the mock's requests were the chat's turns (not its own asks)."""
-        return sum(1 for t in self.mock.turns() if own_ask(t) == "")
+        """How many of the mock's requests were the chat's passes (not its own asks)."""
+        return sum(1 for t in self.mock.passes() if own_ask(t) == "")
 
-    def turn(self, text: str, reply: str, bound: float = 60) -> None:
+    def exchange(self, text: str, reply: str, bound: float = 60) -> None:
         before = self.answered()
         self.mock.reply(reply)
         out = self.hk.send(AI, {"type": "send", "text": text})
@@ -182,7 +182,7 @@ class Rig:
         while self.answered() <= before and time.monotonic() < end:
             time.sleep(0.05)
         if self.answered() <= before:
-            self.need(False, f"the scripted answer is asked for: {self.answered()} turns")
+            self.need(False, f"the scripted answer is asked for: {self.answered()} passes")
         if not self.idle():
             self.need(False, "the chain settles")
 
@@ -192,7 +192,7 @@ class Rig:
         READ UNDER A WIDE WINDOW: a page answers under the chat's inline cap (an eighth of
         its budget), and in the 6000 token window one row's digest — an answer's
         `attributes.parts` — is over it, which ends the paging there. The window is widened
-        for the read and set back before the next turn."""
+        for the read and set back before the next pass."""
         self._window(262144)
         try:
             first = h = self.hk.send(AI, {"type": "history", "limit": 500, **ask})
@@ -220,7 +220,7 @@ class Rig:
     def fold_ids(self) -> list[int]:
         """The folds in the chat's view now: the ids its last projection shows
         (`context_status`) that `history {fold}` opens as a fold (a fold has no chat role,
-        so the plain `history` lists only turns)."""
+        so the plain `history` lists only messages)."""
         cs = self.hk.send(AI, {"type": "context_status"})
         view = (cs.get("last_projection") or {}).get("view_ids") or []
         return [i for i in view if isinstance(i, int)
@@ -241,22 +241,22 @@ class Rig:
                 "members": members, "refs": head.get("members")}
 
     def until_fold(self, label: str, known: set, step, limit: int = 40) -> int | None:
-        """Turns `step(k)` (k = 0, 1, …) until a fold not in `known` lands; its id."""
+        """Passes `step(k)` (k = 0, 1, …) until a fold not in `known` lands; its id."""
         for k in range(limit):
             text, reply = step(k)
-            self.turn(text, reply)
+            self.exchange(text, reply)
             fresh = [f for f in self.fold_ids() if f not in known]
             if fresh:
-                print(f"  info {label}: a fold after {k + 1} turns: {fresh}", flush=True)
+                print(f"  info {label}: a fold after {k + 1} passes: {fresh}", flush=True)
                 known.update(fresh)
                 return fresh[0]
         rows = self.history()
-        sizes = [len(blob(t)) for t in self.mock.turns()][-3:]
-        print(f"  info {label}: {len(rows)} rows, {len(self.mock.turns())} requests, "
+        sizes = [len(blob(t)) for t in self.mock.passes()][-3:]
+        print(f"  info {label}: {len(rows)} rows, {len(self.mock.passes())} requests, "
               f"last request sizes {sizes}, context {str(self.hk.send(AI, {'type': 'context_status'}))[:600]}, "
-              f"usage {[(t.get('body') or {}).get('stream_options') for t in self.mock.turns()[-1:]]}",
+              f"usage {[(t.get('body') or {}).get('stream_options') for t in self.mock.passes()[-1:]]}",
               flush=True)
-        self.need(False, f"{label}: a fold within {limit} turns")
+        self.need(False, f"{label}: a fold within {limit} passes")
         return None
 
     @staticmethod

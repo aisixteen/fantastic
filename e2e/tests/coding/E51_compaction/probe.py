@@ -4,7 +4,7 @@ Codex `compact.rs`/`truncation.rs`/`token_budget.rs`. Our Context Protocol,
 pinned in e2e for the first time: a deliberately TINY context_window so a
 handful of bulky reads overflow it, a fact planted EARLY, and after the
 `[context-notice]` lands the model must answer from `recall` (the durable
-transcript is whole) — not from a lucky still-in-window turn.
+transcript is whole) — not from a lucky still-in-window message.
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ async def main():
             "Step 1: read `secret.txt` through the editor `notes` — it holds a "
             "passphrase you will need at the end. Step 2: read `filler_0.txt` "
             f"through `filler_{N - 1}.txt` ({N} files) to study the corpus — read "
-            f"them ONE PER TURN ({N} separate turns), not all at once. Step 3: WITHOUT reading "
+            f"them ONE PER PASS ({N} separate passes), not all at once. Step 3: WITHOUT reading "
             "`secret.txt` again, write the passphrase to `answer.md`. If your "
             "conversation was compacted and the passphrase scrolled out of "
             "view, use `recall` (send yourself {type:'recall', query:'passphrase'}) "
@@ -90,20 +90,20 @@ async def main():
         await conn.close()
         # DURABLE proof, timing-independent: the model's own history (whole,
         # untrimmed). Scored by `ctx_score`, which reads calls off the ASSISTANT
-        # turns and attributes a fact to the reply block that carried it.
+        # passes and attributes a fact to the reply block that carried it.
         hist = {"messages": await store_rows(root, core, "ai")}
         msgs = hist.get("messages") if isinstance(hist, dict) else None
         got = Path("answer.md").read_text() if Path("answer.md").exists() else ""
 
         # WHAT THE MODEL DID, not what the task said. `"recall" in joined` would match
         # the TASK TEXT (which quotes `{type:'recall', query:'passphrase'}`, and the task
-        # is a user turn in this very store), and `secret in joined` the Step-1 read
-        # reply — both true before the model acts. `ctx_score` reads the ASSISTANT turns for the call and
+        # is a user message in this very store), and `secret in joined` the Step-1 read
+        # reply — both true before the model acts. `ctx_score` reads the ASSISTANT passes for the call and
         # attributes the secret to the REPLY BLOCK that carried it.
         called_recall, recall_returned = ctx_score.recalled(msgs or [], "ai", secret)
         # AND PROVE THERE WAS A COMPACTION AT ALL. `context_status.last_projection` is
-        # the LAST turn's projection and is overwritten every turn, so a run that
-        # compacted and then ended on a turn that fit reads `fired: False` — which is
+        # the LAST pass's projection and is overwritten every pass, so a run that
+        # compacted and then ended on a pass that fit reads `fired: False` — which is
         # why it was never assertable. The pushed `context:compacted` events are.
         compacted = ctx_score.fired(conn)
         answered = secret in got or (msgs and secret in str(msgs[-2:]))
@@ -124,7 +124,7 @@ async def main():
         print(f"  observed context_status.last_projection = {cs.get('last_projection')}")
         print(f"  observed context_status.last_reaction   = {cs.get('last_reaction')}")
         print(f"  observed compactions = {len(conn.compactions)} "
-              f"dropping {ctx_score.dropped_total(conn)} turns total")
+              f"dropping {ctx_score.dropped_total(conn)} messages total")
         allok = all(ok for _, ok in checks)
         verdict(allok, "compacted, recalled, answered from the durable transcript"
                 if allok else "a compaction check failed")

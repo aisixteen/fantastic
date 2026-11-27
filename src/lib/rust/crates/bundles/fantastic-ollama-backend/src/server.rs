@@ -1,7 +1,7 @@
 //! A record that leaves `model` out has it READ FROM THE SERVER — python
 //! `ollama_backend/server.py`, text for text.
 //!
-//! Before `complete`, the verb that runs a turn, an absent `model` is read from
+//! Before `complete`, the verb that runs a pass, an absent `model` is read from
 //! the server the record's `endpoint` names — the ONE model `GET {endpoint}/api/tags`
 //! lists — and WRITTEN BACK to the record, so reflect shows it and it is not read
 //! again until the field is cleared (`null`). A server listing several names them and

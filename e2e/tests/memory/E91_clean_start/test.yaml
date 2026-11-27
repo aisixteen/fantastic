@@ -1,6 +1,6 @@
 id: clean_start
 group: memory
-title: "an empty memory store: kernel_start, an AI agent's first turn — empty head, no error; the kernel's rows land under `kernel`"
+title: "an empty memory store: kernel_start, an AI agent's first pass — empty head, no error; the kernel's rows land under `kernel`"
 runner: probe.py
 costs: free
 muted: "#170: the Python product keeps the old grant model; this probe drives it"

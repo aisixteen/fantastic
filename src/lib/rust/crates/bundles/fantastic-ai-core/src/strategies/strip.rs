@@ -2,9 +2,9 @@
 //!
 //! Every call the model makes carries a one-sentence `title` it wrote at the
 //! moment it made the call. The reply comes back tagged with that title. So when
-//! the window fills, the cheapest safe move is not to drop TURNS but to drop
+//! the window fills, the cheapest safe move is not to drop MESSAGES but to drop
 //! reply BODIES: the 6.8KB read becomes one line — its tag, its title, its size,
-//! its pid — and stays addressable by `recall`. Every assistant turn survives
+//! its pid — and stays addressable by `recall`. Every assistant message survives
 //! untouched, which matters more than it looks: the model's own prose after a
 //! reply IS its distillation of that reply, written with the task in mind, and
 //! it is tiny.
@@ -89,7 +89,7 @@ pub(crate) fn stub(block: &str, id: i64) -> Piece {
     }
 }
 
-/// A delivered reply turn — the only rows whose bodies strip.
+/// A delivered reply message — the only rows whose bodies strip.
 #[must_use]
 pub fn is_reply(m: &Value) -> bool {
     m.get("role").and_then(Value::as_str) == Some("user")
@@ -251,7 +251,7 @@ pub fn strip(body: &[Value], ctx: &ProjectionCtx<'_>) -> Projection {
     let mut cut = false;
     if total(&rendered) > budget {
         // Everything strippable is stripped and the prose alone still overflows.
-        // Stage two: the cut. The goal turn is pinned.
+        // Stage two: the cut. The goal message is pinned.
         let first = rendered[0].clone();
         let head_cost = size(&first);
         let tail = fit_tail(&halve(&rendered[1..]), (budget - head_cost).max(0), &size);

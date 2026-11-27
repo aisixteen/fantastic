@@ -1,7 +1,7 @@
 """Mock model servers — one per provider, standard library only, NO model.
 
 Reusable by any harness (`e2e/`, the canvas e2e): import the provider's class,
-`start()` it, point an AI agent's record at `url`, drive turns, read `requests`.
+`start()` it, point an AI agent's record at `url`, drive passes, read `requests`.
 
     from mocks.vllm import VllmMock            # url → http://127.0.0.1:<port>/v1
     from mocks.ollama import OllamaMock        # url → http://127.0.0.1:<port>
@@ -9,20 +9,20 @@ Reusable by any harness (`e2e/`, the canvas e2e): import the provider's class,
     from mocks.anthropic import AnthropicMock  # url → http://127.0.0.1:<port>/v1/messages
 
     m = VllmMock(model="mock-model").start()   # a free port; `with VllmMock() as m:` too
-    m.reply("hello")                           # the next turn answers this text
-    m.error(500)                               # the next turn answers HTTP 500
-    m.error(503, times=None)                   # every turn, until `m.error(None)`
+    m.reply("hello")                           # the next pass answers this text
+    m.error(500)                               # the next pass answers HTTP 500
+    m.error(503, times=None)                   # every pass, until `m.error(None)`
     m.require_key("sk-1")                      # a request without it → the provider's 401
     m.requests                                 # [{method, path, headers, body, raw, answered}]
     m.keys()                                   # the key each request carried (None = none)
-    m.prompt_tokens = 1234                     # the usage every turn reports (default 100)
+    m.prompt_tokens = 1234                     # the usage every pass reports (default 100)
     m.completion_tokens = 56                   # default: len(answer) // 4, at least 1
     m.stop()
 
-Every switch is per mock and takes effect on the next request. A turn with no
+Every switch is per mock and takes effect on the next request. A pass with no
 queued reply answers `DONE` (a `done` call), so an agent's loop always ends.
 
-What each mock serves, beyond its turn path — the probes each backend makes
+What each mock serves, beyond its pass path — the probes each backend makes
 when its record leaves a field to the server:
 
   vllm       GET /v1/models {data:[{id, max_model_len}]}, GET /metrics (kv slots)
@@ -53,12 +53,12 @@ def free_port() -> int:
 
 class MockServer:
     """A recording, scriptable HTTP server on 127.0.0.1. Subclasses name the
-    provider: `base_path`, `key_of`, `error_body`, `turn`, `probe`."""
+    provider: `base_path`, `key_of`, `error_body`, `on_pass`, `probe`."""
 
     #: the path suffix the CLI record's `endpoint` carries
     base_path = ""
-    #: the turn path
-    turn_path = ""
+    #: the pass path
+    pass_path = ""
 
     def __init__(self, model: str = "mock-model", context_window: int = 262144,
                  max_tokens: int = 262144, port: int | None = None) -> None:
@@ -71,36 +71,36 @@ class MockServer:
         self._replies: list[Any] = []
         self._error: dict | None = None
         self._key: str | None = None
-        #: `responder(request) -> str | None` answers a turn before the queue;
+        #: `responder(request) -> str | None` answers a pass before the queue;
         #: None falls through to the queue.
         self.responder: Callable[[dict], str | None] | None = None
         self.srv: ThreadingHTTPServer | None = None
-        #: The usage each turn REPORTS, in the provider's own fields: the prompt's
+        #: The usage each pass REPORTS, in the provider's own fields: the prompt's
         #: size, and the answer's (None = `len(answer) // 4`, at least 1).
         self.prompt_tokens = 100
         self.completion_tokens: int | None = None
 
     def usage(self, text: str) -> tuple[int, int]:
-        """(prompt, completion) tokens a turn answering `text` reports."""
+        """(prompt, completion) tokens a pass answering `text` reports."""
         out = self.completion_tokens
         return self.prompt_tokens, out if out is not None else max(1, len(text) // 4)
 
     # ── switches ─────────────────────────────────────────────────────────────
     def reply(self, *texts: str) -> Self:
-        """Queue answer texts, one per turn, in order."""
+        """Queue answer texts, one per pass, in order."""
         with self.lock:
             self._replies.extend(texts)
         return self
 
     def error(self, status: int | None, body: Any = None, times: int | None = 1) -> Self:
-        """The next `times` turns answer HTTP `status` (None = every turn until
+        """The next `times` passes answer HTTP `status` (None = every pass until
         cleared). `status=None` clears it. `body` replaces the provider's error body."""
         with self.lock:
             self._error = None if status is None else {"status": status, "body": body, "left": times}
         return self
 
     def require_key(self, key: str | None) -> Self:
-        """Refuse (the provider's 401) every request — turn and probe — that does not
+        """Refuse (the provider's 401) every request — pass and probe — that does not
         carry `key`. None accepts any request."""
         with self.lock:
             self._key = key
@@ -127,9 +127,9 @@ class MockServer:
     def keys(self) -> list[str | None]:
         return [r["key"] for r in self.requests]
 
-    def turns(self) -> list[dict]:
-        """The turn requests alone (no probes, no 404s)."""
-        return [r for r in self.requests if r["kind"] == "turn"]
+    def passes(self) -> list[dict]:
+        """The pass requests alone (no probes, no 404s)."""
+        return [r for r in self.requests if r["kind"] == "pass"]
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     def start(self) -> Self:
@@ -172,7 +172,7 @@ class MockServer:
         """A GET the backend makes to read the server; None = no such path."""
         return None
 
-    def turn(self, h: _Handler, req: dict, text: str) -> None:
+    def on_pass(self, h: _Handler, req: dict, text: str) -> None:
         raise NotImplementedError
 
     # ── plumbing ─────────────────────────────────────────────────────────────
@@ -267,21 +267,21 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 self._json(status, obj)
             return
-        if path.rstrip("/") != m.turn_path:
+        if path.rstrip("/") != m.pass_path:
             done(404, "other")
             self._json(404, {"error": f"mock: no route {path}"})
             return
         err = m.take_error()
         if err is not None:
-            done(err["status"], "turn")
+            done(err["status"], "pass")
             body = err["body"] if err["body"] is not None else m.error_body(
                 err["status"], f"mock: HTTP {err['status']}")
             self._json(err["status"], body)
             return
         text = m.next_text(body if isinstance(body, dict) else {})
-        done(200, "turn")
+        done(200, "pass")
         entry["reply"] = text
-        m.turn(self, body if isinstance(body, dict) else {}, text)
+        m.on_pass(self, body if isinstance(body, dict) else {}, text)
 
     def do_GET(self) -> None:
         self._handle("GET")

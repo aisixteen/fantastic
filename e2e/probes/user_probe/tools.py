@@ -71,7 +71,7 @@ VERBS = {
 KINDS = ("text", "single", "multi", "confirm")
 
 #: HOW MANY INQUIRIES THIS AGENT ACTUALLY RECEIVED, per agent id. The scorer
-#: reads THIS, never the model's prose: a turn that only talks about it leaves the
+#: reads THIS, never the model's prose: a pass that only talks about it leaves the
 #: tally at zero. The other fixtures count their side effects for the same
 #: reason — a model cannot fake the desk's own tally.
 _RECEIVED: dict[str, int] = {}

@@ -301,8 +301,8 @@ async fn say(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) {
     .await;
 }
 
-/// The turn request whose new input is `said` (a recall's side call is not one).
-fn turn_request(s: &crate::tests::MockScript, said: &str) -> Vec<Value> {
+/// The pass request whose new input is `said` (a recall's side call is not one).
+fn pass_request(s: &crate::tests::MockScript, said: &str) -> Vec<Value> {
     (0..s.passes_served())
         .map(|n| s.request_messages(n))
         .find(|req| {
@@ -310,7 +310,7 @@ fn turn_request(s: &crate::tests::MockScript, said: &str) -> Vec<Value> {
                 .and_then(|m| m["content"].as_str())
                 .is_some_and(|c| c == said)
         })
-        .unwrap_or_else(|| panic!("no turn request for {said:?}"))
+        .unwrap_or_else(|| panic!("no pass request for {said:?}"))
 }
 
 /// `rows` saved through the chat's append ([`crate::memory::save_history`]); their ids.
@@ -407,10 +407,10 @@ async fn old_row_dates_its_thread_in_utc() {
             "row {id} was rewritten"
         );
     }
-    // and each turn's request shows every old row as stored, no time on it, and dates
+    // and each pass's request shows every old row as stored, no time on it, and dates
     // the thread by the first of them, in UTC
     for said in ["first", "second"] {
-        let sent = turn_request(&s, said);
+        let sent = pass_request(&s, said);
         let system = sent[0]["content"].as_str().unwrap();
         assert!(system.contains(&want), "the request of {said:?}: {system}");
         for r in &old {
@@ -445,7 +445,7 @@ async fn offset_set_once_on_append() {
     }
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, agent) = mk_kernel(&tmp, "d14_once").await;
-    // spare passes: a recall may ask the provider before a turn
+    // spare passes: a recall may ask the provider before a pass
     let s = script(&agent, (0..12).map(|_| pass(GO)).collect(), Duration::ZERO);
 
     // A ROW SAVED WITH NO OFFSET gets the writing process's offset at its `ts`
@@ -510,9 +510,9 @@ async fn offset_set_once_on_append() {
         "{go}"
     );
     let shown = go["content"].clone();
-    let first_request = turn_request(&s, "go");
+    let first_request = pass_request(&s, "go");
     assert_eq!(first_request.last().unwrap()["content"], shown);
-    let next = turn_request(&s, "again");
+    let next = pass_request(&s, "again");
     assert!(
         next.iter().any(|m| m["content"] == shown),
         "the next pass shows another text: {next:#?}"
@@ -558,7 +558,7 @@ async fn offset_set_once_on_append() {
         offset_at(&fold["attributes"]["ts"]),
         "{fold}"
     );
-    let sent = turn_request(&s, "after the fold");
+    let sent = pass_request(&s, "after the fold");
     let shown = sent
         .iter()
         .find(|m| {
@@ -1661,7 +1661,7 @@ fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
     }
 }
 
-/// D11's children: the writer appends two turns on a file store; a reader opens the
+/// D11's children: the writer appends two rows on a file store; a reader opens the
 /// store again, makes one pass and appends its rows.
 async fn d11_child(role: &str) {
     use super::tests_trace::{answered, names, store, traces_of, Scripted, PLAIN};

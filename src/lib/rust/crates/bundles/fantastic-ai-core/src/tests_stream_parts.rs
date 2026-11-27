@@ -396,7 +396,7 @@ async fn a_call_part_streams_to_its_addressee() {
 
 /// The model stops generating mid-call: the call is NOT dispatched, and the
 /// conversation's newest assistant row is the cut marker, which the next message's
-/// turn sees.
+/// pass sees.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_model_that_stops_with_a_block_open_leaves_the_marker_on_top() {
     let tmp = TempDir::new().unwrap();
@@ -441,11 +441,11 @@ async fn a_model_that_stops_with_a_block_open_leaves_the_marker_on_top() {
 }
 
 /// A stream that never sends a byte is stopped like any other: `stop` closes the
-/// turn, and `status` reports `generating: false` straight after (#177).
+/// pass, and `status` reports `generating: false` straight after (#177).
 #[tokio::test]
 async fn stop_during_a_stalled_stream_clears_generating() {
     // the send ceiling is process-wide: hold the lock a ceiling test takes, so this
-    // turn runs under the default ceiling
+    // pass runs under the default ceiling
     let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
     let tmp = TempDir::new().unwrap();
     let kernel = slow_kernel(&tmp).await;
@@ -456,7 +456,7 @@ async fn stop_during_a_stalled_stream_clears_generating() {
     let fp = slow(&ai, &["never"], Duration::from_secs(600));
     let k = Arc::clone(&kernel);
     let target = ai.clone();
-    let turn = tokio::spawn(async move {
+    let pass_task = tokio::spawn(async move {
         crate::tests::settled(&k, fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             target,
             json!({"type": "send", "text": "go", "client_id": "tab"}),
@@ -489,8 +489,8 @@ async fn stop_during_a_stalled_stream_clears_generating() {
     .result;
     assert_eq!(after["generating"], json!(false), "{after}");
     // the message was acked when it was stored (#795): the stop ends the pass, not the send
-    assert_eq!(turn.await.unwrap().result["accepted"], json!(true));
-    // the stopped notice: the turn keeps its message, and a user row of kind
+    assert_eq!(pass_task.await.unwrap().result["accepted"], json!(true));
+    // the stopped notice: the pass keeps its message, and a user row of kind
     // `stopped` says who stopped it — no bare marker is stored as an answer
     let rows = conversation(&kernel, &ai).await;
     let notice = rows
@@ -499,7 +499,7 @@ async fn stop_during_a_stalled_stream_clears_generating() {
         .and_then(|r| r["content"].as_str())
         .unwrap_or_default();
     assert!(
-        notice.starts_with("[your turn was stopped by rx"),
+        notice.starts_with("[your pass was stopped by rx"),
         "{rows:#?}"
     );
     assert!(
@@ -508,8 +508,8 @@ async fn stop_during_a_stalled_stream_clears_generating() {
     );
 }
 
-/// The SAME provider, behind a bundle whose cancel hook does not close the turn —
-/// the kernel's cancel walk reaches the task and kills it, but the turn is left
+/// The SAME provider, behind a bundle whose cancel hook does not close the pass —
+/// the kernel's cancel walk reaches the task and kills it, but the pass is left
 /// open for `stop` to close (#177).
 const SLOW_DEAF: &str = "slow_backend_deaf.tools";
 
@@ -531,13 +531,13 @@ impl Handler for DeafBundle {
     }
 }
 
-/// `stop` reaches a stream the kernel's cancel did not close (#177): the turn is
+/// `stop` reaches a stream the kernel's cancel did not close (#177): the pass is
 /// closed by `stop` itself — `generating` goes false, the aborted marker is stored,
 /// and the stream is gone, so the FIFO lock is free for the next send at once.
 #[tokio::test]
-async fn stop_closes_a_stalled_turn_the_kernel_cancel_did_not_reach() {
+async fn stop_closes_a_stalled_pass_the_kernel_cancel_did_not_reach() {
     // the send ceiling is process-wide: hold the lock a ceiling test takes, so this
-    // turn runs under the default ceiling
+    // pass runs under the default ceiling
     let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
     let tmp = TempDir::new().unwrap();
     let kernel = base_kernel(&tmp, |k| k.bundles.register(SLOW_DEAF, DeafBundle)).await;
@@ -547,7 +547,7 @@ async fn stop_closes_a_stalled_turn_the_kernel_cancel_did_not_reach() {
     let fp = slow(&ai, &["never"], Duration::from_secs(600));
     let k = Arc::clone(&kernel);
     let target = ai.clone();
-    let turn = tokio::spawn(async move {
+    let pass_task = tokio::spawn(async move {
         crate::tests::settled(&k, fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             target,
             json!({"type": "send", "text": "go", "client_id": "tab"}),
@@ -576,7 +576,7 @@ async fn stop_closes_a_stalled_turn_the_kernel_cancel_did_not_reach() {
         rows.iter().any(|r| r["kind"] == json!("stopped")
             && r["content"]
                 .as_str()
-                .is_some_and(|c| c.starts_with("[your turn was stopped by rx"))),
+                .is_some_and(|c| c.starts_with("[your pass was stopped by rx"))),
         "{rows:#?}"
     );
     // the stream is gone: the next send runs at once, not behind the 600s stall
@@ -593,18 +593,18 @@ async fn stop_closes_a_stalled_turn_the_kernel_cancel_did_not_reach() {
     .result;
     assert!(next.get("raised").is_none(), "{next}");
     assert_eq!(fp.requests(), 2, "the next send ran its own pass");
-    let _ = turn.await;
+    let _ = pass_task.await;
 }
 
-/// A turn woken by a tool reply (#177) — the shape `deliver_reply` gives it: the
+/// A pass woken by a tool reply (#177) — the shape `deliver_reply` gives it: the
 /// send runs as a dispatch row nested under a `deliver_reply` task. Stalled, then
-/// stopped. The kernel's cancel reaches it: `stop` closes the turn through the
-/// walk's `on_cancel` and needs no fallback. The turn ends, the marker is stored,
+/// stopped. The kernel's cancel reaches it: `stop` closes the pass through the
+/// walk's `on_cancel` and needs no fallback. The pass ends, the marker is stored,
 /// `status` reads `generating: false`, and the next send runs at once.
 #[tokio::test]
-async fn stop_reaches_a_reply_woken_turn() {
+async fn stop_reaches_a_reply_woken_pass() {
     // the send ceiling is process-wide: hold the lock a ceiling test takes, so this
-    // turn runs under the default ceiling
+    // pass runs under the default ceiling
     let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
     let tmp = TempDir::new().unwrap();
     let kernel = slow_kernel(&tmp).await;
@@ -644,7 +644,7 @@ async fn stop_reaches_a_reply_woken_turn() {
         rows.iter().any(|r| r["kind"] == json!("stopped")
             && r["content"]
                 .as_str()
-                .is_some_and(|c| c.starts_with("[your turn was stopped by rx"))),
+                .is_some_and(|c| c.starts_with("[your pass was stopped by rx"))),
         "{rows:#?}"
     );
     *fp.step.lock().unwrap() = Duration::ZERO;
@@ -662,9 +662,9 @@ async fn stop_reaches_a_reply_woken_turn() {
     assert_eq!(fp.requests(), 2, "the next send ran its own pass");
 }
 
-/// THE ABORT ARM (#177). The kernel's cancel does NOT find the turn: the task id
+/// THE ABORT ARM (#177). The kernel's cancel does NOT find the pass: the task id
 /// its in-flight entry records is not in the task table, so `cancel_task` answers
-/// `{cancelled:false}` and runs no `on_cancel`. `stop` then closes the turn itself,
+/// `{cancelled:false}` and runs no `on_cancel`. `stop` then closes the pass itself,
 /// fires the generation's abort, and the send returns `{cancelled:true}` from its
 /// abort arm — its provider stream dropped, the FIFO lock released — so the next
 /// send runs at once.
@@ -679,7 +679,7 @@ async fn stop_aborts_a_send_the_kernel_cancel_does_not_find() {
     let fp = slow(&ai, &["never"], Duration::from_secs(600));
     let k = Arc::clone(&kernel);
     let target = ai.clone();
-    let turn = tokio::spawn(async move {
+    let pass_task = tokio::spawn(async move {
         crate::tests::settled(&k, fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             target,
             json!({"type": "send", "text": "go", "client_id": "tab"}),
@@ -693,7 +693,7 @@ async fn stop_aborts_a_send_the_kernel_cancel_does_not_find() {
     {
         let state = crate::state::state_for(&ai);
         let mut cur = state.current_meta.lock().expect("current poisoned");
-        cur.as_mut().expect("a turn in flight").task_id = Some(UNKNOWN_TASK.to_string());
+        cur.as_mut().expect("a pass in flight").task_id = Some(UNKNOWN_TASK.to_string());
     }
     let out = as_agent(
         "rx",
@@ -703,8 +703,8 @@ async fn stop_aborts_a_send_the_kernel_cancel_does_not_find() {
     .remove(0);
     assert_eq!(out.result, json!({"stopped": true}), "{:?}", out.result);
     // the message was acked when it was stored (#795); the stop's abort ended the pass
-    let turn_out = turn.await.expect("the turn task");
-    assert_eq!(turn_out.result["accepted"], json!(true), "{:?}", turn_out.result);
+    let pass_out = pass_task.await.expect("the pass task");
+    assert_eq!(pass_out.result["accepted"], json!(true), "{:?}", pass_out.result);
     let after = as_agent(
         "rx",
         fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(ai.clone(), json!({"type": "status"}))]),
@@ -718,7 +718,7 @@ async fn stop_aborts_a_send_the_kernel_cancel_does_not_find() {
         rows.iter().any(|r| r["kind"] == json!("stopped")
             && r["content"]
                 .as_str()
-                .is_some_and(|c| c.starts_with("[your turn was stopped by rx"))),
+                .is_some_and(|c| c.starts_with("[your pass was stopped by rx"))),
         "{rows:#?}"
     );
     *fp.step.lock().unwrap() = Duration::ZERO;
@@ -738,7 +738,7 @@ async fn stop_aborts_a_send_the_kernel_cancel_does_not_find() {
 
 /// One thread, as python's event loop: the stop lands between two chunks.
 #[tokio::test]
-async fn a_receiver_stops_the_stream_and_the_turn_keeps_a_marker() {
+async fn a_receiver_stops_the_stream_and_the_pass_keeps_a_marker() {
     let tmp = TempDir::new().unwrap();
     let kernel = slow_kernel(&tmp).await;
     let ai = make_ai(&kernel, &id_for(&tmp, "sp_stop")).await;
@@ -750,7 +750,7 @@ async fn a_receiver_stops_the_stream_and_the_turn_keeps_a_marker() {
     // the send dispatch lasts as long as the stream: run it, stop it mid-way
     let k = Arc::clone(&kernel);
     let target = ai.clone();
-    let turn = tokio::spawn(async move {
+    let pass_task = tokio::spawn(async move {
         crate::tests::settled(&k, fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             target,
             json!({"type": "send", "text": "go", "client_id": "tab"}),
@@ -768,14 +768,14 @@ async fn a_receiver_stops_the_stream_and_the_turn_keeps_a_marker() {
     .remove(0);
     assert_eq!(out.result, json!({"stopped": true}), "{:?}", out.result);
     // the message was acked when it was stored (#795): the stop ends the pass, not the send
-    assert_eq!(turn.await.unwrap().result["accepted"], json!(true));
+    assert_eq!(pass_task.await.unwrap().result["accepted"], json!(true));
     let seen = types(&drain_parts(&mut w));
     assert_eq!(
         seen.last().map(String::as_str),
         Some("part_abort"),
         "{seen:?}"
     );
-    // the next turn sees what it was asked and the marker — never the half answer
+    // the next pass sees what it was asked and the marker — never the half answer
     *fp.step.lock().unwrap() = Duration::ZERO;
     call(
         &kernel,
@@ -807,7 +807,7 @@ async fn stop_with_nothing_in_flight_says_so() {
 }
 
 /// `rows` is the agent's in-memory head, as held — no store read, no transform:
-/// nothing loaded → loaded:false; after a turn → its rows, paged by row id.
+/// nothing loaded → loaded:false; after a pass → its rows, paged by row id.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rows_is_a_view_of_what_the_agent_holds() {
     let tmp = TempDir::new().unwrap();
@@ -834,8 +834,8 @@ async fn rows_is_a_view_of_what_the_agent_holds() {
     let fp = slow(&ai, &["hello there", DONE], Duration::ZERO);
     call(&kernel, ai.as_str(), json!({"type": "send", "text": "hi"})).await;
     until_requests(&fp, 2).await;
-    // the prose attempt is re-asked inside the turn (#795) and its rows land after the
-    // second request starts: wait until the head holds the whole turn — hi, done — so
+    // the prose attempt is re-asked inside the pass (#795) and its rows land after the
+    // second request starts: wait until the head holds the whole pass — hi, done — so
     // the two reads below page one settled head (each `rows` call is atomic; two
     // calls are not one snapshot)
     let mut settled = Value::Null;
@@ -1002,7 +1002,7 @@ async fn status_during_a_stream_is_json() {
     let fp = slow(&ai, &[&words, DONE], Duration::from_millis(10));
     let k = Arc::clone(&kernel);
     let target = ai.clone();
-    let turn = tokio::spawn(async move {
+    let pass_task = tokio::spawn(async move {
         crate::tests::settled(&k, fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             target,
             json!({"type": "send", "text": "go"}),
@@ -1020,7 +1020,7 @@ async fn status_during_a_stream_is_json() {
             .is_none_or(|c| !c.contains_key("parts")),
         "{out}"
     );
-    turn.await.unwrap();
+    pass_task.await.unwrap();
 }
 
 /// Only a successful generation dispatches: a pass that wrote
@@ -1129,7 +1129,7 @@ fn a_backtick_in_a_call_argument_does_not_hide_a_wrapper_after_it() {
 fn stop_rows_with_nothing_said_has_no_answer() {
     let (shown, notice) = crate::stream_parts::stop_rows("", "rx", &[]);
     assert_eq!(shown, None);
-    assert_eq!(notice, "[your turn was stopped by rx before you answered]");
+    assert_eq!(notice, "[your pass was stopped by rx before you answered]");
 }
 
 #[test]
@@ -1137,14 +1137,14 @@ fn stop_rows_while_thinking() {
     let open = "\u{3c}think>hmm";
     let (shown, notice) = crate::stream_parts::stop_rows(open, "rx", &[]);
     assert_eq!(shown, None);
-    assert_eq!(notice, "[your turn was stopped by rx while thinking]");
+    assert_eq!(notice, "[your pass was stopped by rx while thinking]");
 }
 
 #[test]
 fn stop_rows_keeps_the_partial_text() {
     let (shown, notice) = crate::stream_parts::stop_rows("partial words", "rx", &[]);
     assert_eq!(shown, Some("partial words".to_string()));
-    assert_eq!(notice, "[your turn was stopped by rx]");
+    assert_eq!(notice, "[your pass was stopped by rx]");
 }
 
 #[test]

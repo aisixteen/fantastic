@@ -6,7 +6,7 @@ inline (the cap invariant — 0 dehydrated), and the marker is reported.
 
 PRE-SEEDED: the reads are PLANTED — the instruction, each read call and
 its reply inline — and the last reply arrives live, so the run continues that chain: the
-folding and the answer are the model's own, without spending a live turn per file.
+folding and the answer are the model's own, without spending a live pass per file.
 """
 from __future__ import annotations
 
@@ -44,13 +44,13 @@ async def main():
         marker = secrets.token_hex(4)
         plant_fillers(N, marker_in=1, marker=marker)
         await fixture(root, FB)
-        task = (f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER TURN, noting anything unusual. Then "
+        task = (f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER PASS, noting anything unusual. Then "
                 f"write `report.md` through `notes`: list every file, and add `marker: <filename> <value>` for the one "
                 f"file that carried an audit marker (grep for it if it is no longer in view). Then {DONE}.")
         reads = file_reads([f"filler_{i}.txt" for i in range(N)])
         a = await run_planted(root, core, BK, FB, AID, STRATEGY, EXTRA, task, reads, "report.md")
         want = f"marker: filler_1.txt {marker}"
-        print(f"     turns={a['turns']}  folded={a['folded']}  recalls={a['recall_rows']}  greps={a['greps']}  folds_opened={a['folds_opened']}  "
+        print(f"     passes={a['passes']}  folded={a['folded']}  recalls={a['recall_rows']}  greps={a['greps']}  folds_opened={a['folds_opened']}  "
               f"self-replies dehydrated={a['dehydrated_self']}{(' ' + '; '.join(a.get('dehydrated_self_tags') or [])) if a['dehydrated_self'] else ''}  FOUND={want in a['body']}")
         checks = [
             (f"folds fired ({a['folded']})", a["folded"] >= 1),

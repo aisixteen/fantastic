@@ -27,7 +27,7 @@ use crate::verbs;
 pub const HANDLER_MODULE: &str = "ai_chat.tools";
 const NAME: &str = "ai_chat";
 /// What the bundle is for — its one short man text.
-const MAN: &str = "An AI agent: it holds a conversation in its memory store, folds and recalls it to fit the model's window, reads the calls the model writes and routes each to the agent it names, and completes every turn through the provider agent its record names.";
+const MAN: &str = "An AI agent: it holds a conversation in its memory store, folds and recalls it to fit the model's window, reads the calls the model writes and routes each to the agent it names, and completes every pass through the provider agent its record names.";
 
 const CFG: BackendConfig = BackendConfig {
     name: NAME,
@@ -57,7 +57,7 @@ pub const VIEW_USER_CALLS: [&str; 2] = ["inquiries", "answer_inquiry"];
 /// The fields a chat's record carries, beside the ones every record has.
 #[derive(Debug, JsonSchema)]
 pub struct ChatRecord {
-    /// The provider agent that completes this chat's turns (`<guid>|<id>` on a connected kernel).
+    /// The provider agent that completes this chat's passes (`<guid>|<id>` on a connected kernel).
     pub provider_id: Option<String>,
     /// The model this chat asks its provider for.
     pub model: Option<String>,

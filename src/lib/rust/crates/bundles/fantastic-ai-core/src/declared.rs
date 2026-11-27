@@ -42,7 +42,7 @@ pub struct Image {
 pub struct Send {
     /// The message.
     pub text: String,
-    /// Whose turn it is: `cli`, or the tab whose socket filters by it.
+    /// Who sent it: `cli`, or the tab whose socket filters by it.
     #[serde(default = "fantastic_kernel::inquiry::default_client_id")]
     #[schemars(schema_with = "fantastic_kernel::inquiry::client_id")]
     pub client_id: String,
@@ -52,7 +52,7 @@ pub struct Send {
     pub notice: Option<bool>,
     /// A reply to a call of a previous incarnation: recorded, never read by a pass.
     pub late: Option<bool>,
-    /// The sending turn's message id.
+    /// The sending pass's message id.
     pub msg: Option<i64>,
     /// The message id this one answers.
     pub re: Option<i64>,
@@ -65,7 +65,7 @@ pub struct Send {
     pub call_stack: Option<Vec<String>>,
 }
 
-/// Stop this agent's in-flight generation: the provider stream closes, open parts abort, the turn keeps a `[stopped by <you>]` marker. Returns {stopped}.
+/// Stop this agent's in-flight generation: the provider stream closes, open parts abort, the pass keeps a `[stopped by <you>]` marker. Returns {stopped}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Stop {
@@ -165,16 +165,16 @@ pub struct Status {
 #[serde(deny_unknown_fields)]
 pub struct ContextStatus {}
 
-/// Page turns back from the DURABLE store — the full conversation, anything compaction dropped is one call away. Read-only. Returns {messages, total, truncated, note?}.
+/// Page messages back from the DURABLE store — the full conversation, anything compaction dropped is one call away. Read-only. Returns {messages, total, truncated, note?}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Recall {
     /// A row id: that row whole (query, limit and before are then ignored).
     pub id: Option<i64>,
-    /// A substring of a serialized turn, tool args and replies included.
+    /// A substring of a serialized message, tool args and replies included.
     #[schemars(length(min = 1))]
     pub query: Option<String>,
-    /// At most this many turns.
+    /// At most this many messages.
     #[schemars(range(min = 1, max = 100))]
     #[serde(default = "default_recall_limit")]
     pub limit: i64,
@@ -263,7 +263,7 @@ pub struct Fork {
     pub from: Option<ForkFrom>,
 }
 
-/// Mark THIS agent's history at its newest row, a turn boundary outside any fold, so `fork {at}` there is always valid. The last 20 marks are kept. Returns {marked, at, label}.
+/// Mark THIS agent's history at its newest row, a pass boundary outside any fold, so `fork {at}` there is always valid. The last 20 marks are kept. Returns {marked, at, label}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Mark {
@@ -333,7 +333,7 @@ pub struct Complete {
     pub image: Option<ImageRef>,
     /// The model of this pass; absent, this provider's default model.
     pub model: Option<String>,
-    /// A side call's own output bound (a fold summary); absent, the pass is the chat's turn, bounded by its knobs' max_tokens.
+    /// A side call's own output bound (a fold summary); absent, the pass is the chat's pass, bounded by its knobs' max_tokens.
     pub max_tokens: Option<i64>,
     /// The calling chat's request knobs (temperature, top_p, …, max_tokens): this pass's request carries them; absent ones are the backend's defaults.
     pub knobs: Option<crate::record::RequestKnobs>,
@@ -347,7 +347,7 @@ pub struct Complete {
 #[serde(deny_unknown_fields)]
 pub struct Models {}
 
-/// What this provider's models can do: {capabilities: {<model>: {images, max_images, max_bytes, max_pixels}}, model}. A chat asks it at its first turn and whenever its provider or model changes.
+/// What this provider's models can do: {capabilities: {<model>: {images, max_images, max_bytes, max_pixels}}, model}. A chat asks it at its first pass and whenever its provider or model changes.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Capabilities {}

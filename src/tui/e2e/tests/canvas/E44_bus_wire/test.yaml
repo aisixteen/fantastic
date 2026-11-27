@@ -4,7 +4,7 @@ id: bus_wire
 group: canvas
 title: "an AI wires instrument panels to a mixer — and leaves one unwired"
 runner: probe.py
-costs: turns
+costs: passes
 limits:
   total_seconds: 600
   quiet_seconds: 30

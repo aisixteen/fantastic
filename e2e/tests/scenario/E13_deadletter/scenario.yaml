@@ -20,7 +20,7 @@ task: >-
   in a document named exactly 'report' (no extension) in the `yaml_store` agent. Then say REPORT FILED.
 
 limits:
-  max_turns: 14
+  max_passes: 14
   idle_seconds: 150
 
 roster:

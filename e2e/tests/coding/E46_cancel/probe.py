@@ -76,7 +76,7 @@ async def main():
         )
         await human_line(root, conn.id)
         # The AI's chat leg — without one, history is RAM-empty (by design) and
-        # every reply turn arrives with total amnesia.
+        # every reply pass arrives with total amnesia.
         r = await _call(
             root,
             root.id,

@@ -6,7 +6,7 @@ answered. Line 80 is `KEY=<token>`, minted now: neither the marker's head (the b
 first line) nor anything the model was told carries it.
 
   1. "Read big.txt. Answer only ok." — the reply arrives whole and folds after the answer.
-  2. An unrelated small task — one more answered turn, so the fold is in force.
+  2. An unrelated small task — one more answered pass, so the fold is in force.
   3. "What is the token on the line that starts with KEY= in big.txt? Do not read the file
      again." — the body is only in the store: the model must send itself `recall` with the
      folded row's id.

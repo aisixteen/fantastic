@@ -2,8 +2,8 @@
 //! `anthropic_backend/server.py`, text for text.
 //!
 //! `context_window` may be left off the provider's record, and `max_tokens` off the
-//! calling chat's knobs (#632: a turn's output budget is the chat's). Before
-//! `complete`, the verb that runs a turn, each one still absent is read from the
+//! calling chat's knobs (#632: a pass's output budget is the chat's). Before
+//! `complete`, the verb that runs a pass, each one still absent is read from the
 //! API's model entry — `GET {models}/{model}`, `{models}` being the endpoint with its
 //! `/messages` replaced by `/models`: `context_window` from its `max_input_tokens`,
 //! WRITTEN BACK to the provider's record; `max_tokens` from the entry's `max_tokens`
@@ -30,7 +30,7 @@ fn read_budgets() -> &'static Mutex<HashMap<String, i64>> {
 
 /// The fields a record may leave to the API, in the order they are read.
 pub const INFERRED: [&str; 2] = ["max_tokens", "context_window"];
-/// The verbs that run a turn of the model — the ones the API is read for.
+/// The verbs that run a pass of the model — the ones the API is read for.
 /// Seconds to wait on the model entry.
 pub const READ_TIMEOUT: f64 = 30.0;
 
@@ -259,7 +259,7 @@ pub async fn resolve(
     if let Some(m) = model {
         rec.insert("model".into(), json!(m));
     }
-    // a turn's output budget is the chat's alone: never the provider's record
+    // a pass's output budget is the chat's alone: never the provider's record
     rec.remove("max_tokens");
     if let Some(m) = chat_max {
         rec.insert("max_tokens".into(), json!(m));

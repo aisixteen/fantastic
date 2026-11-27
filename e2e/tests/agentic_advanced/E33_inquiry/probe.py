@@ -63,7 +63,7 @@ async def _arm(name: str, answer: str):
     The AI id is UNIQUE PER ARM: ai_core keeps its FIFO lock / queue / provider
     maps keyed by bare agent id at module scope, so two in-process kernels that
     both name their AI "ai" share that state — arm 2's first send then queues
-    behind arm 1's dead lock and the chain reads as ended with zero turns."""
+    behind arm 1's dead lock and the chain reads as ended with zero passes."""
     aid = f"ai_{name}"
     root, core, close_kernel = await open_kernel(
         f"ask_{name}_", reach=["prefs", "kernel_store", aid, "user"]
@@ -119,7 +119,7 @@ async def _arm(name: str, answer: str):
     # THE TASK COMES FROM THE HUMAN, not from the harness.
     capped = await drive(conn, TASK, client_id=name, via="user")
     # DID AN INQUIRY ACTUALLY REACH IT? The HUMAN'S OWN TALLY, which only a real call can
-    # move. A turn that merely talks about it leaves the tally at zero, and the
+    # move. A pass that merely talks about it leaves the tally at zero, and the
     # ledger cannot serve here: its rows carry the target but not the verb, so a
     # row on `user` cannot tell the operator's opening task from a question.
     tally = (

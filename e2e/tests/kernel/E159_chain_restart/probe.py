@@ -91,7 +91,7 @@ def main() -> int:
         """The last user message of the first request carrying `needle`, waited for."""
         end = time.monotonic() + bound
         while time.monotonic() < end:
-            for t in m.turns():
+            for t in m.passes():
                 u = last_user(t["body"])
                 if needle in u and RECALL_MARK not in u:
                     return u
@@ -185,7 +185,7 @@ def main() -> int:
             pass
         need(hk.proc.poll() is not None, "the first kernel process is killed")
         hk.close()
-        n_lead, n_work = len(lead_m.turns()), len(work_m.turns())
+        n_lead, n_work = len(lead_m.passes()), len(work_m.passes())
 
         # a restarted agent first asks its model to rebuild its working context from
         # the rows it read back: answered apart, it takes no scripted answer
@@ -240,10 +240,10 @@ def main() -> int:
         need(bool(back) and "ex run" in back,
              f"the lead's chain goes on: its resent job's reply reaches it: {back[:300]!r}")
         need(idle(), "the chains settle after the restart")
-        after_l = [u for u in (last_user(t["body"]) for t in lead_m.turns()[n_lead:])
+        after_l = [u for u in (last_user(t["body"]) for t in lead_m.passes()[n_lead:])
                    if RECALL_MARK not in u]
         need(sum("[restart]" in u for u in after_l) == 1, "the lead is told once")
-        after_w = [u for u in (last_user(t["body"]) for t in work_m.turns()[n_work:])
+        after_w = [u for u in (last_user(t["body"]) for t in work_m.passes()[n_work:])
                    if RECALL_MARK not in u]
         need(sum("[restart]" in u for u in after_w) == 0,
              "the worker is told nothing: its message was acked and read")

@@ -340,7 +340,7 @@ async fn an_image_over_the_limits_after_the_downscale_or_not_an_image_is_refused
         );
         assert_eq!(r["reason"], json!("bad_arg"));
     }
-    assert_eq!(script.passes_served(), 0, "a refused send runs no turn");
+    assert_eq!(script.passes_served(), 0, "a refused send runs no pass");
     assert!(rows(&kernel, &chat).await.is_empty(), "and stores no row");
 }
 
@@ -526,7 +526,7 @@ async fn the_chat_keeps_its_providers_capabilities_and_asks_again_only_on_a_chan
     assert_eq!(
         held(&kernel, &chat),
         Value::Null,
-        "nothing before the first turn"
+        "nothing before the first pass"
     );
     // every write of the map to the chat's record shows as an `updated` event naming it
     let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -552,7 +552,7 @@ async fn the_chat_keeps_its_providers_capabilities_and_asks_again_only_on_a_chan
     update(&kernel, &provider_id, json!({"capabilities_reply": other})).await;
     say(&kernel, &chat, "again", json!(null)).await;
     assert_eq!(held(&kernel, &chat)["capabilities"], e1);
-    assert_eq!(written(), 1, "an unchanged turn writes no record");
+    assert_eq!(written(), 1, "an unchanged pass writes no record");
     // the model changes: asked again, and the entry is the new model's
     update(&kernel, &chat, json!({"model": "small-model"})).await;
     say(&kernel, &chat, "third", json!(null)).await;

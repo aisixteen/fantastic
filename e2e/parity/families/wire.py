@@ -42,7 +42,7 @@ CHAIN_SCRIPT = [
     'The files agent answered; finishing.\n<call name="done"></call>',
 ]
 BUSY_SCRIPT = [
-    'First turn, working.\n<call name="send"><routing><target_id>files</target_id></routing><payload><type>reflect</type></payload></call>',
+    'First pass, working.\n<call name="send"><routing><target_id>files</target_id></routing><payload><type>reflect</type></payload></call>',
     '<call name="done"></call>',
 ]
 

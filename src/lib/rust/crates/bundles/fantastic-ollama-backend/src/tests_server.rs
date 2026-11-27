@@ -225,7 +225,7 @@ async fn a_complete_the_server_cannot_answer_is_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_verb_that_runs_no_turn_reads_nothing() {
+async fn a_verb_that_runs_no_pass_reads_nothing() {
     let tmp = TempDir::new().unwrap();
     let srv = ollama(tags(&["m"]), 200).await;
     let kernel = mk(&tmp, &srv.uri()).await;
@@ -271,7 +271,7 @@ async fn the_key_rides_the_chat_only_when_set() {
     }
 }
 
-/// A key the server refuses (401) on the pre-turn `/api/tags` read is PERMANENT through the
+/// A key the server refuses (401) on the pre-pass `/api/tags` read is PERMANENT through the
 /// shared classifier (`provider::read_reason`).
 #[tokio::test]
 async fn a_refused_key_on_the_model_read_is_permanent() {

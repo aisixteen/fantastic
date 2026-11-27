@@ -21,7 +21,7 @@ task: >-
   a document named exactly 'coin' (no extension) in the `yaml_store` agent. Then say COIN SECURED.
 
 limits:
-  max_turns: 14
+  max_passes: 14
   idle_seconds: 150
 
 roster:

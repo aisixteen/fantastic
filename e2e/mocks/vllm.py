@@ -35,7 +35,7 @@ ERROR_TYPES = {400: "BadRequestError", 401: "Unauthorized", 404: "NotFoundError"
 
 class VllmMock(MockServer):
     base_path = "/v1"
-    turn_path = "/v1/chat/completions"
+    pass_path = "/v1/chat/completions"
 
     def __init__(self, *a, kv_slots: int = 4, block_size: int = 16, **kw) -> None:
         super().__init__(*a, **kw)
@@ -66,7 +66,7 @@ class VllmMock(MockServer):
                          f"vllm:cache_config_info{{{body}}} 1.0\n")
         return None
 
-    def turn(self, h, req, text):
+    def on_pass(self, h, req, text):
         cid = "chatcmpl-" + uuid.uuid4().hex
         created = int(time.time())
 
@@ -95,7 +95,7 @@ class ThinkingVllmMock(VllmMock):
     `<think>T</think>A` streams T as `reasoning_content` deltas, then A as
     `content` — the shape a reasoning model's server sends."""
 
-    def turn(self, h, req, text):
+    def on_pass(self, h, req, text):
         think, answer = "", text
         if text.startswith("<think>") and "</think>" in text:
             think, answer = text[len("<think>"):].split("</think>", 1)

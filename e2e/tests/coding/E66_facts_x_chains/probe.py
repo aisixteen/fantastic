@@ -41,7 +41,7 @@ LETTERS = "abcd"
 
 def task(i, letter):
     lo = 4 * i
-    return (f"TASK {letter.upper()}: read `filler_{lo}.txt` … `filler_{lo + 3}.txt` through `notes`, ONE PER TURN, "
+    return (f"TASK {letter.upper()}: read `filler_{lo}.txt` … `filler_{lo + 3}.txt` through `notes`, ONE PER PASS, "
             f"noting anything unusual; then write `report_{letter}.md` listing exactly those four filenames, "
             f"one per line, plus `marker: <value>` if one of them carried an audit marker. Then {DONE}.")
 

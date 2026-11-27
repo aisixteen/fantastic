@@ -489,7 +489,7 @@ async fn a_complete_the_server_cannot_answer_is_refused_naming_the_field() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_verb_that_runs_no_turn_reads_nothing() {
+async fn a_verb_that_runs_no_pass_reads_nothing() {
     let tmp = TempDir::new().unwrap();
     let kernel = mk_kernel(&tmp).await;
     let (srv, ep) = default_vllm().await;
@@ -529,7 +529,7 @@ async fn a_key_the_store_refuses_refuses_naming_credentials() {
     }
 }
 
-/// A key the server refuses (401) on the pre-turn `/models` read is PERMANENT through the
+/// A key the server refuses (401) on the pre-pass `/models` read is PERMANENT through the
 /// shared classifier (`provider::read_reason`): `unauthorized`, so the chain gives up at
 /// once — the read is never retried every pass (the GPU-run burst of `/v1/models` 401s).
 #[tokio::test]

@@ -8,4 +8,4 @@ runtimes: [rust]
 costs: free
 limits:
   idle_seconds: 60
-  turn_seconds: 180
+  pass_seconds: 180

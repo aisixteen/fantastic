@@ -31,7 +31,7 @@ async fn a_failed_pass_stores_an_error_row_and_the_queue_moves_on() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_err_row").await;
     let reason = "mock_backend: stream_stalled — https://api.example/v1/messages sent no \
-                  bytes for 0.2s; this turn is NOT complete";
+                  bytes for 0.2s; this pass is NOT complete";
     let s = script(
         &backend,
         vec![
@@ -54,7 +54,7 @@ async fn a_failed_pass_stores_an_error_row_and_the_queue_moves_on() {
     let content = errors[0]["content"].as_str().unwrap_or_default();
     assert!(content.contains("stream_stalled"), "{content}");
     assert!(
-        content.contains("nothing this turn meant to send"),
+        content.contains("nothing this pass meant to send"),
         "{content}"
     );
     assert!(
@@ -115,9 +115,9 @@ const ENDPOINT: &str = "https://api.example/v1/messages";
 /// stored and acked at once (#795); it is read by the next pass, the moment the window
 /// ends the first. The first pass's `status` is `failed` with `reason='error'`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_queued_send_waits_behind_a_stalled_turn_and_runs_when_the_window_ends() {
+async fn a_queued_send_waits_behind_a_stalled_pass_and_runs_when_the_window_ends() {
     // the send ceiling is process-wide: hold the lock a ceiling test takes, so this
-    // turn runs under the default ceiling
+    // pass runs under the default ceiling
     let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_stall_q").await;
@@ -177,7 +177,7 @@ async fn a_queued_send_waits_behind_a_stalled_turn_and_runs_when_the_window_ends
     let why = done_a["detail"]["error"].as_str().unwrap_or_default();
     assert!(why.contains("stream_stalled"), "{why}");
     assert!(why.contains(ENDPOINT), "{why}");
-    // and the stored error row is what the next turn reads
+    // and the stored error row is what the next pass reads
     let rows = conversation(&kernel, &backend).await;
     let errors = error_rows(&rows);
     assert_eq!(errors.len(), 1, "{rows:#?}");
@@ -189,13 +189,13 @@ async fn a_queued_send_waits_behind_a_stalled_turn_and_runs_when_the_window_ends
         "{rows:#?}"
     );
     assert!(
-        s.request(1).to_string().contains("[turn failed]"),
+        s.request(1).to_string().contains("[pass failed]"),
         "{}",
         s.request(1)
     );
 }
 
-// ─── a failed turn settles its sender and tells its watchers (#496) ─────────
+// ─── a failed pass settles its sender and tells its watchers (#496) ─────────
 
 /// A pass that outlives the ceiling fails with `status(failed, reason: timeout)` and an
 /// error row naming the ceiling, and it is NOT retried: one pass served, however long
@@ -237,7 +237,7 @@ async fn a_timed_out_pass_says_timeout_and_is_not_retried() {
     );
     // nothing retries it: the agent is idle and no second pass starts
     tokio::time::sleep(Duration::from_millis(400)).await;
-    assert_eq!(s.passes_served(), 1, "the failed turn was run again");
+    assert_eq!(s.passes_served(), 1, "the failed pass was run again");
 }
 
 /// A provider failure that is not a timeout emits `failed {reason: error}` once, and its
@@ -291,8 +291,8 @@ async fn a_failed_provider_pass_emits_failed_error_once() {
         .collect();
     assert_eq!(dones.len(), 1, "{seen:#?}");
     assert_eq!(dones[0]["detail"]["reason"], json!("error"), "{dones:#?}");
-    // nothing re-runs the failed turn (#795)
-    assert_eq!(s.passes_served(), 1, "the failed turn was run again");
+    // nothing re-runs the failed pass (#795)
+    assert_eq!(s.passes_served(), 1, "the failed pass was run again");
 }
 
 /// A message that lands during a pass that times out was acked at once (#795): no sender
@@ -409,7 +409,7 @@ async fn a_message_during_a_failed_pass_is_read_by_the_next_pass() {
     let (kernel, backend) = mk_kernel(&tmp, "rt_held_fail").await;
     let s = script(
         &backend,
-        // the first turn fails, and so does the wake turn that reads the held message
+        // the first pass fails, and so does the wake pass that reads the held message
         vec![
             vec![ScriptEvent::Fail("boom".into())],
             vec![ScriptEvent::Fail("boom".into())],
@@ -460,12 +460,12 @@ fn status_reason<'a>(events: &'a [Value], reason: &str) -> Option<&'a Value> {
     })
 }
 
-/// A FAILED PASS ENDS VISIBLY, with no turn of its own (#795, Q4; was #533): a
+/// A FAILED PASS ENDS VISIBLY, with no pass of its own (#795, Q4; was #533): a
 /// provider failure past `transport_retries` stores its error row after the incoming
 /// one, ends on `status(failed)` naming the error, and nothing more is asked — no
 /// self-sent retry, no loop.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_failed_pass_ends_with_its_error_row_and_no_turn_of_its_own() {
+async fn a_failed_pass_ends_with_its_error_row_and_no_pass_of_its_own() {
     let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_retry_once").await;
@@ -473,7 +473,7 @@ async fn a_failed_pass_ends_with_its_error_row_and_no_turn_of_its_own() {
         &backend,
         vec![
             vec![ScriptEvent::Fail("mock_backend: boom".into())],
-            // never served: a failed pass is not re-run as a turn
+            // never served: a failed pass is not re-run as a pass
             pass(r#"RETRIED-ANSWER <call name="done"></call>"#),
         ],
         Duration::ZERO,
@@ -514,7 +514,7 @@ async fn a_pass_cut_at_max_tokens_fails_naming_the_cut() {
     let s = script(
         &backend,
         vec![vec![ScriptEvent::Fail(
-            "mock_backend: the turn was cut at max_tokens=16384 and is NOT complete".into(),
+            "mock_backend: the pass was cut at max_tokens=16384 and is NOT complete".into(),
         )]],
         Duration::ZERO,
     );
@@ -537,9 +537,9 @@ async fn a_pass_cut_at_max_tokens_fails_naming_the_cut() {
     );
 }
 
-/// A cancelled turn is not retried (#533).
+/// A cancelled pass is not retried (#533).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_cancelled_turn_is_not_retried() {
+async fn a_cancelled_pass_is_not_retried() {
     let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_retry_cancel").await;
@@ -566,7 +566,7 @@ async fn a_cancelled_turn_is_not_retried() {
         .await;
     let _ = first.await;
     tokio::time::sleep(Duration::from_millis(900)).await;
-    assert_eq!(s.passes_served(), 1, "a cancelled turn was retried");
+    assert_eq!(s.passes_served(), 1, "a cancelled pass was retried");
     let rows = stored_rows(&kernel, &backend).await;
     assert!(error_rows(&rows).is_empty(), "{rows:#?}");
 }

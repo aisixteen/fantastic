@@ -1,6 +1,6 @@
-"""memory/rules_decay — constraint compliance under many turns.
+"""memory/rules_decay — constraint compliance under many passes.
 
-Three rules about the final report are given at turn 1; twenty filler reads follow at
+Three rules about the final report are given at pass 1; twenty filler reads follow at
 a squeezed window; then the report is written. Scored on the FOLD arm holding all three
 rules; the TRUNCATE arm runs the same and is printed beside it as the control."""
 from __future__ import annotations
@@ -33,7 +33,7 @@ async def _arm(root, core, aid, strategy, rules, tok):
     spec = "; ".join(f"{how} `{line}`" for how, line in rules)
     await drive(conn, f"Rules for the report you will write at the END of this task: {spec}. Acknowledge the "
                       f"rules, then {DONE}", client_id=aid, via="user")
-    await M.ask(root, aid, f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER TURN. Do not write "
+    await M.ask(root, aid, f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER PASS. Do not write "
                            f"anything yet. After the last one, {DONE}")
     await M.ask(root, aid, f"Now write `{aid}.md` through `notes` listing the files you read, obeying every rule "
                            f"you were given at the start. Then {DONE}")
@@ -63,7 +63,7 @@ async def main():
             (f"the fold arm was compacted ({fold[2]})", fold[2] >= 1),
             (f"the fold arm held every rule ({fold[0]}/{len(rules)})", fold[0] == len(rules)),
         ])
-        verdict(ok, "the rules held across twenty turns and the folds" if ok else "a rules_decay check failed")
+        verdict(ok, "the rules held across twenty passes and the folds" if ok else "a rules_decay check failed")
     finally:
         await close()
 

@@ -5,11 +5,11 @@ group: coding
 title: the model edits, then takes it back with undo
 runner: probe.py
 runtimes: [rust]
-costs: turns
+costs: passes
 limits:
   idle_seconds: 60
-  max_turns: 20
-  no_progress_turns: 32
-  turn_chars: 60000
-  turn_seconds: 300
+  max_passes: 20
+  no_progress_passes: 32
+  pass_chars: 60000
+  pass_seconds: 300
 env: {}

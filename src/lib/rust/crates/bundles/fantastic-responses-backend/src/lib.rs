@@ -10,7 +10,7 @@
 //! - the key is read before EACH request from the record's `credentials: {store,
 //!   ref}` — a ref in a `credential_store`, sent only to the ref's host
 //!   (`fantastic_ai_core::credentials`) — never from the environment or the
-//!   record. `credentials` is REQUIRED; a refused read fails the turn, naming
+//!   record. `credentials` is REQUIRED; a refused read fails the pass, naming
 //!   the store and the ref. No key-storage verb, no sidecar.
 //! - NO guessed host and NO guessed model: `endpoint` (the full `…/v1/responses`
 //!   URL, used verbatim) and `model` must be on the record; the sentinels exist
@@ -21,7 +21,7 @@
 //! the assistant). STATELESS: `store:false`, the whole conversation every pass. NO
 //! native tools — a `function_call` output item is a loud error. The stream's
 //! `response.reasoning_text` / `reasoning_summary_text` deltas are wrapped once per
-//! turn in `<think>…</think>`; `response.output_text` deltas are the output.
+//! pass in `<think>…</think>`; `response.output_text` deltas are the output.
 
 #![deny(missing_docs)]
 
@@ -51,7 +51,7 @@ pub const HANDLER_MODULE: &str = "responses_backend.tools";
 /// The name a required-field refusal carries.
 const BACKEND: &str = "responses_backend";
 
-/// Per-turn output budget (`max_output_tokens`) for a chat that names no `max_tokens` (#632).
+/// Per-pass output budget (`max_output_tokens`) for a chat that names no `max_tokens` (#632).
 pub const DEFAULT_MAX_TOKENS: i64 = 8192;
 
 /// EDGE TRANSPORT FAILURES. A 4xx, or any 5xx
@@ -75,7 +75,7 @@ const REASONING_DELTAS: [&str; 2] = [
 ];
 
 /// Output deltas. A refusal is text the model produced; dropping it would return
-/// a refused turn as an EMPTY completion.
+/// a refused pass as an EMPTY completion.
 const TEXT_DELTAS: [&str; 2] = ["response.output_text.delta", "response.refusal.delta"];
 
 /// Per-backend config: per-client-inbox routing; serial dispatch.
@@ -243,7 +243,7 @@ impl Provider for ResponsesProvider {
         max_tokens: Option<i64>,
     ) -> Result<ProviderStream, ProviderError> {
         // Python's order: the endpoint, then the model, then the key (read
-        // inside the turn, before the request).
+        // inside the pass, before the request).
         if self.endpoint.is_empty() {
             return Err(ProviderError::raised(
                 "responses_backend: no `endpoint` set — this connector does not \
@@ -279,7 +279,7 @@ impl Provider for ResponsesProvider {
         }
         let body = Value::Object(body);
         // THE KEY, read before EACH request (python `await self._key(...)` in
-        // the headers): a refused read raises inside the turn.
+        // the headers): a refused read raises inside the pass.
         let key = self.key.key(&self.endpoint).await?.unwrap_or_default();
         let mut auth = reqwest::header::HeaderValue::from_str(&format!("Bearer {key}"))
             .map_err(|e| ProviderError::raised(format!("api_key has illegal header chars: {e}")))?;
@@ -450,7 +450,7 @@ fn decode_sse_line(st: &mut SseState, line: &str) -> Result<Vec<ProviderEvent>, 
     };
     let etype = obj.get("type").and_then(Value::as_str).unwrap_or("");
     if REASONING_DELTAS.contains(&etype) {
-        // BOTH CHANNELS ARE READ: a turn spent thinking would otherwise arrive
+        // BOTH CHANNELS ARE READ: a pass spent thinking would otherwise arrive
         // EMPTY, and a `<call>` written mid-thought would be lost with it.
         if let Some(t) = obj.get("delta").and_then(Value::as_str) {
             if !t.is_empty() {
@@ -475,7 +475,7 @@ fn decode_sse_line(st: &mut SseState, line: &str) -> Result<Vec<ProviderEvent>, 
     }
     match etype {
         // A NATIVE function_call ITEM IS A LOUD ERROR — JSON arguments this kernel
-        // does not read; a silent drop would end the turn with the call lost.
+        // does not read; a silent drop would end the pass with the call lost.
         "response.output_item.added" => {
             let item = obj.get("item").cloned().unwrap_or(json!({}));
             let kind = item.get("type").cloned().unwrap_or(Value::Null);
@@ -509,7 +509,7 @@ fn decode_sse_line(st: &mut SseState, line: &str) -> Result<Vec<ProviderEvent>, 
                 r.completion_tokens = (output != 0).then_some(output);
             }
             st.final_response = Some(resp);
-            // A turn spent ENTIRELY reasoning ends inside the span — balance it.
+            // A pass spent ENTIRELY reasoning ends inside the span — balance it.
             if let Some(m) = st.wrap.close_marker() {
                 out.push(ProviderEvent::Token(m.to_string()));
             }
@@ -584,7 +584,7 @@ fn consume_sse(
                         return None;
                     }
                     // THE READ CLOCK: a body quiet for the idle window is a stalled
-                    // stream, and the turn fails with its error row (#177).
+                    // stream, and the pass fails with its error row (#177).
                     let chunk = match within(stream_idle, inner.next()).await {
                         Ok(chunk) => chunk,
                         Err(stalled) => {
@@ -730,7 +730,7 @@ impl Handler for ResponsesBundle {
         .await
     }
 
-    /// The kernel is killing a task of this agent: close the in-flight turn out
+    /// The kernel is killing a task of this agent: close the in-flight pass out
     /// for the caller before the substrate drops the future.
     async fn on_cancel(
         &self,

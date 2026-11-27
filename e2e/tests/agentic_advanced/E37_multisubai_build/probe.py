@@ -10,18 +10,18 @@ the creator makes each solver's provider under it, fills each solver's record wi
 exactly one oracle line and a line on each peer, points them at `notes`, starts all
 three in ONE batch with replies DISCARDED, calls `done`. Then, when the solvers have
 agreed and written the code, the writer must message the creator; the creator's
-turn wakes, reads `answer.txt` on `notes`, confirms the code the solvers report is
+pass wakes, reads `answer.txt` on `notes`, confirms the code the solvers report is
 the code on disk, tells the human, deletes its three solvers (its `create` line
 covers them) and ends with `done`. That last leg — a sleeping mind woken by
 its own creation, validating, cleaning up and stopping — is the point of the test.
 Acceptance: the reported answer AND the deletion of the sub-agents.
 
-A creator left to work it out is not stuck but SLOW: turns of reflecting, a probe
+A creator left to work it out is not stuck but SLOW: passes of reflecting, a probe
 program, one `update_agent` per line. So the task
 here is as detailed as a spec — the record fields to copy, the exact `can` lines
 (and that `update_agent` REPLACES a named field whole), the solver instructions
 verbatim, the batch kickoff with `<reply_to>null</reply_to>`, and `done`. What is
-left to the creator is doing it, correctly, in few turns.
+left to the creator is doing it, correctly, in few passes.
 
 Reuses E30's driver (`P.run`) with E36's puzzle, oracle and kickoff text. THREE
 solver lanes plus the creator's: run alone.
@@ -64,11 +64,11 @@ def solver_instructions(k: int) -> str:
     """E36's kickoff text plus the closing step: tell the creator."""
     base = S.kickoff(k)
     return base.replace(
-        "End every turn with `done` once you have nothing more to send;",
+        "End every pass with `done` once you have nothing more to send;",
         f"When the code has been written to `answer.txt`, the writer sends `{CREATOR}` "
         "(your creator) one message: `CONCLUDED <code>` with one line per digit saying "
         "who owned it and how it was derived; the other two send nothing further. End "
-        "every turn with `done` once you have nothing more to send;",
+        "every pass with `done` once you have nothing more to send;",
     )
 
 
@@ -79,7 +79,7 @@ _PROV_FIELDS, _CHAT_FIELDS = split_record(P.BK.record())
 #: and key are its provider's, named by `provider_id`): the model (the
 #: chat's: it names it on each `complete`; the provider uses the call's model or its
 #: `default_model` setting, never its own record's), the provider, the conversation
-#: store, the window and the request knobs the plug sets (`max_tokens` bounds a turn
+#: store, the window and the request knobs the plug sets (`max_tokens` bounds a pass
 #: inside the server's window). A backend whose record names no model copies none.
 #: NOT `handler_module`: the shells are created as chats (`CHAT_MODULE`) and the kernel
 #: never lets any caller change an agent's handler (structure fields are not updatable).
@@ -112,7 +112,7 @@ TASK = (
     "other call needs a LINE in the CALLER's own `can` field, "
     "`{<target id>: {\"call\": [<verbs>]}}` (`[\"*\"]` for every verb). You may hand "
     "on only lines you hold yourself.\n\n"
-    "DO EXACTLY THIS, in as few turns as you can — every step is spelled out so you "
+    "DO EXACTLY THIS, in as few passes as you can — every step is spelled out so you "
     "need no exploration:\n\n"
     f"STEP 1 — FILL THE THREE SOLVERS. They already exist as YOUR OWN CHILDREN, empty "
     f"chats with ids `{SOLVERS[0]}`, `{SOLVERS[1]}`, `{SOLVERS[2]}`. Each solver is a "
@@ -141,7 +141,7 @@ TASK = (
     "it. You are their parent, so you reach them with no line.\n\n"
     "STEP 2 — KICK OFF ALL THREE AT ONCE: one batch of three `send` calls, one per "
     "solver, each with `<type>send</type>`, `<client_id>` = the solver's id, "
-    "`<reply_to>null</reply_to>` (their first turns are NOT yours to read), and "
+    "`<reply_to>null</reply_to>` (their first passes are NOT yours to read), and "
     "`<text>` = that solver's instructions, VERBATIM from the three blocks below.\n\n"
     "STEP 3 — tell me in one paragraph what you built, then call `done`. Do not poll, "
     "do not read `answer.txt` yet, do not message the solvers again.\n\n"
@@ -296,18 +296,18 @@ async def score(root, store_id, total, new_total, transcript):
 
     # ── 2. ONE-BATCH KICKOFF with replies discarded, then `done` ──
     creator = (await _rows(root, CREATOR))
-    kick_turn = None
+    kick_pass = None
     for r in creator:
         if r.get("role") != "assistant":
             continue
         body = str(r.get("content") or "")
         n = sum(1 for s in solvers if re.search(rf"<target_id>\s*{s}\s*</target_id>", body))
         if n == N:
-            kick_turn = body
+            kick_pass = body
             break
-    discarded = bool(kick_turn) and len(re.findall(r"<reply_to>\s*null\s*</reply_to>", kick_turn)) >= N
-    c2 = kick_turn is not None and discarded
-    print(f"    2. one-batch kickoff, replies null  {'OK' if c2 else 'NO'} kickoff_turn={'yes' if kick_turn else 'no'} reply_to_null={discarded}")
+    discarded = bool(kick_pass) and len(re.findall(r"<reply_to>\s*null\s*</reply_to>", kick_pass)) >= N
+    c2 = kick_pass is not None and discarded
+    print(f"    2. one-batch kickoff, replies null  {'OK' if c2 else 'NO'} kickoff_pass={'yes' if kick_pass else 'no'} reply_to_null={discarded}")
 
     # ── 3. THE SWARM CONCLUDES (E36's measure) ──
     print(f"       … the team works unattended, up to {UNATTENDED:.0f}s")
@@ -392,11 +392,11 @@ async def score(root, store_id, total, new_total, transcript):
         print(f"  {s_}: {len(errs)} — " + "; ".join(f"{k} ×{n}" for k, n in sorted(kinds.items(), key=lambda t: -t[1])[:4]))
         last = [r for r in (await _rows(root, s_)) if r.get("role") == "assistant"]
         if last:
-            print(f"     last turn: {' '.join(str(last[-1].get('content') or '').split())[:200]}")
-    turns = {s: sum(1 for r in (await _rows(root, s)) if r.get("role") == "assistant") for s in solvers}
+            print(f"     last pass: {' '.join(str(last[-1].get('content') or '').split())[:200]}")
+    passes = {s: sum(1 for r in (await _rows(root, s)) if r.get("role") == "assistant") for s in solvers}
     ct = sum(1 for r in (await _rows(root, CREATOR)) if r.get("role") == "assistant")
-    print(f"\n  observed — creator turns        : {ct}")
-    print(f"  observed — solver turns         : {turns}  (storm: {sum(turns.values())} turns)")
+    print(f"\n  observed — creator passes        : {ct}")
+    print(f"  observed — solver passes         : {passes}  (storm: {sum(passes.values())} passes)")
     ok = c1 and c2 and c3 and c4
     print(f"\n  RESULT: {'PASS — built, started, slept, woken, validated, cleaned up, stopped' if ok else 'FAIL'}")
     verdict(ok)

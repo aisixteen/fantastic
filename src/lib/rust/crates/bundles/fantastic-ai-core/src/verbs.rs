@@ -145,7 +145,7 @@ pub fn status(agent_id: &AgentId, args: &Status) -> Value {
 /// store (`keep_memory:true` on the delete keeps those). Python `on_delete`.
 ///
 /// NOT the incarnation: it stays monotonic across a re-create, so a reply to a
-/// call the deleted agent made never becomes a live turn of the new one.
+/// call the deleted agent made never becomes a live pass of the new one.
 pub async fn on_delete(agent_id: &AgentId, kernel: &Arc<Kernel>) {
     // Its persisted rows go with it (unless `delete_agent keep_memory:true`).
     crate::memory::purge(agent_id, kernel).await;
@@ -345,7 +345,7 @@ pub(crate) async fn stopped(agent_id: &AgentId, stream_id: Option<&str>, kernel:
 /// `rows` — a VIEW of this agent's conversation exactly as the agent HOLDS it in
 /// memory — its loaded head, in the order it lived it; no store read, no transform,
 /// so what a UI draws is what the agent has. Before the agent has loaded its head (a
-/// fresh boot, before its first turn) it holds nothing: `{rows:[], loaded:false}`.
+/// fresh boot, before its first pass) it holds nothing: `{rows:[], loaded:false}`.
 /// Returns `{rows, next, total, loaded}`.
 ///
 /// THE HEAD IS THIS KERNEL'S CACHE (`Mem::heads`), never a store mirror (a mirror
@@ -446,7 +446,7 @@ pub(crate) async fn history(
         crate::steps::refreshed(agent_id, kernel, (args, settle), move |(args, settle), r| async move {
             settle.with(r.map(|head| {
                 let cards: Vec<Value> = head.iter().filter(|r| crate::embed::is_card_row(r)).cloned().collect();
-                history_page(&me, &args, &k, model_window, crate::memory::turns(head), cards)
+                history_page(&me, &args, &k, model_window, crate::memory::chat_rows(head), cards)
             }));
         })
         .await;
@@ -454,7 +454,7 @@ pub(crate) async fn history(
 }
 
 /// The `history` reply over what its read gave: `rows`, the whole conversation for a
-/// fold, else the head's turns; `cards`, the head's card rows.
+/// fold, else the head's rows; `cards`, the head's card rows.
 fn history_page(
     agent_id: &AgentId,
     args: &History,
@@ -509,7 +509,7 @@ fn history_page(
         .map(digest)
         .collect();
     // CHAT CARDS (#339): embed / unembed rows have no role, so `load_history` drops
-    // them; the page redraws them from here, in their place among the turns.
+    // them; the page redraws them from here, in their place among the rows.
     let mut card_count = 0;
     if args.fold.is_none() {
         let cards: Vec<Value> = cards
@@ -549,7 +549,7 @@ fn history_page(
     out
 }
 
-/// Render ONE stored turn for a `recall` reply — python `_recall_render`.
+/// Render ONE stored row for a `recall` reply — python `_recall_render`.
 ///
 /// WHOLE, NOT CAPPED — python returns it verbatim, and the cut half would be
 /// exactly what a model pages back FOR.
@@ -582,7 +582,7 @@ fn own_search_reply(agent_id: &AgentId, m: &Value) -> bool {
         })
 }
 
-/// `recall` verb: page turns back from the DURABLE chat store (the FULL
+/// `recall` verb: page messages back from the DURABLE chat store (the FULL
 /// conversation, never trimmed — so anything compaction dropped is one call
 /// away). Read-only. args: `query?` (case-insensitive substring), `limit?`
 /// (default 20, max 100), `before?` (store index), `id?` (a row id: that row whole).
@@ -682,7 +682,7 @@ fn recall_page(agent_id: &AgentId, args: &Recall, kernel: &Kernel, model_window:
     // The page is trimmed from the OLDEST end (the newest of what was
     // asked for is kept) and says so, with the index to continue from — the
     // caller loses a page, never the run. Measured on the WHOLE reply serialized
-    // as one user turn, which is the unit delivery measures.
+    // as one user message, which is the unit delivery measures.
     let cap = crate::context::inline_cap(&agent_meta(agent_id, kernel), model_window);
     let render_page = |pg: &[&(usize, &Value)]| -> Vec<Value> {
         pg.iter()
@@ -693,7 +693,7 @@ fn recall_page(agent_id: &AgentId, args: &Recall, kernel: &Kernel, model_window:
         let probe = json!({
             "messages": render_page(pg), "total": total, "truncated": true,
             "note": format!(
-                "page trimmed by 999 older turn(s) to fit your window (cap {cap} tok); \
+                "page trimmed by 999 older message(s) to fit your window (cap {cap} tok); \
                  pass before=999999 to page further back."
             ),
         });
@@ -713,7 +713,7 @@ fn recall_page(agent_id: &AgentId, args: &Recall, kernel: &Kernel, model_window:
     });
     if trimmed > 0 {
         reply["note"] = json!(format!(
-            "page trimmed by {trimmed} older turn(s) to fit your window (cap {cap} tok); \
+            "page trimmed by {trimmed} older message(s) to fit your window (cap {cap} tok); \
              pass before={} to page further back.",
             page[0].0
         ));
@@ -730,17 +730,17 @@ fn recall_page(agent_id: &AgentId, args: &Recall, kernel: &Kernel, model_window:
             .unwrap_or(false);
         let note = if let (Some(q), false) = (&q, full.is_empty()) {
             format!(
-                "query {} matched none of the {} stored turns.",
+                "query {} matched none of the {} stored messages.",
                 py_repr(q),
                 full.len()
             )
         } else if !fired {
-            "nothing has been compacted away — recall pages back turns that \
+            "nothing has been compacted away — recall pages back messages that \
              compaction DROPPED, and none have been. If you can see this reply, \
              your live context already holds the whole conversation."
                 .to_string()
         } else {
-            "no stored turns in this page.".to_string()
+            "no stored messages in this page.".to_string()
         };
         reply["note"] = json!(note);
     }
@@ -975,7 +975,7 @@ pub fn inquiry_head(asker: &str, pid: &str) -> String {
 /// and reads the answer off the same reply.
 #[must_use]
 pub fn inquiry_text(args: &Inquiry) -> String {
-    // The inquiry IS the turn. `options`/`kind` ride in the text because a model
+    // The inquiry IS the message. `options`/`kind` ride in the text because a model
     // reads prose, not a schema; `action` is carried verbatim so an answering
     // agent can see what it is being asked to endorse.
     let asker = fantastic_kernel::current_origin();
@@ -1081,7 +1081,7 @@ pub async fn boot(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     }
     // A new incarnation reads its store afresh; bodies are this run's only.
     crate::memory::forget_head(agent_id, kernel);
-    // the provider is asked what it can do again at the first turn of this incarnation
+    // the provider is asked what it can do again at the first pass of this incarnation
     *state_for(agent_id)
         .caps_checked
         .lock()

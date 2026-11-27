@@ -7,7 +7,7 @@ not needed — reported, not failed.
 
 PRE-SEEDED: the reads are PLANTED — the instruction, each read call and
 its reply inline — and the last reply arrives live, so the run continues that chain: the
-folding and the answer are the model's own, without spending a live turn per file.
+folding and the answer are the model's own, without spending a live pass per file.
 """
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ DONE = 'end your run by calling done — emit <call name="done"></call>'
 FB = "descent_fb"
 N = 16
 TASK = (
-    f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER TURN, noting anything "
+    f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER PASS, noting anything "
     "unusual. Then write `report.md` through `notes`: list every file, and add the line "
     f"`marker: <filename> <value>` for the one file that carried an audit marker. Then {DONE}."
 )

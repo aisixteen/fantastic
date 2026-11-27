@@ -1,4 +1,4 @@
-//! Prompt assembly: render_reflect, the two how-tos, and the per-turn message
+//! Prompt assembly: render_reflect, the two how-tos, and the per-pass message
 //! list.
 //!
 //! The default system block states the MECHANISM (how to call, grants, replies,
@@ -77,7 +77,7 @@ pub fn render_reflect(v: &Value) -> String {
 /// The fields of an agent's own reflect its system block shows — python `_SELF_KEYS`.
 const SELF_KEYS: [&str; 3] = ["id", "description", "memory_store_id"];
 
-/// THE PLACEHOLDERS a system prompt may hold, filled per agent and per turn —
+/// THE PLACEHOLDERS a system prompt may hold, filled per agent and per pass —
 /// so a prompt that REPLACES the default block keeps its
 /// live parts: `{self}` this agent's identity and grants, `{store}` its memory
 /// store id, `{howto}` the fixed how-to blocks. `{self}\n\n{howto}` IS the
@@ -213,7 +213,7 @@ fn parts(
     out
 }
 
-/// A prompt with its placeholders filled for this agent and this turn — python
+/// A prompt with its placeholders filled for this agent and this pass — python
 /// `_render_prompt`. `me`: the agent's own `reflect`.
 fn render_prompt(
     text: &str,
@@ -234,7 +234,7 @@ fn render_prompt(
 /// reflect and the how-to sections its record earns. Nothing in it changes when the tree
 /// does, nor with the clock (its date is the thread's first row's), so the cached prefix
 /// holds for the whole conversation. Extracted so `context_recall` can MEASURE the same
-/// block the next turn will carry — python's `_default_system_content`.
+/// block the next pass will carry — python's `_default_system_content`.
 ///
 /// # Errors
 /// The memory store refused the read of the thread's first row.
@@ -319,12 +319,12 @@ pub(crate) fn self_text(self_id: &AgentId, me: &Value) -> String {
     format!("You are `{}`. {}", self_id, render_reflect(&me))
 }
 
-/// THE system block a turn uses, as `decl` writes it — the one choice
-/// `assemble_messages` builds the turn on and `context_recall` sizes the body budget
+/// THE system block a pass uses, as `decl` writes it — the one choice
+/// `assemble_messages` builds the pass on and `context_recall` sizes the body budget
 /// against, so the two never drift (python `_system_content`). PRECEDENCE:
 /// the per-call argument (this delivery) > the record's own `system_prompt` (read
-/// LIVE, so an `update_agent` lands on the next turn — a main turn, a
-/// self-delivery, a turn woken by a reply) > the file the record's
+/// LIVE, so an `update_agent` lands on the next pass — a main pass, a
+/// self-delivery, a pass woken by a reply) > the file the record's
 /// `system_prompt_file` names ([`crate::prompt_file`]) > the default block.
 /// Whichever prompt is in force has its placeholders filled; none is ever
 /// appended to another.
@@ -349,7 +349,7 @@ pub(crate) fn system_content(
     ))
 }
 
-/// The system block a turn uses, piece by piece: the block is their mapped texts end to
+/// The system block a pass uses, piece by piece: the block is their mapped texts end to
 /// end. `env`: the first row of the thread.
 pub(crate) fn system_pieces(
     self_id: &AgentId,
@@ -402,15 +402,15 @@ fn inner_system_pieces(
     {
         return Ok(render_prompt(&s, self_id, kernel, "system_text", env, me));
     }
-    // Set and unusable is an `Err` — the turn fails, never the default below.
+    // Set and unusable is an `Err` — the pass fails, never the default below.
     if let Some(s) = crate::prompt_file::current(self_id, kernel)? {
         return Ok(render_prompt(&s, self_id, kernel, "prompt_file", env, me));
     }
     Ok(default_pieces(self_id, kernel, env, me))
 }
 
-/// Why a turn's block or view could not be built: the memory store failed, or a
-/// set `system_prompt_file` is unusable. Either fails the turn, said so (python
+/// Why a pass's block or view could not be built: the memory store failed, or a
+/// set `system_prompt_file` is unusable. Either fails the pass, said so (python
 /// `MemoryStoreError` / `PromptFileError`, both caught by `_send`).
 #[derive(Debug)]
 pub enum BlockFail {
@@ -482,10 +482,10 @@ impl From<BlockFail> for fantastic_kernel::bundle::BundleError {
 /// The conversation is ALWAYS this agent's own (its memory store): there is no
 /// caller-supplied history. The environment section's date is the thread's first row's.
 ///
-/// Returns `(messages, store_len)`. `store_len` is how many turns the head held
+/// Returns `(messages, store_len)`. `store_len` is how many rows the head held
 /// when this view was built, and it is NOT derivable from the messages: the
 /// history is a deduped/trimmed VIEW (see [`crate::history_view`]), so counting
-/// the view puts the compaction reaction cursor short by exactly the turns the
+/// the view puts the compaction reaction cursor short by exactly the rows the
 /// trimmers dropped.
 #[cfg(test)]
 pub(crate) async fn assemble_messages(
@@ -800,7 +800,7 @@ pub fn listed_entries(
     (!out.is_empty()).then_some(out)
 }
 
-/// The history part of the model view (no system block, no user turn), as
+/// The history part of the model view (no system block, no user message), as
 /// `assemble_messages` sends it: the listed entries each at its recorded
 /// resolution, then every row after the newest of them as stored; with no listed
 /// array, the whole store as stored. Shared with `context_fold`, which persists
@@ -866,9 +866,9 @@ fn rows_from(store: &[Value], from: usize) -> Vec<Rendered> {
 #[cfg(test)]
 mod tests_worknote {
     #[test]
-    fn the_context_howto_teaches_one_turn_thinking_and_anchors() {
+    fn the_context_howto_teaches_one_pass_thinking_and_anchors() {
         let h = crate::model_format::default::HOWTO_CONTEXT;
-        assert!(h.contains("Your thinking lasts one turn"));
+        assert!(h.contains("Your thinking lasts one pass"));
         assert!(h.contains("Do not repeat a call whose result you still have or noted"));
     }
 

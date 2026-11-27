@@ -11,7 +11,7 @@ Three phases on ONE agent, scored on the store and on the agent:
      marker planted mid-corpus is unknown to the agent afterwards, and `grep` reaches it.
   3. chat / fold / clear / STOP / START — a new kernel on the same dir, the memory
      store's tables carried across: the thread still starts at the last clear, the
-     first-turn recall did not resurrect the folded past, the rows behind are all still
+     first-pass recall did not resurrect the folded past, the rows behind are all still
      there, and the agent still answers NONE.
 """
 from __future__ import annotations
@@ -41,7 +41,7 @@ _, STRATEGY, EXTRA = FOLD_ARMS[1]
 # 12 fillers at 4000 chars. The read reply must be INLINED for the view to grow: the
 # inline cap is budget/8 = 1872 tokens ≈ 7488 chars of the RENDERED reply, and a
 # 6800-char file renders (line-numbered items) past it — every runtime stored those
-# as digests and the fold count then depends on how many grep turns the MODEL chooses.
+# as digests and the fold count then depends on how many grep passes the MODEL chooses.
 # At 4000 chars a
 # read renders ≈ 6k chars, inlined; twelve of them ≈ 18k tokens against a 16k window,
 # so folds fire on every runtime whatever the model does between reads.
@@ -148,7 +148,7 @@ async def main():
         behind1 = await _behind(root)
 
         # ── 2. chat / fold / clear / chat ──
-        await _ask(root, f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER TURN, noting anything "
+        await _ask(root, f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER PASS, noting anything "
                          f"unusual (an audit marker, if any). Do not write anything. After the last file, {DONE}")
         folds2 = sum(1 for r in await _thread(root) if r.get("kind") == "fold")
         cs2 = await call(root, AI, {"type": "context_status"})
@@ -162,7 +162,7 @@ async def main():
         await conn.close()
 
         # ── 3. fold / clear / SHUTDOWN / BOOT ──
-        await _ask(root, f"Read `filler_1.txt` and `filler_3.txt` through `notes`, one per turn, noting anything unusual. Then {DONE}")
+        await _ask(root, f"Read `filler_1.txt` and `filler_3.txt` through `notes`, one per pass, noting anything unusual. Then {DONE}")
         r3 = await call(root, AI, {"type": "context_clear", "why": "phase 3"})
         behind3 = await _behind(root)
         root2, stop = await restart(root, core)

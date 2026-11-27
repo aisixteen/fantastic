@@ -116,7 +116,7 @@ async fn http_errors_are_classed_by_the_shared_classifier() {
         (401, ErrorClass::Permanent(UNAUTHORIZED)),
         (404, ErrorClass::Permanent(NOT_FOUND)),
         (503, ErrorClass::Transient),
-        (400, ErrorClass::Turn),
+        (400, ErrorClass::Pass),
     ] {
         let server = MockServer::start().await;
         Mock::given(method("POST"))

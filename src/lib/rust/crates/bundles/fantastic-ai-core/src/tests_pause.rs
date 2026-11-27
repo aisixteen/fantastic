@@ -263,7 +263,7 @@ async fn resume_runs_one_pass_over_the_held_and_the_resumed_row() {
     assert_eq!(r["released"], 1, "{r}");
     let s = await_request(&served, "held-probe")
         .await
-        .expect("the held turn never reached the model");
+        .expect("the held pass never reached the model");
     let resumed_at = s
         .find("resumed after a pause")
         .expect("no resumed row in that request");
@@ -288,11 +288,11 @@ async fn held_messages_keep_their_order() {
     assert_eq!(r["released"], 3, "{r}");
     let s = await_request(&served, "m3-probe")
         .await
-        .expect("not all held turns reached the model");
+        .expect("not all held passes reached the model");
     let a = s.find("m1-probe").expect("m1 missing");
     let b = s.find("m2-probe").expect("m2 missing");
     let c = s.find("m3-probe").expect("m3 missing");
-    assert!(a < b && b < c, "held turns out of order");
+    assert!(a < b && b < c, "held passes out of order");
 }
 
 #[tokio::test]

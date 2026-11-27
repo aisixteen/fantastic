@@ -67,14 +67,14 @@ pub enum GenFailure {
     Projection(Value),
     /// The provider pass failed. See [`ProviderError`].
     Provider(ProviderError),
-    /// The agent's memory store refused or is unreachable — FAIL FAST, no turn
+    /// The agent's memory store refused or is unreachable — FAIL FAST, no pass
     /// (python `MemoryStoreError`, caught by `_send`).
     Store(MemoryStoreError),
-    /// `system_prompt_file` is set and cannot be the block — FAIL LOUD, no turn
+    /// `system_prompt_file` is set and cannot be the block — FAIL LOUD, no pass
     /// on another block (python `PromptFileError`, caught by `_send`).
     PromptFile(crate::prompt_file::PromptFileError),
     /// A fold's summary would not fit its budget after every re-summarise — FAIL
-    /// LOUD, no turn on an unfolded view (python `FoldSummaryError`, caught by
+    /// LOUD, no pass on an unfolded view (python `FoldSummaryError`, caught by
     /// `_send`).
     FoldSummary(crate::strategies::fold::FoldSummaryError),
     /// A fold's anchor cannot be known — python's `ValueError` out of
@@ -834,9 +834,9 @@ async fn settled(mut rec: Box<PassRec>, live: Arc<LiveView>, r: Result<String, P
             fields.insert("removed".into(), json!(removed));
         }
         let kind = rec.cur().kind;
-        rec.cur().events().push(Mode::Turn.name(), kind, "repaired", fields);
+        rec.cur().events().push(Mode::Pass.name(), kind, "repaired", fields);
     }
-    let report = rec.cur().report(Mode::Turn);
+    let report = rec.cur().report(Mode::Pass);
     if attempt == 1 {
         rec.window = Window::of(&report);
     }
@@ -855,12 +855,12 @@ async fn settled(mut rec: Box<PassRec>, live: Arc<LiveView>, r: Result<String, P
         // THE ACCEPTED ATTEMPT: its view's chain is kept, its pins go
         if let Some(view) = rec.view.take() {
             let mut events = rec.cur().events();
-            view.finish(&mut events, Mode::Turn.name());
+            view.finish(&mut events, Mode::Pass.name());
         }
         let accepted = rec.cur().accepted(&report);
         return answered(rec, read.text, report, accepted, read.open).await;
     };
-    // a thrown-away attempt: its counts go to the next row's `turn.rejected`
+    // a thrown-away attempt: its counts go to the next row's `pass.rejected`
     rec.cur().rejected(&report);
     let error = first_line(&why).to_string();
     let mut fields = Map::new();
@@ -868,7 +868,7 @@ async fn settled(mut rec: Box<PassRec>, live: Arc<LiveView>, r: Result<String, P
     fields.insert("error".into(), json!(error));
     fields.extend(retry_counts(&report));
     let kind = rec.cur().kind;
-    rec.cur().events().push(Mode::Turn.name(), kind, "retry", fields);
+    rec.cur().events().push(Mode::Pass.name(), kind, "retry", fields);
     rec.errors.push(error.clone());
     // A REPLY NAMING A MODEL OF ANOTHER TYPE (Q26): the sequence restarts once under
     // the new type, with the same view mapped for it
@@ -881,7 +881,7 @@ async fn settled(mut rec: Box<PassRec>, live: Arc<LiveView>, r: Result<String, P
             fields.insert("from".into(), json!(rec.pass.kind));
             fields.insert("to".into(), json!(next.kind));
             fields.insert("model".into(), json!(next.model.clone().unwrap_or_default()));
-            next.events().push(Mode::Turn.name(), next.kind, "model_switched", fields);
+            next.events().push(Mode::Pass.name(), next.kind, "model_switched", fields);
             let view = next.view(&rec.model_messages, &rec.meta);
             rec.sent = view.messages.clone();
             rec.view = Some(view);
@@ -994,7 +994,7 @@ async fn stopped(rec: Box<PassRec>) {
     fields.insert("reason".into(), json!(reason));
     fields.insert("errors".into(), json!(rec.errors));
     let kind = rec.cur().kind;
-    rec.cur().events().push(Mode::Turn.name(), kind, "stop", fields);
+    rec.cur().events().push(Mode::Pass.name(), kind, "stop", fields);
     let run = &rec.run;
     let message_id = run.kernel.mint_id();
     let mut row = json!({
@@ -1026,7 +1026,7 @@ async fn stopped(rec: Box<PassRec>) {
         landing.stored();
         *rec.run.state.prev_request.lock().expect("prev_request poisoned") = Some(next);
         // THE PASS'S TRACE ROWS (#766, 1.10), as steps; the give-up once they are written
-        let events = crate::model_format::trace::of_turn(&rec.pass, rec.restarted.as_ref());
+        let events = crate::model_format::trace::of_pass(&rec.pass, rec.restarted.as_ref());
         let (me, k, state, cid) = (
             rec.run.self_id.clone(),
             Arc::clone(&rec.run.kernel),
@@ -1167,7 +1167,7 @@ struct Answered {
 /// THE ANSWER ROW IS STORED: the pass's trace rows (steps), then the route.
 async fn stored(rec: Box<PassRec>, done: Answered) {
     // THE PASS'S TRACE ROWS (#766, 1.10), its helpers' included, once its rows are stored
-    let events = crate::model_format::trace::of_turn(&rec.pass, rec.restarted.as_ref());
+    let events = crate::model_format::trace::of_pass(&rec.pass, rec.restarted.as_ref());
     let (me, k, state, cid) = (
         rec.run.self_id.clone(),
         Arc::clone(&rec.run.kernel),
@@ -1326,7 +1326,7 @@ async fn told(run: Run, why: String, permanent: bool) {
     let mut body = Map::new();
     body.insert(
         "error".to_string(),
-        json!(format!("{}'s turn failed: {why}", self_id.as_str())),
+        json!(format!("{}'s pass failed: {why}", self_id.as_str())),
     );
     let mut clients: Vec<String> = run.tail.iter().map(|a| a.client_id.clone()).collect();
     clients.dedup();
@@ -1350,7 +1350,7 @@ async fn retry(mut run: Run, message: String) {
         "parent": Value::Null,
         "kind": "notice",
         "content": format!(
-            "[retry {attempt}/{retries}] the link dropped ({message}) — retrying the turn"
+            "[retry {attempt}/{retries}] the link dropped ({message}) — retrying the pass"
         ),
     });
     // the visible notice row is a step; the retry goes on once the store took it
@@ -1392,7 +1392,7 @@ fn failed_row(run: &Run, reason: &str) -> Value {
         "role": "user",
         "kind": "error",
         "content": format!(
-            "[turn failed] {reason}. No answer was stored, and nothing this turn meant \
+            "[pass failed] {reason}. No answer was stored, and nothing this pass meant \
              to send was dispatched."
         ),
         "id": run.kernel.mint_id(),
@@ -1611,7 +1611,7 @@ fn calibrate(state: &BackendState, window: Option<Window>, sent: &[Value]) {
     *state.reported.lock().expect("reported poisoned") = Some(reported);
 }
 
-/// `calib` cleared when `kind` is not the type of the chat's last finished turn pass
+/// `calib` cleared when `kind` is not the type of the chat's last finished pass
 /// (Q37): the projection then runs at 1.0. A model switch inside one type keeps it.
 fn clear_calib_on_type_change(state: &BackendState, kind: &str) {
     let last = *state.last_type.lock().expect("last_type poisoned");
@@ -1692,7 +1692,7 @@ async fn abort_parts(parts: &tokio::sync::Mutex<PassParts>, e: ProviderError) ->
     GenFailure::Provider(e)
 }
 
-/// The turn a delivered reply answers: `↑N` on the FIRST tag of the incoming
+/// The pass a delivered reply answers: `↑N` on the FIRST tag of the incoming
 /// text — python `_TAG_LINKS`. Anything else is a ROOT.
 pub(crate) fn incoming_parent(text: &str) -> Option<i64> {
     let rest = text.strip_prefix("[reply to ")?;

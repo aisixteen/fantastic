@@ -12,7 +12,7 @@
 //! `data:` line carries `{choices:[{delta:{content?, reasoning_content?}}]}`
 //! and the last one the `usage`. BOTH text channels are read (a reasoning model
 //! streams its deliberation as `reasoning_content`, some servers as
-//! `reasoning`); the deliberation is wrapped in `<think>…</think>` once per turn
+//! `reasoning`); the deliberation is wrapped in `<think>…</think>` once per pass
 //! (`fantastic_ai_core::think`). RAW MODE: NO `tools` array is sent and NO
 //! `tool_calls` are read — ai-core parses the `<call name=…>` envelope from the
 //! content text.
@@ -20,7 +20,7 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
-use fantastic_ai_core::constants::DEFAULT_TURN_TOKENS;
+use fantastic_ai_core::constants::DEFAULT_PASS_TOKENS;
 use fantastic_ai_core::credentials::KeySource;
 use fantastic_ai_core::declared::provider;
 use fantastic_ai_core::provider::{
@@ -306,7 +306,7 @@ pub struct OpenAiRecord {
     pub model: Option<String>,
     /// Sampling temperature; left out, none is sent and the server's own setting applies.
     pub temperature: Option<f64>,
-    /// A turn's output budget (tokens).
+    /// A pass's output budget (tokens).
     #[schemars(range(min = 1), default = "default_max_tokens")]
     pub max_tokens: Option<i64>,
     /// The read clock of the answer stream.
@@ -324,7 +324,7 @@ pub struct OpenAiRecord {
 }
 
 fn default_max_tokens() -> Option<i64> {
-    Some(DEFAULT_TURN_TOKENS)
+    Some(DEFAULT_PASS_TOKENS)
 }
 
 fantastic_kernel::record!(OpenAiRecord);

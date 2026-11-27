@@ -369,7 +369,7 @@ async fn pair(wire: Wire, open: bool, granted: bool) -> Pair {
     assert_eq!(made["id"], json!("probe"), "{made}");
 
     let ka = kernel(A, &held).await;
-    // process-wide agent state (an AI's turn table) is keyed by id: every pair
+    // process-wide agent state (an AI's pass table) is keyed by id: every pair
     // names its agents on A apart
     let (ai, probe, creds) = (
         format!("{t}_ai"),
@@ -540,9 +540,9 @@ impl Pair {
     }
 }
 
-/// A turn on A's AI for a non-cli caller — its stream goes to the AI's inbox, so
+/// A pass on A's AI for a non-cli caller — its stream goes to the AI's inbox, so
 /// its watchers see it.
-fn turn(text: &str) -> Value {
+fn pass(text: &str) -> Value {
     json!({"type": "send", "text": text, "client_id": "remote"})
 }
 
@@ -563,9 +563,9 @@ async fn settle(k: &Arc<Kernel>) {
     );
 }
 
-/// What a watcher gets of one turn: wait for A's passes to end, then collect from
-/// `rx` until the turn's `done` has arrived (it rides the socket after the events).
-async fn stream_of_turn(
+/// What a watcher gets of one pass: wait for A's passes to end, then collect from
+/// `rx` until the pass's `done` has arrived (it rides the socket after the events).
+async fn stream_of_pass(
     a: &Arc<Kernel>,
     rx: &mut fantastic_kernel::inbox::InboxReceiver,
 ) -> Vec<Value> {
@@ -596,7 +596,7 @@ fn kinds(evs: &[Value]) -> Vec<String> {
         .collect()
 }
 
-/// A full turn's stream as a watcher sees it: status phases, the text part
+/// A full pass's stream as a watcher sees it: status phases, the text part
 /// streamed, all before `done`.
 fn assert_stream_before_done(evs: &[Value], wire: Wire) {
     let k = kinds(evs);
@@ -726,7 +726,7 @@ async fn b_watches_an_ai_on_a_and_gets_its_stream_until_unwatch_or_drop() {
         );
         p.until_watched("ai", true).await;
 
-        let out = p.call("ai", turn("one")).await;
+        let out = p.call("ai", pass("one")).await;
         assert_eq!(
             out.status.as_str(),
             "completed",
@@ -735,13 +735,13 @@ async fn b_watches_an_ai_on_a_and_gets_its_stream_until_unwatch_or_drop() {
         );
         assert_eq!(out.result["client_id"], json!("remote"), "{wire:?}");
         assert_eq!(out.result["accepted"], json!(true), "{wire:?}: {:?}", out.result);
-        // the turn's events rode the same socket, `done` last
-        assert_stream_before_done(&stream_of_turn(&p.ka, &mut rx).await, wire);
+        // the pass's events rode the same socket, `done` last
+        assert_stream_before_done(&stream_of_pass(&p.ka, &mut rx).await, wire);
 
-        // unwatched: A stops streaming, the next turn brings nothing
+        // unwatched: A stops streaming, the next pass brings nothing
         p.kb.unwatch(&target, &w).await;
         p.until_watched("ai", false).await;
-        let out = p.call("ai", turn("two")).await;
+        let out = p.call("ai", pass("two")).await;
         assert_eq!(out.status.as_str(), "completed", "{wire:?}");
         settle(&p.ka).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -756,7 +756,7 @@ async fn b_watches_an_ai_on_a_and_gets_its_stream_until_unwatch_or_drop() {
         p.until_watched("ai", true).await;
         p.cut().await;
         p.until_watched("ai", false).await;
-        let local = op(&p.ka, &p.n("ai"), turn("three")).await;
+        let local = op(&p.ka, &p.n("ai"), pass("three")).await;
         assert_eq!(local.status.as_str(), "completed", "{wire:?}");
         settle(&p.ka).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -794,9 +794,9 @@ async fn a_watch_from_b_is_gated_by_the_legs_watch_line() {
         );
         assert!(refusal.get("id").is_none(), "{wire:?}: {refusal}");
         assert!(p.kb.peer_watched(A).is_empty(), "{wire:?}");
-        // the leg serves calls but not watches: the turn runs, nothing streams
+        // the leg serves calls but not watches: the pass runs, nothing streams
         p.line("ai", json!({"call": ["send"]}));
-        let out = p.call("ai", turn("one")).await;
+        let out = p.call("ai", pass("one")).await;
         assert_eq!(
             out.status.as_str(),
             "completed",
@@ -909,7 +909,7 @@ async fn a_dropped_link_fails_calls_fast_and_a_redial_resumes_the_watch() {
             failed.result
         );
         // while the link is down, what A's AI streams is not kept for B
-        let local = op(&p.ka, &p.n("ai"), turn("unseen")).await;
+        let local = op(&p.ka, &p.n("ai"), pass("unseen")).await;
         assert_eq!(local.status.as_str(), "completed", "{wire:?}");
         settle(&p.ka).await;
 
@@ -917,14 +917,14 @@ async fn a_dropped_link_fails_calls_fast_and_a_redial_resumes_the_watch() {
         p.dial().await;
         p.until_watched("ai", true).await;
         assert_eq!(drain(&mut rx), Vec::<Value>::new(), "{wire:?}: replayed");
-        let out = p.call("ai", turn("again")).await;
+        let out = p.call("ai", pass("again")).await;
         assert_eq!(
             out.status.as_str(),
             "completed",
             "{wire:?}: {:?}",
             out.result
         );
-        assert_stream_before_done(&stream_of_turn(&p.ka, &mut rx).await, wire);
+        assert_stream_before_done(&stream_of_pass(&p.ka, &mut rx).await, wire);
         p.stop().await;
     }
 }
@@ -934,7 +934,7 @@ async fn a_second_hello_for_the_guid_replaces_the_first_connection() {
     for wire in WIRES {
         let p = pair(wire, true, true).await;
         if let Link::Ws(t) = &p.link {
-            t.set_up(false); // the leg's own redial would replace `newer` in turn
+            t.set_up(false); // the leg's own redial would replace `newer` in pass
         }
         let mut newer = raw_ws(p.port, &p.b_web).await;
         newer

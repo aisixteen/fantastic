@@ -30,7 +30,7 @@ async def main():
         Path("big.md").write_text(body + "\n")
         await M.files(root)
         conn = await M.agent(root, core, BK, "ai", record={"context_async": False})
-        await drive(conn, f"Read `big.md` through `notes` THREE times, one read per turn (it is a test of the "
+        await drive(conn, f"Read `big.md` through `notes` THREE times, one read per pass (it is a test of the "
                           f"reader). Then {DONE}", client_id="ai", via="user")
         await conn.close()
         rows = await store_rows(root, core, "ai")

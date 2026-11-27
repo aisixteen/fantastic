@@ -47,7 +47,7 @@ VLLM_CASES = [
     # …and the same cut INSIDE the reasoning channel: the think span must still close.
     ("stream_cut_mid_reasoning", [{"reasoning": "weighing it", "text": "", "cut": True}],
      (), {}),
-    # A main turn cut at the record's max_tokens fails, naming the cut.
+    # A main pass cut at the record's max_tokens fails, naming the cut.
     ("finish_length", [{"text": "an answer the budget cut", "finish_reason": "length"}],
      (), {}),
     # The reasoning channel (`reasoning_content`) before the answer.

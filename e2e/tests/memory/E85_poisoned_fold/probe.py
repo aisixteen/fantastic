@@ -38,7 +38,7 @@ async def main():
         plant_fillers(N, extra={1: f">> checksum: {real}"}, pad_to=3000)
         await M.files(root)
         conn = await M.agent(root, core, BK, "ai")
-        await drive(conn, f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER TURN. Then {DONE}",
+        await drive(conn, f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER PASS. Then {DONE}",
                     client_id="ai", via="user")
         rows = await store_rows(root, core, "ai")
         members = [m["id"] for m in rows if m.get("id") and "filler_1" in str(m.get("content", ""))]

@@ -3,7 +3,7 @@
 Python runtime, the Anthropic plug (skipped without it). The parent runs with
 `caching: provider_cache` and a primer: its first message is long and its row id is
 `cache_primer_until`, so every request marks the end of that prefix for the provider.
-Two turns write the cache; the parent marks its history; a fork at the mark sends once.
+Two passes write the cache; the parent marks its history; a fork at the mark sends once.
 Scored on the fork's cache-read tokens, from the backend's per-agent usage count
 (`anthropic_backend.tools.usage_of`), being above zero.
 """
@@ -41,7 +41,7 @@ def _skip(why: str) -> None:
     print(f"E2E-SKIP: {why}", flush=True)
 
 
-async def _turn(root, aid, text):
+async def _pass(root, aid, text):
     r = (await root.send([{"target": aid, "timeout": 300, "payload": {"type": "send", "text": text}}]))[0]["result"]
     assert not (isinstance(r, dict) and r.get("error")), r
     for _ in range(300):
@@ -50,7 +50,7 @@ async def _turn(root, aid, text):
             await asyncio.sleep(0.3)
             if not await _live_tasks(root, aid):
                 return
-    raise AssertionError(f"the turn of {aid} never went quiet")
+    raise AssertionError(f"the pass of {aid} never went quiet")
 
 
 async def main():
@@ -73,13 +73,13 @@ async def main():
             limits=Limits.from_env(os.environ),
         )
         aid = conn.id
-        await _turn(root, aid, PRIMER)
+        await _pass(root, aid, PRIMER)
         first = (await memory.rows_of(root, aid, conversation_only=True))[0]["id"]
         # the primer ends at the first row: the provider is told where the prefix ends
         done = (await root.send([{"target": root.id, "payload": {
             "type": "update_agent", "id": aid, "cache_primer_until": first}}]))[0]["result"]
         assert not (done or {}).get("error"), done
-        await _turn(root, aid, ASK)  # writes the cache
+        await _pass(root, aid, ASK)  # writes the cache
         marked = (await root.send([{"target": aid, "payload": {"type": "mark", "label": "ledger read"}}]))[0]["result"]
         assert isinstance(marked.get("at"), int), marked
         forked = (await root.send([{"target": aid, "payload": {"type": "fork", "at": marked["at"], "id": "ai_fork"}}]))[0]["result"]
@@ -90,7 +90,7 @@ async def main():
         await memory.open_ingress(root, "cli", "ai_fork")
 
         before = usage_of("ai_fork").cache_read_tokens
-        await _turn(root, "ai_fork", ASK)
+        await _pass(root, "ai_fork", ASK)
         read = usage_of("ai_fork").cache_read_tokens - before
         parent_read = usage_of(aid).cache_read_tokens
 

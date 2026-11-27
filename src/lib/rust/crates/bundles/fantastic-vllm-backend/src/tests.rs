@@ -1,10 +1,10 @@
-//! vllm_backend — the wire it speaks, the turns it must not lose, and the
+//! vllm_backend — the wire it speaks, the passes it must not lose, and the
 //! KV-cache session table it keeps per endpoint. Twin of python
 //! `vllm_backend/tests/test_vllm_backend.py`, case for case.
 //!
 //! Every behaviour here traces to a measured failure on a live vLLM (the
 //! production deployment, Qwen3.8-27B-FP8, vLLM 0.27.1): a dropped thought
-//! channel, a turn spent thinking with no answer, a stream that died without
+//! channel, a pass spent thinking with no answer, a stream that died without
 //! saying so, a system message the template refused, and a cache that only pays
 //! off while the live set stays under the server's KV ceiling.
 
@@ -73,7 +73,7 @@ impl KeySource for NoKey {
     }
 }
 
-/// A reader handing out `keys` in turn, recording the endpoint each read was
+/// A reader handing out `keys` in pass, recording the endpoint each read was
 /// for (python's `key` + `asked`).
 struct Keys {
     keys: Mutex<VecDeque<&'static str>>,
@@ -166,8 +166,8 @@ async fn the_thought_channel_is_wrapped_once_not_dropped() {
 }
 
 #[tokio::test]
-async fn a_cut_main_turn_fails_naming_the_cut() {
-    // the record's bound hit on a MAIN turn: it did not finish — never an answer
+async fn a_cut_main_pass_fails_naming_the_cut() {
+    // the record's bound hit on a MAIN pass: it did not finish — never an answer
     let body = sse(
         &[
             delta(None, json!({"content": "half"})),
@@ -179,7 +179,7 @@ async fn a_cut_main_turn_fails_naming_the_cut() {
     let p = provider(&endpoint);
     let e = drain(&p, &hi(), None)
         .await
-        .expect_err("a cut main turn fails");
+        .expect_err("a cut main pass fails");
     assert!(e.message.contains("cut at max_tokens=8000"), "{e}");
     assert_eq!(p.report().stop_reason.as_deref(), Some("max_tokens"));
 }
@@ -494,8 +494,8 @@ async fn a_body_error_after_finish_reason_is_a_normal_answer() {
 }
 
 #[tokio::test]
-async fn a_main_turn_cut_still_fails_when_the_body_errors_after_length_finish() {
-    // the same abrupt close after finish_reason `length`: the turn was cut at its
+async fn a_main_pass_cut_still_fails_when_the_body_errors_after_length_finish() {
+    // the same abrupt close after finish_reason `length`: the pass was cut at its
     // bound, so the cut error stands — the swallowed close must not turn it into an answer
     let cut = format!(
         "data: {}\n\n",
@@ -505,7 +505,7 @@ async fn a_main_turn_cut_still_fails_when_the_body_errors_after_length_finish() 
     let p = provider(&endpoint);
     let e = drain(&p, &hi(), None)
         .await
-        .expect_err("a cut main turn fails");
+        .expect_err("a cut main pass fails");
     assert!(e.message.contains("cut at max_tokens=8000"), "{e}");
 }
 
@@ -553,7 +553,7 @@ fn each_connection_failure_says_what_it_means() {
     assert!(t(true, true).contains("within connect_timeout=5s — the instance is STOPPED"));
     assert!(t(true, false).contains("not listening yet"));
     assert!(t(false, true)
-        .contains("http://gpu:8000/v1 sent no bytes for 900s; this turn is NOT complete"));
+        .contains("http://gpu:8000/v1 sent no bytes for 900s; this pass is NOT complete"));
     assert!(t(false, true).contains("stream_stalled"));
     assert!(t(false, false).contains("died or restarted"));
 }
@@ -569,7 +569,7 @@ fn a_timeout_is_printed_like_python_g() {
 // ─── the request ────────────────────────────────────────────────────────────
 
 /// python `test_a_cap_that_is_the_whole_window_sends_no_max_tokens`: vLLM counts
-/// prompt AND output against one window, so a turn capped at the window asks for
+/// prompt AND output against one window, so a pass capped at the window asks for
 /// the rest of it — no `max_tokens`; a side call keeps its own bound; a cap below
 /// the window is sent as set.
 #[tokio::test]
@@ -578,7 +578,7 @@ async fn a_cap_that_is_the_whole_window_sends_no_max_tokens() {
     let mut p = provider(&endpoint);
     p.max_tokens = 262144;
     p.window = Some(262144);
-    drain(&p, &hi(), None).await.expect("turn");
+    drain(&p, &hi(), None).await.expect("pass");
     drain(&p, &hi(), Some(2000)).await.expect("side call");
     let sent = bodies(&server).await;
     assert!(sent[0].get("max_tokens").is_none(), "{:?}", sent[0]);
@@ -586,7 +586,7 @@ async fn a_cap_that_is_the_whole_window_sends_no_max_tokens() {
     let (server2, endpoint2) = server_with(sse(&[delta(Some("stop"), json!({}))], true), 200).await;
     let mut q = provider(&endpoint2);
     q.window = Some(262144);
-    drain(&q, &hi(), None).await.expect("turn");
+    drain(&q, &hi(), None).await.expect("pass");
     assert_eq!(bodies(&server2).await[0]["max_tokens"], json!(8000));
 }
 
@@ -658,12 +658,12 @@ async fn every_system_message_becomes_one_at_index_0() {
 }
 
 #[tokio::test]
-async fn a_budget_not_below_the_turn_halves_and_none_below_the_floor() {
-    // the chat's default 8192 on a turn the window bounds at 8000 could never fire
+async fn a_budget_not_below_the_pass_halves_and_none_below_the_floor() {
+    // the chat's default 8192 on a pass the window bounds at 8000 could never fire
     let (server, endpoint) = server_with(sse(&[delta(Some("stop"), json!({}))], true), 200).await;
     let mut p = provider(&endpoint);
     p.budget = Some(8192);
-    drain(&p, &hi(), None).await.expect("turn"); // max_tokens 8000 → min(8192, 4000)
+    drain(&p, &hi(), None).await.expect("pass"); // max_tokens 8000 → min(8192, 4000)
     drain(&p, &hi(), Some(2000)).await.expect("fold"); // → min(8192, 1000)
     drain(&p, &hi(), Some(40)).await.expect("tiny"); // half is 20, under the floor → none
     let sent: Vec<Value> = bodies(&server)
@@ -682,21 +682,21 @@ async fn a_budget_not_below_the_turn_halves_and_none_below_the_floor() {
 async fn a_pass_with_no_budget_sends_none() {
     let (server, endpoint) = server_with(sse(&[delta(Some("stop"), json!({}))], true), 200).await;
     let p = provider(&endpoint);
-    drain(&p, &hi(), None).await.expect("turn");
+    drain(&p, &hi(), None).await.expect("pass");
     let body = bodies(&server).await.remove(0);
     assert!(body.get("thinking_token_budget").is_none(), "{body}");
     assert!(p.enforces_thinking_budget(), "vLLM ends the thinking itself");
 }
 
 #[tokio::test]
-async fn the_chats_budget_rules_the_turn_and_halves_on_a_side_call() {
-    // the proxy runs' 8000: a main turn sends it as set; a fold summary bounded
+async fn the_chats_budget_rules_the_pass_and_halves_on_a_side_call() {
+    // the proxy runs' 8000: a main pass sends it as set; a fold summary bounded
     // at 2000 gets 1000 instead of being refused; a tiny call gets none
     let (server, endpoint) = server_with(sse(&[delta(Some("stop"), json!({}))], true), 200).await;
     let mut p = provider(&endpoint);
     p.budget = Some(8000);
     p.max_tokens = 65536;
-    drain(&p, &hi(), None).await.expect("turn");
+    drain(&p, &hi(), None).await.expect("pass");
     drain(&p, &hi(), Some(2000)).await.expect("fold");
     drain(&p, &hi(), Some(300)).await.expect("tiny");
     let sent: Vec<Value> = bodies(&server)
@@ -874,8 +874,8 @@ async fn side_calls_take_no_kv_slot() {
             .await
             .expect("a side call is never refused");
     }
-    let turn = vec![json!({"role": "user", "content": "the conversation"})];
-    drain(&p, &turn, None)
+    let message = vec![json!({"role": "user", "content": "the conversation"})];
+    drain(&p, &message, None)
         .await
         .expect("the one slot is still free");
     let live = with_table(&endpoint, |t| t.view());
@@ -1540,7 +1540,7 @@ async fn http_errors_are_classed_by_the_shared_classifier() {
         (500, ErrorClass::Transient),
         (503, ErrorClass::Transient),
         (429, ErrorClass::Transient),
-        (400, ErrorClass::Turn),
+        (400, ErrorClass::Pass),
     ] {
         let (_server, endpoint) = server_with("no".to_string(), code).await;
         let p = provider(&endpoint);

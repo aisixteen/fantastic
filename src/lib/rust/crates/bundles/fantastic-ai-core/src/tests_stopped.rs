@@ -1,4 +1,4 @@
-//! The `stop` call (#766, 1.8; spec 2.7): the harness stops a turn after
+//! The `stop` call (#766, 1.8; spec 2.7): the harness stops a pass after
 //! `1 + CALL_RETRIES` malformed attempts, a model may write `stop` itself, and both end
 //! the chain through the same give-up.
 
@@ -169,11 +169,11 @@ async fn run_chain(tag: &str, model: Option<&str>, passes: Vec<Vec<ScriptEvent>>
 }
 
 // T9
-/// The harness stops the turn: status `failed`, `reason: gave_up`, `error` the reason,
+/// The harness stops the pass: status `failed`, `reason: gave_up`, `error` the reason,
 /// the key set of the give-up status; the asker's inquiry is closed with it; the chain
 /// ends with nothing more asked and nothing routed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn harness_stop_fails_turn() {
+async fn harness_stop_fails_pass() {
     let (reason, n) = harness_reason();
     let out = run_chain("st_t9", None, (0..12).map(|_| pass(FOREIGN)).collect()).await;
     assert_eq!(out.passes, n, "no nudge, no reroll");
@@ -187,7 +187,7 @@ async fn harness_stop_fails_turn() {
 }
 
 // T17
-/// The stored row of a harness-stopped turn is exactly the `stop` call with the reason;
+/// The stored row of a harness-stopped pass is exactly the `stop` call with the reason;
 /// the reason is `stop_reason.txt` filled with the attempt count and holds no byte of any
 /// attempt; the parser reads it back; the next pass shows it in its type's own form.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -260,9 +260,9 @@ async fn stopped_row_is_a_stop_call() {
 }
 
 // T18
-/// A stopped turn, then the next send: a normal turn.
+/// A stopped pass, then the next send: a normal pass.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn next_turn_after_stop() {
+async fn next_pass_after_stop() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp, "st_t18").await;
     let s = script(
@@ -340,7 +340,7 @@ async fn give_up_status_unchanged() {
     assert_eq!(st["detail"].to_string(), want);
     assert_eq!(
         reason,
-        "3 attempts in a row wrote malformed calls or no call, so the harness stopped the turn."
+        "3 attempts in a row wrote malformed calls or no call, so the harness stopped the pass."
     );
 }
 

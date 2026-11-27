@@ -1,8 +1,8 @@
 //! Context-overflow strategies (the projection logic). A strategy maps the
-//! conversation BODY (history + live user turn, WITHOUT the system block)
+//! conversation BODY (history + live user message, WITHOUT the system block)
 //! to a [`Projection`]: a shortened body that fits the budget + a structured
 //! artifact (a summary, or an omitted-span flag). It does NOT fabricate a
-//! notice turn — the ONE canonical `[context-notice]` is composed at the
+//! notice message — the ONE canonical `[context-notice]` is composed at the
 //! seam ([`crate::projection`]). The durable store is NEVER touched.
 //!
 //! Selection is STATIC per agent (`context_strategy` meta, default
@@ -25,10 +25,10 @@ use std::sync::Arc;
 pub const STUB_SUMMARY: &str = "[Earlier conversation omitted — summary unavailable]";
 
 /// What a strategy returns: the projected body + the artifact the seam needs
-/// to compose the canonical context-notice. NEVER a fabricated user turn.
+/// to compose the canonical context-notice. NEVER a fabricated user message.
 #[derive(Clone, Debug, Default)]
 pub struct Projection {
-    /// Projected conversation body — NO notice turn, NO system block.
+    /// Projected conversation body — NO notice message, NO system block.
     pub body: Vec<Value>,
     /// compact: the LLM summary text; truncate/none: `None`.
     pub summary: Option<String>,
@@ -55,7 +55,7 @@ pub struct Projection {
 pub struct ProjectionCtx<'a> {
     /// Token budget for the conversation BODY.
     pub budget: i64,
-    /// Verbatim recent turns `compact`/`truncate` keep.
+    /// Verbatim recent messages `compact`/`truncate` keep.
     pub recent_n: usize,
     /// The chat's pass path, for the strategies that summarize (a task pass).
     pub(crate) pass: &'a Pass,
@@ -67,17 +67,17 @@ pub struct ProjectionCtx<'a> {
     pub client_id: &'a str,
 }
 
-/// Keep the largest SUFFIX of `turns` that fits `budget`, always including
-/// the last turn (the live request). `size`: a message's tokens as the pass sends it
+/// Keep the largest SUFFIX of `messages` that fits `budget`, always including
+/// the last message (the live request). `size`: a message's tokens as the pass sends it
 /// ([`Pass::tokens`]).
-pub fn fit_tail(turns: &[Value], budget: i64, size: &dyn Fn(&Value) -> i64) -> Vec<Value> {
-    if turns.is_empty() {
+pub fn fit_tail(messages: &[Value], budget: i64, size: &dyn Fn(&Value) -> i64) -> Vec<Value> {
+    if messages.is_empty() {
         return Vec::new();
     }
-    let last = turns.len() - 1;
-    let mut kept = vec![turns[last].clone()];
-    let mut used = size(&turns[last]);
-    for t in turns[..last].iter().rev() {
+    let last = messages.len() - 1;
+    let mut kept = vec![messages[last].clone()];
+    let mut used = size(&messages[last]);
+    for t in messages[..last].iter().rev() {
         let c = size(t);
         if used + c > budget {
             break;
@@ -88,7 +88,7 @@ pub fn fit_tail(turns: &[Value], budget: i64, size: &dyn Fn(&Value) -> i64) -> V
     kept
 }
 
-/// Split `body` into (overflow, recent) at the last `recent_n` turns.
+/// Split `body` into (overflow, recent) at the last `recent_n` messages.
 pub fn recent_split(body: &[Value], recent_n: usize) -> (Vec<Value>, Vec<Value>) {
     let start = body.len().saturating_sub(recent_n);
     (body[..start].to_vec(), body[start..].to_vec())
@@ -108,7 +108,7 @@ pub fn recent_split(body: &[Value], recent_n: usize) -> (Vec<Value>, Vec<Value>)
 ///
 /// NO INPUT CUT. A REASONING MODEL THINKS OUT LOUD HERE TOO: unstripped,
 /// model-written folds carry titles beginning `<think>The user wants me to
-/// summarize…`. Side calls strip like the main turn.
+/// summarize…`. Side calls strip like the main pass.
 ///
 /// The answer is READ FROM THE PASS'S BOOK (#795): [`Pending`] when it has not come yet.
 pub(crate) fn summarize(
@@ -165,11 +165,11 @@ pub(crate) fn safe_summary(pass: &Pass, overflow: &[Value]) -> Result<String, Pe
     })
 }
 
-/// `compact` (DEFAULT): keep the recent turns verbatim + an LLM summary of
+/// `compact` (DEFAULT): keep the recent messages verbatim + an LLM summary of
 /// the overflow. The summary rides the artifact; the seam wraps it.
 pub(crate) fn compact(body: &[Value], recent: usize, budget: i64, pass: &Pass) -> Result<Projection, Pending> {
     let size = |m: &Value| pass.tokens(m);
-    let (overflow, recent_turns) = recent_split(body, recent);
+    let (overflow, recent_messages) = recent_split(body, recent);
     if overflow.is_empty() {
         return Ok(Projection {
             body: fit_tail(body, budget, &size),
@@ -186,16 +186,16 @@ pub(crate) fn compact(body: &[Value], recent: usize, budget: i64, pass: &Pass) -
     // the summary text itself (the seam embeds this exact summary).
     let summary_cost = size(&json!({"role": "user", "content": summary}));
     let avail = (budget - NOTICE_ENVELOPE_RESERVE - summary_cost).max(0);
-    // PIN THE GOAL. The first turn is the task framing, and it is the OLDEST — so it is
+    // PIN THE GOAL. The first message is the task framing, and it is the OLDEST — so it is
     // the first thing the overflow split takes. A summary is a lossy retelling; the one
-    // turn that must survive verbatim is the instruction the whole run serves.
+    // message that must survive verbatim is the instruction the whole run serves.
     // Without the pin the agent reaches the correct conclusion, then ends "healthy
     // budget, no tasks" — it has not refused to act, it no longer knows what it is
-    // doing. `truncate` pins this turn too. Cost is one turn of budget, charged
+    // doing. `truncate` pins this message too. Cost is one message of budget, charged
     // before the tail.
     let Some(first) = body.first() else {
         return Ok(Projection {
-            body: fit_tail(&recent_turns, avail, &size),
+            body: fit_tail(&recent_messages, avail, &size),
             summary: Some(summary),
             omitted_marker: false,
             stripped: 0,
@@ -205,7 +205,7 @@ pub(crate) fn compact(body: &[Value], recent: usize, budget: i64, pass: &Pass) -
         });
     };
     let head_cost = size(first);
-    let kept = fit_tail(&recent_turns, (avail - head_cost).max(0), &size);
+    let kept = fit_tail(&recent_messages, (avail - head_cost).max(0), &size);
     // Only re-add it if the recent window does not already carry it (short bodies).
     let body = if kept.first() == Some(first) {
         kept
@@ -225,7 +225,7 @@ pub(crate) fn compact(body: &[Value], recent: usize, budget: i64, pass: &Pass) -
     })
 }
 
-/// `truncate`: keep the first (task-framing) turn + the recent turns, drop the
+/// `truncate`: keep the first (task-framing) message + the recent messages, drop the
 /// middle. NO summarizer. The elision is reported via `omitted_marker`. `size`: a
 /// message's tokens as the pass sends it ([`Pass::tokens`]).
 pub fn truncate(body: &[Value], budget: i64, size: &dyn Fn(&Value) -> i64) -> Projection {

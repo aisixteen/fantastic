@@ -11,7 +11,7 @@ use serde_json::{json, Map, Value};
 /// Rough token estimate for ONE message — counts the SERIALIZED form, because
 /// role + content + the JSON envelope all consume real context.
 ///
-/// It counts what it is given: on the turn path that is the message as the pass sends
+/// It counts what it is given: on the pass path that is the message as the pass sends
 /// it ([`crate::model_format::pass::Pass::tokens`]), so no stored attribute and no
 /// internal key is counted.
 pub fn estimate_one(message: &Value) -> i64 {
@@ -60,7 +60,7 @@ pub fn budget(meta: &Map<String, Value>, model_window: i64) -> i64 {
     (resolve_context_window(meta, model_window) - output_reserve(meta)).max(BUDGET_FLOOR)
 }
 
-/// The agent's configured `recent_n` (verbatim recent turns kept by
+/// The agent's configured `recent_n` (verbatim recent messages kept by
 /// compact/truncate); its range and default are the record's declared ones.
 pub fn recent_n(meta: &Map<String, Value>) -> usize {
     crate::record::ai::RECORD
@@ -69,7 +69,7 @@ pub fn recent_n(meta: &Map<String, Value>) -> usize {
         .expect("recent_n declares its default") as usize
 }
 
-/// Tokens a reply may occupy INLINE in the model's next turn. Above this it is
+/// Tokens a reply may occupy INLINE in the model's next pass. Above this it is
 /// stored and digested. An eighth of the input budget: a 12k window inlines
 /// ~1.4k tokens (a reflect, an error, a short read) and digests a 6.8KB file
 /// body. Python `_inline_cap`.

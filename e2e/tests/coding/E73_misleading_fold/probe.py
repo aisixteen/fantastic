@@ -5,7 +5,7 @@ value; its members hold the right one. Scored: the answer is the members' value,
 the model descended (grep/pull on that fold) to get it.
 
 PRE-SEEDED: the first instruction and its reads are PLANTED — each read
-call and its reply inline, then the model's `done` — instead of eight live turns.
+call and its reply inline, then the model's `done` — instead of eight live passes.
 """
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ async def main():
         plant_fillers(N, extra={1: f">> checksum: {real}"})
         await fixture(root, FB)
         aid, strategy, extra = FOLD_ARMS[1]
-        first = (f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER TURN. Then {DONE}.")
+        first = (f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER PASS. Then {DONE}.")
         rows = planted_reads(root.ctx.mint_id, first, file_reads([f"filler_{i}.txt" for i in range(N)]),
                              tail=False)
         rows.append({"role": "assistant", "id": root.ctx.mint_id(), "parent": rows[-1]["id"],

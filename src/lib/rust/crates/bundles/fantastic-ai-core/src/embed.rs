@@ -1,7 +1,7 @@
 //! Inline agent views in a chat (#339): `embed {id}` and `unembed {id}`.
 //!
 //! An embed is ONE appended store row, `{kind:"embed", content:<agent id>}` — it has
-//! no `role`, so it is a row of the conversation's store but never a TURN: it does
+//! no `role`, so it is a row of the conversation's store but never a MESSAGE: it does
 //! not enter the model's prompt, projection or retrieval (`load_history` keeps
 //! only rows with a chat role). `history` merges the card rows back into its
 //! digests ([`crate::verbs::history`]) so a chat page redraws the same cards, in the
@@ -9,7 +9,7 @@
 //! `unembed` appends a tombstone row `{kind:"unembed", content:<id>}`; the cards a
 //! chat shows are its embed rows since the last `clear` minus the tombstoned ones
 //! ([`cards`]). A `context_clear` starts a new thread, so cards before it are not in
-//! the head — the same as turns.
+//! the head — the same as messages.
 //!
 //! Neither verb creates, moves or deletes an agent. `embed` makes the same checks
 //! the canvas's `place {backend_id}` makes: the agent exists and it has a `view`

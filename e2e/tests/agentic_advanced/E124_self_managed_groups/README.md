@@ -4,7 +4,7 @@ One master AI finishes a queue of Exercism python tasks by running up to
 `MAX_GROUPS` worker groups at once. There is **no group code**: a group is four
 agents the master creates under one id prefix — `g<k>_worker` (an AI chat, which
 takes the task through `send`) and, under it, `g<k>_worker_prov` (the provider its
-`provider_id` names, which completes its turns), `g<k>_editor` (a `file_bridge`
+`provider_id` names, which completes its passes), `g<k>_editor` (a `file_bridge`
 over the task's folder) and `g<k>_runner` (an `exec_bridge` that may start the
 task's suite), E43's runner trio — with the kernel verbs every AI already has
 (`create_agent`, `send`, `delete_agent`), and deletes once the task is checked (the
@@ -27,9 +27,9 @@ a worker's last reply wakes the master.
 | bound held | no sample saw more than `MAX_GROUPS` groups live at once |
 | no orphans | no `g<k>_…` agent is live at the end |
 | suites | every task's own suite passes, rerun by the probe, test files untouched |
-| master bounded | the master's largest turn input (prompt + conversation, chars) ≤ `MASTER_INPUT_CHARS_MAX` |
+| master bounded | the master's largest pass input (prompt + conversation, chars) ≤ `MASTER_INPUT_CHARS_MAX` |
 
-It also prints the model per role, the wall time, each group's lifetime, turns per
+It also prints the model per role, the wall time, each group's lifetime, passes per
 agent and — on a metered run — tokens, cache hits and cost (for the whole test: the
 meter tags per test, not per agent).
 

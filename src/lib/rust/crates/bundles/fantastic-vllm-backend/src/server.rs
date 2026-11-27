@@ -2,7 +2,7 @@
 //! `vllm_backend/server.py`, text for text.
 //!
 //! `model`, `context_window` and `kv_slots` may be left off the
-//! record. Before `complete`, the verb that runs a turn, every one still absent
+//! record. Before `complete`, the verb that runs a pass, every one still absent
 //! is read from the server the record's `endpoint` names and WRITTEN BACK to the
 //! record — it then holds a measured value like one the operator set: reflect
 //! shows it, a reboot keeps it, and the server is not asked again until the field
@@ -10,10 +10,10 @@
 //!
 //! - `model` — the ONE model the server serves (`GET {endpoint}/models`); a server
 //!   serving several names them, and the record must pick one.
-//! - `context_window` — that model's `max_model_len` (same list). A turn's
+//! - `context_window` — that model's `max_model_len` (same list). A pass's
 //!   `max_tokens` is the chat's (#632); a chat that names none gets 260000, plus its
 //!   `thinking_token_budget` when it sets one, never above the window (#495). A main
-//!   turn whose `max_tokens` could overrun the window sends NO `max_tokens`, so the
+//!   pass whose `max_tokens` could overrun the window sends NO `max_tokens`, so the
 //!   server bounds the reply by what the prompt leaves.
 //! - `kv_slots` — how many full-length conversations the server's KV cache holds:
 //!   `floor(kv_cache_max_concurrency)` of the `vllm:cache_config_info` line on the

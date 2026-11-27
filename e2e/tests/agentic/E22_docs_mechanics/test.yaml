@@ -6,11 +6,11 @@ group: agentic
 title: it finds a deep agent and learns how to call it from a reflect's `tier`/`verb`/`part`, cutting the tree as it goes
 runner: probe.py
 runtimes: [rust]
-costs: turns
+costs: passes
 limits:
   idle_seconds: 60
-  max_turns: 24
-  no_progress_turns: 32
-  turn_chars: 60000
-  turn_seconds: 300
+  max_passes: 24
+  no_progress_passes: 32
+  pass_chars: 60000
+  pass_seconds: 300
 env: {}

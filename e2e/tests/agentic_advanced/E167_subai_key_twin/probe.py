@@ -109,19 +109,19 @@ def main() -> int:
 
     def build(*script: str) -> None:
         """One builder chain: the scripted answers, then wait for it to settle."""
-        start = len(b.turns())
+        start = len(b.passes())
         b.reply(*script)
         out = hk.send(AI, {"type": "send", "text": "Build the routine."})
         need(out.get("accepted") is True, f"the builder's send is accepted: {short(out)}")
         # the send is acked at once (#795): the chain is over once every scripted answer
         # was asked for and nothing of the twin runs
         end = time.monotonic() + 90
-        while time.monotonic() < end and len(b.turns()) - start < len(script):
+        while time.monotonic() < end and len(b.passes()) - start < len(script):
             time.sleep(0.05)
         need(idle(), "the builder's chain settles")
         time.sleep(0.5)
-        need(len(b.turns()) - start == len(script),
-             f"one builder request per scripted answer: {len(b.turns()) - start} "
+        need(len(b.passes()) - start == len(script),
+             f"one builder request per scripted answer: {len(b.passes()) - start} "
              f"for {len(script)}")
 
     def tick(refused: bool = False) -> tuple[list[dict], str]:
@@ -184,27 +184,27 @@ def main() -> int:
         need(prov.get("parent_id") == SUB_AI and (prov.get("can") or {}) == KEY_LINE,
              f"{SUB_PROV} is under {SUB_AI}, holding only the key line: {short(prov)}")
         reqs, rows = tick()
-        turns = [q for q in reqs if q["kind"] == "turn"]
-        need(bool(turns) and all(q["key"] == KEY for q in turns),
-             f"the first completion carries the key: {len(turns)} turn(s)")
+        passes = [q for q in reqs if q["kind"] == "pass"]
+        need(bool(passes) and all(q["key"] == KEY for q in passes),
+             f"the first completion carries the key: {len(passes)} pass(es)")
         need(not any(q["kind"] == "refused" for q in reqs),
              f"no request to H went without the key: {[q['kind'] for q in reqs]}")
-        need(FAILED not in rows, "no turn of the new chat failed on the key store")
+        need(FAILED not in rows, "no pass of the new chat failed on the key store")
 
         # 2 · a `can` rewrite that drops the line: the key is refused
         build(call("kernel", "update_agent", id=SUB_AI, can={"memory": ALL}), DONE)
         need(sub_can() == {"memory": ALL}, f"the rewrite replaced the field: {short(sub_can())}")
         reqs, rows = tick(refused=True)
         need(not reqs, f"nothing reached H without the line: {[q['kind'] for q in reqs]}")
-        need(FAILED in rows, f"the new chat's turn failed on the key store ({FAILED})")
+        need(FAILED in rows, f"the new chat's pass failed on the key store ({FAILED})")
 
         # 3 · the rewrite that keeps it: the key goes through again
         build(call("kernel", "update_agent", id=SUB_AI, can=chat_can), DONE)
         need(sub_can() == chat_can, f"the line is back: {short(sub_can())}")
         reqs, _ = tick()
-        turns = [q for q in reqs if q["kind"] == "turn"]
-        need(bool(turns) and all(q["key"] == KEY for q in turns),
-             f"the completion carries the key again: {len(turns)} turn(s)")
+        passes = [q for q in reqs if q["kind"] == "pass"]
+        need(bool(passes) and all(q["key"] == KEY for q in passes),
+             f"the completion carries the key again: {len(passes)} pass(es)")
         need(not any(q["kind"] == "refused" for q in reqs),
              f"no request to H went without the key: {[q['kind'] for q in reqs]}")
     finally:

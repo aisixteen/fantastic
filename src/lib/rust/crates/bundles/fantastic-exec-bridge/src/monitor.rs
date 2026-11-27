@@ -4,7 +4,7 @@
 //!
 //! A job's output already flows through this bridge line by line, so a monitor POLLS
 //! NOTHING: each line is matched as it arrives (`match`, a regex in python's `re`
-//! dialect, searched; absent = every line), and a match is SENT to `notify` as a turn.
+//! dialect, searched; absent = every line), and a match is SENT to `notify` as a message.
 //! `every` throttles delivery — the first match goes at once, later ones are gathered
 //! and delivered at most once per `every` seconds — and a timer exists only while
 //! something waits. An idle monitor wakes never. `tail` caps the lines in one

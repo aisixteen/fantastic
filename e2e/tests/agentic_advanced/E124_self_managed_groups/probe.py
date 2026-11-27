@@ -18,11 +18,11 @@ Scored on:
   1. the bound held — never more than MAX_GROUPS groups live in one sample;
   2. no orphans — no group agent is left when the master says it is done;
   3. every task's own suite passes, rerun by the probe, test files untouched;
-  4. the master's prompt stayed bounded — its largest turn input (system prompt plus
+  4. the master's prompt stayed bounded — its largest pass input (system prompt plus
      conversation, in characters) is under MASTER_INPUT_CHARS_MAX.
 
 Reported: the model per role (`BK.roles_used()`), wall time, each group's lifetime,
-turns per agent, and — when the run is metered (E2E_METER=1) — tokens, cache hits
+passes per agent, and — when the run is metered (E2E_METER=1) — tokens, cache hits
 and cost from the meter. Run it twice, MAX_GROUPS=1 and MAX_GROUPS=3, to compare.
 """
 
@@ -185,9 +185,9 @@ async def rows(root, aid) -> list[dict]:
         return []
 
 
-def max_turn_input(prompt: str, conv: list[dict]) -> int:
-    """The largest input the master sent in one turn, in characters: its system
-    prompt plus every conversation row before that turn's reply."""
+def max_pass_input(prompt: str, conv: list[dict]) -> int:
+    """The largest input the master sent in one pass, in characters: its system
+    prompt plus every conversation row before that pass's reply."""
     best, seen = 0, len(prompt)
     for r in conv:
         if r.get("role") == "assistant":
@@ -317,10 +317,10 @@ async def main() -> None:
               f"{sum(v[0] for v in results.values())}/{len(results)}")
         for name, (ok, line) in results.items():
             print(f"         {name:<24} {'pass' if ok else 'FAIL'} {line}")
-        biggest = max_turn_input(prompt, await rows(root, MASTER))
+        biggest = max_pass_input(prompt, await rows(root, MASTER))
         c4 = 0 < biggest <= MASTER_INPUT_CHARS_MAX
         print(f"    4. master prompt bounded          {'OK' if c4 else 'NO'} "
-              f"max_turn_input={biggest} chars limit={MASTER_INPUT_CHARS_MAX} prompt={len(prompt)}")
+              f"max_pass_input={biggest} chars limit={MASTER_INPUT_CHARS_MAX} prompt={len(prompt)}")
 
         print("\n  ── observed ──")
         print(f"  wall (ledger)          : {wall_seconds(ledger):.0f}s  finished={finished}")
@@ -329,8 +329,8 @@ async def main() -> None:
         agents = [MASTER, *(w for w in worker_ids() if any(w in ids for _, ids in ledger.samples))]
         for aid in agents:
             conv = await rows(root, aid)
-            turns = sum(1 for r in conv if r.get("role") == "assistant")
-            print(f"  turns {aid:<16}: {turns}")
+            passes = sum(1 for r in conv if r.get("role") == "assistant")
+            print(f"  passes {aid:<16}: {passes}")
         metered = meter_rows()
         if metered:
             from helpers.meter_report import _price_env, request_usd

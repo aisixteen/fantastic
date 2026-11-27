@@ -19,7 +19,7 @@ fold check asserts both halves: whole in the request that carries it, the marker
   need about 450 rows; the rule is verb-blind (`fantastic-ai-core` `tests_autofold.rs`).
 - N (`caching: none`): nothing folds, no `<folded`/`<thought` marker and no unfold call, no cache mark; the read reply and a recall
   reply stay whole in every later request.
-- U: the person's `context_fold` over the two rows of one turn (a given summary): a fold row, a
+- U: the person's `context_fold` over the two rows of one pass (a given summary): a fold row, a
   `[fold ID · 2 refs · L1] "title"` line in place of them in the next request, a large read reply
   after it folds as usual, the folded rows stay in the store (`recall`, `history {fold}`).
   The free twin of the paid E72_user_fold.

@@ -203,7 +203,7 @@ pub const TABLE: &[Binding] = &[
     Binding {
         scope: "composer",
         keys: "/q …",
-        does: "send explicitly queued behind the running turn",
+        does: "send explicitly queued behind the running pass",
     },
     Binding {
         scope: "composer",
@@ -724,8 +724,8 @@ pub fn composer_hint(app: &App) -> String {
         .unwrap_or(false);
     if busy && !app.composer.explicit_queue() {
         // The honest word. A second send does NOT interrupt: it waits behind the
-        // turn that holds the backend's lock, linked to it but not steering it.
-        return "a turn is running — this will be QUEUED behind it, not an interrupt.".into();
+        // pass that holds the backend's lock, linked to it but not steering it.
+        return "a pass is running — this will be QUEUED behind it, not an interrupt.".into();
     }
     match app.composer.re {
         Some(r) => format!("answering row {r}"),

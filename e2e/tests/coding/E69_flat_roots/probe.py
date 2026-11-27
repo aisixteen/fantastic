@@ -1,6 +1,6 @@
 """coding/flat_roots — a superlong FLAT list: many small roots, no depth.
 
-Each root — PLANTED as finished (one read, then `done`) — folds at the first live turn;
+Each root — PLANTED as finished (one read, then `done`) — folds at the first live pass;
 folds pile up past half the view and fold into higher folds. The final message needs a value from (nearly) every root. Scored:
 a level-2 fold exists with title and body, and the final lists most checksums.
 """

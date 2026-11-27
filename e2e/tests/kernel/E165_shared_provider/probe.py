@@ -78,22 +78,22 @@ def idle(hk: HostKernel, aid: str, bound: float = 60) -> bool:
     return False
 
 
-def turns_at_least(m: VllmMock, n: int, bound: float = 60) -> list[dict]:
+def passes_at_least(m: VllmMock, n: int, bound: float = 60) -> list[dict]:
     end = time.monotonic() + bound
     while time.monotonic() < end:
-        if len(m.turns()) >= n:
+        if len(m.passes()) >= n:
             break
         time.sleep(0.05)
-    return m.turns()
+    return m.passes()
 
 
-def turn_of(hk: HostKernel, m: VllmMock, cid: str, text: str, answer: str, n: int) -> dict:
-    """One turn of `cid`; the request the server saw (its `n`-th), or {}."""
+def pass_of(hk: HostKernel, m: VllmMock, cid: str, text: str, answer: str, n: int) -> dict:
+    """One pass of `cid`; the request the server saw (its `n`-th), or {}."""
     m.reply(answer + DONE)
     out = hk.send(cid, {"type": "send", "text": text})
     need(not out.get("error"), f"{cid} accepts a send: {short(out, 160)}")
-    seen = turns_at_least(m, n)
-    need(idle(hk, cid), f"{cid}'s turn settles")
+    seen = passes_at_least(m, n)
+    need(idle(hk, cid), f"{cid}'s pass settles")
     need(answer in json.dumps(hk.send(cid, {"type": "history", "limit": 500}), default=str),
          f"{cid}'s history holds its answer")
     return seen[n - 1]["body"] if len(seen) >= n else {}
@@ -139,8 +139,8 @@ def main() -> int:
 
         # ── 2 · each request carries its own chat's knobs ──
         print("\n── 2 · own knobs ──", flush=True)
-        a = turn_of(hk, m, CA, "Say the first thing.", "Answer A.", 1)
-        b = turn_of(hk, m, CB, "Now something else entirely.", "Answer B.", 2)
+        a = pass_of(hk, m, CA, "Say the first thing.", "Answer A.", 1)
+        b = pass_of(hk, m, CB, "Now something else entirely.", "Answer B.", 2)
         need((a.get("temperature"), a.get("max_tokens")) == (0.3, 8192),
              f"{CA}'s request carries its own knobs: temperature={a.get('temperature')} "
              f"max_tokens={a.get('max_tokens')}")
@@ -160,10 +160,10 @@ def main() -> int:
         print("\n── 4 · lifecycle ──", flush=True)
         r = hk.send(hk.root_id, {"type": "update_agent", "id": PROV, "endpoint": m2.url})
         need(r.get("updated") is True, f"the provider's endpoint changed: {short(r, 160)}")
-        c = turn_of(hk, m2, CA, "Once more.", "Answer C.", 1)
-        need(c.get("temperature") == 0.3 and len(m.turns()) == 2,
+        c = pass_of(hk, m2, CA, "Once more.", "Answer C.", 1)
+        need(c.get("temperature") == 0.3 and len(m.passes()) == 2,
              f"{CA}'s next request reached the new endpoint with its own knobs: "
-             f"temperature={c.get('temperature')} first server={len(m.turns())}")
+             f"temperature={c.get('temperature')} first server={len(m.passes())}")
         for cid in (CA, CB):
             r = hk.send(hk.root_id, {"type": "delete_agent", "id": cid})
             need(r.get("deleted") is True, f"delete {cid}: {short(r, 160)}")

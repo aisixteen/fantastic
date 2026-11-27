@@ -1,7 +1,7 @@
 //! ONE COMMAND, EXECUTED. The bridge between what a key wanted and what the
 //! kernel does.
 //!
-//! Each command runs in its own task holding an `Arc<Host>`, so a long turn and a
+//! Each command runs in its own task holding an `Arc<Host>`, so a long pass and a
 //! fast tree read never queue behind each other, and the render loop awaits none
 //! of it.
 //!
@@ -505,7 +505,7 @@ async fn send_shelf(host: Arc<Host>, tx: mpsc::Sender<Ev>, keys: bool) {
 /// EXECUTION rows moved: a call moves its target, a settle the settled agent.
 ///
 /// The tail yields IDS, and they do NOT arrive in id order, so this never
-/// filters by a high-water mark. An AI agent's OWN rows (its turns, folds,
+/// filters by a high-water mark. An AI agent's OWN rows (its messages, folds,
 /// views) never pass through here — they land in its memory store, and the AI
 /// agent announces them itself (`spawn_row_watch`).
 pub fn spawn_row_tail(host: Arc<Host>, tx: mpsc::Sender<Ev>, after: i64) {

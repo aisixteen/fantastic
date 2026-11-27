@@ -607,10 +607,10 @@ pub fn cut_marker(text_so_far: &str, why: &str, unsent: &[Part]) -> String {
     lines.join("\n")
 }
 
-/// The stopped turn's two halves — kept apart so a model never reads the notice
+/// The stopped pass's two halves — kept apart so a model never reads the notice
 /// as its own answer. First: the VISIBLE text streamed so far (thinking stripped),
 /// `None` when there is none, saved as the assistant row. Second: the notice, a
-/// USER row (kind `stopped`), naming who stopped the turn, whether it was cut
+/// USER row (kind `stopped`), naming who stopped the pass, whether it was cut
 /// while thinking or before any answer, and every unsent call as not sent.
 #[must_use]
 pub fn stop_rows(text_so_far: &str, who: &str, unsent: &[Part]) -> (Option<String>, String) {
@@ -624,7 +624,7 @@ pub fn stop_rows(text_so_far: &str, who: &str, unsent: &[Part]) -> (Option<Strin
         })
         .collect();
     let visible = py_strip(&visible);
-    let mut head = format!("[your turn was stopped by {who}");
+    let mut head = format!("[your pass was stopped by {who}");
     if splitter.in_think() && visible.is_empty() {
         head.push_str(" while thinking");
     } else if visible.is_empty() {

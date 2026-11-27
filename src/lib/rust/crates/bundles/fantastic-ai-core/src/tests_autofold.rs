@@ -85,7 +85,7 @@ async fn thinking_folds_to_its_anchor_from_the_next_request() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_large_reply_is_whole_the_turn_it_arrives_and_an_anchor_from_the_next() {
+async fn a_large_reply_is_whole_the_pass_it_arrives_and_an_anchor_from_the_next() {
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_kernel(&tmp, "af_large").await;
     widen(&kernel, &agent).await;
@@ -185,7 +185,7 @@ async fn a_recall_reply_refolds_after_the_next_answer() {
             .as_str()
             .unwrap()
             .contains(&"x".repeat(1000)),
-        "the recalled row is whole the turn it arrives: {}",
+        "the recalled row is whole the pass it arrives: {}",
         &last["content"].as_str().unwrap()[..400]
     );
     tokio::time::sleep(Duration::from_millis(300)).await;

@@ -1,7 +1,7 @@
 # E157 · chat_view_renders — the html chat view draws in a canvas cell
 
 Scripted (`costs: free`): the model is the parity chat stub; its responder plays
-three turns (a reply and a run of two calls, an inquiry, a closing reply).
+three passes (a reply and a run of two calls, an inquiry, a closing reply).
 
 **PASS** when every check holds:
 

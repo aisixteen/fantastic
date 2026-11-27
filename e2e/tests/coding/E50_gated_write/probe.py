@@ -5,7 +5,7 @@ holds only `reflect` on the `vault`, so its write is `not_allowed` naming `write
 (the E53 wall). A separate `reviewer` agent holds `update` on the writer's `can` and a
 line on the vault — authority the writer can never raise for itself (an agent's
 own `can` is never its own to write) — and hands the writer the `write` it
-holds. Three real turns, deterministic: writer denied → reviewer inspects and
+holds. Three real passes, deterministic: writer denied → reviewer inspects and
 grants → writer retries and lands. Delegation, not self-raise.
 """
 

@@ -3,7 +3,7 @@
 Run this before any `tmp/live_*.py`. It answers one question: would a probe fail
 for a REASON THAT IS NOT THE SUBSTRATE? A live run that dies on a missing model,
 an unset variable or a backend nobody started tells you nothing about the kernel,
-and costs a turn to work out.
+and costs a pass to work out.
 
     cd src/lib/python && uv run python ../../../tmp/live_preflight.py
 

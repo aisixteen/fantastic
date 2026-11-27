@@ -4,7 +4,7 @@ id: inventory
 group: canvas
 title: "an AI inventories a large canvas by kind, without looping"
 runner: probe.py
-costs: turns
+costs: passes
 limits:
   total_seconds: 900
   quiet_seconds: 30

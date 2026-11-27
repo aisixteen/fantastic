@@ -91,8 +91,8 @@ def write_bundle(work: Path) -> None:
 
 
 # ── wire readers: one per plug ────────────────────────────────────────────────
-def msgs(turn: dict) -> list[dict]:
-    return turn["body"].get("messages") or []
+def msgs(one_pass: dict) -> list[dict]:
+    return one_pass["body"].get("messages") or []
 
 
 def content_text(c) -> str:
@@ -101,20 +101,20 @@ def content_text(c) -> str:
     return "".join(b.get("text", "") for b in c or [] if isinstance(b, dict))
 
 
-def texts(turn: dict) -> list[str]:
+def texts(one_pass: dict) -> list[str]:
     """Every text the request carries."""
     out: list[str] = []
-    out.append(content_text(turn["body"].get("system")))  # anthropic: `system` (string or blocks)
-    out += [content_text(m.get("content")) for m in msgs(turn)]
+    out.append(content_text(one_pass["body"].get("system")))  # anthropic: `system` (string or blocks)
+    out += [content_text(m.get("content")) for m in msgs(one_pass)]
     return out
 
 
-def full(turn: dict) -> str:
-    return "\n".join(texts(turn))
+def full(one_pass: dict) -> str:
+    return "\n".join(texts(one_pass))
 
 
-def last_user(turn: dict) -> str:
-    for m in reversed(msgs(turn)):
+def last_user(one_pass: dict) -> str:
+    for m in reversed(msgs(one_pass)):
         if m.get("role") == "user":
             return content_text(m.get("content"))
     return ""
@@ -126,8 +126,8 @@ def marked(m: dict) -> bool:
         isinstance(b, dict) and b.get("cache_control") == EPH for b in c)
 
 
-def system_marked(turn: dict) -> bool:
-    s = turn["body"].get("system")
+def system_marked(one_pass: dict) -> bool:
+    s = one_pass["body"].get("system")
     return isinstance(s, list) and any(
         isinstance(b, dict) and b.get("cache_control") == EPH for b in s)
 
@@ -156,14 +156,14 @@ def main() -> int:
         if not cond:
             bad.append(what)
 
-    def turns_at_least(m, n: int, bound: float = 90) -> list[dict]:
+    def passes_at_least(m, n: int, bound: float = 90) -> list[dict]:
         end = time.monotonic() + bound
         while time.monotonic() < end:
-            got = m.turns()
+            got = m.passes()
             if len(got) >= n:
                 return got
             time.sleep(0.05)
-        return m.turns()
+        return m.passes()
 
     def idle(aid: str, bound: float = 90) -> bool:
         end = time.monotonic() + bound
@@ -180,12 +180,12 @@ def main() -> int:
     def run(m, aid: str, label: str, text: str, want: int) -> list[dict]:
         out = hk.send(aid, {"type": "send", "text": text})
         need(not out.get("error"), f"{label}: the send is accepted: {str(out)[:200]}")
-        turns_at_least(m, want)
+        passes_at_least(m, want)
         need(idle(aid), f"{label}: the chain settles")
         time.sleep(0.5)
-        turns = m.turns()
-        need(len(turns) == want, f"{label}: {want} requests: {len(turns)}")
-        return turns
+        passes = m.passes()
+        need(len(passes) == want, f"{label}: {want} requests: {len(passes)}")
+        return passes
 
     def big_rows(aid: str) -> list[dict]:
         return [r for r in history(aid)
@@ -235,8 +235,8 @@ def main() -> int:
 
         # ══ A0 · a key read with no line on the store: the unknown answer ═══════
         mA.reply(call("creds", "<type>get</type><ref>anthropic</ref>"), f"Noted.\n{DONE}")
-        turns = run(mA, AI_A, "A0", "read the key", 2)
-        reply = last_user(turns[1]) if len(turns) > 1 else ""
+        passes = run(mA, AI_A, "A0", "read the key", 2)
+        reply = last_user(passes[1]) if len(passes) > 1 else ""
         # the reply as the model reads it: one tag per field (tool_parse/render.rs)
         need(" creds get" in reply and "<error>no agent 'creds'</error>" in reply
              and "<reason>unknown_agent</reason>" in reply
@@ -245,44 +245,44 @@ def main() -> int:
              f"A0: {AI_A} (no line on creds) gets the unknown answer, never the key: {reply[:300]!r}")
 
         # ══ PART B · caching: provider_cache ══════════════════════════════════
-        def collect(turns: list[dict]) -> None:
-            allb.extend(turns)
+        def collect(passes: list[dict]) -> None:
+            allb.extend(passes)
 
-        def first_seen(label: str, pattern: str, turns: list[dict], base: int) -> str:
-            """The anchor of `pattern` in request 1 of `turns`; remembered for B4."""
-            m = re.search(pattern, full(turns[0])) if turns else None
+        def first_seen(label: str, pattern: str, passes: list[dict], base: int) -> str:
+            """The anchor of `pattern` in request 1 of `passes`; remembered for B4."""
+            m = re.search(pattern, full(passes[0])) if passes else None
             need(m is not None, f"{label}: request 1 shows the anchor /{pattern[:60]}…/")
             if m:
                 anchors.append((label, m.group(0), base))
                 return m.group(0)
             return ""
 
-        # B1a · the read reply is whole the turn it arrives
+        # B1a · the read reply is whole the pass it arrives
         mB.reply(read, f"Got it.\n{DONE}")
-        turns = run(mB, AI_B, "B1a", "read big.txt", 2)
+        passes = run(mB, AI_B, "B1a", "read big.txt", 2)
         base = len(allb)
-        collect(turns)
-        need(len(turns) > 1 and "L100 " in last_user(turns[1]) and NEEDLE in last_user(turns[1]),
+        collect(passes)
+        need(len(passes) > 1 and "L100 " in last_user(passes[1]) and NEEDLE in last_user(passes[1]),
              "B1a: request 2 carries the whole read reply")
         big = big_rows(AI_B)
         need(len(big) == 1, f"B1a: one large user row: {[r.get('bytes') for r in history(AI_B)]}")
         if not big:
             raise SystemExit(verdict(False, f"{RUNTIME}: no large row to fold"))
         b = big[0]["id"]
-        whole_marks = [("B1a req2", base + 1)] if len(turns) > 1 else []
+        whole_marks = [("B1a req2", base + 1)] if len(passes) > 1 else []
         plain_marks = [("B1a req1", base)]
 
-        # B1b · the read reply is its anchor; a large docs reply is whole in its turn
+        # B1b · the read reply is its anchor; a large docs reply is whole in its pass
         mB.clear()
         mB.reply(docs_detailed, f"Noted.\n{DONE}")
-        turns = run(mB, AI_B, "B1b", "docs", 2)
+        passes = run(mB, AI_B, "B1b", "docs", 2)
         base = len(allb)
-        collect(turns)
+        collect(passes)
         anchor_read = first_seen(
             "B1b", rf'<folded id="{b}" verb="read" from="files" tokens="\d+" head="[^"]*"/>[^\n]*',
-            turns, base)
-        need(bool(turns) and "L100 " not in full(turns[0]), "B1b: the read reply is folded")
-        last = last_user(turns[1]) if len(turns) > 1 else ""
+            passes, base)
+        need(bool(passes) and "L100 " not in full(passes[0]), "B1b: the read reply is folded")
+        last = last_user(passes[1]) if len(passes) > 1 else ""
         need(f" {BIGDOC} reflect" in last and "<tier>detailed</tier>" in last and "S090 " in last,
              f"B1b: request 2 carries the whole reflect part=docs reply of {BIGDOC}: {last[:200]!r}")
         big = [r for r in big_rows(AI_B) if r["id"] != b]
@@ -296,12 +296,12 @@ def main() -> int:
         # B2 · recall by row id gives the docs body back
         mB.clear()
         mB.reply(call(AI_B, f"<type>recall</type><id>{d}</id>"), f"Noted.\n{DONE}")
-        turns = run(mB, AI_B, "B2", "recall", 2)
+        passes = run(mB, AI_B, "B2", "recall", 2)
         base = len(allb)
-        collect(turns)
-        need(bool(turns) and "S090 " in full(turns[0]) and f'<folded id="{d}"' not in full(turns[0]),
+        collect(passes)
+        need(bool(passes) and "S090 " in full(passes[0]) and f'<folded id="{d}"' not in full(passes[0]),
              "B2: the reflect reply stays whole (a reflect never folds)")
-        last = last_user(turns[1]) if len(turns) > 1 else ""
+        last = last_user(passes[1]) if len(passes) > 1 else ""
         need(f" {AI_B} recall" in last and "S090 " in last,
              f"B2: request 2 carries the recalled row whole: {last[:200]!r}")
         whole_marks.append(("B2 req2", base + 1))
@@ -309,28 +309,28 @@ def main() -> int:
         # B3 · grep finds a word inside a folded body; the body stays folded
         mB.clear()
         mB.reply(call(AI_B, f"<type>grep</type><query>{NEEDLE}</query>"), f"Noted.\n{DONE}")
-        turns = run(mB, AI_B, "B3", "grep", 2)
+        passes = run(mB, AI_B, "B3", "grep", 2)
         base = len(allb)
-        collect(turns)
+        collect(passes)
         first_seen("B3", rf'<folded id="\d+" verb="recall" from="{AI_B}" recalled="id {d}" tokens="\d+"/>[^\n]*',
-                   turns, base)
-        need(bool(turns) and full(turns[0]).count("S090 ") == 1,
+                   passes, base)
+        need(bool(passes) and full(passes[0]).count("S090 ") == 1,
              "B3: the recall reply refolds (only the whole reflect reply still carries the body)")
         need(any(r.get("id") == d and int(r.get("bytes") or 0) > 64000 for r in history(AI_B)),
              "B3: the store row is still whole")
-        last = last_user(turns[1]) if len(turns) > 1 else ""
+        last = last_user(passes[1]) if len(passes) > 1 else ""
         need(f" {AI_B} grep" in last and f"L050 {NEEDLE}" in last,
              f"B3: the grep hit is inside the folded body: {last[:300]!r}")
-        need(len(turns) > 1 and anchor_read in full(turns[1]) and "L100 " not in full(turns[1]),
+        need(len(passes) > 1 and anchor_read in full(passes[1]) and "L100 " not in full(passes[1]),
              "B3: the read body is still folded in the view")
         plain_marks.append(("B3 req2", base + 1))
 
         # B4 · the cache holds
         mB.clear()
         mB.reply(DONE)
-        turns = run(mB, AI_B, "B4", "again", 1)
+        passes = run(mB, AI_B, "B4", "again", 1)
         base = len(allb)
-        collect(turns)
+        collect(passes)
         plain_marks.append(("B4 req1", base))
         for label, anchor, at in anchors:
             if not anchor:

@@ -24,10 +24,10 @@ from helpers import e2e_root
 SPAWNED = ("rust",)
 
 #: THE PROVIDER SEAM, in process only. ai_core builds an AI agent's provider for
-#: every turn from its live record (`core._build_provider`); `seat_providers`
+#: every pass from its live record (`core._build_provider`); `seat_providers`
 #: patches that ONE function to consult this table by agent id. An entry is
 #: `async wrap(build)`, `build()` building the provider ai_core would have used:
-#: a reader WRAPS it (`wrap_with`), fresh each turn as the product builds it, so an
+#: a reader WRAPS it (`wrap_with`), fresh each pass as the product builds it, so an
 #: `update_agent` mid-run reaches the model; a stub REPLACES it (`replace_with`) and
 #: nothing is built. An id with no entry turns on the product's own provider.
 WRAPS: dict[str, Callable[[Callable[[], Awaitable[Any]]], Awaitable[Any]]] = {}
@@ -53,7 +53,7 @@ def seat_providers(core) -> None:
 
 def wrap_with(reader):
     """A `WRAPS` entry that puts `reader` between ai_core and the model: its
-    `inner` becomes the provider ai_core built for this turn."""
+    `inner` becomes the provider ai_core built for this pass."""
 
     async def wrap(build):
         reader.inner = await build()
@@ -143,7 +143,7 @@ async def restart(root, core):
 
     A `ram_store` dies with its process, so the harness carries its tables the way a
     durable store keeps them by itself: `dump` → stop → new kernel → `inject`, BEFORE
-    the new kernel's first turn reads anything. The guid and the id counter come back
+    the new kernel's first pass reads anything. The guid and the id counter come back
     with the root record, so every carried row keeps its key and no id repeats.
 
     The stop is the operator's signal (SIGTERM, a graceful shutdown): process verbs

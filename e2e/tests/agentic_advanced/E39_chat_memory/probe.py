@@ -4,7 +4,7 @@ The bot of E38's chat server (the same `chat_gateway` and `chat_users`, imported
 E38) wakes into a long history it never lived: ~120 chat events across three public
 channels and three direct-message channels, PRE-WRITTEN by this probe (no model
 generation) and planted in the AI's memory store in THREE BATCHES — the first before its
-first turn, the others between live asks — so the window overflows three times: three
+first pass, the others between live asks — so the window overflows three times: three
 folds, then a fold of folds. Three facts sit at different depths:
 
   * early, in Dana's DM — her dog's name, told in confidence;

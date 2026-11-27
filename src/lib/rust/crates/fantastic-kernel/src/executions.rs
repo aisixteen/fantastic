@@ -217,7 +217,7 @@ impl Kernel {
     ///    in flight (a `call` row with no `settle`) settles as a dead letter now
     ///    (`settle_cut`).
     /// 5. `boot_all`: boot every other agent in registration order (AI agents
-    ///    boot lazily — they read their own store on their first turn), each
+    ///    boot lazily — they read their own store on their first pass), each
     ///    as ITSELF ([`Kernel::announce`]): a loaded agent is never the operator.
     ///
     /// Idempotent: a second call reports the store it is already writing to.

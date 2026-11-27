@@ -78,8 +78,8 @@ def main() -> int:
              f"{len(rig.asks(TITLED_ASK))} titled")
         need(f["summary"].startswith(BODY), f"F1: the fold's summary is that body: {f['summary'][:120]!r}")
         # the next request shows the fold under that line
-        rig.turn("one more", f"{line('after the fold')}\nnoted.\n{DONE}")
-        seen = blob(rig.mock.turns()[-1])
+        rig.exchange("one more", f"{line('after the fold')}\nnoted.\n{DONE}")
+        seen = blob(rig.mock.passes()[-1])
         need(f'[fold {fid} · {len(f["members"])} refs · L1] \\"{want}\\"' in seen,
              f"F1: the next request shows the fold line under its title")
 

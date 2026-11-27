@@ -10,7 +10,7 @@ pub use fantastic_ram_store::verbs::{
     Append, CopyRows, Dump, GetBytes, Inject, Order, Prune, PutBytes, Read, Search, StoreTables,
 };
 
-/// Open the store's database file (the schema ensured): a bad `path` fails here, at boot, not on the first turn. Sent by the kernel at start.
+/// Open the store's database file (the schema ensured): a bad `path` fails here, at boot, not on the first pass. Sent by the kernel at start.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Boot {}

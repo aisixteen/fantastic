@@ -2,12 +2,12 @@
 
 Every check here exists because the obvious one is a tautology. Asserting
 `"recall" in str(history)` and `secret in str(history)` is true before the model acts: the
-task text names `{type:'recall', query:'passphrase'}`, the task is a user turn in the
+task text names `{type:'recall', query:'passphrase'}`, the task is a user message in the
 durable store, and the secret arrives in the Step-1 read reply. Such a test passes even
 when recall returns an empty page and the chain dies.
 
 So the rules here are:
-  * scan ASSISTANT turns for calls; a call the TASK described is not a call the model made;
+  * scan ASSISTANT messages for calls; a call the TASK described is not a call the model made;
   * score a fact by WHICH reply carried it, not by its presence anywhere in the transcript;
   * prove compaction HAPPENED before scoring what survived it.
 """
@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 
 # REUSED, not re-derived. `core` already owns the reply-block grammar (`_BLOCK_SPLIT`
-# splits a batched turn into blocks, `_REPLY_TAG` reads `<agent> <verb>` off one) — the
+# splits a batched pass into blocks, `_REPLY_TAG` reads `<agent> <verb>` off one) — the
 # same parser the projection trimmers run on. A second regex here would be a second
 # grammar to keep in step with the first.
 from ai_core.core import _REPLY_TAG, _reply_blocks
@@ -32,11 +32,11 @@ def _content(m: dict) -> str:
 def calls_made(
     messages: list[dict], *, target: str | None = None, verb: str | None = None
 ) -> list[dict]:
-    """The `send` tool-calls the MODEL actually emitted, from its own assistant turns.
+    """The `send` tool-calls the MODEL actually emitted, from its own assistant messages.
 
     Reads the same `<tool_call>` envelopes the runtime dispatches, via the kernel's own
     parser — so a call the model only described in prose does not count, and a call the
-    TASK text quoted does not count either (a task is a user turn, never scanned here)."""
+    TASK text quoted does not count either (a task is a user message, never scanned here)."""
     out = []
     for m in messages:
         if m.get("role") != "assistant":
@@ -63,7 +63,7 @@ def reply_blocks(messages: list[dict], *, agent: str, verb: str) -> list[str]:
     out = []
     for m in messages:
         if m.get("role") == "assistant":
-            continue  # replies arrive as user turns; assistant turns are the model's own
+            continue  # replies arrive as user messages; assistant messages are the model's own
         for block in _reply_blocks(_content(m)):
             tag = _REPLY_TAG.match(block)
             if tag and tag.group(1) == agent and tag.group(2) == verb:
@@ -87,8 +87,8 @@ def fired(conn) -> bool:
     """Did compaction actually happen at any point in the run?
 
     From the pushed `context:compacted` events, NOT `context_status` — that reports only
-    the LAST projection and is overwritten every turn, so a run that compacted five times
-    and ended on a turn that fit reads `fired: False`."""
+    the LAST projection and is overwritten every pass, so a run that compacted five times
+    and ended on a pass that fit reads `fired: False`."""
     return bool(conn.compactions)
 
 

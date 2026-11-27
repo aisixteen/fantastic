@@ -1,8 +1,8 @@
-//! The pass path of a turn and of its helpers (#766, spec 2.7 and H11): retries
-//! inside the turn, and the task pass the harness's helpers make. The cases of the old
+//! The pass path of a pass and of its helpers (#766, spec 2.7 and H11): retries
+//! inside the pass, and the task pass the harness's helpers make. The cases of the old
 //! stream checker (`tests_stream_cut.rs`, #499) live here with their fixtures: a foreign
 //! tag is no longer cut and corrected by the router, it fails the attempt and is
-//! re-asked inside the turn.
+//! re-asked inside the pass.
 
 use super::*;
 use crate::agent_loop::{run_generation, GenFailure, Generation};
@@ -115,7 +115,7 @@ async fn task_pass_not_parsed() {
     crate::state::drop_state(&AgentId::from("h11_task_pass"));
 }
 
-// ─── the attempts of a turn (#766, 1.5 step 4; spec 2.7) ─────────────────────
+// ─── the attempts of a pass (#766, 1.5 step 4; spec 2.7) ─────────────────────
 
 const DONE: &str = r#"<call name="done"></call>"#;
 /// A foreign call tag: the `default` reader fails the attempt at it (#499's fixture).
@@ -454,7 +454,7 @@ async fn retry_leaves_no_trace() {
             assert!(!text.contains("<tool_call>\n<call"), "{kind}: {row}");
             assert!(!text.contains(&report), "{kind}: {row}");
         }
-        // the router got attempt 2's call: its reply is the next turn
+        // the router got attempt 2's call: its reply is the next pass
         let next = s.request(2);
         assert!(next.contains("kernel reflect"), "{kind}: {next}");
     }
@@ -736,7 +736,7 @@ async fn failed_attempt_dispatches_nothing() {
 
 // T4, T9 (status half in tests_stopped.rs)
 /// Every attempt bad: the provider is called exactly `1 + CALL_RETRIES` times and never
-/// again in that send; the turn ends `Stopped`, its reply the stored `stop` call.
+/// again in that send; the pass ends `Stopped`, its reply the stored `stop` call.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stop_after_n() {
     let tmp = TempDir::new().unwrap();
@@ -820,7 +820,7 @@ async fn retry_marks_then_aborts() {
 }
 
 // T6
-/// A transport error mid-attempt and mid-re-ask: today's path, the turn is rerun whole
+/// A transport error mid-attempt and mid-re-ask: today's path, the pass is rerun whole
 /// from attempt 1; no stop.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transport_error_unchanged() {
@@ -874,7 +874,7 @@ async fn transport_error_unchanged() {
 
 // T7
 /// A re-ask answered with nothing, reasoning only or prose only is no call either
-/// (#795): it is re-asked again in the same turn, its report the no-call text, and the
+/// (#795): it is re-asked again in the same pass, its report the no-call text, and the
 /// third request still carries the first attempt's re-ask pair.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn callless_reask_is_accepted() {
@@ -893,7 +893,7 @@ async fn callless_reask_is_accepted() {
         assert!(until_passes(&s, 3).await, "{answer:?}: no third attempt");
         let last = last_in(&s, 2);
         assert_eq!(last, crate::model_format::default::REPORT_NO_CALL, "{answer:?}");
-        // the third request is the same turn: the first re-ask pair is in it
+        // the third request is the same pass: the first re-ask pair is in it
         let report = default_report(FOREIGN).expect("bad");
         assert!(
             s.request_messages(2)
@@ -961,7 +961,7 @@ async fn cancel_during_reask() {
             .await
             .iter()
             .any(|r| r["kind"] == json!("trace")),
-        "a cancelled turn writes no trace row"
+        "a cancelled pass writes no trace row"
     );
     let stats = crate::state::state_for(&backend).render_cache.stats();
     assert_eq!(stats.pins, 0);
@@ -1108,7 +1108,7 @@ async fn cut_lists_every_call() {
 }
 
 // T16
-/// No cut streak is left: nine turns in a row that each needed a retry and then
+/// No cut streak is left: nine passes in a row that each needed a retry and then
 /// answered go on; no give-up.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn no_cut_streak() {
@@ -1338,30 +1338,30 @@ async fn bad_attempt_read_unseen() {
 }
 
 // R11
-/// A good `default` turn is the turn of `4fd5bb4d`: for the five recorded answers the
+/// A good `default` pass is the pass of `4fd5bb4d`: for the five recorded answers the
 /// caller's tokens, the parts and the stored row equal the recording
-/// (`res/test/default_turn_*.txt`); the row without `attributes.utc_offset`, which the
+/// (`res/test/default_pass_*.txt`); the row without `attributes.utc_offset`, which the
 /// stored offset (1.13) adds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn default_turn_same_as_before() {
+async fn default_pass_same_as_before() {
     // (`prose` is gone from the list: an answer with no call is re-asked now, #795, so
-    // its turn is not the recording's; the re-ask has its own units)
+    // its pass is not the recording's; the re-ask has its own units)
     for (name, recorded) in [
         (
             "reasoning",
-            include_str!("model_format/res/test/default_turn_reasoning.txt"),
+            include_str!("model_format/res/test/default_pass_reasoning.txt"),
         ),
         (
             "one_call",
-            include_str!("model_format/res/test/default_turn_one_call.txt"),
+            include_str!("model_format/res/test/default_pass_one_call.txt"),
         ),
         (
             "several_calls",
-            include_str!("model_format/res/test/default_turn_several_calls.txt"),
+            include_str!("model_format/res/test/default_pass_several_calls.txt"),
         ),
         (
             "repaired_opener",
-            include_str!("model_format/res/test/default_turn_repaired_opener.txt"),
+            include_str!("model_format/res/test/default_pass_repaired_opener.txt"),
         ),
     ] {
         let body: String = recorded
@@ -1385,8 +1385,8 @@ async fn default_turn_same_as_before() {
         let mut want_row = want["row"].clone();
         let howto = crate::model_format::default::HOWTO_SEND;
         assert!(howto.contains(INQUIRY_WAIT), "{name}: the inquiry's wait line");
-        let grown = i64::try_from(turns_of(howto).len()).unwrap()
-            - i64::try_from(turns_of(BASE_TURNS).len()).unwrap()
+        let grown = i64::try_from(passes_of(howto).len()).unwrap()
+            - i64::try_from(passes_of(BASE_PASSES).len()).unwrap()
             + i64::try_from(INQUIRY_WAIT.len()).unwrap()
             - i64::try_from(BASE_INQUIRY_WAIT.len()).unwrap();
         assert!(grown > 0, "{name}: the stop wording is in the how-to");
@@ -1401,7 +1401,10 @@ async fn default_turn_same_as_before() {
             + i64::try_from(replies_of(howto)).unwrap()
             - i64::try_from(BASE_REPLIES.len()).unwrap()
             + i64::try_from(crate::model_format::default::HOWTO_WORKING.len()).unwrap()
-            - i64::try_from(BASE_WORKING.len()).unwrap();
+            - i64::try_from(BASE_WORKING.len()).unwrap()
+            // and the pass words (PR D of #795): the context section, against its text before
+            + i64::try_from(crate::model_format::default::HOWTO_CONTEXT.len()).unwrap()
+            - i64::try_from(BASE_CONTEXT.len()).unwrap();
         let attrs = &mut want_row["attributes"];
         for p in attrs["parts"]["list"].as_array_mut().into_iter().flatten() {
             if p["part"] == json!("verb_docs") {
@@ -1446,7 +1449,7 @@ const HEAD: i64 = 26;
 
 /// The Turns section of the how-to on `4fd5bb4d` (`assembly.rs` `SEND_TO_HOWTO`), byte
 /// for byte: R11's measure of what W13 added.
-const BASE_TURNS: &str = r#"## Turns
+const BASE_PASSES: &str = r#"## Turns
 Only your ANSWER acts: a `<call>` in your thinking does not run; write it in your answer,
 after thinking; every call in it runs. End every turn with a call, with
 `<call name="await"></call>` (stop until the next message wakes you; what you wait for is in
@@ -1461,12 +1464,14 @@ no call is rerolled.
 const BASE_REPLIES: &str = include_str!("model_format/res/test/b2/base_replies_default.txt");
 /// The `default` working section before #795, byte for byte.
 const BASE_WORKING: &str = include_str!("model_format/res/test/b2/base_working_default.txt");
+/// The `default` context section before the pass words (PR D of #795), byte for byte.
+const BASE_CONTEXT: &str = include_str!("model_format/res/test/b2/base_context_default.txt");
 const BASE_INQUIRY_WAIT: &str = "work on, or `<call name=\"await\"></call>`\nfor it.";
 const INQUIRY_WAIT: &str = "work on, or end your answer with\n`<call name=\"done\"></call>` until it comes.";
 
 /// The section of a how-to on ending an answer (`## Turns` on `4fd5bb4d`): from its
 /// heading to the next one.
-fn turns_of(howto: &str) -> &str {
+fn passes_of(howto: &str) -> &str {
     let at = howto
         .find("## Turns")
         .or_else(|| howto.find("## Ending an answer"))
@@ -1477,7 +1482,7 @@ fn turns_of(howto: &str) -> &str {
     &rest[..end]
 }
 
-/// The harness of the `4fd5bb4d` recording (`res/test/default_turn_*.txt`), unchanged:
+/// The harness of the `4fd5bb4d` recording (`res/test/default_pass_*.txt`), unchanged:
 /// a chat `rec_ai_<name>` on a provider that streams the answer in 4-char chunks and
 /// names the model `stub`, a call target `notes`, both watched.
 mod rec {
@@ -1623,7 +1628,7 @@ mod rec {
         order.into_iter().map(|s| by.remove(&s).unwrap()).collect()
     }
 
-    /// `{tokens, parts, row}` of `answer`'s turn, as the recording took them.
+    /// `{tokens, parts, row}` of `answer`'s pass, as the recording took them.
     pub(super) async fn record_one(name: &str, answer: &str) -> Value {
         let tmp = TempDir::new().unwrap();
         let kernel = base_kernel(&tmp, |k| k.bundles.register(REC, RecBundle)).await;
@@ -1779,7 +1784,7 @@ async fn reply_type_restarts_once() {
         (&json!("default"), &json!(HERMES))
     );
 
-    // a second such reply in the same turn does not restart again
+    // a second such reply in the same pass does not restart again
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_hermes(&tmp, "tr_m16c").await;
     let steps = Steps::new(vec![
@@ -1925,7 +1930,7 @@ async fn pins_released_on_drop() {
 
 /// `text <invoke name="send">` then thousands of looping tokens: the attempt fails at
 /// the tag, the rest is read unseen, nothing of it is stored, the report reaches the
-/// re-ask, and the turn ends in a blink.
+/// re-ask, and the pass ends in a blink.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_looping_foreign_tag_is_reasked() {
     let tmp = TempDir::new().unwrap();

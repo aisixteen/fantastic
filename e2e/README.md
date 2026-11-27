@@ -1,6 +1,6 @@
 # `e2e/` — the live suite
 
-Tests that spend **real model turns**. Nothing that spends a turn runs
+Tests that spend **real model passes**. Nothing that spends a pass runs
 automatically and nothing should: no pytest collection, no `npm test`, and CI runs
 only the FREE tests (`costs: free`, no model — `run.py --only-free`, on Linux,
 macOS and Windows; see `.github/workflows/ci.yml`). The paid ones exist to answer
@@ -96,7 +96,7 @@ The OpenAI Responses wire is `BACKEND=responses` with `RESPONSES_ENDPOINT` (the 
 
 ### Anthropic (the Messages API)
 
-`BACKEND=anthropic` runs the turns tier against the Anthropic Messages API, with no
+`BACKEND=anthropic` runs the passes tier against the Anthropic Messages API, with no
 GPU. Nothing is guessed: name the full `…/v1/messages` URL, the model, and the key the
 store reads:
 
@@ -120,7 +120,7 @@ uv run python ../../../e2e/run.py --group agentic --lanes 1
   for a model with a long-context tier, `ANTHROPIC_LONG_CONTEXT_THRESHOLD_TOKENS` with
   `ANTHROPIC_PRICE_INPUT_LONG_PER_MTOK` / `ANTHROPIC_PRICE_OUTPUT_LONG_PER_MTOK`.
 - `MAX_TOKENS` overrides the output cap (default 32000 in `backends/__init__.py`).
-- `E2E_METER=1` writes `meter.jsonl` and `turns/` beside the run's logs; the key is
+- `E2E_METER=1` writes `meter.jsonl` and `passes/` beside the run's logs; the key is
   forwarded as a header and never written there. `helpers/meter_report.py` prints the
   per-test tokens and dollars.
 - The key is read by the `creds` store under the ref `anthropic`, bound to the host of
@@ -150,7 +150,7 @@ on the store, so an agent a MODEL creates reads its key the same way.
 | `--lanes N` | how many run at once |
 | `--group agentic` | one group |
 | `--id plan` | one test (repeatable) |
-| `--free` / `--only-free` | include / run only the self-tests, which cost no turns |
+| `--free` / `--only-free` | include / run only the self-tests, which cost no passes |
 | `--list` | show what would run, run nothing |
 
 **Lanes are somebody else's latency.** The GPU behind the endpoint holds a fixed
@@ -177,7 +177,7 @@ E2E_ARTIFACTS=/tmp/e2e-art E2E_PROFILE=release uv run python ../../../e2e/run.py
 `BACKEND` and `FANTASTIC_AI_MODEL` are required and never inferred. This is the
 same rule the kernel holds itself to, for the same reason: a guessed default is
 how a run ends up measuring something other than what you meant, and here that
-mistake also costs real turns to discover.
+mistake also costs real passes to discover.
 
 ## A model per role
 
@@ -224,7 +224,7 @@ The launcher reads only the machine line. A probe that prints neither is reporte
 `no verdict`, never guessed into a pass: "the probe never said" and "the probe
 said no" are different facts, and collapsing them invents a result.
 
-Every run keeps its full transcripts under `runs/<stamp>/`. These cost turns —
+Every run keeps its full transcripts under `runs/<stamp>/`. These cost passes —
 re-running to look again is not free.
 
 ## The self-tests exist because a fixture lied

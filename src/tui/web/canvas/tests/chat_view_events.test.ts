@@ -47,7 +47,7 @@ test("the AI chat view follows every call of its agent, whoever made it", async 
     assert.equal(stop["hidden"], true, `${end}: nothing runs: no Stop`);
   }
 
-  // a question it asked the person: read on the event, not at a turn's end
+  // a question it asked the person: read on the event, not at a pass's end
   mark = h.sends.length;
   await h.publish("chat1", { type: "inquiry_opened", re: 9, asker: "chat1", holder: "user" });
   assert.deepEqual(h.since(mark).map((s) => `${s.target} ${String(s.p["type"])}`), ["user inquiries"]);

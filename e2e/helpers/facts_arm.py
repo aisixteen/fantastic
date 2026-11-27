@@ -65,10 +65,10 @@ async def call(root, target, payload):
 
 async def store_rows(root, core, aid: str) -> list[dict]:
     """The agent's conversation, for SCORING: its rows read from its MEMORY STORE (the
-    store's dump — the one read every runtime answers), from the last `clear` on, turns
+    store's dump — the one read every runtime answers), from the last `clear` on, rows
     only — what the agent's own head holds. ONE PATH: a read from outside the agent
     (`core._load_history`) would be answered under the CALLER's key — empty before the
-    agent's first turn."""
+    agent's first pass."""
     rows = await memory.rows_of(root, aid, conversation_only=True)
     last_clear = max(
         (i for i, r in enumerate(rows) if r.get("kind") == "clear"), default=None
@@ -118,7 +118,7 @@ def _remap_row(row: dict, seen: dict[int, int]) -> dict:
         if old_pid is not None and old_pid in seen:
             out["content"] = c.replace(
                 f"[reply to {old_pid} ", f"[reply to {seen[old_pid]} ", 1)
-        # …and its `↑<call>` link: the turn that made the call this answers.
+        # …and its `↑<call>` link: the pass that made the call this answers.
         c = out["content"]
         head, _, rest = c.partition("\n")
         for old, new in seen.items():
@@ -175,7 +175,7 @@ def _wire_sys_tokens(aid: str) -> int:
 
 async def fit_planted(core, root, aid: str, rows: list[dict], *, window: int, band) -> None:
     """MEASURE the planted past against the fold trigger, and FIT it into `band`, in
-    place: under it, neutral filler turns go in right after the goal (the oldest
+    place: under it, neutral filler messages go in right after the goal (the oldest
     region, folded first); over it the plant fails loud — a probe's own rows are never
     dropped (needles live there). The measure is ai_core's own: the system block this
     agent will carry, the window's budget, the fold trigger, the rendered view.
@@ -228,7 +228,7 @@ async def fit_planted(core, root, aid: str, rows: list[dict], *, window: int, ba
     if before < lo:
         goal = rows[0]
         fillers: list[dict] = []
-        answers: dict[int, dict] = {}  # assistant filler → its user turn (by position)
+        answers: dict[int, dict] = {}  # assistant filler → its user message (by position)
         k = 0
         while (estimate_tokens(render(rows + fillers, anchors_of(rows + fillers))) / trigger) < (lo + hi) / 2:
             u = {"role": "user", "id": 0, "parent": None,
@@ -395,7 +395,7 @@ async def run_arm(root, core, bk, fb: str, aid: str, strategy: str, extra: dict,
     finally:
         await conn.close()
     msgs = await store_rows(root, core, aid)
-    # THE WRITE IS DETACHED. `done` closes the turn, and the calls that turn made run
+    # THE WRITE IS DETACHED. `done` closes the pass, and the calls that pass made run
     # in a spawned task after it — so the artifact can land a moment after `drive`
     # returns, while the file still reads as empty. Wait for it.
     p = Path(artifact)
@@ -410,10 +410,10 @@ async def run_arm(root, core, bk, fb: str, aid: str, strategy: str, extra: dict,
     views = [r for r in await memory.rows_of(root, aid) if r.get("kind") == "view"]
     return {
         # THE STARTUP VIEW: the first view the agent wrote — over a planted past, the
-        # one its boot rebuild chose before the first live turn.
+        # one its boot rebuild chose before the first live pass.
         "startup_compacted": startup_compacted(views[0] if views else None),
         "id": aid, "strategy": strategy, "body": body, "msgs": msgs,
-        "turns": conn.turns, "cuts": len(conn.compactions),
+        "passes": conn.passes, "cuts": len(conn.compactions),
         "dropped": ctx_score.dropped_total(conn),
         "carried": max((d.get("pinned_facts") or 0) for d in conn.compactions)
         if conn.compactions else 0,
@@ -517,8 +517,8 @@ def _pending(aid: str, coro):
 
 async def send_later(root, aid: str, text: str, delay: float, *, client_id: str | None = None):
     """The HUMAN sends another message while the agent is mid-run. It queues behind the
-    agent's FIFO lock and starts a new ROOT when the current turn ends — which is how two
-    chains come to interleave across turns."""
+    agent's FIFO lock and starts a new ROOT when the current pass ends — which is how two
+    chains come to interleave across passes."""
     import asyncio
 
     async def _go():
@@ -530,7 +530,7 @@ async def send_later(root, aid: str, text: str, delay: float, *, client_id: str 
 
 
 def done_calls(rows: list[dict]) -> int:
-    """How many times the agent has closed a task — `done` envelopes in its own turns."""
+    """How many times the agent has closed a task — `done` envelopes in its own passes."""
     return sum(1 for m in rows if m.get("role") == "assistant" and '"name":"done"' in re.sub(r"\s", "", str(m.get("content"))))
 
 
@@ -591,7 +591,7 @@ async def send_when(root, core, aid: str, text: str, ready, *, max_wait: float, 
     return _pending(aid, _go())
 
 
-async def send_in_turn(root, aid: str, texts: list[str], *, quiet: float = 1.0,
+async def send_in_pass(root, aid: str, texts: list[str], *, quiet: float = 1.0,
                        max_wait: float = 600.0, client_id: str | None = None):
     """The HUMAN sends each message as soon as the agent has FINISHED the one before —
     its own work was seen running, then stayed quiet for `quiet` s — so messages still
@@ -672,7 +672,7 @@ async def continue_arm(root, core, aid: str, task: str, artifact: str, *, timeou
 # ─── A PRE-SEEDED PAST ───────────────────────────────────────────────────────────
 #
 # A fold test needs a past long enough to overflow the window. Producing it LIVE — the
-# model reading N files one per turn — would be most of every fold test's wall. The past is PLANTED instead: the original instruction, then per file the
+# model reading N files one per pass — would be most of every fold test's wall. The past is PLANTED instead: the original instruction, then per file the
 # model's `read` call and its reply with the text INLINE (bodies are never persisted;
 # a planted history carries them inline). The LAST reply is delivered LIVE, as the
 # reply a live run would have received, so the run continues that very chain: the
@@ -681,7 +681,7 @@ async def continue_arm(root, core, aid: str, task: str, artifact: str, *, timeou
 
 def read_reply(path: str, text: str, call_id: int, *, target: str = "notes") -> str:
     """The reply a `read` of `path` comes back as — the tag names the call's pid (its
-    message id) and the turn that made it (`↑`)."""
+    message id) and the pass that made it (`↑`)."""
     return (f'[reply to {call_id} · {target} read · "read {path}" · ↑{call_id}]\n'
             f"<path>{path}</path>\n<text>{text}</text>")
 
@@ -761,7 +761,7 @@ def report(arms, score_line):
     for a in arms:
         print(
             f"\n  ── {a['id']} ({a['strategy']}) ──\n"
-            f"     turns={a['turns']}  cuts={a['cuts']} (dropped {a['dropped']})  "
+            f"     passes={a['passes']}  cuts={a['cuts']} (dropped {a['dropped']})  "
             f"stripped={a['stripped']} ({a['stripped_bytes']}B)  titled={a['titled']}/{a['sends']}  "
             f"ledger calls={a['ledger_calls']}\n"
             f"     digested={a['digested']}  folds_opened={a['folds_opened']}  greps={a['greps']}  "

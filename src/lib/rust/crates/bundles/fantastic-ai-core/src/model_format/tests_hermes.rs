@@ -525,7 +525,7 @@ fn call_of(text: &str) -> String {
 // internal call as the raw block, and render still writes the raw block.
 #[test]
 fn bytes_in_json_read_as_body() {
-    // the GPU run's turn-5 form, verbatim
+    // the GPU run's pass-5 form, verbatim
     let inline = h_call(
         r#"{"name":"send","arguments":{"routing":{"target_id":"desk","title":"write answer.md"},"payload":{"type":"write","path":"answer.md","bytes":"amber-df391e\n"}}}"#,
     );
@@ -1098,7 +1098,7 @@ fn runtime_notice_sites() {
         h.starts_with("[reply to 12 · notes grep]\n<tool_response>\ncall NOT dispatched: `notes`")
     );
     assert!(h.ends_with("\n</tool_response>"), "{h}");
-    // the nudge after a turn that retried
+    // the nudge after a pass that retried
     let nudge = "[no call was dispatched] Your answer emitted no <call> element, so NOTHING ran. \
                  If it is finished, end the chain explicitly: <call name=\"done\"></call>";
     notice(nudge);
@@ -1245,7 +1245,7 @@ fn several_calls_in_order() {
     );
 }
 
-/// The send of the GPU run's `agentic_advanced.new_tool` turn 14, verbatim: its JSON
+/// The send of the GPU run's `agentic_advanced.new_tool` pass 14, verbatim: its JSON
 /// lacks one closing brace.
 const NEW_TOOL_JSON: &str = r#"{"name": "send", "arguments": {"routing": {"target_id": "ai_prov"}, "payload": {"type": "complete", "rid": "sha256-compute", "messages": [{"role": "user", "content": "Compute the SHA-256 hex digest of the exact string: E160-b22389e54e51. Reply with ONLY the 64-character lowercase hex digest, nothing else."}], "max_tokens": 100, "knobs": {"temperature": 0}}}"#;
 
@@ -1272,9 +1272,9 @@ fn repair_adds_missing_brace() {
 }
 
 // The two calls of the 2026-11-25 GPU run that lacked their last `}`, as written
-// (new_tool turn 012, subai turn 007).
+// (new_tool pass 012, subai pass 007).
 const RUN_1125_NEW_TOOL: &str = r#"{"name": "send", "arguments": {"routing": {"target_id": "ai_prov"}, "payload": {"type": "complete", "rid": "sha256-compute", "messages": [{"role": "user", "content": "Compute the SHA-256 hex digest of the exact string: E160-b22389e54e51\n\nReply with ONLY the 64-character lowercase hex digest, nothing else."}], "max_tokens": 100, "knobs": {"temperature": 0}}}"#;
-const RUN_1125_SUBAI: &str = r#"{"name": "send", "arguments": {"routing": {"target_id": "kernel", "title": "create hour_ai"}, "payload": {"type": "create_agent", "id": "hour_ai", "parent_id": "ai", "handler_module": "ai_chat.tools", "display_name": "hour_ai", "model": "qwen3.8-27b", "context_window": 196608, "context_strategy": "compact", "memory_store_id": "memory", "provider_id": "hour_ai_prov", "credentials": null, "endpoint": null, "generating": false, "sentence": "An AI agent: on each clock tick it runs the hour program on hour_code, takes the printed value, stores it durably in totals under a stable name, and ends its turn with done.", "can": {"totals": {"call": ["*"]}, "memory": {"call": ["*"]}}, "tree": {"id": "hour_ai", "children": [], "sentence": "An AI agent: on each clock tick it runs the hour program on hour_code, takes the printed value, stores it durably in totals under a stable name, and ends its turn with done.", "description": "A AI agent: one completion per send. No loop of its own."}}}"#;
+const RUN_1125_SUBAI: &str = r#"{"name": "send", "arguments": {"routing": {"target_id": "kernel", "title": "create hour_ai"}, "payload": {"type": "create_agent", "id": "hour_ai", "parent_id": "ai", "handler_module": "ai_chat.tools", "display_name": "hour_ai", "model": "qwen3.8-27b", "context_window": 196608, "context_strategy": "compact", "memory_store_id": "memory", "provider_id": "hour_ai_prov", "credentials": null, "endpoint": null, "generating": false, "sentence": "An AI agent: on each clock tick it runs the hour program on hour_code, takes the printed value, stores it durably in totals under a stable name, and ends its pass with done.", "can": {"totals": {"call": ["*"]}, "memory": {"call": ["*"]}}, "tree": {"id": "hour_ai", "children": [], "sentence": "An AI agent: on each clock tick it runs the hour program on hour_code, takes the printed value, stores it durably in totals under a stable name, and ends its pass with done.", "description": "A AI agent: one completion per send. No loop of its own."}}}"#;
 
 // Each run call reads with the one `}` added; followed by a `<bytes>` block it reads
 // the same way, the JSON repaired alone and the block kept as the body.

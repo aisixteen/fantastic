@@ -183,7 +183,7 @@ async fn send_streams_tokens_and_emits_done() {
         .await;
 
     let (kernel, backend) = mk_kernel(&tmp, "tok", &server.uri()).await;
-    // the chat holds the turn and streams to its caller; the provider completes it
+    // the chat holds the pass and streams to its caller; the provider completes it
     let chat = pair_chat(&kernel, &backend).await;
     let mut rx = rebind_backend_inbox(&kernel, &chat);
     let client_id = "browser_tok";
@@ -286,7 +286,7 @@ fn decoded_text(chunks: &[Value]) -> String {
 }
 
 #[test]
-fn reasoning_channel_is_wrapped_once_per_turn() {
+fn reasoning_channel_is_wrapped_once_per_pass() {
     // ollama streams a reasoning model's tokens as `message.thinking` and only its
     // conclusion as `message.content`. THREE thinking chunks + one content chunk
     // must produce exactly ONE open and ONE close — per chunk it would be a
@@ -308,7 +308,7 @@ fn reasoning_channel_is_wrapped_once_per_turn() {
 #[test]
 fn a_thinking_only_chunk_is_not_an_empty_completion() {
     // A model can spend every generated token on `thinking`; reading only
-    // `content`, the turn would look like the server wedged. The span closes at
+    // `content`, the pass would look like the server wedged. The span closes at
     // end-of-stream even though content never started.
     let text = decoded_text(&[json!({"message": {"thinking": "all of it"}, "done": true})]);
     assert_eq!(text, format!("{THINK_OPEN}all of it{THINK_CLOSE}"));
@@ -320,7 +320,7 @@ fn a_thinking_only_chunk_is_not_an_empty_completion() {
 #[tokio::test]
 async fn thinking_streams_wrapped_and_persists_stripped() {
     // End-to-end over the real NDJSON transport: the caller gets the answer, the
-    // durable turn keeps only the conclusion.
+    // durable message keeps only the conclusion.
     let tmp = TempDir::new().unwrap();
     let server = MockServer::start().await;
     let body = ndjson_body(&[
@@ -395,7 +395,7 @@ async fn sends_temperature_default_and_override() {
 }
 
 /// The `num_predict` a request carries when the chat's knobs are `knobs` (#495, #632).
-/// The answer ends the turn (a `done` call), so no later pass of it reaches a port
+/// The answer ends the pass (a `done` call), so no later pass of it reaches a port
 /// that another case's server has since taken.
 async fn sent_num_predict(tag: &str, knobs: Value) -> Value {
     let tmp = TempDir::new().unwrap();
@@ -490,7 +490,7 @@ async fn history_persists_and_round_trips() {
         .await
         .remove(0)
         .result;
-    // One generation, so one status `done` event; it is emitted before the turn's
+    // One generation, so one status `done` event; it is emitted before the pass's
     // rows are saved, so then wait for the store itself to hold both rows.
     let chat = pair_chat(&kernel, &backend).await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
@@ -539,7 +539,7 @@ async fn history_persists_and_round_trips() {
     assert_eq!(digest[1]["role"], "assistant");
     assert_eq!(digest[1]["head"], "ack <call name=\"done\"></call>");
 
-    // The turns live in the CHAT's memory store (`memory_store_id`) — the chat's id IS
+    // The rows live in the CHAT's memory store (`memory_store_id`) — the chat's id IS
     // the conversation's; the provider and the kernel keep none.
     let none = fantastic_kernel::test_support::as_agent(
         backend.clone(),
@@ -551,7 +551,7 @@ async fn history_persists_and_round_trips() {
         none.is_empty(),
         "the provider holds no conversation: {none:#?}"
     );
-    // two turns: the ping and the answer
+    // two rows: the ping and the answer
     assert_eq!(rows.len(), 2, "one row per message: {rows:#?}");
     assert_eq!(rows[0]["content"], "ping");
     assert_eq!(rows[1]["content"], "ack <call name=\"done\"></call>");
@@ -917,7 +917,7 @@ async fn a_final_ndjson_line_without_a_newline_still_counts() {
         last_answer(&kernel, &backend).await,
         "Hello world <call name=\"done\"></call>"
     );
-    // and a thinking-only turn cut at EOF (no newline) still closes its span once
+    // and a thinking-only pass cut at EOF (no newline) still closes its span once
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/api/chat"))
@@ -932,7 +932,7 @@ async fn a_final_ndjson_line_without_a_newline_still_counts() {
     let mut rx = rebind_backend_inbox(&kernel, &chat);
     send_once(&kernel, &backend, "c_eof2").await;
     // a thinking-only answer is re-asked, and every attempt is one: the harness stops
-    // the turn (#795); the chat's own stream shows the span, closed once per attempt
+    // the pass (#795); the chat's own stream shows the span, closed once per attempt
     assert!(
         last_answer(&kernel, &backend).await.starts_with("<call name=\"stop\">"),
         "{:?}",
@@ -1029,7 +1029,7 @@ async fn a_bad_system_prompt_is_refused_at_the_write() {
 }
 
 /// A 200 whose body starts and then stops: the connection stays open, silent — the
-/// stall under test. The client's read clock, not the connection, ends the turn.
+/// stall under test. The client's read clock, not the connection, ends the pass.
 fn quiet_response(content_type: &str, body: &str) -> (Vec<u8>, bool) {
     (
         format!(
@@ -1078,7 +1078,7 @@ async fn a_stream_that_goes_quiet_fails_after_the_idle_window() {
 }
 
 /// Headers that never come are the same stall: the window runs from the request,
-/// and the turn fails naming the stall, not a connect error (#177).
+/// and the pass fails naming the stall, not a connect error (#177).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_endpoint_that_never_answers_fails_after_the_idle_window() {
     let (port, _log) = raw_stub(|_| (Vec::new(), false)).await;
@@ -1138,7 +1138,7 @@ async fn http_errors_are_classed_by_the_shared_classifier() {
         (401, ErrorClass::Permanent(UNAUTHORIZED)),
         (404, ErrorClass::Permanent(NOT_FOUND)),
         (503, ErrorClass::Transient),
-        (400, ErrorClass::Turn),
+        (400, ErrorClass::Pass),
     ] {
         let server = MockServer::start().await;
         Mock::given(method("POST"))

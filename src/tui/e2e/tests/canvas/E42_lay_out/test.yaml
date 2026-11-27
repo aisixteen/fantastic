@@ -4,7 +4,7 @@ id: lay_out
 group: canvas
 title: "an AI arranges scattered slides into one ordered row"
 runner: probe.py
-costs: turns
+costs: passes
 limits:
   total_seconds: 600
   quiet_seconds: 30

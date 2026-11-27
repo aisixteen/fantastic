@@ -33,7 +33,7 @@ def _now() -> str:
 
 class OllamaMock(MockServer):
     base_path = ""
-    turn_path = "/api/chat"
+    pass_path = "/api/chat"
 
     def error_body(self, status, message):
         return {"error": message}
@@ -48,7 +48,7 @@ class OllamaMock(MockServer):
                             "quantization_level": "Q4_K_M"}}]}
         return None
 
-    def turn(self, h, req, text):
+    def on_pass(self, h, req, text):
         def line(obj):
             return (json.dumps(obj) + "\n").encode()
 

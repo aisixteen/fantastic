@@ -304,7 +304,7 @@ fn endpoint_cold_after_lifetime() {
 #[tokio::test]
 async fn reported_read_is_not_kept() {
     use super::pass::Mode;
-    use super::tests_cache::{hermes_pass, turn_of, Canned};
+    use super::tests_cache::{hermes_pass, pass_view, Canned};
     use crate::provider::ProviderReport;
     use serde_json::{json, Map};
 
@@ -319,7 +319,7 @@ async fn reported_read_is_not_kept() {
     let want: Vec<(usize, usize)> = views
         .iter()
         .map(|v| {
-            let d = turn_of(&control, v);
+            let d = pass_view(&control, v);
             (d.kept, d.kept_endpoint)
         })
         .collect();
@@ -330,7 +330,7 @@ async fn reported_read_is_not_kept() {
         let provider = Canned::new("ok");
         let (pass, state) = hermes_pass(provider.clone(), &chat);
         *state.last_send_secs.lock().unwrap() = Some(crate::helpers::now_secs());
-        assert_eq!(turn_of(&pass, &views[0]).kept, want[0].0);
+        assert_eq!(pass_view(&pass, &views[0]).kept, want[0].0);
 
         let view = pass.view(&views[1], &Map::new());
         let predicted = (view.kept, view.kept_endpoint);
@@ -342,7 +342,7 @@ async fn reported_read_is_not_kept() {
             cache_write: Some(0),
             ..ProviderReport::default()
         };
-        let report = pass.report(Mode::Turn);
+        let report = pass.report(Mode::Pass);
         assert_eq!(
             report.cache_read,
             Some(reported),
@@ -353,7 +353,7 @@ async fn reported_read_is_not_kept() {
             predicted,
             "the report changes neither"
         );
-        let _ = view.finish(&mut pass.events(), Mode::Turn.name());
+        let _ = view.finish(&mut pass.events(), Mode::Pass.name());
 
         let rows = pass.take_events().into_rows();
         let measured: Vec<&serde_json::Value> = rows
@@ -363,7 +363,7 @@ async fn reported_read_is_not_kept() {
         assert_eq!(measured.len(), 1, "{rows:?}");
         assert_eq!(measured[0]["cache_read"], json!(reported));
         assert_eq!(measured[0]["cache_write"], json!(0));
-        assert_eq!(measured[0]["mode"], json!("turn"));
+        assert_eq!(measured[0]["mode"], json!("pass"));
         assert_eq!(measured[0]["type"], json!(super::hermes::NAME));
         let render = rows
             .iter()
@@ -373,7 +373,7 @@ async fn reported_read_is_not_kept() {
         assert_eq!(render["kept_endpoint"], json!(predicted.1));
 
         // the next pass predicts from the links alone, as with no report
-        let next = turn_of(&pass, &views[2]);
+        let next = pass_view(&pass, &views[2]);
         assert_eq!((next.kept, next.kept_endpoint), want[2]);
         crate::state::drop_state(&fantastic_kernel::AgentId::from(chat.as_str()));
     }

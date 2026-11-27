@@ -37,7 +37,7 @@ N = 8
 TASK = (
     f"One of `filler_0.txt` … `filler_{N - 1}.txt` ({N} files, all the same size) carries "
     "a line beginning `>> audit marker:`. You do not need to read them all — read them "
-    "through `notes` ONE PER TURN so they are on record, then FIND the marker (you can "
+    "through `notes` ONE PER PASS so they are on record, then FIND the marker (you can "
     "grep everything you have received) and write `report.md` through `notes` with the "
     f"single line `marker: <filename> <value>`. Then {DONE}."
 )

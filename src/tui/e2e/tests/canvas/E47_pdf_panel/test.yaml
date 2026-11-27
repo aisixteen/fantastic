@@ -4,7 +4,7 @@ id: pdf_panel
 group: canvas
 title: "an AI opens an allowed PDF in a panel; the file leg refuses the rest"
 runner: probe.py
-costs: turns
+costs: passes
 limits:
   total_seconds: 600
   quiet_seconds: 30

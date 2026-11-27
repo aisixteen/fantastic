@@ -69,11 +69,11 @@ class SlowVllm(VllmMock):
     """The vllm mock, plus a slow answer: one starting with `<slow>` waits `SLOW` s
     before it streams (the marker is stripped)."""
 
-    def turn(self, h, req, text):
+    def on_pass(self, h, req, text):
         if text.startswith(SLOW_MARK):
             time.sleep(SLOW)
             text = text[len(SLOW_MARK):]
-        return super().turn(h, req, text)
+        return super().on_pass(h, req, text)
 
 
 def last_user(req: dict) -> str:
@@ -105,14 +105,14 @@ def main() -> int:
         if not cond:
             bad.append(what)
 
-    def turns_at_least(m: VllmMock, n: int, bound: float = 60) -> list[dict]:
+    def passes_at_least(m: VllmMock, n: int, bound: float = 60) -> list[dict]:
         end = time.monotonic() + bound
         while time.monotonic() < end:
-            got = m.turns()
+            got = m.passes()
             if len(got) >= n:
                 return got
             time.sleep(0.05)
-        return m.turns()
+        return m.passes()
 
     def idle(bound: float = 60) -> bool:
         end = time.monotonic() + bound
@@ -227,25 +227,25 @@ def main() -> int:
              f"the lead holds the ack of its message to the busy worker, inside the deadline "
              f"({took:.2f}s): {told[:300]!r}")
         need(idle(), "the passes settle (no AI task left in `ps`)")
-        need(len(lead_m.turns()) == 1, f"the ack woke no pass of the lead: {len(lead_m.turns())} requests")
-        w_turns = turns_at_least(work_m, 2)
-        need(len(w_turns) == 2 and f"PING-{TOKEN}" in json.dumps(w_turns[1]["body"].get("messages")),
-             f"the worker reads the ping in ONE pass after its slow one: {len(w_turns)} requests")
+        need(len(lead_m.passes()) == 1, f"the ack woke no pass of the lead: {len(lead_m.passes())} requests")
+        w_passes = passes_at_least(work_m, 2)
+        need(len(w_passes) == 2 and f"PING-{TOKEN}" in json.dumps(w_passes[1]["body"].get("messages")),
+             f"the worker reads the ping in ONE pass after its slow one: {len(w_passes)} requests")
 
         # 4 · a call past its deadline: the dead letter, and the lead is told its id
-        seen_l = len(lead_m.turns())
+        seen_l = len(lead_m.passes())
         hk.send(LEAD, {"type": "send", "text": f"Take a nap ({TOKEN})."})
-        got = turns_at_least(lead_m, seen_l + 2)[seen_l:]
+        got = passes_at_least(lead_m, seen_l + 2)[seen_l:]
         note = re.search(rf"your message to {SLOWP} hit its 3\.0s deadline → dead letter (\d+); resend or drop",
                          last_user(got[1]["body"]) if len(got) > 1 else "")
         need(note is not None,
              f"the lead's request carries the dead-letter notice: {last_user(got[1]['body'])[:300] if len(got) > 1 else ''!r}")
 
         # 5 · resend + drop; the resend's reply reaches the lead once
-        turns_at_least(lead_m, seen_l + 3, bound=NAP + 30)
+        passes_at_least(lead_m, seen_l + 3, bound=NAP + 30)
         need(idle(NAP + 30), "the passes settle (no AI task left in `ps`)")
         time.sleep(0.5)
-        after = [last_user(t["body"]) for t in lead_m.turns()[seen_l:]]
+        after = [last_user(t["body"]) for t in lead_m.passes()[seen_l:]]
         back = [u for u in after if f"· {SLOWP} sleep" in u and "<slept>" in u and "<error>" not in u]
         need(len(back) == 1, f"the resend, inside its 30 s deadline, is answered and its reply "
              f"reaches the lead once: {[u[:200] for u in after]}")
@@ -273,7 +273,7 @@ def main() -> int:
             need((work / DB).is_file(), f"the ledger file is on disk: {DB}")
 
             # 6 · the lead's call passes its deadline again
-            seen_l = len(lead_m.turns())
+            seen_l = len(lead_m.passes())
             state2 = {"pid": None, "resent": False}
             ledger_call = (f'<call name="send">\n<routing><target_id>{root}</target_id></routing>\n'
                            "<payload><type>ledger</type></payload>\n</call>")
@@ -294,7 +294,7 @@ def main() -> int:
 
             lead_m.responder = lead_responder2
             hk.send(LEAD, {"type": "send", "text": f"Take a nap again ({TOKEN2})."})
-            got = turns_at_least(lead_m, seen_l + 2)[seen_l:]
+            got = passes_at_least(lead_m, seen_l + 2)[seen_l:]
             note = re.search(r"hit its 3\.0s deadline → dead letter (\d+); resend or drop",
                              last_user(got[1]["body"]) if len(got) > 1 else "")
             need(note is not None, "part 2: the lead is told the dead letter's id on the sqlite ledger: "
@@ -309,12 +309,12 @@ def main() -> int:
             need(hk.proc is not None and hk.proc.poll() is not None, "the first kernel process is gone")
             hk.boot()
             need((work / DB).is_file(), f"the ledger file is still on disk: {DB}")
-            seen_l = len(lead_m.turns())
+            seen_l = len(lead_m.passes())
             hk.send(LEAD, {"type": "send", "text": "Check the ledger, then deal with it."})
-            turns_at_least(lead_m, seen_l + 3, bound=NAP + 30)
+            passes_at_least(lead_m, seen_l + 3, bound=NAP + 30)
             need(idle(NAP + 30), "part 2: the passes settle after the restart")
             time.sleep(0.5)
-            l_after = [last_user(t["body"]) for t in lead_m.turns()[seen_l:]]
+            l_after = [last_user(t["body"]) for t in lead_m.passes()[seen_l:]]
             ledger_seen = next((u for u in l_after if "timed_out" in u and pid2 in u), "")
             need(bool(ledger_seen),
                  f"after the restart the lead's ledger still holds dead letter {pid2} as timed_out: "

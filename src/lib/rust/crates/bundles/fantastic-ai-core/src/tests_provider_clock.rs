@@ -68,6 +68,6 @@ fn a_stall_is_a_raise_naming_the_seconds_and_the_endpoint() {
     assert_eq!(
         err.message,
         "anthropic_backend: stream_stalled — https://x/v1/messages sent no bytes for 0.2s; \
-         this turn is NOT complete"
+         this pass is NOT complete"
     );
 }

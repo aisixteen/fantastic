@@ -51,7 +51,7 @@ TASK = (
     "Step 1: read `README.md` through the editor `notes` — it describes how this team "
     "works and what deliverables must look like.\n"
     f"Step 2: read `filler_0.txt` through `filler_{N - 1}.txt` ({N} files) through "
-    "`notes`, ONE PER TURN, noting anything operationally interesting you find.\n"
+    "`notes`, ONE PER PASS, noting anything operationally interesting you find.\n"
     "Step 3: write `report.md` through `notes`, in house style, listing every file you "
     "read and summarising anything operationally interesting you noted.\n"
     f"Do not re-read README.md. Then {DONE}."
@@ -67,7 +67,7 @@ def loop_cause(a: dict, aid: str) -> list[str]:
     reads = Counter(str(c["payload"].get("path")) for c in calls
                     if c["payload"].get("type") == "read")
     mine = Counter(c["payload"].get("type") for c in calls if c["target"] == aid)
-    out = [f"{aid}: {a['turns']} turns, {len(calls)} calls; on itself: "
+    out = [f"{aid}: {a['passes']} passes, {len(calls)} calls; on itself: "
            + (", ".join(f"{v} x{n}" for v, n in sorted(mine.items())) or "none")
            + f"; checkpoints (facts) {a['dumps']}"]
     rep = [(k, n) for k, n in same.most_common() if n > 1][:3]

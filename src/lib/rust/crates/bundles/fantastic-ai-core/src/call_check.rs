@@ -3,7 +3,7 @@
 //!
 //! A model may invent any call syntax — a `<tool_call>` wrapper, `<function=call
 //! name="send">`, `<send>` as a tag, a JSON object, `<parameter=x>` arguments — and
-//! none of it opens a `<call` envelope, so the scanner finds nothing and the turn
+//! none of it opens a `<call` envelope, so the scanner finds nothing and the pass
 //! reads as call-less (a `<tool_call><function=call name="send">…</call>` reply
 //! answered only with the call-less reminder repeats the same shape until the
 //! chain gives up).

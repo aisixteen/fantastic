@@ -10,4 +10,4 @@ muted: "#763: cross-kernel peers wait for the peer design"
 costs: free
 limits:
   idle_seconds: 120
-  turn_seconds: 300
+  pass_seconds: 300

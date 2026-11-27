@@ -327,7 +327,7 @@ pub struct PasteImage {
 #[serde(deny_unknown_fields)]
 pub struct Connector {}
 
-/// Watch a running job's output AS IT ARRIVES and SEND what matches to `notify` as a turn — it polls nothing. Returns {monitor_id, job_id, notify, match, every, tail, label}; kernel `cancel` (or `unmonitor`) ends it, and it ends with its job.
+/// Watch a running job's output AS IT ARRIVES and SEND what matches to `notify` as a message — it polls nothing. Returns {monitor_id, job_id, notify, match, every, tail, label}; kernel `cancel` (or `unmonitor`) ends it, and it ends with its job.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Monitor {
@@ -359,7 +359,7 @@ impl JsonSchema for Monitor {
     fn json_schema(_gen: &mut SchemaGenerator) -> Schema {
         serde_json::from_value(serde_json::json!({
             "type": "object",
-            "description": "Watch a running job's output AS IT ARRIVES and SEND what matches to `notify` as a turn — it polls nothing. Returns {monitor_id, job_id, notify, match, every, tail, label}; kernel `cancel` (or `unmonitor`) ends it, and it ends with its job.",
+            "description": "Watch a running job's output AS IT ARRIVES and SEND what matches to `notify` as a message — it polls nothing. Returns {monitor_id, job_id, notify, match, every, tail, label}; kernel `cancel` (or `unmonitor`) ends it, and it ends with its job.",
             "properties": {
                 "job_id": {"type": "integer", "description": "A RUNNING job of this agent."},
                 "notify": {"type": "string", "minLength": 1, "description": "The agent told."},

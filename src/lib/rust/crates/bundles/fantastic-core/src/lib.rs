@@ -625,7 +625,7 @@ async fn reload_bundle(
     let changed = fantastic_kernel::inherit::reapply(kernel, &before);
     if !kernel.bundles.meta_chain(name).is_empty() {
         // a META BUNDLE has no program to restart: each instance reads its fields on
-        // its next call or turn
+        // its next call or pass
         return Ok(json!({"reloaded": name, "instances": changed}));
     }
     let mut live: Vec<Arc<Agent>> = kernel.agent_ids().into_iter().filter_map(|aid| kernel.resolve_target(aid.as_str()))

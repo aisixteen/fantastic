@@ -12,14 +12,14 @@ The AI's own `can` lines reach `memory`, `files`, its provider and `reflect` on
 the root; nothing is written on a target.
 
 The script: a `reflect` call on the root (its reply, the root's id and none of
-its guid, is the next request's user turn) → a `file_bridge` `write` (the bytes land verbatim) →
-one turn of three attempts, re-asked inside it (#766, `CALL_RETRIES = 2`): a call written
+its guid, is the next request's user message) → a `file_bridge` `write` (the bytes land verbatim) →
+one pass of three attempts, re-asked inside it (#766, `CALL_RETRIES = 2`): a call written
 wrong (it fails at its first foreign tag; the re-ask is the same messages plus the attempt
 as written and the compiler-style report; nothing after the tag is read; nothing runs),
 then an envelope with text outside a tag (the second re-ask adds it and its fault), then a
 call inside the thought beside a real one in the answer (accepted; the thought's call is
-not dispatched; the stored history has no thought) → one turn of two attempts (#795): an
-answer with no call, re-asked inside the turn with the no-call report, then a plain answer
+not dispatched; the stored history has no thought) → one pass of two attempts (#795): an
+answer with no call, re-asked inside the pass with the no-call report, then a plain answer
 with `done` (no further request). After
 the accepted attempt no request and no stored row holds either failed attempt or a report.
 A thought shows in the next request as its autofold marker (`<thought id="N" tokens="…"/>`,

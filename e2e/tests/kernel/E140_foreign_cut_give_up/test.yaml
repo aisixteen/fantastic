@@ -2,10 +2,10 @@
 # play the model for the kernel's own vllm_backend agents, driven over web_rest.
 id: foreign_cut_give_up
 group: kernel
-title: "the call checker on the stream (#499) and its retries inside the turn (#766): a foreign call tag fails the attempt and is re-asked in the same turn, three failed attempts stop the turn with the harness stop call and the sender is told, retried turns in a row never stop, a failed attempt after thinking is re-asked without its thought and never stored"
+title: "the call checker on the stream (#499) and its retries inside the pass (#766): a foreign call tag fails the attempt and is re-asked in the same pass, three failed attempts stop the pass with the harness stop call and the sender is told, retried passes in a row never stop, a failed attempt after thinking is re-asked without its thought and never stored"
 runner: probe.py
 runtimes: [rust]
 costs: free
 limits:
   idle_seconds: 120
-  turn_seconds: 300
+  pass_seconds: 300

@@ -12,7 +12,7 @@ message, which is HELD on the lead's chain; then the kernel's process group is K
 
 Everything is records: the new kernel settles the calls the old process left in flight
 (a `call` row with no `settle`) as dead letters, `cancelled`; every AI agent they
-concern is told once, at its boot, in one notice turn:
+concern is told once, at its boot, in one notice pass:
 
 - the lead: `[reply to <pid> · ex run] no reply will come → dead letter <pid>; resend or
   drop`, and `[from worker · dead letter <pid>] a message to you was cut …`;

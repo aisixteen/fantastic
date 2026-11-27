@@ -8,7 +8,7 @@ every file, which means the summaries carried them or the model went into a fold
 
 PRE-SEEDED: the reads are PLANTED — the instruction, each read call and
 its reply inline — and the last reply arrives live, so the run continues that chain: the
-folding and the answer are the model's own, without spending a live turn per file.
+folding and the answer are the model's own, without spending a live pass per file.
 The live reply CONTINUES the planted chain, so it is still ONE chain that never closed.
 """
 from __future__ import annotations
@@ -42,7 +42,7 @@ FOLD_ONLY = (FOLD_ARMS[1],)
 
 FB = "long_fb"
 N = 40
-TASK = (f"Read `filler_0.txt` … `filler_{N - 1}.txt` ({N} files) through `notes`, ONE PER TURN. Then write "
+TASK = (f"Read `filler_0.txt` … `filler_{N - 1}.txt` ({N} files) through `notes`, ONE PER PASS. Then write "
         f"`report.md` through `notes` listing every file you read, one per line. Then {DONE}.")
 
 

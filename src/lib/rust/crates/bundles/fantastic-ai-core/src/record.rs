@@ -19,11 +19,11 @@ pub enum ContextStrategy {
     Compact,
     /// Drop what falls out of the window.
     Truncate,
-    /// Strip the bulky parts of old turns.
+    /// Strip the bulky parts of old messages.
     Strip,
     /// Fold the oldest spans into fold rows.
     Fold,
-    /// Never shrink: an over-budget turn is refused.
+    /// Never shrink: an over-budget message is refused.
     None,
 }
 
@@ -65,7 +65,7 @@ fn default_transport_retries() -> Option<i64> {
 /// The fields EVERY ai_core agent takes, whatever its backend.
 #[derive(Debug, JsonSchema)]
 pub struct AiRecord {
-    /// Tokens the model sees per turn.
+    /// Tokens the model sees per pass.
     #[schemars(range(min = 1))]
     pub context_window: Option<i64>,
     /// Tokens of the window held back for the model's reply.
@@ -73,16 +73,16 @@ pub struct AiRecord {
     pub output_reserve: Option<i64>,
     /// How the conversation is fitted into the window.
     pub context_strategy: Option<ContextStrategy>,
-    /// Recent turns a compaction keeps verbatim.
+    /// Recent messages a compaction keeps verbatim.
     #[schemars(range(min = 1, max = 50), default = "default_recent_n")]
     pub recent_n: Option<i64>,
     /// A row id: the row that ends the stable prefix; it and every row before it are pinned.
     #[schemars(range(min = 1))]
     pub cache_primer_until: Option<i64>,
-    /// How many times a turn whose link dropped is retried before it fails, with a 2 s, 4 s, 8 s backoff; 0 = off.
+    /// How many times a pass whose link dropped is retried before it fails, with a 2 s, 4 s, 8 s backoff; 0 = off.
     #[schemars(range(min = 0, max = 5), default = "default_transport_retries")]
     pub transport_retries: Option<i64>,
-    /// A system block that REPLACES the default one on every turn; null = the default.
+    /// A system block that REPLACES the default one on every pass; null = the default.
     #[schemars(length(min = 1), regex(pattern = r"\S"))]
     pub system_prompt: Option<String>,
     /// The file_bridge this agent reads files THROUGH; null = none.
@@ -91,10 +91,10 @@ pub struct AiRecord {
     /// The path of the file view `file_bridge_id` names, read through that view as the system block; null = none.
     #[schemars(length(min = 1), regex(pattern = r"\S"))]
     pub system_prompt_file: Option<String>,
-    /// Text placed BEFORE the system block on every turn; null = nothing.
+    /// Text placed BEFORE the system block on every pass; null = nothing.
     #[schemars(length(min = 1), regex(pattern = r"\S"))]
     pub pre_system_prompt: Option<String>,
-    /// Text placed AFTER the system block on every turn; null = nothing.
+    /// Text placed AFTER the system block on every pass; null = nothing.
     #[schemars(length(min = 1), regex(pattern = r"\S"))]
     pub post_system_prompt: Option<String>,
     /// Bytes of one image, lowering what the model takes; null = the model's.
@@ -164,7 +164,7 @@ pub fn record_wrap_prompt(meta: &Map<String, Value>, name: &str) -> Option<Strin
 }
 
 /// The record's own `system_prompt`, as declared (text with a non-space character, or
-/// absent). Precedence at a turn: the per-call argument > this > the default block.
+/// absent). Precedence at a pass: the per-call argument > this > the default block.
 #[must_use]
 pub fn record_system_prompt(meta: &Map<String, Value>) -> Option<String> {
     meta.get("system_prompt")
@@ -259,7 +259,7 @@ pub struct RequestKnobs {
     /// Stop sequences.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop: Option<Vec<String>>,
-    /// A turn's output budget (tokens); unset, the backend's default for its server.
+    /// A pass's output budget (tokens); unset, the backend's default for its server.
     #[schemars(range(min = 1))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<i64>,
@@ -306,14 +306,14 @@ pub fn knobs_of(meta: &Map<String, Value>) -> Map<String, Value> {
 }
 
 /// A write a chat's knobs cannot honour, on the MERGED record: a thinking budget not
-/// below the output budget could never fire, and a turn would end mid-thought.
+/// below the output budget could never fire, and a pass would end mid-thought.
 #[must_use]
 pub fn knobs_refusal(meta: &Map<String, Value>, record: &Map<String, Value>) -> Option<String> {
     let pick = |k: &str| meta.get(k).or_else(|| record.get(k)).and_then(Value::as_i64);
     match (pick("thinking_token_budget"), pick("max_tokens")) {
         (Some(b), Some(m)) if b >= m => Some(format!(
             "thinking_token_budget={b} is not below max_tokens={m} — it could \
-             never fire, and a turn would end mid-thought with no answer; keep it \
+             never fire, and a pass would end mid-thought with no answer; keep it \
              below max_tokens (half is a good start)"
         )),
         _ => None,
@@ -347,7 +347,7 @@ fn default_stream_idle() -> Option<f64> {
 /// The read clock of a provider's answer stream, flattened into each provider backend's record.
 #[derive(Debug, JsonSchema)]
 pub struct StreamClock {
-    /// The read clock on the answer stream: seconds with no byte from the server (headers included) before the turn is judged stalled and ends with an error row. A bound BETWEEN bytes, never a widened send ceiling.
+    /// The read clock on the answer stream: seconds with no byte from the server (headers included) before the pass is judged stalled and ends with an error row. A bound BETWEEN bytes, never a widened send ceiling.
     #[schemars(range(min = 0.001), default = "default_stream_idle")]
     pub stream_idle_seconds: f64,
 }

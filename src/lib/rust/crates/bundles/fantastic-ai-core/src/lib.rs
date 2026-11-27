@@ -57,7 +57,7 @@
 //! - `{type:"context", ...}` — the compaction push half (see [`projection`]).
 //! - STREAMING PARTS ([`stream_parts`]): the output split as it
 //!   is written into `text` / `thinking` / `call` parts — `part_start {stream_id,
-//!   source, kind, name?, target?, to?, re?}` (`re`: the message this turn
+//!   source, kind, name?, target?, to?, re?}` (`re`: the message this pass
 //!   answers) → `part_delta {text}` (batched 50 ms) → `part_end {ok?}` (`ok` on a
 //!   call: whether it parsed) | `part_abort {reason}`. A call part goes to its
 //!   addressee's inbox (each of `to`) as an emit once `<target_id>`/`<to>` has
@@ -71,9 +71,9 @@
 //!
 //! A reasoning model's deliberation arrives on a SEPARATE provider channel
 //! (ollama `message.thinking`, vLLM `reasoning_content`). A provider that reads
-//! only the content channel reports a reasoning turn as an EMPTY completion, so
+//! only the content channel reports a reasoning pass as an EMPTY completion, so
 //! every provider reads BOTH and wraps the deliberation in
-//! [`think::THINK_OPEN`]/[`think::THINK_CLOSE`] — **once per turn**. Dispatch and
+//! [`think::THINK_OPEN`]/[`think::THINK_CLOSE`] — **once per pass**. Dispatch and
 //! history then read only the ANSWER (see [`think::without_thinking`]): a call
 //! written inside thinking never runs.
 

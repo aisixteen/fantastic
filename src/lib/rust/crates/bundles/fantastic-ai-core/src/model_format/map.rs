@@ -100,11 +100,11 @@ pub(crate) enum Piece {
         pid: i64,
     },
     /// THE CONTEXT NOTICE a projection prepends (`[context-notice] …`): what it did, and
-    /// how to page turns back, in the type's call form.
+    /// how to page messages back, in the type's call form.
     Notice {
         /// The strategy that ran.
         strategy: String,
-        /// The turns it dropped from the view.
+        /// The messages it dropped from the view.
         dropped: usize,
         /// The summary of the dropped span, when it made one.
         summary: Option<String>,

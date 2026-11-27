@@ -19,7 +19,7 @@ pub type AgentId = String;
 
 /// One WHOLE row, read straight off the kernel's row store.
 ///
-/// `kind` is ABSENT on a plain conversation turn; the bookkeeping kinds are
+/// `kind` is ABSENT on a plain conversation message; the bookkeeping kinds are
 /// `call`, `task`, `body`, `view` and `settle`, and the outline filters exactly
 /// those (the same set the kernel's own history loader drops).
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
@@ -283,12 +283,12 @@ mod tests {
         assert_eq!(call.caller.as_deref(), Some("user"));
         assert!(!call.is_conversation());
 
-        let turn: Row = serde_json::from_str(
+        let message: Row = serde_json::from_str(
             r#"{"role":"user","id":4660,"agent":"ai_b","ts":1.0,"content":"do it"}"#,
         )
         .unwrap();
-        assert!(turn.kind.is_none());
-        assert!(turn.is_conversation());
+        assert!(message.kind.is_none());
+        assert!(message.is_conversation());
 
         let fold: Row = serde_json::from_str(
             r#"{"role":"user","id":8132,"parent":4660,"kind":"fold","level":1,"agent":"ai_b",

@@ -111,7 +111,7 @@ def main() -> bool:
                 await say(pg, f"Now overwrite the bundle `{RELEASE}` with the code of the bundle `{dev}` (its agent.py).")
                 done2 = await wait_quiet(pg, rig.budget(rig.limits["ask_seconds"], reserve=20), rig.limits["quiet_seconds"])
                 r["ai_overwrites_release"] = await until(lambda: hello(f"{RELEASE}_1") == "dev-three, world", 20)
-                info.update({"said1": said1, "turn1_quiet": done1, "turn2_quiet": done2})
+                info.update({"said1": said1, "pass1_quiet": done1, "pass2_quiet": done2})
 
     try:
         asyncio.run(drive())

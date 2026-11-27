@@ -10,9 +10,9 @@
 //!   prompt_file` and `system_prompt_file: prompt.md` — stamped on
 //!   every backend agent that names neither, at boot and as each is made. A chat
 //!   reads it by its own `prompt_file` line (`read`, `watch`). The lib watches the view: a save is the
-//!   block from the next turn on, no restart — the KV cache rebuilds once, on
+//!   block from the next pass on, no restart — the KV cache rebuilds once, on
 //!   the human's own act. An AI's own `system_prompt` beats the file; nothing is
-//!   appended. A missing or EMPTY file FAILS the turn loud (the lib: no fallback
+//!   appended. A missing or EMPTY file FAILS the pass loud (the lib: no fallback
 //!   to the default block) — the file is re-seeded at the next boot.
 
 use serde_json::{json, Value};

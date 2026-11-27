@@ -96,7 +96,7 @@ impl Zoom {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LineKind {
-    Turn {
+    Message {
         assistant: bool,
     },
     Fold {
@@ -256,7 +256,7 @@ pub fn outline(a: Args<'_>) -> Outline {
             conv.drain(..at);
         }
     }
-    // NOTICES are not drawn: `kind: "notice"` rows are the AI layer's own turns
+    // NOTICES are not drawn: `kind: "notice"` rows are the AI layer's own messages
     // to its model (the no-call reminder, a malformed-call report, a refused
     // await) — the model reads them, a person need not. A link INTO one lifts to
     // the notice's own parent, so the reply after it stays in its thread.
@@ -329,7 +329,7 @@ pub fn outline(a: Args<'_>) -> Outline {
     }
 
     // ── 5. Links. A hidden row's link lifts to the fold that hides it, so a
-    // reply into a folded turn hangs off the fold rather than disappearing.
+    // reply into a folded message hangs off the fold rather than disappearing.
     let lift = |id: RowId| -> Option<RowId> {
         let id = past_notices(id)?;
         if vis_ids.contains(&id) {
@@ -454,7 +454,7 @@ pub fn outline(a: Args<'_>) -> Outline {
             Some("recall") => LineKind::Recall,
             Some("late") => LineKind::Late,
             Some(other) => LineKind::Other(other.to_string()),
-            None => LineKind::Turn {
+            None => LineKind::Message {
                 assistant: r.role.as_deref() == Some("assistant"),
             },
         }
@@ -530,9 +530,9 @@ pub fn outline(a: Args<'_>) -> Outline {
             .get(&root.id)
             .map(|k| k.iter().rev().map(|id| (*id, 1u8)).collect())
             .unwrap_or_default();
-        // INDENT ONLY WHERE THE THREAD BRANCHES. A turn is a causal chain —
+        // INDENT ONLY WHERE THE THREAD BRANCHES. A pass is a causal chain —
         // step → its tool reply → the next step → … — and drawing every parent
-        // link as one more level turned a ten-step turn into a ten-level
+        // link as one more level turned a ten-step pass into a ten-level
         // staircase. So a node with exactly ONE child keeps that child at its
         // own depth and always shows it: a linear run reads flat. Only a node
         // with several children (a batch, a reply to an older row) nests them
@@ -641,12 +641,12 @@ mod tests {
         o.lines.iter().map(|l| l.id).collect()
     }
 
-    /// A LONG LOG, built here rather than recorded: `turns` human turns on
+    /// A LONG LOG, built here rather than recorded: `messages` human messages on
     /// `ai_b`, each a burst of calls, tasks, tool replies and assistant steps
-    /// hanging off its root — a long first turn, short later ones. With `folds`, the first turn's steps are covered
+    /// hanging off its root — a long first message, short later ones. With `folds`, the first message's steps are covered
     /// by four level-1 folds, one level-2 fold over those four, a view row and
     /// a recall — the shapes a real compaction writes.
-    fn long_log(turns: usize, folds: bool) -> Store {
+    fn long_log(messages: usize, folds: bool) -> Store {
         let mut rows = Vec::new();
         let mut id = 0i64;
         let mut next = || {
@@ -655,14 +655,14 @@ mod tests {
         };
         let mut first_steps = Vec::new();
         let mut first_root = 0;
-        for t in 0..turns {
+        for t in 0..messages {
             let root = next();
             if t == 0 {
                 first_root = root;
             }
             rows.push(json!({"id":root,"agent":"ai_b","role":"user","ts":root,
-                             "content":format!("[from user · msg {root}]\nturn {t}")}));
-            // The first turn is the long one a compaction folds; later ones are short.
+                             "content":format!("[from user · msg {root}]\nmessage {t}")}));
+            // The first message is the long one a compaction folds; later ones are short.
             for k in 0..(if t == 0 { 30 } else { 2 }) {
                 let call = next();
                 let task = next();
@@ -673,7 +673,7 @@ mod tests {
                 rows.push(json!({"id":reply,"agent":"ai_b","role":"user","parent":root,"ts":reply,
                                  "content":format!("[from files · re {call}]\nchunk {k}")}));
                 rows.push(json!({"id":step,"agent":"ai_b","role":"assistant","parent":root,"ts":step,
-                                 "content":format!("step {k} of turn {t}")}));
+                                 "content":format!("step {k} of message {t}")}));
                 if t == 0 {
                     first_steps.extend([call, task, reply, step]);
                 }
@@ -697,7 +697,7 @@ mod tests {
                              "ids":[{"id":first_root,"res":"full"},{"id":f2,"res":"full"}],"ts":v}));
             let r = next();
             rows.push(json!({"id":r,"agent":"ai_b","role":"user","kind":"recall","ts":r,
-                             "title":"the turn-0 instruction","content":format!("[recall {r} · kept 2 rows]")}));
+                             "title":"the message-0 instruction","content":format!("[recall {r} · kept 2 rows]")}));
         }
         let mut s = Store::default();
         s.apply_full(&"ai_b".to_string(), rows.into_iter().map(|v| serde_json::from_value(v).unwrap()).collect());
@@ -748,7 +748,7 @@ mod tests {
         ]);
         let o = plain(&s);
         assert_eq!(ids(&o), vec![1, 3, 5], "the notice is not drawn");
-        assert_eq!(o.lines[2].depth, 1, "the reply after the notice hangs off the turn, not off the hidden row");
+        assert_eq!(o.lines[2].depth, 1, "the reply after the notice hangs off the message, not off the hidden row");
     }
 
     #[test]
@@ -808,7 +808,7 @@ mod tests {
         let o = plain(&s);
         assert_eq!(
             o.lines[1].depth, 1,
-            "the ↑ turn hangs off the turn it answers"
+            "the ↑ message hangs off the message it answers"
         );
     }
 
@@ -1215,7 +1215,7 @@ mod tests {
         // 173 rows on ai_b: four level-1 folds and one level-2 fold over them.
         // The level-2 fold must swallow the other four and everything they hold.
         let s = long_log(6, true);
-        // The root is one live turn with everything hanging off it, so open it:
+        // The root is one live message with everything hanging off it, so open it:
         // folded-by-default is the point, and this test is about what is inside.
         let mut st = OutlineState::default();
         let root = fixture_outline(&s, "ai_b", &st).lines[0].id;
@@ -1247,7 +1247,7 @@ mod tests {
     }
 
     #[test]
-    fn a_long_log_has_one_root_per_human_turn() {
+    fn a_long_log_has_one_root_per_human_message() {
         let s = long_log(6, true);
         let o = fixture_outline(&s, "ai_b", &OutlineState::default());
         let roots = o.lines.iter().filter(|l| l.depth == 0).count();

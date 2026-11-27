@@ -2,7 +2,7 @@
 //!
 //! HERMETIC (default suite): every case here is answered by the swift bridge
 //! BEFORE any generation starts — a malformed `request_json` (parsed first), an
-//! invalid turn or option (FMCore's preflight, after the availability check), the
+//! invalid message or option (FMCore's preflight, after the availability check), the
 //! NULL / unknown-handle no-ops. No prompt reaches the model, so the suite runs
 //! the same on a machine without Apple Intelligence.
 //!
@@ -11,7 +11,7 @@
 //! on-device model and prints what it measured (`FM_LIVE …` lines).
 
 use crate::engine::{
-    FmAvailability, FmEngine, FmEvent, FmReason, FmRequest, FmStream, FmTurn, FM_CANCELLED,
+    FmAvailability, FmEngine, FmEvent, FmMessage, FmReason, FmRequest, FmStream, FM_CANCELLED,
 };
 use crate::system::SystemEngine;
 use std::time::{Duration, Instant};
@@ -76,27 +76,27 @@ fn availability_and_the_window_come_from_the_bridge() {
 async fn a_malformed_request_json_is_refused_in_fmcores_words() {
     for (json, want) in [
         (
-            r#"{"turns":[],"prompt":"p"}"#,
+            r#"{"messages":[],"prompt":"p"}"#,
             "request_json: `instructions` is missing",
         ),
         (
-            r#"{"instructions":"","turns":[{"role":"user"}],"prompt":"p"}"#,
-            "request_json: `turns[0].content` is missing",
+            r#"{"instructions":"","messages":[{"role":"user"}],"prompt":"p"}"#,
+            "request_json: `messages[0].content` is missing",
         ),
         (
-            r#"{"instructions":"","turns":[],"prompt":5}"#,
+            r#"{"instructions":"","messages":[],"prompt":5}"#,
             "request_json: `prompt` is not a string",
         ),
         (
-            r#"{"instructions":"","turns":[],"prompt":"p","max_tokens":"9"}"#,
+            r#"{"instructions":"","messages":[],"prompt":"p","max_tokens":"9"}"#,
             "request_json: `max_tokens` is not an int",
         ),
         (
-            r#"{"instructions":"","turns":"x","prompt":"p"}"#,
-            "request_json: `turns` is not a list",
+            r#"{"instructions":"","messages":"x","prompt":"p"}"#,
+            "request_json: `messages` is not a list",
         ),
         (
-            r#"{"instructions":null,"turns":[],"prompt":"p"}"#,
+            r#"{"instructions":null,"messages":[],"prompt":"p"}"#,
             "request_json: `instructions` is null, expected a string",
         ),
         ("[1]", "request_json: the document is not an object"),
@@ -111,11 +111,11 @@ async fn a_malformed_request_json_is_refused_in_fmcores_words() {
 }
 
 #[tokio::test]
-async fn an_invalid_turn_or_option_is_refused_before_the_model() {
+async fn an_invalid_message_or_option_is_refused_before_the_model() {
     let e = SystemEngine::new();
-    let req = |turns: Vec<FmTurn>, temperature: Option<f64>, max_tokens: Option<i64>| FmRequest {
+    let req = |messages: Vec<FmMessage>, temperature: Option<f64>, max_tokens: Option<i64>| FmRequest {
         instructions: String::new(),
-        turns,
+        messages,
         prompt: "p".to_string(),
         temperature,
         max_tokens,
@@ -123,14 +123,14 @@ async fn an_invalid_turn_or_option_is_refused_before_the_model() {
     let cases = [
         (
             req(
-                vec![FmTurn {
+                vec![FmMessage {
                     role: "tool".to_string(),
                     content: "x".to_string(),
                 }],
                 None,
                 None,
             ),
-            "turn 0 has role \"tool\" — a transcript turn is user or assistant (system text goes in instructions)",
+            "message 0 has role \"tool\" — a transcript message is user or assistant (system text goes in instructions)",
         ),
         (
             req(vec![], Some(-0.5), None),
@@ -164,12 +164,12 @@ fn the_null_and_unknown_handle_cases_are_no_ops() {
 
 // ── LIVE, opt-in ────────────────────────────────────────────────────
 
-fn tiny(instructions: &str, turns: &[(&str, &str)], prompt: &str) -> FmRequest {
+fn tiny(instructions: &str, messages: &[(&str, &str)], prompt: &str) -> FmRequest {
     FmRequest {
         instructions: instructions.to_string(),
-        turns: turns
+        messages: messages
             .iter()
-            .map(|(r, c)| FmTurn {
+            .map(|(r, c)| FmMessage {
                 role: (*r).to_string(),
                 content: (*c).to_string(),
             })
@@ -214,7 +214,7 @@ async fn live_on_device_model() {
     assert_eq!(error, None);
     assert!(!texts.concat().trim().is_empty());
 
-    // 2. the transcript is replayed: the model reads the earlier turns
+    // 2. the transcript is replayed: the model reads the earlier messages
     let t = Instant::now();
     let (texts, error, pt) = collect(e.stream(&tiny(
         "Answer with one word.",
@@ -264,9 +264,9 @@ async fn live_on_device_model() {
     );
     assert_eq!(done, Some(Some(FM_CANCELLED.to_string())));
 
-    // 4. one kernel turn through a foundation_models_backend agent
+    // 4. one kernel pass through a foundation_models_backend agent
     let t = Instant::now();
-    let (k, reply, status) = live_kernel_turn().await;
+    let (k, reply, status) = live_kernel_pass().await;
     eprintln!(
         "FM_LIVE kernel send: {reply} reported_prompt_tokens={} {:.2}s",
         status["reported_prompt_tokens"],
@@ -277,7 +277,7 @@ async fn live_on_device_model() {
 
     // 5. the default system block, against the real window: refused before the
     // model is called
-    let (_k, reply) = live_default_block_turn().await;
+    let (_k, reply) = live_default_block_pass().await;
     eprintln!("FM_LIVE default system block: {reply}");
     assert!(
         reply["error"]
@@ -330,29 +330,29 @@ async fn live_kernel(id: &str) -> (std::sync::Arc<fantastic_kernel::Kernel>, tem
     (k, tmp)
 }
 
-async fn live_kernel_turn() -> (
+async fn live_kernel_pass() -> (
     (std::sync::Arc<fantastic_kernel::Kernel>, tempfile::TempDir),
     serde_json::Value,
     serde_json::Value,
 ) {
     use fantastic_kernel::{AgentId, Item};
     use serde_json::json;
-    let (k, tmp) = live_kernel("fm_live_turn").await;
+    let (k, tmp) = live_kernel("fm_live_pass").await;
     let _ = fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
             AgentId::from("kernel_state"),
-            json!({"type": "update_agent", "id": "fm_live_turn",
-                   "system_prompt": "Be terse. End every turn with <call name=\"done\"></call>."}),
+            json!({"type": "update_agent", "id": "fm_live_pass",
+                   "system_prompt": "Be terse. End every pass with <call name=\"done\"></call>."}),
         )])
         .await;
     let reply = fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
-            AgentId::from("fm_live_turn"),
+            AgentId::from("fm_live_pass"),
             json!({"type": "send", "text": "Say hello, then end the chain."}),
         )])
         .await
         .remove(0)
         .result;
     let status = fantastic_kernel::test_support::send_settled(&k, vec![Item::new(
-            AgentId::from("fm_live_turn"),
+            AgentId::from("fm_live_pass"),
             json!({"type": "context_status"}),
         )])
         .await
@@ -361,7 +361,7 @@ async fn live_kernel_turn() -> (
     ((k, tmp), reply, status)
 }
 
-async fn live_default_block_turn() -> (
+async fn live_default_block_pass() -> (
     (std::sync::Arc<fantastic_kernel::Kernel>, tempfile::TempDir),
     serde_json::Value,
 ) {

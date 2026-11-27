@@ -37,7 +37,7 @@ TASK = (
     "change `port = 8080` to `port = 9090` using the editor's `edit` verb "
     "(reflect `editor` for the shape). Step 2: the change is cancelled — put "
     "`config.txt` back to its pre-edit state with the editor's `undo` verb. "
-    "When the file is restored, stop — a turn with no "
+    "When the file is restored, stop — a pass with no "
     "tool call ends your run."
 )
 

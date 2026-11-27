@@ -2,7 +2,7 @@
 
     python3 e2e/helpers/meter_report.py e2e/runs/<stamp> [e2e/runs/<stamp> …]
 
-Per test: verdict (SUMMARY.txt), model requests (turns, sub-AIs included), prompt
+Per test: verdict (SUMMARY.txt), model requests (passes, sub-AIs included), prompt
 tokens summed / peak, completion tokens, model time (sum of request durations),
 mean time to first byte, the wall span from the first request to the last, and the
 dollar cost. Prompt and completion counts are the endpoint's own `usage`; a request

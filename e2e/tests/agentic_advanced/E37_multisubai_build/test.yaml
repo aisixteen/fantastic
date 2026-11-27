@@ -5,14 +5,14 @@ group: agentic_advanced
 title: the creator builds the three-solver team, sleeps, is woken by its conclusion, validates, deletes the fleet, stops
 runner: probe.py
 runtimes: [rust]
-costs: turns
+costs: passes
 # FOUR LANES inside one test (creator + three solvers). Run alone.
 long: true
 limits:
   idle_seconds: 60
-  max_turns: 50
-  no_progress_turns: 0
-  turn_chars: 120000
-  turn_seconds: 600
+  max_passes: 50
+  no_progress_passes: 0
+  pass_chars: 120000
+  pass_seconds: 600
 env: {FANTASTIC_AI_SEND_TIMEOUT: "420", UNATTENDED: "600"}
 exclusive: true   # runs a team of AIs that takes every model slot: alone, after the pool (e2e/run.py)

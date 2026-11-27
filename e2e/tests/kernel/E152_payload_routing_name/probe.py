@@ -45,8 +45,8 @@ LABEL = f"make-notes-{TOKEN}"
 DONE = '<call name="done"></call>'
 
 
-def last_user(turn: dict) -> str:
-    for m in reversed(turn["body"].get("messages") or []):
+def last_user(one_pass: dict) -> str:
+    for m in reversed(one_pass["body"].get("messages") or []):
         if m.get("role") == "user":
             c = m.get("content")
             return c if isinstance(c, str) else json.dumps(c)
@@ -66,14 +66,14 @@ def main() -> int:
         if not cond:
             bad.append(what)
 
-    def turns_at_least(n: int, bound: float = 60) -> list[dict]:
+    def passes_at_least(n: int, bound: float = 60) -> list[dict]:
         end = time.monotonic() + bound
         while time.monotonic() < end:
-            got = m.turns()
+            got = m.passes()
             if len(got) >= n:
                 return got
             time.sleep(0.05)
-        return m.turns()
+        return m.passes()
 
     def idle(bound: float = 60) -> bool:
         end = time.monotonic() + bound
@@ -115,14 +115,14 @@ def main() -> int:
         m.reply(*script)
         out = hk.send(AI, {"type": "send", "text": f"Make notes ({TOKEN})."})
         need(not out.get("error"), f"the send is accepted: {str(out)[:200]}")
-        turns_at_least(len(script))
+        passes_at_least(len(script))
         need(idle(), "the chain settles (no AI task left in `ps`)")
-        turns = m.turns()
-        for i, t in enumerate(turns):
-            print(f"  ── request {i + 1}: last user turn ──\n"
+        passes = m.passes()
+        for i, t in enumerate(passes):
+            print(f"  ── request {i + 1}: last user message ──\n"
                   + "\n".join("     " + ln for ln in last_user(t)[:500].splitlines()), flush=True)
-        need(len(turns) == len(script), f"one request per scripted answer: {len(turns)} for {len(script)}")
-        u = [last_user(t) for t in turns] + [""] * len(script)
+        need(len(passes) == len(script), f"one request per scripted answer: {len(passes)} for {len(script)}")
+        u = [last_user(t) for t in passes] + [""] * len(script)
 
         # 1 · the routing form: the payload is delivered whole, its own `id` makes the agent
         rec = record(MADE)

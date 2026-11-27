@@ -101,9 +101,9 @@ def kernel_cmd(rt: str) -> list[str]:
 #: Context constants, recorded in meta rather than left to a default that could
 #: differ between runtimes. `ctx` uses them; nothing else may.
 #:
-#: 16000: the system block plus the chain's largest live turn (the recall after
+#: 16000: the system block plus the chain's largest live pass (the recall after
 #: the context notice) must fit the budget, or every chain dies `too_small`. At
-#: 16000 (budget 15000, trigger 12000) all four chains run their turns and
+#: 16000 (budget 15000, trigger 12000) all four chains run their passes and
 #: compact repeatedly, and `too_small` fires only where it is the case (the
 #: 60000-char send, and `ai_tiny`).
 CTX_WINDOW = 16000
@@ -113,15 +113,15 @@ CTX_WINDOW_TINY = 2048
 #: `ai_paths`' OWN window, deliberately NOT `CTX_WINDOW`.
 #:
 #: `ai_paths` runs many scripted cases through ONE ai agent, so its history
-#: grows over many model turns. A budget the history crosses BY ACCIDENT can be
+#: grows over many model passes. A budget the history crosses BY ACCIDENT can be
 #: crossed one character apart on two runtimes (`runtime=python` is two bytes
 #: longer than `runtime=rust`), and because the recorded event stream is
-#: compared positionally, one turn of skew cascades into every later line.
+#: compared positionally, one pass of skew cascades into every later line.
 #:
 #: Compaction is NOT this family's subject: `ctx` drives all four strategies
 #: deliberately, at `CTX_WINDOW` and at `CTX_WINDOW_TINY`. Here the budget is
 #: raised so nothing crosses it by accident, and the ONE crossing the family
-#: does record is FORCED by `context_fill` (a scripted filler turn), landing
+#: does record is FORCED by `context_fill` (a scripted filler pass), landing
 #: thousands of tokens past the line instead of one character past it.
 #:
 #: THE NUMBERS, on a python capture of this family with these values. The token
@@ -133,17 +133,17 @@ CTX_WINDOW_TINY = 2048
 #:   * budget = 38000 - 1000 = 37000 tokens; trigger = 29600.
 #:   * the scenario's own growth peaks at 13468 tokens (request 61 of 77), i.e.
 #:     16132 tokens short of the trigger. Nothing crosses it by accident.
-#:   * the turn the filler is answered on is 12255 tokens.
+#:   * the pass the filler is answered on is 12255 tokens.
 #:   * `AI_FILL_CHARS` is the filler ONE scripted reply carries. At 4 chars per
 #:     token (`ai_core.context.CHARS_PER_TOKEN`) 80000 chars is ~20000 tokens,
-#:     so the turn it lands on is ~32300 — PAST the trigger by ~2700 tokens.
-#:   * the filler turn is the NEWEST turn, so compaction keeps it and reclaims
+#:     so the pass it lands on is ~32300 — PAST the trigger by ~2700 tokens.
+#:   * the filler pass is the NEWEST pass, so compaction keeps it and reclaims
 #:     the history behind it: the next three prompts are 27569, 27467 and 27466
 #:     tokens, 2031 UNDER the trigger. So the family compacts EXACTLY ONCE — one
 #:     `context`/`compacted` event in `events.json`. A smaller window would let
-#:     that post-fill prompt re-fire compaction on every turn after the filler.
+#:     that post-fill prompt re-fire compaction on every pass after the filler.
 #: The smallest of those margins is ~2000 tokens, ~20x the ~100-token spread
-#: between the three runtimes' prompts for the same turn (the `runtime=` word
+#: between the three runtimes' prompts for the same pass (the `runtime=` word
 #: plus the id digit width).
 AI_WINDOW = 38000
 AI_RESERVE = 1000

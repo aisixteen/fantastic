@@ -9,7 +9,7 @@ b) the person asks a question: the model sends the person an inquiry (`user inqu
 c) a click on an option answers it: `answered`, the state pill gone;
 d) a page reload: the cell draws the same history again.
 
-The model is the parity chat stub: each request's newest message picks the turn."""
+The model is the parity chat stub: each request's newest message picks the pass."""
 
 from __future__ import annotations
 
@@ -115,20 +115,20 @@ def main() -> bool:
             r["1 the view draws, header names the chat"] = bool(got.get("name"))
             await say(pg, "hello there")
             got = await until(pg, lambda g: any("Both calls are back" in m for m in g["agent"]) and g["tools"])
-            info["turn1"] = got
+            info["pass1"] = got
             r["2 a person bubble"] = any("hello there" in m for m in got.get("user", []))
             r["3 an agent bubble with a code chip"] = any("Listing with" in m for m in got.get("agent", [])) and "ls" in got.get("code", [])
             tools = got.get("tools", [])
             r["4 ONE row, 2 tool calls, two entries"] = len(tools) == 1 and tools[0]["n"] == "2 tool calls" and tools[0]["calls"] == 2
             await say(pg, "please ask me")
             got = await until(pg, lambda g: g["inquiries"])
-            info["turn2"] = got
+            info["pass2"] = got
             inq = (got.get("inquiries") or [{}])[0]
             r["5 an inquiry card with its options, state asks you"] = (inq.get("q") == "Which colour?" and inq.get("options") == ["red", "blue"]
                                                                    and got["state"]["pill"].startswith("asks you") and not got["state"]["pill_hidden"])
             await chat_eval(pg, "(()=>{[...d.querySelectorAll('#dialog .inq .row > button')].find(b=>b.textContent==='red').click(); return true;})()")
             got = await until(pg, lambda g: g["inquiries"] and g["inquiries"][0]["answered"] and g["state"]["pill_hidden"])
-            info["turn3"] = got
+            info["pass3"] = got
             inq = (got.get("inquiries") or [{}])[0]
             r["6 a click answers it: answered, asks you gone"] = bool(inq.get("answered")) and "red" in inq.get("status", "") and got["state"]["pill_hidden"]
             before = (len(got["user"]), len(got["agent"]), len(got["tools"]), len(got["inquiries"]))

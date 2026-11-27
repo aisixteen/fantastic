@@ -1,1 +1,1 @@
-[context-notice] Your conversation exceeded the window and was compacted (strategy={strategy}, {dropped} earlier turn(s) dropped from THIS view).
+[context-notice] Your conversation exceeded the window and was compacted (strategy={strategy}, {dropped} earlier message(s) dropped from THIS view).

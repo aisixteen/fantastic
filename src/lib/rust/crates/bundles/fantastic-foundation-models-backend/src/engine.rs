@@ -98,17 +98,17 @@ pub fn unavailable_message(reason: &str) -> String {
     format!("the on-device model is unavailable: {reason}")
 }
 
-/// One prior turn: `user` (a prompt the model was given) or `assistant` (what it
-/// answered). System text is never a turn — it is the request's `instructions`.
+/// One prior message: `user` (a prompt the model was given) or `assistant` (what it
+/// answered). System text is never a message — it is the request's `instructions`.
 #[derive(Clone, Debug, PartialEq)]
-pub struct FmTurn {
+pub struct FmMessage {
     /// `user` or `assistant`.
     pub role: String,
-    /// The turn's text.
+    /// The message's text.
     pub content: String,
 }
 
-/// One generation: the instructions, the prior turns (replayed into the
+/// One generation: the instructions, the prior messages (replayed into the
 /// session's transcript, in order), the prompt to answer, and the two options.
 /// `None` = the model's own. Swift `FMRequest`.
 #[derive(Clone, Debug, PartialEq)]
@@ -116,7 +116,7 @@ pub struct FmRequest {
     /// Every system message, joined by a blank line.
     pub instructions: String,
     /// The conversation before the prompt.
-    pub turns: Vec<FmTurn>,
+    pub messages: Vec<FmMessage>,
     /// The text answered.
     pub prompt: String,
     /// Sampling temperature (>= 0).
@@ -127,18 +127,18 @@ pub struct FmRequest {
 
 impl FmRequest {
     /// The bridge's `request_json`, keys in the header's order:
-    /// `{"instructions","turns":[{"role","content"}],"prompt","temperature","max_tokens"}`
+    /// `{"instructions","messages":[{"role","content"}],"prompt","temperature","max_tokens"}`
     /// — an unset option is `null` (the model's own).
     #[must_use]
     pub fn to_json(&self) -> String {
-        let turns: Vec<Value> = self
-            .turns
+        let messages: Vec<Value> = self
+            .messages
             .iter()
             .map(|t| json!({"role": t.role, "content": t.content}))
             .collect();
         json!({
             "instructions": self.instructions,
-            "turns": turns,
+            "messages": messages,
             "prompt": self.prompt,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,

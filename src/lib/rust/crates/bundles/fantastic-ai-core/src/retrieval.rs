@@ -222,7 +222,7 @@ finished stretches (their members are one descent away). Everything is currently
 DIGEST resolution; your budget for the body is {budget} tokens and the digests use
 {used}. Replies ALREADY IN THIS HISTORY (their calls need not be repeated; the task itself may be unfinished):
 {done}
-Choose which rows you want IN FULL next turn (expansions cost their size) and say in one
+Choose which rows you want IN FULL next pass (expansions cost their size) and say in one
 sentence why. Reply JSON only:
 {\"expand\": [<id>, ...], \"why\": \"<one sentence>\"}
 
@@ -352,7 +352,7 @@ pub(crate) async fn context_clear(
 }
 
 /// The persisted view entry for a row the view keeps: its id and resolution, and
-/// its body when a trimmer changed it, so the next turn renders the same message
+/// its body when a trimmer changed it, so the next pass renders the same message
 /// the model saw before the fold.
 fn kept_entry(row: &Value, msg: &Value, res: &str) -> Value {
     let mut e = json!({"id": row_id(row), "res": res});
@@ -380,7 +380,7 @@ fn is_boundary(row: &Value) -> bool {
 /// false only when the summarizer gave nothing and the fold carries its titles.
 ///
 /// Refused, with the reason named: an empty range, an id not in the view, a range
-/// crossing a fold or clear row, a turn running for this agent.
+/// crossing a fold or clear row, a pass running for this agent.
 ///
 /// AS STEPS (#795): the history read, the fold reckoned over the pass's book (its
 /// summary a task request, [`crate::model_format::pass::drive`]), then the view row
@@ -401,12 +401,12 @@ pub(crate) async fn context_fold(
     if crate::state::state_for(agent_id).life.lock().expect("life poisoned").running {
         return settle.with(Ok::<_, crate::assembly::BlockFail>(refusal_hint(
             LOCKED,
-            format!("{verb}: a turn is running for {agent_id}"),
-            "fold once the running turn has answered",
+            format!("{verb}: a pass is running for {agent_id}"),
+            "fold once the running pass has answered",
         )));
     }
-    // The view is rendered as the next turn renders it, so the fold
-    // persists exactly the view the next turn will send. A primer pins its prefix.
+    // The view is rendered as the next pass renders it, so the fold
+    // persists exactly the view the next pass will send. A primer pins its prefix.
     let meta = agent_meta(agent_id, kernel);
     let (_mode, primer) = match crate::caching::settings(&meta) {
         Ok(s) => s,
@@ -616,8 +616,8 @@ pub(crate) async fn context_forget(
         return settle.with(Ok::<_, crate::memory::MemoryStoreError>(
             fantastic_kernel::refusal::refusal_hint(
                 fantastic_kernel::refusal::LOCKED,
-                format!("context_forget: a turn is running for {agent_id}"),
-                "compact once the running turn has answered",
+                format!("context_forget: a pass is running for {agent_id}"),
+                "compact once the running pass has answered",
             ),
         ));
     }
@@ -680,29 +680,29 @@ fn forgettable(
     include_cleared: bool,
 ) -> std::collections::BTreeSet<i64> {
     use crate::folds::{chains, is_fold, is_open, own_anchor, refs_of};
-    use crate::memory::{BOOKKEEPING, TURN_ROLES};
+    use crate::memory::{BOOKKEEPING, CHAT_ROLES};
     let kind = |r: &Value| r.get("kind").and_then(Value::as_str).map(str::to_string);
     let by_id: std::collections::HashMap<i64, &Value> = head_rows
         .iter()
         .filter_map(|r| row_id(r).map(|id| (id, r)))
         .collect();
     let head_folds: Vec<&Value> = head_rows.iter().filter(|r| is_fold(r)).collect();
-    let turns: Vec<Value> = head_rows
+    let rows: Vec<Value> = head_rows
         .iter()
         .filter(|r| !kind(r).is_some_and(|k| BOOKKEEPING.contains(&k.as_str())))
         .filter(|r| {
             r.get("role")
                 .and_then(Value::as_str)
-                .is_some_and(|role| TURN_ROLES.contains(&role))
+                .is_some_and(|role| CHAT_ROLES.contains(&role))
         })
         .cloned()
         .collect();
-    let open_ids: HashSet<i64> = chains(&turns)
+    let open_ids: HashSet<i64> = chains(&rows)
         .into_iter()
-        .filter(|c| is_open(&turns, c))
+        .filter(|c| is_open(&rows, c))
         .flat_map(|c| {
             c.into_iter()
-                .filter_map(|i| row_id(&turns[i]))
+                .filter_map(|i| row_id(&rows[i]))
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -763,7 +763,7 @@ fn forgettable(
 /// newest-first fill (#218).
 const PIN_SHARE: f64 = 0.5;
 
-/// A task root: a user turn with no parent, of plain kind (none, `""` or `"user"`),
+/// A task root: a user message with no parent, of plain kind (none, `""` or `"user"`),
 /// that is not a reply. A person or a peer sent it, and it sets or changes the task.
 fn is_task_root(r: &Value) -> bool {
     r.get("role").and_then(Value::as_str) == Some("user")
@@ -784,7 +784,7 @@ fn push_new(out: &mut Vec<usize>, i: usize) {
 }
 
 /// The rows of a rebuilt view kept before anything else (#218), in priority order,
-/// unique, never `0` (the goal turn is always kept): the FIRST task root (the turn
+/// unique, never `0` (the goal message is always kept): the FIRST task root (the message
 /// that set this thread's task), the LAST task root (the live one), the newest fold,
 /// then every other task root, newest first.
 pub(crate) fn standing(view: &[Value]) -> Vec<usize> {
@@ -812,10 +812,10 @@ pub(crate) fn standing(view: &[Value]) -> Vec<usize> {
 
 /// `context_recall`: rebuild this agent's VIEW from its store — with
 /// `context_strategy` fold, a head longer than the budget is FOLDED first (oldest
-/// spans into fold rows, as a turn's projection folds); then fit the head to the
+/// spans into fold rows, as a pass's projection folds); then fit the head to the
 /// budget at digest resolution, ask the model which rows it wants in full,
 /// persist the id list, log the decision as a row, and drop RAM scratch. Runs on
-/// boot, after a fold batch, or on request. `client_id` is the turn's caller
+/// boot, after a fold batch, or on request. `client_id` is the pass's caller
 /// (none for the verb); a recall that folded tells it, as a projection does.
 ///
 /// args: `dry?` (mechanical fit only — no model call). Returns
@@ -978,7 +978,7 @@ fn reckon_recall(pass: Option<&Pass>, at: &Recall, rows_in: Vec<Value>) -> Resul
     let target = (body_budget as f64 * LOW) as i64;
     // A HEAD LONGER THAN THE BUDGET FOLDS FIRST. A store
     // written under a larger window — another model, a planted past — is folded
-    // the way the turn's own `fold` projection folds it: oldest spans into fold
+    // the way the pass's own `fold` projection folds it: oldest spans into fold
     // rows, folds of folds as they pile up; the fit below then only stubs replies
     // and drops what still does not fit. Folding takes the model (a summary per
     // span), so a `dry` recall does not fold.
@@ -1030,8 +1030,8 @@ fn reckon_recall(pass: Option<&Pass>, at: &Recall, rows_in: Vec<Value>) -> Resul
             &crate::model_format::map::Shown::of(&m),
         ))
     };
-    // 1. MECHANICAL FIT — never fails. The goal turn always in; then the STANDING
-    // rows (#218) — the turn that set the task, the live one, the newest fold, the
+    // 1. MECHANICAL FIT — never fails. The goal message always in; then the STANDING
+    // rows (#218) — the message that set the task, the live one, the newest fold, the
     // other roots — within PIN_SHARE of the target, so a reboot after a long run of
     // polling still sees why it is running; then newest first.
     let mut picked: HashSet<usize> = HashSet::from([0]);
@@ -1262,7 +1262,7 @@ where
             *st.compaction_mark.lock().expect("mark poisoned") = None;
             crate::strategies::strip::forget(agent_id.as_str());
             if folded > 0 && !at.client.is_empty() {
-                // The caller is told its context was compacted, as by a turn's projection.
+                // The caller is told its context was compacted, as by a pass's projection.
                 to_caller(
                     kernel,
                     agent_id,

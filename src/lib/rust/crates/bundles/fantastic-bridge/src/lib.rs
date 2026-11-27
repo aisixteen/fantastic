@@ -1779,8 +1779,8 @@ async fn read_loop(
     //
     // THROUGH THE TABLE, not a raw abort: the frame id IS the execution id (the
     // pid), and a dropped dispatch frees none of what its handler holds — an AI
-    // agent's turn stays `generating` for good and every later send to it hangs.
-    // `cancel_task` runs the bundle's `on_cancel` (the turn is released) before it
+    // agent's pass stays `generating` for good and every later send to it hangs.
+    // `cancel_task` runs the bundle's `on_cancel` (the pass is released) before it
     // stops the task, exactly as an operator's `cancel` would. The abort then
     // catches the serving task itself (its reply has nowhere to go) and a call
     // still before its dispatch (no execution yet).

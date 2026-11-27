@@ -10,11 +10,11 @@
 //! every row by WHO WROTE IT. So this agent reads and writes ITS OWN rows only, by
 //! plain gated sends: the creator writes this agent's line on the store in its own
 //! `can`, explicitly. No store named ⇒ the agent fails loud
-//! at boot and at its first turn; a store that refuses or is unreachable mid-turn ⇒
-//! the turn fails fast. Nothing falls back to RAM.
+//! at boot and at its first pass; a store that refuses or is unreachable mid-pass ⇒
+//! the pass fails fast. Nothing falls back to RAM.
 //!
 //! THE HEAD CACHE. The rows from the last `clear` on (the head) are read ONCE, on
-//! the first turn after boot, and then kept in RAM WRITE-THROUGH: every row is
+//! the first pass after boot, and then kept in RAM WRITE-THROUGH: every row is
 //! appended to the store FIRST and enters the cache only when the store took it, so
 //! the cache never holds what the store does not. Reads that reach behind the head
 //! (recall, grep, `history {fold}`) go to the store.
@@ -257,8 +257,8 @@ pub(crate) fn rows_of(res: &Map<String, Value>, self_id: &AgentId) -> Vec<Value>
 /// allow-list of kinds to HIDE: a kind forgotten here lands in the model's prompt).
 pub const BOOKKEEPING: [&str; 2] = ["view", "keep"];
 
-/// The chat roles a TURN carries.
-pub const TURN_ROLES: [&str; 3] = ["user", "assistant", "system"];
+/// The chat roles a MESSAGE carries.
+pub const CHAT_ROLES: [&str; 3] = ["user", "assistant", "system"];
 
 fn kind_of(r: &Value) -> Option<&str> {
     r.get("kind").and_then(Value::as_str)
@@ -379,7 +379,7 @@ pub fn head_loaded(self_id: &AgentId, kernel: &Kernel) -> bool {
 /// under this key too — an admin planting a row, a store fed from outside. So each
 /// read of the head first reads every row AFTER the newest cached id and merges it
 /// by id (a row the agent wrote meanwhile is already there). A `clear` among them
-/// restarts the head. One small read per turn; the store stays passive (no push).
+/// restarts the head. One small read per pass; the store stays passive (no push).
 /// TESTS: a pass reads it as a step ([`crate::steps`]).
 #[cfg(any(test, feature = "test-support"))]
 pub async fn refresh_head(self_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<Vec<Value>> {
@@ -407,15 +407,15 @@ pub async fn load_history(
     } else {
         refresh_head(self_id, kernel).await?
     };
-    Ok(turns(rows))
+    Ok(chat_rows(rows))
 }
 
-/// The conversation among stored `rows`: its turns, in order, each reply block carrying
+/// The conversation among stored `rows`: its messages, in order, each reply block carrying
 /// what the model kept of it ([`load_history`]).
-pub(crate) fn turns(rows: Vec<Value>) -> Vec<Value> {
-    // THE CONVERSATION IS ITS TURNS — rows with a chat `role`. The agent may also
+pub(crate) fn chat_rows(rows: Vec<Value>) -> Vec<Value> {
+    // THE CONVERSATION IS ITS MESSAGES — rows with a chat `role`. The agent may also
     // `append` a row of its own straight to its store (a note to itself); that row
-    // is memory, not a turn: it stays in the store, `grep` finds it, the view never
+    // is memory, not a message: it stays in the store, `grep` finds it, the view never
     // renders it as a message it cannot be.
     // WHAT THE MODEL KEPT (#641): each `keep` row's summary rides on the reply block it
     // names, in `attributes.keep` (the newest wins); never rendered but by the fold.
@@ -431,7 +431,7 @@ pub(crate) fn turns(rows: Vec<Value>) -> Vec<Value> {
         .filter(|r| {
             r.get("role")
                 .and_then(Value::as_str)
-                .is_some_and(|role| TURN_ROLES.contains(&role))
+                .is_some_and(|role| CHAT_ROLES.contains(&role))
         })
         .collect();
     crate::history_view::attach_kept(&mut rows, &kept);
@@ -441,7 +441,7 @@ pub(crate) fn turns(rows: Vec<Value>) -> Vec<Value> {
 /// The model's `keep` (#641) checked: the reply block `of` (its pid) is in the conversation
 /// the pass read (the head cache its history step loaded). `Err` names why not.
 pub(crate) fn keep_check(self_id: &AgentId, kernel: &Kernel, of: i64) -> Result<(), String> {
-    let rows = turns(cached_head(self_id, kernel).unwrap_or_default());
+    let rows = chat_rows(cached_head(self_id, kernel).unwrap_or_default());
     let is_reply = rows.iter().any(|r| {
         r.get("role").and_then(Value::as_str) == Some("user")
             && crate::history_view::reply_blocks(r.get("content").and_then(Value::as_str).unwrap_or(""))
@@ -463,9 +463,9 @@ pub(crate) fn keep_check(self_id: &AgentId, kernel: &Kernel, of: i64) -> Result<
 pub async fn save_history(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
-    new_turns: &[Value],
+    new_rows: &[Value],
 ) -> MemResult<Vec<i64>> {
-    let rows = rows_to_append(self_id, kernel, new_turns)?;
+    let rows = rows_to_append(self_id, kernel, new_rows)?;
     if rows.is_empty() {
         return Ok(Vec::new());
     }
@@ -479,10 +479,10 @@ pub async fn save_history(
 pub(crate) fn rows_to_append(
     self_id: &AgentId,
     kernel: &Kernel,
-    new_turns: &[Value],
+    new_rows: &[Value],
 ) -> MemResult<Vec<Map<String, Value>>> {
-    let mut rows: Vec<Map<String, Value>> = Vec::with_capacity(new_turns.len());
-    for t in new_turns {
+    let mut rows: Vec<Map<String, Value>> = Vec::with_capacity(new_rows.len());
+    for t in new_rows {
         let mut r: Map<String, Value> = match t {
             Value::Object(m) => m
                 .iter()
@@ -618,7 +618,7 @@ pub fn forget_head(self_id: &AgentId, kernel: &Kernel) {
     m.heads.lock().expect("heads poisoned").remove(&self_id.0);
 }
 
-/// A reply too big to hand the model as a turn: kept IN RAM under its pid (never
+/// A reply too big to hand the model as a message: kept IN RAM under its pid (never
 /// persisted); the model is handed its digest + `origin` line. Python
 /// `_store_reply`.
 pub fn store_reply(self_id: &AgentId, kernel: &Kernel, pid: i64, body: &str) -> bool {

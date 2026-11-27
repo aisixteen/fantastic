@@ -5,11 +5,11 @@ group: coding
 title: glob-filtered search — the marker hides among decoys, only *.cfg counts
 runner: probe.py
 runtimes: [rust]
-costs: turns
+costs: passes
 limits:
   idle_seconds: 60
-  max_turns: 16
-  no_progress_turns: 32
-  turn_chars: 60000
-  turn_seconds: 300
+  max_passes: 16
+  no_progress_passes: 32
+  pass_chars: 60000
+  pass_seconds: 300
 env: {}

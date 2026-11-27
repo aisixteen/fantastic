@@ -50,11 +50,11 @@ pub struct Store {
     pub body_of: HashMap<RowId, RowId>,
     pub views: HashMap<AgentId, View>,
     /// The id of the LAST row seen for that agent. NOT a high-water mark: ids
-    /// are minted at turn start and the row lands at turn end, so a turn's row
+    /// are minted at pass start and the row lands at pass end, so a pass's row
     /// carries a LOWER id than rows appended before it.
     pub cursor: HashMap<AgentId, RowId>,
     /// AI agents whose `rows` said `loaded:false`: they hold no history yet
-    /// (boot is lazy — it loads on the agent's next turn).
+    /// (boot is lazy — it loads on the agent's next pass).
     pub unloaded: std::collections::HashSet<AgentId>,
     /// Bumped on every delivery: what a projection is keyed on, so a view
     /// re-derives only when the rows actually changed.
@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn order_is_delivery_not_id() {
-        // A long turn mints 10 early and settles late: delivery order is the truth.
+        // A long pass mints 10 early and settles late: delivery order is the truth.
         let mut s = Store::default();
         s.apply_full(
             &a(),
@@ -402,7 +402,7 @@ mod tests {
         s.apply_full(
             &a(),
             vec![
-                row(json!({"id":1,"agent":"ai","content":"turn"})),
+                row(json!({"id":1,"agent":"ai","content":"pass"})),
                 row(json!({"id":2,"agent":"ai","kind":"call"})),
                 row(json!({"id":3,"agent":"ai","kind":"task"})),
                 row(json!({"id":4,"agent":"ai","kind":"body"})),

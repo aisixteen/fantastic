@@ -1,7 +1,7 @@
 //! THE VIEW ARRAY — the agent's STATE: the ordered ids it sees, each at a
 //! resolution. A `view` row in the agent's memory store (see
 //! [`crate::memory::save_view`]), written by every projection and by
-//! `context_recall`, so the next turn (and the next PROCESS) rebuilds the same
+//! `context_recall`, so the next pass (and the next PROCESS) rebuilds the same
 //! bytes rather than a freshly-guessed prefix.
 //!
 //! Mirrors python `ai_core/core.py` `_res_of` / `_apply_res`.

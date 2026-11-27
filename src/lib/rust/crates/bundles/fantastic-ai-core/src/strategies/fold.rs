@@ -11,14 +11,14 @@
 //!
 //! THE ONE STRATEGY THAT WRITES. Every other strategy is a pure projection; this
 //! one appends fold rows to the durable store, because a fold is a mark that must
-//! persist — the next turn has to see the same collapse, or the prefix rewrites
-//! every turn. Bookkeeping from above, same path as the conversation itself.
+//! persist — the next pass has to see the same collapse, or the prefix rewrites
+//! every pass. Bookkeeping from above, same path as the conversation itself.
 //! Nothing is ever edited.
 //!
 //! If the summarizer fails, the fold is still written — refs plus the members'
 //! joined titles — and says so on its own line. Degraded, loud, never silent.
 //! A summary that stays OVER ITS BUDGET (or is CUT OFF by it) after
-//! `SUMMARY_RETRIES` re-summarises fails the turn LOUD ([`FoldSummaryError`]).
+//! `SUMMARY_RETRIES` re-summarises fails the pass LOUD ([`FoldSummaryError`]).
 //!
 //! Mirrors python `ai_core/strategies/fold.py`.
 
@@ -215,7 +215,7 @@ pub fn mechanical_index(rows: &[Value], chain: &[usize]) -> String {
 }
 
 /// A span's summary stayed over [`SUMMARY_BUDGET`] (or was cut at it) after
-/// [`SUMMARY_RETRIES`] re-summarises — the fold fails the turn, loud. Python
+/// [`SUMMARY_RETRIES`] re-summarises — the fold fails the pass, loud. Python
 /// `FoldSummaryError(RuntimeError)`.
 #[derive(Debug, Clone)]
 pub struct FoldSummaryError(pub String);
@@ -487,7 +487,7 @@ pub fn fold_row(
 
 /// The oldest foldable stretch of the VIEW, as indices into `rows`.
 ///
-/// Never the goal turn, never the last `keep_tail` rows, and never ending
+/// Never the goal message, never the last `keep_tail` rows, and never ending
 /// between a call and its answer. Folds are ordinary members, but NOT the first
 /// pick: a stretch that starts on the previous fold wraps it, and doing that
 /// every time builds a linked list of summaries-of-summaries the model gets lost
@@ -550,7 +550,7 @@ pub fn next_span(
 /// (`FOLD_RUN` adjacent folds become one parent — the fold tree), budget or no
 /// budget. Returns `(rows + the fold rows made, the view, the fold rows made,
 /// unanchored)`. The fold rows are NOT written: the caller writes them with its view
-/// row in one append ([`crate::memory::save_view`]). The turn's `fold` projection and `context_recall`
+/// row in one append ([`crate::memory::save_view`]). The pass's `fold` projection and `context_recall`
 /// (a store longer than the window, e.g. written under a larger one) share it.
 /// What [`fold_down`] gives: the rows with the fold rows added, the view, the fold rows
 /// made, and how many rows were lost.

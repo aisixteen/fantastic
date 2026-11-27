@@ -6,15 +6,15 @@ PACKAGED rust host, driven over `web_rest`. The chat and the provider reach the 
 by their own `can` lines; the store keeps no list.
 
 The agent's `memory_store_id` names a `sqlite_store` agent whose file is the record's
-`path` (`stores/hist.db`, config, never hardcoded). One scripted turn is run, the kernel
+`path` (`stores/hist.db`, config, never hardcoded). One scripted pass is run, the kernel
 process is stopped (the stop folds the WAL into the file) and a NEW process is booted on
 the same directory. Nothing is dumped or injected: that is what the durable store is
 for (E78/E83/E87 carry a `ram_store` across with `dump` and `inject` and spend real
-turns).
+passes).
 
 Checks: the store holds the same rows (same ids, same content) under the same
 `<guid>|<agent>` key after the restart; a second message reaches the model with the
-first turn in its request; the new rows get ids above the old maximum; the file is on
+first pass in its request; the new rows get ids above the old maximum; the file is on
 disk and the store's `reflect` says durable and names the record's `path`. The checks
 are listed in `probe.py`'s docstring.
 

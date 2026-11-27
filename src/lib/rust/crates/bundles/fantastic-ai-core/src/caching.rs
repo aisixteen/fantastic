@@ -71,7 +71,7 @@ impl Caching {
 
 /// The record's `caching` mode. Absent or null is the default, `provider_cache`. Any other value is an
 /// error — the write refuses it, so only a hand-edited record reaches here, and that
-/// fails the turn rather than running a mode nobody chose.
+/// fails the pass rather than running a mode nobody chose.
 ///
 /// # Errors
 /// The record's `caching` is not one of [`MODES`]; the message names the value.

@@ -200,7 +200,7 @@ def main() -> int:
              f"(min {min(ids) if ids else None} > {ids_before})")
 
     async def plant(hk: HostKernel) -> list[int]:
-        rows = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"turn {i}"}
+        rows = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"message {i}"}
                 for i in range(N)]
         return await memory.plant(WireRoot(hk), "ghost", rows)
 

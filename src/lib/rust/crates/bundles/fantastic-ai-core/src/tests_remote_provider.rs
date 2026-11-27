@@ -432,7 +432,7 @@ async fn a_remote_providers_cache_counts_reach_the_chats_report_and_absent_ones_
 
 /// A FAILED PASS KEEPS ITS CLASS ACROSS `complete`: the provider's reply names it in
 /// `reason`, the chat's side reads it back — a refused key stays permanent, the link
-/// stays transient, a turn's own failure stays a turn's.
+/// stays transient, a pass's own failure stays a pass's.
 #[test]
 fn a_failed_pass_keeps_its_class_across_complete() {
     use crate::provider::ErrorClass;
@@ -458,7 +458,7 @@ fn a_failed_pass_keeps_its_class_across_complete() {
         settle(&json!({"error": "x"}), &Mutex::default(), &Mutex::default())
             .expect_err("failed")
             .class,
-        ErrorClass::Turn
+        ErrorClass::Pass
     );
 }
 

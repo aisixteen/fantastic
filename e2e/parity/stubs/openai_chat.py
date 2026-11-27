@@ -6,11 +6,11 @@
 
 Three ways a family drives it, all deterministic on every runtime:
 
-  * a CHAIN — `set_chain(label, [turn, turn, …])`, answered in order;
+  * a CHAIN — `set_chain(label, [pass, pass, …])`, answered in order;
   * a CASE — the family plants `CASE=<name>#<n>` in the text it sends, the stub
     finds it in the newest message and answers that case's script from the
     top. This is how one boot can run twenty independent scripts without the
-    turn counter of one leaking into the next (lifted from
+    pass counter of one leaking into the next (lifted from
     `SCR/parity_capture_store.py:142-178`);
   * a RESPONDER — `responder(req, raw) -> str | dict | None` takes the wheel
     (ctx classifies each request by what the kernel put in it); `None` falls
@@ -87,16 +87,16 @@ class OpenAIChatStub(StubBase):
         self.chain_label = "none"
         self.chain_n = 0
         self.state: dict = {"nonce": None, "case": None, "step": 0}
-        #: HOW MANY TURNS ONE CASE MAY EVER GET, across every re-entry.
+        #: HOW MANY PASSES ONE CASE MAY EVER GET, across every re-entry.
         #:
         #: A case whose script sends an AI back into another AI re-plants its
         #: marker each hop, so the case restarts from step 0 forever: the first
-        #: run of `ai_paths` took 6722 model turns and wrote 16669 files before it
+        #: run of `ai_paths` took 6722 model passes and wrote 16669 files before it
         #: was stopped. The cap ends the CHAIN, not the measurement — the item is
         #: whether the kernel's own cycle/depth guard fired first, and the answer
         #: is in the rows and in `cap_hits` either way.
         self.case_cap = 30
-        self.case_turns: dict[str, int] = {}
+        self.case_passes: dict[str, int] = {}
         self.cap_hits: dict[str, int] = {}
         self.responder = None
 
@@ -126,11 +126,11 @@ class OpenAIChatStub(StubBase):
             if case and case in self.cases:
                 step = self.state["step"]
                 self.state["step"] += 1
-                seen = self.case_turns.get(case, 0) + 1
-                self.case_turns[case] = seen
+                seen = self.case_passes.get(case, 0) + 1
+                self.case_passes[case] = seen
                 if seen > self.case_cap:
                     self.cap_hits[case] = self.cap_hits.get(case, 0) + 1
-                    return DONE, {"by": "case_cap", "case": case, "turns": seen}
+                    return DONE, {"by": "case_cap", "case": case, "passes": seen}
                 script = self.cases[case]
                 answer = script[step] if step < len(script) else DONE
                 return answer, {"by": "case", "case": case, "step": step}

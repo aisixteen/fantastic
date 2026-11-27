@@ -1,8 +1,8 @@
-//! An inquiry whose recipient's turn fails tells the asker (#722): every failed
-//! turn that is not retried closes the inquiry its chain is answering with
-//! `{error: "<agent>'s turn failed: <reason>"}`, and the asker reads it as an
+//! An inquiry whose recipient's pass fails tells the asker (#722): every failed
+//! pass that is not retried closes the inquiry its chain is answering with
+//! `{error: "<agent>'s pass failed: <reason>"}`, and the asker reads it as an
 //! ordinary `[reply to <pid> · <agent> inquiry]`. A provider failure is retried only
-//! by `transport_retries` inside the pass (#795); past them the turn has failed.
+//! by `transport_retries` inside the pass (#795); past them the pass has failed.
 //!
 //! A child of `tests`, so it drives the same harness: the mock provider, a real
 //! `ram_store` and `mk_kernel` backends.
@@ -34,10 +34,10 @@ async fn start(kernel: &Arc<Kernel>, asker: &AgentId) {
         .await;
 }
 
-/// The asker is handed the error reply naming the failed turn — in whichever of
-/// its passes it lands: a fast failure can answer before the asker's own turn ends.
+/// The asker is handed the error reply naming the failed pass — in whichever of
+/// its passes it lands: a fast failure can answer before the asker's own pass ends.
 async fn told(fb: &Arc<MockScript>, target: &AgentId, why: &str) {
-    let error = format!("{}'s turn failed: {why}", target.as_str());
+    let error = format!("{}'s pass failed: {why}", target.as_str());
     told_error(fb, target, &error).await;
 }
 
@@ -79,7 +79,7 @@ async fn a_store_refusal_tells_the_asker() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp, "iq_store").await;
     let fb = asker(&kernel, &tmp, &a).await;
-    // the store lets the agent read, not append: the turn fails fast
+    // the store lets the agent read, not append: the pass fails fast
     fantastic_kernel::test_support::grant(&kernel, a.as_str(), MEMORY, json!({"call": ["read"]}));
     start(&kernel, &peer_of(&a)).await;
     // the store refuses the message's own row (#795: a message is stored when it
@@ -131,7 +131,7 @@ async fn a_refused_record_tells_the_asker() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_timed_out_turn_tells_the_asker() {
+async fn a_timed_out_pass_tells_the_asker() {
     let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
     let _ceiling = Ceiling::set("0.5");
     let tmp = TempDir::new().unwrap();
@@ -142,7 +142,7 @@ async fn a_timed_out_turn_tells_the_asker() {
     told(&fb, &a, "send: timeout after 0.5s").await;
 }
 
-/// A provider failure fails the turn (#795: no retry turn of its own), and the asker is
+/// A provider failure fails the pass (#795: no retry pass of its own), and the asker is
 /// told it; nothing more is asked of the provider.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_provider_failure_that_gives_up_tells_the_asker() {
@@ -154,11 +154,11 @@ async fn a_provider_failure_that_gives_up_tells_the_asker() {
     start(&kernel, &peer_of(&a)).await;
     told(&fb, &a, "provider exploded").await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(s.passes_served(), 1, "a failed turn is not re-run");
+    assert_eq!(s.passes_served(), 1, "a failed pass is not re-run");
 }
 
 /// A fold-strategy agent over a small window with a goal and six closed chains:
-/// its next turn folds.
+/// its next pass folds.
 async fn over_budget(kernel: &Arc<Kernel>, a: &AgentId) {
     let _ = fantastic_kernel::test_support::send_settled(kernel, vec![Item::new(
             AgentId::from("kernel_state"),
@@ -229,10 +229,10 @@ async fn a_fold_summary_that_never_fits_tells_the_asker() {
     told(&fb, &a, "fold: the summary of rows").await;
 }
 
-/// The multisubai case: two askers inquire of one solver whose turns time out —
+/// The multisubai case: two askers inquire of one solver whose passes time out —
 /// the second inquiry is held behind the first — and each asker is told.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn every_asker_of_a_solver_whose_turns_fail_is_told() {
+async fn every_asker_of_a_solver_whose_passes_fail_is_told() {
     let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
     let _ceiling = Ceiling::set("0.5");
     let tmp = TempDir::new().unwrap();

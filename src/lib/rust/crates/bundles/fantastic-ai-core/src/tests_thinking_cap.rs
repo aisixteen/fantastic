@@ -242,7 +242,7 @@ async fn traces(kernel: &Arc<Kernel>, chat: &AgentId, event: &str) -> Vec<Value>
 
 /// THE HARNESS CUT, end to end: the chat's pass thinks past its cap on a server that
 /// cannot enforce it; the harness ends the thinking, the chat re-asks once with the
-/// "answer now" note, logs a `retry`, and the second pass's answer is the turn's.
+/// "answer now" note, logs a `retry`, and the second pass's answer is the pass's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_cut_thinking_is_re_asked_once_and_answers() {
     let tmp = TempDir::new().unwrap();
@@ -259,9 +259,9 @@ async fn a_cut_thinking_is_re_asked_once_and_answers() {
     assert_eq!(retries[0]["attempt"], json!(1));
 }
 
-/// A second cut in the same turn stops it: the re-ask is once, never the call retries'.
+/// A second cut in the same pass stops it: the re-ask is once, never the call retries'.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_second_cut_stops_the_turn() {
+async fn a_second_cut_stops_the_pass() {
     let tmp = TempDir::new().unwrap();
     let (kernel, chat) = chat_on_thinker(&tmp, "thinker_twice", json!({"thinking_token_budget": 10}), json!({"runaway": 99})).await;
     let r = crate::tests::settled(&kernel, fantastic_kernel::test_support::send_settled(&kernel, vec![Item::new(chat.clone(), json!({"type": "send", "text": "hi"}))]))

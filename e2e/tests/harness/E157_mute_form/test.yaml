@@ -6,4 +6,4 @@ runner: probe.py
 costs: free
 limits:
   idle_seconds: 60
-  turn_seconds: 60
+  pass_seconds: 60

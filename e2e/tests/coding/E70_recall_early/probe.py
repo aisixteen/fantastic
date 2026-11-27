@@ -6,7 +6,7 @@ lives — and to find a marker that sits inside a folded read, by grep.
 
 PRE-SEEDED: the reads are PLANTED — the instruction, each read call and
 its reply inline — and the last reply arrives live, so the run continues that chain: the
-folding and the answer are the model's own, without spending a live turn per file.
+folding and the answer are the model's own, without spending a live pass per file.
 """
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ async def main():
     root, core, close = await open_kernel(prefix="coding_recall_", reach=[FB, "notes", "ai_recency", "ai_fold", "user"])
     try:
         code = secrets.token_hex(4); marker = secrets.token_hex(4)
-        task = (f"Session code: {code}. Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER TURN. "
+        task = (f"Session code: {code}. Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER PASS. "
                 f"Then write `final.md` through `notes` with two lines: `code: <the session code from your very first "
                 f"instruction — use recall if it is no longer in view>` and `marker: <the audit marker value one filler "
                 f"carried — grep for it>`. Then {DONE}.")

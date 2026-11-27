@@ -4,7 +4,7 @@ id: make_panel
 group: canvas
 title: "an AI authors a working calculator panel"
 runner: probe.py
-costs: turns
+costs: passes
 limits:
   total_seconds: 600
   quiet_seconds: 30
