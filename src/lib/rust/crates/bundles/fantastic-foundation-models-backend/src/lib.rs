@@ -88,9 +88,8 @@ impl FoundationModelsBackendBundle {
     /// before the context is projected — so the caller reads why, not a window
     /// failure on a model that could never have answered.
     /// The record is passed in (`complete` lays the pass's `model` over the agent's).
-    fn build_provider_with(&self, _agent_id: &AgentId, _kernel: &Arc<Kernel>, meta: Map<String, Value>) -> Arc<dyn Provider> {
-        let refusal = self
-            .engine
+    fn build_provider_with(engine: &Arc<dyn FmEngine>, meta: &Map<String, Value>) -> Arc<dyn Provider> {
+        let refusal = engine
             .availability()
             .reason()
             // an unavailable on-device model is not available on the next try either
@@ -101,14 +100,14 @@ impl FoundationModelsBackendBundle {
                 )
             });
         Arc::new(FoundationModelsProvider {
-            engine: Arc::clone(&self.engine),
+            engine: Arc::clone(engine),
             // the calling chat's knobs (#632); a chat that names no max_tokens gets the
             // bounded default, never above the model's window (#495)
             temperature: meta.get("temperature").and_then(Value::as_f64),
             max_tokens: Some(
                 meta.get("max_tokens")
                     .and_then(Value::as_i64)
-                    .unwrap_or_else(|| default_max_tokens(None, self.engine.context_size())),
+                    .unwrap_or_else(|| default_max_tokens(None, engine.context_size())),
             ),
             refusal,
             report: ReportCell::default(),
@@ -205,7 +204,13 @@ impl Handler for FoundationModelsBackendBundle {
             agent_id,
             call,
             kernel,
-            |m| self.build_provider_with(agent_id, kernel, m),
+            // an on-device model takes no key
+            None,
+            None,
+            {
+                let engine = Arc::clone(&self.engine);
+                move |m, _key| Self::build_provider_with(&engine, &m)
+            },
             fantastic_ai_core::remote_provider::NO_LIVE,
             || self.reflect_reply(agent_id, kernel),
         )

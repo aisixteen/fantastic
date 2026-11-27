@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use base64::Engine;
 use fantastic_ai_core::credentials::key_reader;
+use fantastic_ai_core::steps::Settle;
 use fantastic_ai_core::record::Credentials;
 use fantastic_bundle::py_repr_value;
 use fantastic_kernel::agent::Agent;
@@ -70,9 +71,9 @@ struct State {
 }
 
 /// The bundle.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct McpClientBundle {
-    state: Mutex<HashMap<String, State>>,
+    state: Arc<Mutex<HashMap<String, State>>>,
 }
 
 impl McpClientBundle {
@@ -120,15 +121,17 @@ fn url_of(kernel: &Kernel, id: &AgentId) -> String {
         .to_string()
 }
 
-async fn read_key(
-    id: &AgentId,
-    kernel: &Arc<Kernel>,
-    url: &str,
-) -> Result<Option<String>, McpError> {
+/// The server's key for `url`, read from the credential store now — one call to the
+/// store, A STEP (#795): `next` gets it (`None`: the record names none).
+async fn read_key<R, F, Fut>(id: &AgentId, kernel: &Arc<Kernel>, url: &str, rec: R, next: F)
+where
+    R: Send + 'static,
+    F: FnOnce(R, Result<Option<String>, McpError>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
     key_reader(id, kernel, NAME, false)
-        .read(url)
-        .await
-        .map_err(|e| McpError(refusal(UNAUTHORIZED, e.0)))
+        .read(url, rec, move |rec, r| next(rec, r.map_err(|e| McpError(refusal(UNAUTHORIZED, e.0)))))
+        .await;
 }
 
 async fn no_note(_: Value) {}
@@ -303,20 +306,32 @@ impl McpClientBundle {
         Value::Object(out)
     }
 
-    async fn boot(&self, id: &AgentId, kernel: &Arc<Kernel>) -> Value {
+    /// `boot`: the key read (a step), then the server's tool list (its own I/O);
+    /// `settle` settles it.
+    async fn boot(&self, id: &AgentId, kernel: &Arc<Kernel>, settle: Settle) {
         let url = url_of(kernel, id);
-        match self.list(id, kernel, &url).await {
-            Ok(v) => v,
-            Err(McpError(reply)) => {
-                let err = fantastic_kernel::refusal::error_text(&reply);
-                self.put(id.as_str(), |s| s.error = err);
-                reply
-            }
-        }
+        let (me, aid, k) = (self.clone(), id.clone(), Arc::clone(kernel));
+        read_key(id, kernel, &url.clone(), settle, move |settle, key| async move {
+            let forker = settle.forker();
+            forker.run(&aid.clone(), "boot", async move {
+                let listed = match key {
+                    Ok(key) => me.list(&aid, &k, &url, key).await,
+                    Err(e) => Err(e),
+                };
+                settle.reply(match listed {
+                    Ok(v) => v,
+                    Err(McpError(reply)) => {
+                        let err = fantastic_kernel::refusal::error_text(&reply);
+                        me.put(aid.as_str(), |s| s.error = err);
+                        reply
+                    }
+                });
+            });
+        })
+        .await;
     }
 
-    async fn list(&self, id: &AgentId, kernel: &Arc<Kernel>, url: &str) -> Result<Value, McpError> {
-        let key = read_key(id, kernel, url).await?;
+    async fn list(&self, id: &AgentId, kernel: &Arc<Kernel>, url: &str, key: Option<String>) -> Result<Value, McpError> {
         let disc = wire::connect(url, key.as_deref()).await?;
         let mut tools: Vec<Value> = Vec::new();
         let has_tools = disc
@@ -428,10 +443,9 @@ impl McpClientBundle {
         args: Value,
         kernel: &Arc<Kernel>,
         mirrors: &[Mirror],
+        (url, key): (String, Option<String>),
     ) -> Result<(Value, Option<Blob>), McpError> {
-        let url = url_of(kernel, id);
         let arguments: Map<String, Value> = args.as_object().cloned().unwrap_or_default();
-        let key = read_key(id, kernel, &url).await?;
         let headers = wire::param_headers(mirrors, &Value::Object(arguments.clone()))?;
         let mut params = Map::new();
         params.insert("name".into(), json!(tool));
@@ -542,18 +556,34 @@ impl Handler for McpClientBundle {
         use declared::Call;
         match call {
             Call::Reflect(_) => Ok((Some(self.reflect(agent_id, kernel)), None)),
-            Call::Boot(_) => Ok((Some(self.boot(agent_id, kernel).await), None)),
+            // the key is read from its store (a step, #795): the verb settles once the
+            // server answered
+            Call::Boot(_) => {
+                self.boot(agent_id, kernel, fantastic_ai_core::steps::deferred(kernel)).await;
+                Ok((None, None))
+            }
             // A TOOL of the server, its arguments already checked against its schema
             Call::Dynamic(tool) => {
                 let st = self.get(agent_id.as_str());
                 let mirrors = st.mirrors.get(&tool.name).cloned().unwrap_or_default();
-                match self
-                    .call(agent_id, &tool.name, tool.args, kernel, &mirrors)
-                    .await
-                {
-                    Ok((reply, body)) => Ok((Some(reply), body)),
-                    Err(McpError(reply)) => Ok((Some(reply), None)),
-                }
+                let settle = fantastic_ai_core::steps::deferred(kernel);
+                let url = url_of(kernel, agent_id);
+                let (me, aid, k) = (self.clone(), agent_id.clone(), Arc::clone(kernel));
+                read_key(agent_id, kernel, &url.clone(), settle, move |settle, key| async move {
+                    let forker = settle.forker();
+                    forker.run(&aid.clone(), "call", async move {
+                        let called = match key {
+                            Ok(key) => me.call(&aid, &tool.name, tool.args, &k, &mirrors, (url, key)).await,
+                            Err(e) => Err(e),
+                        };
+                        match called {
+                            Ok((reply, body)) => settle.reply_with(reply, body),
+                            Err(McpError(reply)) => settle.reply(reply),
+                        }
+                    });
+                })
+                .await;
+                Ok((None, None))
             }
         }
     }

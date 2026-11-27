@@ -1386,7 +1386,7 @@ async fn compact_returns_projection_with_summary() {
     let b = body(10, 80);
     let provider: Arc<dyn Provider> = Arc::new(SummaryProvider("SUMMARY"));
     let pass = crate::model_format::pass::Pass::for_test(Arc::clone(&provider));
-    let proj = crate::strategies::compact(&b, 4, 1_000_000, &pass).await;
+    let proj = crate::model_format::pass::settled(&pass, None, |p| crate::strategies::compact(&b, 4, 1_000_000, p)).await;
     assert_eq!(proj.summary.as_deref(), Some("SUMMARY"));
     assert!(!proj.omitted_marker);
     // recent verbatim, NO fabricated summary turn in the body — plus the PINNED first
@@ -3418,8 +3418,8 @@ async fn the_compaction_cursor_is_the_store_length_not_the_view() {
     let n = fat.len();
     let _ = fantastic_kernel::test_support::as_agent(
         backend.clone(),
-        crate::projection::project_context(
-            &crate::model_format::pass::Pass::for_test(Arc::clone(&provider)),
+        crate::projection::projected(
+            crate::model_format::pass::Pass::for_test(Arc::clone(&provider)),
             &backend,
             &state,
             &kernel,
@@ -4754,12 +4754,13 @@ async fn recall_long_head(
     let r = fantastic_kernel::test_support::as_agent(backend.clone(), async {
         let me = crate::assembly::self_reflect(backend, kernel).await;
         let pass = crate::model_format::pass::Pass::for_test(Arc::clone(&provider));
-        crate::retrieval::context_recall(
+        let decl = pass.decl;
+        crate::retrieval::recalled(
             backend,
             payload["dry"] == json!(true),
             kernel,
-            Some(&pass),
-            pass.decl,
+            Some(pass),
+            decl,
             crate::constants::DEFAULT_CONTEXT_WINDOW,
             client_id,
             &[],
@@ -4979,8 +4980,8 @@ async fn a_fold_projection_over_budget_writes_folds() {
     let ids_in_body = messages.iter().filter(|m| m.get("id").is_some()).count();
     let out = fantastic_kernel::test_support::as_agent(
         backend.clone(),
-        crate::projection::project_context(
-            &crate::model_format::pass::Pass::for_test(Arc::clone(&provider)),
+        crate::projection::projected(
+            crate::model_format::pass::Pass::for_test(Arc::clone(&provider)),
             &backend,
             &state,
             &kernel,
@@ -5162,8 +5163,8 @@ async fn successive_fold_projections_do_not_nest_into_a_chain() {
         .expect("store read");
         let _ = fantastic_kernel::test_support::as_agent(
             backend.clone(),
-            crate::projection::project_context(
-                &crate::model_format::pass::Pass::for_test(Arc::clone(&provider)),
+            crate::projection::projected(
+                crate::model_format::pass::Pass::for_test(Arc::clone(&provider)),
                 &backend,
                 &state,
                 &kernel,
@@ -6179,8 +6180,8 @@ async fn the_seam_keeps_the_goal_the_strategies_pinned() {
             let len = messages.len() - 1;
             let out = fantastic_kernel::test_support::as_agent(
                 backend.clone(),
-                crate::projection::project_context(
-                    &crate::model_format::pass::Pass::for_test(Arc::clone(&provider)),
+                crate::projection::projected(
+                    crate::model_format::pass::Pass::for_test(Arc::clone(&provider)),
                     &backend,
                     &state,
                     &kernel,
@@ -7926,13 +7927,18 @@ impl Handler for EchoProvider {
         use provider_verbs::Call;
         Ok(Some(match call {
             Call::Reflect(_) => json!({"id": id.as_str()}),
-            Call::Complete(a) => crate::remote_provider::complete_verb(id, &a, kernel, build).await,
+            Call::Complete(a) => {
+                crate::remote_provider::complete_verb(id, a, kernel, None, None, move |m, _key| build(m), crate::steps::deferred(kernel)).await;
+                Value::Null
+            }
             Call::Models(_) => {
-                crate::remote_provider::models_verb(id, kernel, crate::remote_provider::NO_LIVE)
-                    .await
+                crate::remote_provider::models_verb(id, kernel, None, crate::remote_provider::NO_LIVE, crate::steps::deferred(kernel))
+                    .await;
+                Value::Null
             }
             Call::SetDefaultModel(a) => {
-                crate::remote_provider::set_default_verb(id, &a, kernel).await
+                crate::remote_provider::set_default_verb(id, &a, kernel, crate::steps::deferred(kernel)).await;
+                Value::Null
             }
         }))
     }

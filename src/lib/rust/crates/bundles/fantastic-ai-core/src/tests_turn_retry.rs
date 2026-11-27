@@ -66,7 +66,10 @@ async fn task_pass_not_parsed() {
     // what the helper sends with no type of its own (the internal form)
     let plain = Canned::new(&answer);
     let (plain_text, _) =
-        crate::strategies::summarize(&Pass::for_test(plain.clone()), &rows, None).await;
+        {
+        let pass = Pass::for_test(plain.clone());
+        crate::model_format::pass::settled(&pass, None, |p| crate::strategies::summarize(p, &rows, None)).await
+    };
     let internal = plain.asked();
     assert_eq!(internal.len(), 1);
 
@@ -79,7 +82,7 @@ async fn task_pass_not_parsed() {
         Some("qwen3-8b"),
     );
     let before = state.render_cache.stats();
-    let (text, cut) = crate::strategies::summarize(&pass, &rows, None).await;
+    let (text, cut) = crate::model_format::pass::settled(&pass, None, |p| crate::strategies::summarize(p, &rows, None)).await;
 
     let asked = provider.asked();
     assert_eq!(asked.len(), 1, "the provider is called once");

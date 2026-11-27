@@ -199,6 +199,7 @@ pub(crate) async fn put_bytes(
 }
 
 /// The bytes this agent's memory store holds under `image_ref`: `(media type, bytes)`.
+#[cfg(test)]
 pub(crate) async fn get_bytes(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,

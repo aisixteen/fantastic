@@ -1370,7 +1370,7 @@ async fn task_rows_carry_mode() {
     let msgs = vec![json!({"role": "user", "id": 1, "content": "go"})];
     let summary = as_agent(a.clone(), async {
         let pass = Pass::new(Arc::clone(&p) as Arc<dyn Provider>, &a, &state, &kernel).await;
-        crate::strategies::summarize(&pass, &msgs, None).await.0
+        crate::model_format::pass::settled(&pass, Some(&kernel), |p| crate::strategies::summarize(p, &msgs, None)).await.0
     })
     .await;
     assert_eq!(summary, "SUMMARY");

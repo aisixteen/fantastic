@@ -39,6 +39,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use fantastic_ai_core::credentials::key_reader;
+use fantastic_ai_core::steps::Settle;
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::inquiry::{self, Answer, Inquiry, Kind};
 use fantastic_kernel::refusal::{self as rf, refusal};
@@ -153,17 +154,32 @@ fn list_of(m: &Map<String, Value>, field: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The login for `host`, read from the credential store now.
-async fn read_login(id: &AgentId, kernel: &Arc<Kernel>, host: &str) -> Result<Login, Value> {
-    match key_reader(id, kernel, NAME, true).read_fields(host, &["username", "password"]).await {
-        Ok(Some(mut v)) if v.len() == 2 => {
-            let password = v.remove(1);
-            Ok(Login::Password { username: v.remove(0), password })
-        }
-        Ok(_) => Err(refusal(rf::UNAUTHORIZED, format!("{id}: no login"))),
-        Err(e) => Err(refusal(rf::UNAUTHORIZED, e.0)),
-    }
+/// The login for `host`, read from the credential store now — one call to the store,
+/// A STEP (#795): `next` gets it, or the refusal.
+async fn read_login<R, F, Fut>(id: &AgentId, kernel: &Arc<Kernel>, host: &str, rec: R, next: F)
+where
+    R: Send + 'static,
+    F: FnOnce(R, Result<Login, Value>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let me = id.clone();
+    key_reader(id, kernel, NAME, true)
+        .read_fields(host, &["username", "password"], rec, move |rec, r| {
+            let login = match r {
+                Ok(Some(mut v)) if v.len() == 2 => {
+                    let password = v.remove(1);
+                    Ok(Login::Password { username: v.remove(0), password })
+                }
+                Ok(_) => Err(refusal(rf::UNAUTHORIZED, format!("{me}: no login"))),
+                Err(e) => Err(refusal(rf::UNAUTHORIZED, e.0)),
+            };
+            next(rec, login)
+        })
+        .await;
 }
+
+/// A step's continuation that takes the outcome of a mail verb.
+type Done = Box<dyn FnOnce(Value) -> futures_util::future::BoxFuture<'static, ()> + Send>;
 
 fn mailbox_allowed(allowed: &[String], mailbox: &str) -> bool {
     allowed
@@ -218,98 +234,165 @@ async fn drop_open(kernel: &Arc<Kernel>, id: &AgentId, re: i64) {
 
 
 impl MailBundle {
-    async fn read(&self, id: &AgentId, kernel: &Arc<Kernel>, op: Read) -> Result<Value, Value> {
+    /// A read (`list`, `fetch`, `mark`): the login read (a step), then the IMAP session,
+    /// the agent's own I/O under this execution; `settle` settles it. A mark that took
+    /// is published on the agent's inbox (`marked`).
+    async fn read(&self, id: &AgentId, kernel: &Arc<Kernel>, op: Read, settle: Settle) {
         let m = meta(kernel, id);
         let mailbox = match &op {
             Read::List(a) => &a.mailbox,
             Read::Fetch(a) => &a.mailbox,
             Read::Mark(a) => &a.mailbox,
         };
-        gate_mailbox(id, &m, mailbox)?;
-        let ep = endpoint(&m, "imap", id)?;
-        let login = read_login(id, kernel, &ep.host).await?;
-        let pass = login.secret();
-        let mut s = imap::open(&ep.host, ep.port, ep.tls.unwrap_or(true), login.username(), pass)
-            .await
-            .map_err(failed)?;
-        let out = match op {
-            Read::List(a) => {
-                imap::list(&mut s, &ep.host, pass, &a.mailbox, a.unseen.unwrap_or(false), a.since.as_deref(), a.limit.unwrap_or(20) as usize).await
-            }
-            Read::Fetch(a) => imap::fetch(&mut s, &ep.host, pass, &a.mailbox, a.uid, a.attachment.as_deref()).await,
-            Read::Mark(a) => {
-                if a.seen.is_none() && a.flag.is_none() {
-                    Err(Fail::new(rf::MISSING_ARG, "mail: mark needs `seen` or `flag`"))
-                } else {
-                    imap::mark(&mut s, &ep.host, pass, &a.mailbox, a.uid, a.seen, a.flag).await
-                }
-            }
+        if let Err(r) = gate_mailbox(id, &m, mailbox) {
+            return settle.reply(r);
+        }
+        let ep = match endpoint(&m, "imap", id) {
+            Ok(ep) => ep,
+            Err(r) => return settle.reply(r),
         };
-        imap::close(s).await;
-        out.map_err(failed)
+        let (owner, k) = (id.clone(), Arc::clone(kernel));
+        let host = ep.host.clone();
+        read_login(id, kernel, &host, (op, ep, settle), move |(op, ep, settle), login| async move {
+            let login = match login {
+                Ok(l) => l,
+                Err(r) => return settle.reply(r),
+            };
+            let forker = settle.forker();
+            forker.run(&owner.clone(), "read", async move {
+                let out = imap_read(&ep, &login, &op).await.unwrap_or_else(|e| e);
+                if let Read::Mark(a) = &op {
+                    if out.get("error").is_none() {
+                        k.emit(&owner, json!({"type": "marked", "mailbox": a.mailbox, "uid": a.uid})).await;
+                    }
+                }
+                settle.reply(out);
+            });
+        })
+        .await;
     }
 
-    async fn send(&self, id: &AgentId, kernel: &Arc<Kernel>, a: verbs::Send) -> Result<Value, Value> {
+    /// `send`: the allowlist, the login read before a person is asked (a step), then
+    /// the inquiry; the person's answer settles the call later (nothing waits on them).
+    async fn send(&self, id: &AgentId, kernel: &Arc<Kernel>, a: verbs::Send, settle: Settle) {
         let m = meta(kernel, id);
         let allow = list_of(&m, "send_allow");
         if let Some(bad) = a.to.iter().find(|t| !recipient_allowed(&allow, t)) {
             let mut r = refusal(rf::NOT_ALLOWED, format!("{id}: recipient {bad:?} is not in this agent's `send_allow` — nothing was asked or sent"));
             rf::with(&mut r, "arg", json!("to"));
-            return Err(r);
+            return settle.reply(r);
         }
-        let smtp = endpoint(&m, "smtp", id)?;
-        // the login must be readable before a person is asked
-        read_login(id, kernel, &smtp.host).await?;
-        // ask; the answer settles this call later (nothing waits on the person)
-        let text = format!("Send this mail?\nTo: {}\nSubject: {}\n\n{}", a.to.join(", "), a.subject, a.text);
-        let asked = inquiry::ask(
-            id,
-            Inquiry { text, kind: Kind::Confirm, options: None, request_id: None, reply_client_id: inquiry::default_client_id() },
-            kernel,
-        )
-        .await;
-        let Some(re) = asked.get("re").and_then(Value::as_i64) else { return Err(asked) };
-        let key = (id.0.clone(), re);
-        let answered = {
-            let mut slots = self.slots.lock().expect("slots poisoned");
-            match slots.remove(&key) {
-                Some(Slot::Answered(d)) => Some((d, a)),
-                _ => {
-                    let d = kernel.defer()?;
-                    slots.insert(key, Slot::Waiting(Pending { pid: d.pid(), args: a }));
-                    None
-                }
-            }
+        let smtp = match endpoint(&m, "smtp", id) {
+            Ok(ep) => ep,
+            Err(r) => return settle.reply(r),
         };
-        match answered {
-            // answered before this call deferred: go on now
-            Some((d, a)) => self.decided(id, kernel, a, d.yes).await,
-            None => Ok(Value::Null),
-        }
+        let (me, aid, k) = (self.clone(), id.clone(), Arc::clone(kernel));
+        // the login must be readable before a person is asked
+        read_login(id, kernel, &smtp.host, (a, settle), move |(a, settle), login| async move {
+            if let Err(r) = login {
+                return settle.reply(r);
+            }
+            // ask; the answer settles this call later (nothing waits on the person)
+            let text = format!("Send this mail?\nTo: {}\nSubject: {}\n\n{}", a.to.join(", "), a.subject, a.text);
+            // the inquiry is held under this call's execution: its pid is the `re`
+            let ask = inquiry::ask(
+                &aid,
+                Inquiry { text, kind: Kind::Confirm, options: None, request_id: None, reply_client_id: inquiry::default_client_id() },
+                &k,
+            );
+            let asked = match settle.pid() {
+                Some(pid) => fantastic_kernel::CURRENT_TASK.scope(pid, ask).await,
+                None => ask.await,
+            };
+            let Some(re) = asked.get("re").and_then(Value::as_i64) else { return settle.reply(asked) };
+            let key = (aid.0.clone(), re);
+            let answered = {
+                let mut slots = me.slots.lock().expect("slots poisoned");
+                match slots.remove(&key) {
+                    Some(Slot::Answered(d)) => Some((d, a)),
+                    _ => {
+                        if let Some(pid) = settle.pid() {
+                            slots.insert(key, Slot::Waiting(Pending { pid, args: a }));
+                        }
+                        None
+                    }
+                }
+            };
+            // answered before this call waited: go on now
+            if let Some((d, a)) = answered {
+                me.decided(aid, k, a, d.yes, Box::new(move |v| Box::pin(async move { settle.reply(v) }))).await;
+            }
+        })
+        .await;
     }
 
-    /// The person answered a `send`: on yes, sign in, send and record it (the agent's
-    /// inbox is told `sent`); on no, `{sent: false}`.
-    async fn decided(&self, id: &AgentId, kernel: &Arc<Kernel>, a: verbs::Send, yes: bool) -> Result<Value, Value> {
+    /// The person answered a `send`: on yes, sign in (the logins read, steps), send and
+    /// record it (the agent's inbox is told `sent`); on no, `{sent: false}`. `done` gets
+    /// the outcome.
+    async fn decided(&self, id: AgentId, kernel: Arc<Kernel>, a: verbs::Send, yes: bool, done: Done) {
         if !yes {
-            return Ok(json!({"sent": false}));
+            return done(json!({"sent": false})).await;
         }
-        let m = meta(kernel, id);
-        let smtp = endpoint(&m, "smtp", id)?;
+        let m = meta(&kernel, &id);
+        let smtp = match endpoint(&m, "smtp", &id) {
+            Ok(ep) => ep,
+            Err(r) => return done(r).await,
+        };
+        let me = self.clone();
+        let (aid, k) = (id.clone(), Arc::clone(&kernel));
         // approved: sign in now, and thread the reply
-        let login = read_login(id, kernel, &smtp.host).await?;
-        let mut thread = None;
-        if let Some(uid) = a.reply_to_uid {
-            let Some(first) = list_of(&m, "mailboxes").into_iter().next() else {
-                return Err(refusal(rf::NOT_ALLOWED, format!("{id}: reply_to_uid needs a mailbox in `mailboxes`")));
+        let host = smtp.host.clone();
+        read_login(&id, &kernel, &host, (a, done), move |(a, done), login| async move {
+            let login = match login {
+                Ok(l) => l,
+                Err(r) => return done(r).await,
             };
-            let ep = endpoint(&m, "imap", id)?;
-            let il = read_login(id, kernel, &ep.host).await?;
-            let mut s = imap::open(&ep.host, ep.port, ep.tls.unwrap_or(true), il.username(), il.secret()).await.map_err(failed)?;
-            let t = imap::thread_of(&mut s, &ep.host, il.secret(), &first, uid).await;
-            imap::close(s).await;
-            thread = Some(t.map_err(failed)?);
-        }
+            let Some(uid) = a.reply_to_uid else {
+                return me.deliver(&aid, &k, &smtp, &login, a, None, done).await;
+            };
+            let m = meta(&k, &aid);
+            let Some(first) = list_of(&m, "mailboxes").into_iter().next() else {
+                return done(refusal(rf::NOT_ALLOWED, format!("{aid}: reply_to_uid needs a mailbox in `mailboxes`"))).await;
+            };
+            let ep = match endpoint(&m, "imap", &aid) {
+                Ok(ep) => ep,
+                Err(r) => return done(r).await,
+            };
+            let (aid2, k2) = (aid.clone(), Arc::clone(&k));
+            read_login(&aid, &k, &ep.host.clone(), (a, done, login), move |(a, done, login), il| async move {
+                let il = match il {
+                    Ok(l) => l,
+                    Err(r) => return done(r).await,
+                };
+                let thread = async {
+                    let mut s = imap::open(&ep.host, ep.port, ep.tls.unwrap_or(true), il.username(), il.secret()).await.map_err(failed)?;
+                    let t = imap::thread_of(&mut s, &ep.host, il.secret(), &first, uid).await;
+                    imap::close(s).await;
+                    t.map_err(failed)
+                }
+                .await;
+                match thread {
+                    Ok(t) => me.deliver(&aid2, &k2, &smtp, &login, a, Some(t), done).await,
+                    Err(r) => done(r).await,
+                }
+            })
+            .await;
+        })
+        .await;
+    }
+
+    /// The approved mail sent over SMTP (its own I/O), recorded and published.
+    #[allow(clippy::too_many_arguments)]
+    async fn deliver(
+        &self,
+        id: &AgentId,
+        kernel: &Arc<Kernel>,
+        smtp: &Endpoint,
+        login: &Login,
+        a: verbs::Send,
+        thread: Option<(String, Vec<String>)>,
+        done: Done,
+    ) {
         let domain = login.username().rsplit_once('@').map_or("localhost", |(_, d)| d);
         let message_id = format!(
             "{:x}.{}.{}@{domain}",
@@ -325,9 +408,9 @@ impl MailBundle {
             message_id: &message_id,
             in_reply_to: thread.as_ref().map(|(i, r)| (i.as_str(), r.as_slice())),
         };
-        smtp::send(&smtp.host, smtp.port, smtp.tls.unwrap_or(true), login.username(), login.secret(), out)
-            .await
-            .map_err(failed)?;
+        if let Err(f) = smtp::send(&smtp.host, smtp.port, smtp.tls.unwrap_or(true), login.username(), login.secret(), out).await {
+            return done(failed(f)).await;
+        }
         {
             let mut sent = self.sent.lock().expect("sent poisoned");
             let q = sent.entry(id.0.clone()).or_default();
@@ -337,7 +420,7 @@ impl MailBundle {
             }
         }
         kernel.emit(id, json!({"type": "sent", "message_id": message_id, "to": a.to})).await;
-        Ok(json!({"sent": true, "message_id": message_id, "to": a.to}))
+        done(json!({"sent": true, "message_id": message_id, "to": a.to})).await;
     }
 
     async fn answer(&self, id: &AgentId, kernel: &Arc<Kernel>, a: verbs::AnswerInquiry) -> Value {
@@ -377,13 +460,18 @@ impl MailBundle {
         if let Some(p) = waiting {
             let (me, k, aid) = (self.clone(), Arc::clone(kernel), id.clone());
             kernel.spawn_task(id, "send", async move {
-                let res = me.decided(&aid, &k, p.args, yes).await.unwrap_or_else(|e| e);
-                let status = if fantastic_kernel::is_refused(&res) {
-                    fantastic_kernel::Status::Errored
-                } else {
-                    fantastic_kernel::Status::Completed
-                };
-                k.settle_deferred(p.pid, fantastic_kernel::Outcome::new(Some(p.pid), status, res));
+                let k2 = Arc::clone(&k);
+                let done: Done = Box::new(move |res| {
+                    Box::pin(async move {
+                        let status = if fantastic_kernel::is_refused(&res) {
+                            fantastic_kernel::Status::Errored
+                        } else {
+                            fantastic_kernel::Status::Completed
+                        };
+                        k2.settle_deferred(p.pid, fantastic_kernel::Outcome::new(Some(p.pid), status, res));
+                    })
+                });
+                me.decided(aid, k, p.args, yes, done).await;
             });
         }
         out
@@ -429,6 +517,29 @@ enum Read {
     Mark(verbs::Mark),
 }
 
+/// One IMAP session for a read: sign in, the read, sign out.
+async fn imap_read(ep: &Endpoint, login: &Login, op: &Read) -> Result<Value, Value> {
+    let pass = login.secret();
+    let mut s = imap::open(&ep.host, ep.port, ep.tls.unwrap_or(true), login.username(), pass)
+        .await
+        .map_err(failed)?;
+    let out = match op {
+        Read::List(a) => {
+            imap::list(&mut s, &ep.host, pass, &a.mailbox, a.unseen.unwrap_or(false), a.since.as_deref(), a.limit.unwrap_or(20) as usize).await
+        }
+        Read::Fetch(a) => imap::fetch(&mut s, &ep.host, pass, &a.mailbox, a.uid, a.attachment.as_deref()).await,
+        Read::Mark(a) => {
+            if a.seen.is_none() && a.flag.is_none() {
+                Err(Fail::new(rf::MISSING_ARG, "mail: mark needs `seen` or `flag`"))
+            } else {
+                imap::mark(&mut s, &ep.host, pass, &a.mailbox, a.uid, a.seen, a.flag).await
+            }
+        }
+    };
+    imap::close(s).await;
+    out.map_err(failed)
+}
+
 #[async_trait]
 impl Handler for MailBundle {
     type Call = verbs::Call;
@@ -465,36 +576,42 @@ impl Handler for MailBundle {
 
     async fn handle(&self, agent_id: &AgentId, call: Self::Call, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
         use verbs::Call;
+        // THE VERBS THAT READ THE LOGIN settle by their steps (#795): the read is a call
+        // to the credential store
         let out = match call {
             Call::Reflect(_) => {
                 let m = meta(kernel, agent_id);
-                let account = match (m.get("imap"), m.get("credentials")) {
-                    (Some(_), Some(_)) => match endpoint(&m, "imap", agent_id) {
-                        Ok(ep) => read_login(agent_id, kernel, &ep.host).await.ok().map(|l| l.username().to_string()),
-                        Err(_) => None,
-                    },
+                let ep = match (m.get("imap"), m.get("credentials")) {
+                    (Some(_), Some(_)) => endpoint(&m, "imap", agent_id).ok(),
                     _ => None,
                 };
-                self.reflect(agent_id, kernel, account)
+                let Some(ep) = ep else {
+                    return Ok(Some(self.reflect(agent_id, kernel, None)));
+                };
+                let settle = fantastic_ai_core::steps::deferred(kernel);
+                let (me, aid, k) = (self.clone(), agent_id.clone(), Arc::clone(kernel));
+                read_login(agent_id, kernel, &ep.host, settle, move |settle, login| async move {
+                    let account = login.ok().map(|l| l.username().to_string());
+                    settle.reply(me.reflect(&aid, &k, account));
+                })
+                .await;
+                return Ok(None);
             }
-            Call::List(a) => self.read(agent_id, kernel, Read::List(a)).await.unwrap_or_else(|e| e),
-            Call::Fetch(a) => self.read(agent_id, kernel, Read::Fetch(a)).await.unwrap_or_else(|e| e),
             // WHAT CHANGED, PUBLISHED on the agent's own inbox: `marked {mailbox, uid}` after a
             // mark, `sent {message_id, to}` after a sent mail — its view re-reads that box's
             // count and the recent sends on these, never on a copy of a call
-            Call::Mark(a) => {
-                let (mailbox, uid) = (a.mailbox.clone(), a.uid);
-                let out = self.read(agent_id, kernel, Read::Mark(a)).await.unwrap_or_else(|e| e);
-                if out.get("error").is_none() {
-                    kernel.emit(agent_id, json!({"type": "marked", "mailbox": mailbox, "uid": uid})).await;
-                }
-                out
+            Call::List(a) => Read::List(a),
+            Call::Fetch(a) => Read::Fetch(a),
+            Call::Mark(a) => Read::Mark(a),
+            Call::Send(a) => {
+                self.send(agent_id, kernel, a, fantastic_ai_core::steps::deferred(kernel)).await;
+                return Ok(None);
             }
-            Call::Send(a) => self.send(agent_id, kernel, a).await.unwrap_or_else(|e| e),
-            Call::Inquiries(a) => inquiry::list(agent_id, &a, kernel),
-            Call::AnswerInquiry(a) => self.answer(agent_id, kernel, a).await,
+            Call::Inquiries(a) => return Ok(Some(inquiry::list(agent_id, &a, kernel))),
+            Call::AnswerInquiry(a) => return Ok(Some(self.answer(agent_id, kernel, a).await)),
         };
-        Ok(Some(out))
+        self.read(agent_id, kernel, out, fantastic_ai_core::steps::deferred(kernel)).await;
+        Ok(None)
     }
 }
 

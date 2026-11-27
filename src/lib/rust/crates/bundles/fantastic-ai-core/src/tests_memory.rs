@@ -101,8 +101,8 @@ async fn the_endpoints_count_calibrates_the_estimate() {
     ];
     let provider: Arc<dyn Provider> = Arc::new(Reporting(0));
     // under the trigger by our own estimate (~1000 of a ~12k budget)
-    let out = as_agent(ai.clone(), crate::projection::project_context(
-        &crate::model_format::pass::Pass::for_test(Arc::clone(&provider)),
+    let out = as_agent(ai.clone(), crate::projection::projected(
+        crate::model_format::pass::Pass::for_test(Arc::clone(&provider)),
         &ai,
         &state,
         &kernel,
@@ -119,8 +119,8 @@ async fn the_endpoints_count_calibrates_the_estimate() {
     assert_eq!(proj["fired"], json!(false), "{proj}");
     // the endpoint said the same prompt was TEN times bigger — the budget shrinks
     *state.calib.lock().unwrap() = Some(10.0);
-    let out = as_agent(ai.clone(), crate::projection::project_context(
-        &crate::model_format::pass::Pass::for_test(Arc::clone(&provider)),
+    let out = as_agent(ai.clone(), crate::projection::projected(
+        crate::model_format::pass::Pass::for_test(Arc::clone(&provider)),
         &ai,
         &state,
         &kernel,

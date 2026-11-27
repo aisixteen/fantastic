@@ -354,8 +354,8 @@ async fn project(kernel: &Arc<Kernel>, agent: &AgentId) -> Arc<MockScript> {
     .expect("assemble");
     as_agent(
         agent.clone(),
-        crate::projection::project_context(
-            &crate::model_format::pass::Pass::for_test(Arc::clone(&provider)),
+        crate::projection::projected(
+            crate::model_format::pass::Pass::for_test(Arc::clone(&provider)),
             agent,
             &state,
             kernel,

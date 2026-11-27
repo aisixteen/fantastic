@@ -217,3 +217,67 @@ async fn a_malformed_credentials_field_is_refused_at_the_write() {
         );
     }
 }
+
+// ── the password read is a step (#795) ───────────────────────────────────────
+
+/// A RELAY DIAL READS ITS PASSWORD AS A STEP (#795): while the store holds the read,
+/// the leg's create (its boot) has returned and nothing is dialed; a `boot` call meanwhile
+/// stays open and joins the dial in flight (one dial per leg, never two); the read's
+/// settle dials with the password and settles the call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_relay_dial_reads_its_password_as_a_step() {
+    let tmp = TempDir::new().unwrap();
+    let mut kernel = Kernel::new();
+    kernel.bundles.register(RELAY_HANDLER_MODULE, RelayConnectorBundle);
+    let leg = id_for("rl_step", &tmp);
+    let (store, gate) = fantastic_credential_store::test_support::held_bundle(&leg);
+    kernel.bundles.register(fantastic_credential_store::HANDLER_MODULE, store);
+    let k = Arc::new(kernel);
+    let root = Agent::new(AgentId::from("kernel_state"), None, None, Map::new(), tmp.path().join(".fantastic"), false);
+    fantastic_kernel::test_support::register(&k, Arc::clone(&root));
+    k.set_root(Arc::clone(&root));
+    let (url, dials) = recording_relay().await;
+    let host = url.trim_start_matches("ws://").to_string();
+    let made = ask(
+        &k,
+        "kernel",
+        json!({"type": "create_agent", "parent_id": "kernel_state",
+               "handler_module": fantastic_credential_store::HANDLER_MODULE, "id": "creds",
+               "backend": "keychain", "refs": {RELAY_REF: {"host": host}}}),
+    )
+    .await;
+    assert_eq!(made["id"], "creds", "{made}");
+    set_relay_password(&k, "creds", PW).await;
+    // the create boots the leg: its password read goes out, and the create returns
+    let made = tokio::time::timeout(std::time::Duration::from_secs(5), mk_leg(&k, &leg, &url, creds()))
+        .await
+        .expect("the create waited for the store");
+    assert_eq!(made["id"], json!(leg), "{made}");
+    for _ in 0..250 {
+        if gate.held() >= 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(gate.held() >= 1, "the password was never read");
+    let (k2, leg2) = (Arc::clone(&k), leg.clone());
+    let boot = tokio::spawn(async move { ask(&k2, &leg2, json!({"type": "boot"})).await });
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(!boot.is_finished(), "the boot was answered before the password was read");
+    assert!(dials.lock().unwrap().is_empty(), "a dial went out before its password was read");
+    gate.open();
+    let booted = tokio::time::timeout(std::time::Duration::from_secs(5), boot)
+        .await
+        .expect("the boot never settled")
+        .unwrap();
+    assert!(
+        booted["booted"] == json!(true) || booted["already"] == json!(true),
+        "{booted}"
+    );
+    assert_eq!(
+        dials.lock().unwrap().clone(),
+        vec![("/A".to_string(), PW.to_string())],
+        "one dial, with the password read"
+    );
+    ask(&k, &leg, json!({"type": "shutdown"})).await;
+}

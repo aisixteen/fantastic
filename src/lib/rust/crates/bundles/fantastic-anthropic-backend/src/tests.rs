@@ -2068,7 +2068,15 @@ async fn turn(kernel: &Arc<Kernel>, id: &str) {
     fantastic_kernel::test_support::as_agent(AgentId::from(id), async {
         let mut pass = helpers::agent_meta(&AgentId::from(id), kernel);
         pass.insert("max_tokens".into(), json!(8000));
-        let p = build_provider_with(&AgentId::from(id), kernel, pass, None, Images::default());
+        let endpoint = pass.get("endpoint").and_then(Value::as_str).unwrap_or("").to_string();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        fantastic_ai_core::credentials::key_reader(&AgentId::from(id), kernel, NAME, false)
+            .key(&endpoint, tx, |tx, key| async move {
+                let _ = tx.send(key);
+            })
+            .await;
+        let key = rx.await.expect("the key read ran its next step");
+        let p = build_provider_with(&AgentId::from(id), kernel, pass, key, None, Images::default());
         let msgs = [json!({"role": "user", "content": "hi"})];
         let mut s = p
             .chat(&msgs, None)

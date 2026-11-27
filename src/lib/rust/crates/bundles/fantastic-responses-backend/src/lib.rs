@@ -26,7 +26,7 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
-use fantastic_ai_core::credentials::{key_reader, KeySource};
+use fantastic_ai_core::credentials::KeySource;
 use fantastic_ai_core::provider::{
     stream_idle_of, within, Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream,
     ReportCell, Unconfigured,
@@ -718,7 +718,12 @@ impl Handler for ResponsesBundle {
             agent_id,
             call,
             kernel,
-            |m| build_provider_with(agent_id, kernel, m),
+            Some(fantastic_ai_core::remote_provider::Keys { backend: BACKEND, required: true }),
+            None,
+            {
+                let id = agent_id.clone();
+                move |m, key| build_provider_with(&id, m, key)
+            },
             fantastic_ai_core::remote_provider::NO_LIVE,
             || reflect_reply(agent_id, kernel),
         )
@@ -744,10 +749,10 @@ impl Handler for ResponsesBundle {
 }
 
 /// The provider this agent is configured for — built per call from the record
-/// (python `make_provider`); the key is read through the reader inside each pass,
-/// from the record's `credentials`.
+/// (python `make_provider`) with the key read for the pass from the record's
+/// `credentials` (a step before it, #795).
 /// The record is passed in (`complete` lays the pass's `model` over the agent's).
-fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<String, Value>) -> Arc<dyn Provider> {
+fn build_provider_with(agent_id: &AgentId, meta: Map<String, Value>, key: Arc<dyn KeySource>) -> Arc<dyn Provider> {
     // python's argument order: `endpoint`, `model`, `max_tokens`, then the
     // provider's own check of `sampling`.
     // `endpoint` and `model` are REQUIRED on the record — nothing is guessed.
@@ -793,7 +798,7 @@ fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<Strin
         self_id: agent_id.clone(),
         endpoint,
         model,
-        key: Arc::new(key_reader(agent_id, kernel, BACKEND, true)),
+        key,
         max_tokens,
         sampling,
         report: ReportCell::default(),

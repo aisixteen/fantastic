@@ -110,7 +110,9 @@ impl Handler for CannedProvider {
             id,
             call,
             k,
-            |_| Arc::new(Canned) as Arc<dyn Provider>,
+            None,
+            None,
+            |_, _| Arc::new(Canned) as Arc<dyn Provider>,
             fantastic_ai_core::remote_provider::NO_LIVE,
             || json!({"id": id.0, "sentence": "canned provider"}),
         )

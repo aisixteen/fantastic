@@ -65,9 +65,18 @@ impl Handler for Echo {
         use provider_verbs::Call;
         Ok(Some(match call {
             Call::Reflect(_) => json!({"id": id.as_str()}),
-            Call::Complete(a) => crate::remote_provider::complete_verb(id, &a, kernel, build).await,
-            Call::Models(_) => crate::remote_provider::models_verb(id, kernel, NO_LIVE).await,
-            Call::SetDefaultModel(a) => crate::remote_provider::set_default_verb(id, &a, kernel).await,
+            Call::Complete(a) => {
+                crate::remote_provider::complete_verb(id, a, kernel, None, None, move |m, _key| build(m), crate::steps::deferred(kernel)).await;
+                Value::Null
+            }
+            Call::Models(_) => {
+                crate::remote_provider::models_verb(id, kernel, None, NO_LIVE, crate::steps::deferred(kernel)).await;
+                Value::Null
+            }
+            Call::SetDefaultModel(a) => {
+                crate::remote_provider::set_default_verb(id, &a, kernel, crate::steps::deferred(kernel)).await;
+                Value::Null
+            }
         }))
     }
 }
@@ -82,6 +91,46 @@ fn agent(k: &Arc<Kernel>, root: &Arc<fantastic_kernel::Agent>, id: &str, meta: V
         false,
     );
     fantastic_kernel::test_support::register(k, a);
+}
+
+/// What a live view of a request was shown.
+struct Shown(std::sync::Mutex<String>);
+
+#[async_trait]
+impl crate::provider::Live for Shown {
+    async fn token(&self, t: &str) {
+        self.0.lock().unwrap().push_str(t);
+    }
+}
+
+/// ONE REQUEST OF `chat` AS A MESSAGE ([`RemoteProvider::begin`]), as `chat`: what its
+/// live view was shown, and the whole answer its settle carried (or why it failed).
+async fn request(rp: &RemoteProvider, chat: &str) -> (String, Result<String, ProviderError>) {
+    let live = Arc::new(Shown(std::sync::Mutex::new(String::new())));
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, ProviderError>>();
+    let done: crate::provider::Done = Box::new(move |r| {
+        Box::pin(async move {
+            let _ = tx.send(r);
+        })
+    });
+    fantastic_kernel::test_support::as_agent(AgentId::from(chat), async {
+        rp.begin(
+            vec![json!({"role": "user", "content": "hi"})],
+            None,
+            (Duration::from_secs(30), 30.0),
+            Arc::clone(&live) as Arc<dyn crate::provider::Live>,
+            done,
+            Box::new(|_| {}),
+        )
+        .await;
+    })
+    .await;
+    let whole = tokio::time::timeout(Duration::from_secs(20), rx)
+        .await
+        .expect("the request settled")
+        .expect("done ran");
+    let shown = live.0.lock().unwrap().clone();
+    (shown, whole)
 }
 
 #[tokio::test]
@@ -99,16 +148,9 @@ async fn a_chat_completes_through_its_provider_agent_by_id() {
     agent(&k, &root, "p", json!({}), tmp.path());
     agent(&k, &root, "chat", json!({"can": {"p": {"call": ["complete", "watch"]}}}), tmp.path());
     let rp = RemoteProvider::new(&k, &AgentId::from("chat"), "p");
-    let text: Vec<String> = fantastic_kernel::test_support::as_agent(AgentId::from("chat").clone(), async {
-        let s = rp.chat(&[json!({"role": "user", "content": "hi"})], None).await.unwrap();
-        s.map(|e| match e.unwrap() {
-            ProviderEvent::Token(t) => t,
-        })
-        .collect()
-        .await
-    })
-    .await;
-    assert_eq!(text.concat(), "hello", "the provider's tokens, in order");
+    let (shown, whole) = request(&rp, "chat").await;
+    assert_eq!(whole.unwrap(), "hello", "the settle's whole answer");
+    assert_eq!(shown, "hello", "the provider's tokens, in order");
     assert_eq!(rp.model(), "echo-1", "the model the provider reported");
 }
 
@@ -150,7 +192,10 @@ impl Handler for Knobbed {
         };
         use provider_verbs::Call;
         Ok(Some(match call {
-            Call::Complete(a) => crate::remote_provider::complete_verb(id, &a, kernel, build).await,
+            Call::Complete(a) => {
+                crate::remote_provider::complete_verb(id, a, kernel, None, None, move |m, _key| build(m), crate::steps::deferred(kernel)).await;
+                Value::Null
+            }
             _ => json!({"id": id.as_str()}),
         }))
     }
@@ -189,11 +234,7 @@ async fn two_chats_on_one_provider_each_send_their_own_knobs() {
     let mut seen = Vec::new();
     for chat in ["a", "b", "c"] {
         let rp = RemoteProvider::new(&k, &AgentId::from(chat), "p");
-        fantastic_kernel::test_support::as_agent(AgentId::from(chat).clone(), async {
-            let s = rp.chat(&[json!({"role": "user", "content": "hi"})], None).await.unwrap();
-            let _: Vec<_> = s.collect().await;
-        })
-        .await;
+        request(&rp, chat).await.1.unwrap();
         seen.push(rp.model());
     }
     assert_eq!(seen, ["t=0.1 m=64 stop=-", "t=0.7 m=- stop=[\"END\"]", "t=- m=- stop=-"]);
@@ -231,13 +272,10 @@ async fn a_chat_without_the_grant_is_refused_by_name() {
     agent(&k, &root, "p", json!({}), tmp.path());
     agent(&k, &root, "chat", json!({}), tmp.path());
     let rp = RemoteProvider::new(&k, &AgentId::from("chat"), "p");
-    let r = fantastic_kernel::test_support::as_agent(AgentId::from("chat").clone(), async {
-        match rp.chat(&[json!({"role": "user", "content": "hi"})], None).await {
-            Err(e) => e.message,
-            Ok(_) => String::new(),
-        }
-    })
-    .await;
+    let r = match request(&rp, "chat").await.1 {
+        Err(e) => e.message,
+        Ok(_) => String::new(),
+    };
     assert!(r.contains("cannot watch provider `p`"), "{r}");
 }
 
@@ -262,19 +300,39 @@ async fn kernel_with_provider(tmp: &tempfile::TempDir, with_store: bool) -> Arc<
     k
 }
 
+/// The provider's kept usage, its read run to its end ([`kept_usage`]).
+async fn kept(p: &AgentId, k: &Arc<Kernel>) -> Option<Value> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    kept_usage(p, k, tx, |tx, v| async move {
+        let _ = tx.send(v);
+    })
+    .await;
+    rx.await.expect("the read ran its next step")
+}
+
+/// The provider's usage kept, its write run to its end ([`keep_usage`]).
+async fn keep(p: &AgentId, k: &Arc<Kernel>, usage: &Value) -> Result<(), String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    keep_usage(p, k, usage, tx, |tx, r| async move {
+        let _ = tx.send(r);
+    })
+    .await;
+    rx.await.expect("the write ran its next step")
+}
+
 #[tokio::test]
 async fn a_providers_usage_is_kept_in_its_store_and_the_newest_wins() {
     let tmp = tempfile::TempDir::new().unwrap();
     let k = kernel_with_provider(&tmp, true).await;
     let p = AgentId::from("p");
     fantastic_kernel::test_support::as_agent(p.clone(), async {
-        assert_eq!(usage_of(&p, &k).await, None, "nothing kept yet");
+        assert_eq!(kept(&p, &k).await, None, "nothing kept yet");
         let first = json!({"total": {"requests": 1}, "by_model": {}, "by_agent": {}});
-        set_usage(&p, &k, &first).await.unwrap();
-        assert_eq!(usage_of(&p, &k).await, Some(first));
+        keep(&p, &k, &first).await.unwrap();
+        assert_eq!(kept(&p, &k).await, Some(first));
         let second = json!({"total": {"requests": 2}, "by_model": {}, "by_agent": {}});
-        set_usage(&p, &k, &second).await.unwrap();
-        assert_eq!(usage_of(&p, &k).await, Some(second), "the newest row wins");
+        keep(&p, &k, &second).await.unwrap();
+        assert_eq!(kept(&p, &k).await, Some(second), "the newest row wins");
     })
     .await;
 }
@@ -284,9 +342,9 @@ async fn a_provider_without_a_store_keeps_no_usage_and_does_not_fail() {
     let tmp = tempfile::TempDir::new().unwrap();
     let k = kernel_with_provider(&tmp, false).await;
     let p = AgentId::from("p");
-    assert_eq!(usage_of(&p, &k).await, None);
-    set_usage(&p, &k, &json!({"total": {}})).await.unwrap();
-    assert_eq!(usage_of(&p, &k).await, None);
+    assert_eq!(kept(&p, &k).await, None);
+    keep(&p, &k, &json!({"total": {}})).await.unwrap();
+    assert_eq!(kept(&p, &k).await, None);
 }
 
 #[tokio::test]
@@ -325,15 +383,7 @@ async fn a_remote_providers_cache_counts_reach_the_chats_report_and_absent_ones_
     );
     for (provider, cache) in [("p", (Some(600), Some(300))), ("q", (None, None))] {
         let rp = RemoteProvider::new(&k, &AgentId::from("chat"), provider);
-        let _: Vec<_> =
-            fantastic_kernel::test_support::as_agent(AgentId::from("chat").clone(), async {
-                let s = rp
-                    .chat(&[json!({"role": "user", "content": "hi"})], None)
-                    .await
-                    .unwrap();
-                s.collect().await
-            })
-            .await;
+        request(&rp, "chat").await.1.unwrap();
         let r = rp.report();
         assert_eq!((r.cache_read, r.cache_write), cache, "{provider}");
         assert_eq!(
@@ -417,7 +467,10 @@ impl Handler for Many {
         };
         use provider_verbs::Call;
         Ok(Some(match call {
-            Call::Complete(a) => crate::remote_provider::complete_verb(id, &a, kernel, build).await,
+            Call::Complete(a) => {
+                crate::remote_provider::complete_verb(id, a, kernel, None, None, move |m, _key| build(m), crate::steps::deferred(kernel)).await;
+                Value::Null
+            }
             _ => json!({"id": id.as_str()}),
         }))
     }
@@ -451,6 +504,7 @@ async fn the_route_reads_the_settled_text_not_the_stream() {
             let _ = tx.send(r);
         })
     });
+    let (ltx, lrx) = tokio::sync::oneshot::channel();
     fantastic_kernel::test_support::as_agent(AgentId::from("chat"), async {
         rp.begin(
             vec![json!({"role": "user", "content": "hi"})],
@@ -458,11 +512,14 @@ async fn the_route_reads_the_settled_text_not_the_stream() {
             (Duration::from_secs(30), 30.0),
             Arc::clone(&live) as Arc<dyn crate::provider::Live>,
             done,
+            Box::new(move |pid| {
+                let _ = ltx.send(pid);
+            }),
         )
         .await
     })
-    .await
-    .expect("the request is out");
+    .await;
+    lrx.await.expect("the request is out");
     let whole = tokio::time::timeout(Duration::from_secs(20), rx)
         .await
         .expect("the request settled")
@@ -504,6 +561,7 @@ async fn the_chat_keeps_one_watch_on_its_provider_across_requests() {
                 let _ = tx.send(r);
             })
         });
+        let (ltx, lrx) = tokio::sync::oneshot::channel();
         fantastic_kernel::test_support::as_agent(chat.clone(), async {
             rp.begin(
                 vec![json!({"role": "user", "content": "hi"})],
@@ -511,11 +569,14 @@ async fn the_chat_keeps_one_watch_on_its_provider_across_requests() {
                 (Duration::from_secs(30), 30.0),
                 Arc::clone(&live) as Arc<dyn crate::provider::Live>,
                 done,
+                Box::new(move |pid| {
+                    let _ = ltx.send(pid);
+                }),
             )
             .await
         })
-        .await
-        .expect("the request is out");
+        .await;
+        lrx.await.expect("the request is out");
         let whole = tokio::time::timeout(Duration::from_secs(20), rx)
             .await
             .expect("the request settled")

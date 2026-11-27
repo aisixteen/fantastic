@@ -467,9 +467,16 @@ macro_rules! bridge_handler {
                 let family = $family;
                 let reply = match call {
                     verbs::$m::Call::Reflect(_) => reflect_reply(family, $agent, $kern),
-                    verbs::$m::Call::Boot(_) => boot_reply(family, $agent, $kern).await,
+                    verbs::$m::Call::Boot(_) => match boot_call(family, $agent, $kern, false).await {
+                        Some(v) => v,
+                        // deferred: the dial's steps settle the call
+                        None => return Ok((None, None)),
+                    },
                     verbs::$m::Call::Shutdown(_) => Value::Null,
-                    verbs::$m::Call::Reconnect(_) => reconnect_reply(family, $agent, $kern).await,
+                    verbs::$m::Call::Reconnect(_) => match boot_call(family, $agent, $kern, true).await {
+                        Some(v) => v,
+                        None => return Ok((None, None)),
+                    },
                     verbs::$m::Call::Forward(a) => {
                         return Ok(match forward_call($agent, a, body, $kern).await {
                             Some((v, b)) => (Some(v), b),
@@ -551,13 +558,13 @@ bridge_handler!(
 /// The credential field that holds the relay group password. Python `FIELD`.
 pub const RELAY_PASSWORD_FIELD: &str = "password";
 
-/// The async `read() -> password` a dial awaits — every dial, nothing cached.
-/// Asks the store named by the record's `credentials` for the ref's `password`,
-/// pinned to the relay URL's host (the store refuses a ref bound elsewhere). The
-/// dial runs in this connector's dispatch (`boot`) or a task it spawned (the
-/// reconnect supervisor), so the read is the connector's own send, gated as it.
-/// `Err` names the store and the ref on any refusal or a missing field
-/// (python's `CredentialError`). Python `password_reader`.
+/// The `read() -> password` a dial runs first — every dial, nothing cached — as a
+/// STEP (#795): one `get` to the store named by the record's `credentials` for the
+/// ref's `password`, pinned to the relay URL's host (the store refuses a ref bound
+/// elsewhere); its settle runs the dial. The read is the connector's own call (its
+/// `boot`, or the reconnect supervisor carrying its identity), gated as it. `Err`
+/// names the store and the ref on any refusal or a missing field (python's
+/// `CredentialError`). Python `password_reader`.
 fn password_reader(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
@@ -567,16 +574,19 @@ fn password_reader(
     let reader =
         fantastic_ai_core::credentials::key_reader(self_id, kernel, "relay_connector", true);
     let url = relay_url.to_string();
-    Arc::new(move || {
+    Arc::new(move |next: transport::relay::PasswordNext| {
         let (reader, url) = (reader.clone(), url.clone());
         Box::pin(async move {
-            let values = reader
-                .read_fields(&url, &[RELAY_PASSWORD_FIELD])
-                .await
-                .map_err(|e| e.0)?;
-            values
-                .and_then(|mut v| (!v.is_empty()).then(|| v.remove(0)))
-                .ok_or_else(|| "relay_connector: no `credentials`".to_string())
+            reader
+                .read_fields(&url, &[RELAY_PASSWORD_FIELD], next, |next, values| async move {
+                    let password = values.map_err(|e| e.0).and_then(|values| {
+                        values
+                            .and_then(|mut v| (!v.is_empty()).then(|| v.remove(0)))
+                            .ok_or_else(|| "relay_connector: no `credentials`".to_string())
+                    });
+                    next(password).await;
+                })
+                .await;
         })
     })
 }
@@ -722,36 +732,40 @@ fn reflect_reply(family: Family, agent_id: &AgentId, kernel: &Kernel) -> Value {
     Value::Object(out)
 }
 
-async fn boot_reply(family: Family, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
-    boot_carrying(family, agent_id, kernel, HashSet::new()).await
+/// What runs with a boot's reply ([`boot_relay`]).
+type BootDone = Box<dyn FnOnce(Value) -> futures_util::future::BoxFuture<'static, ()> + Send>;
+
+/// `boot` / `reconnect` as a CALL: a `ws` leg's dial is its own I/O and answers now; a
+/// relay leg's dial reads its password first, a STEP (#795), so the call defers and
+/// its steps settle it (nothing settles in a kernel bookkeeping run: the steps run).
+/// `None`: deferred.
+async fn boot_call(family: Family, agent_id: &AgentId, kernel: &Arc<Kernel>, reconnect: bool) -> Option<Value> {
+    if reconnect {
+        let _ = shutdown_reply(agent_id, kernel).await;
+    }
+    match family {
+        Family::Ws => Some(boot_ws(agent_id, kernel, HashSet::new()).await),
+        Family::Relay => {
+            let settle = fantastic_ai_core::steps::deferred(kernel);
+            boot_relay(
+                agent_id,
+                kernel,
+                Box::new(move |v| Box::pin(async move { settle.reply(v) })),
+            )
+            .await;
+            None
+        }
+    }
 }
 
-/// `boot`, with the remote agents a dropped link was watching: the new link asks
-/// the far side for each of them again, so a watcher of this leg keeps receiving
-/// without subscribing anew. A plain `boot` carries none.
-///
-/// Boxed: the read loop `boot` spawns redials through this very function, and a
-/// boxed `Send` future breaks the cycle the compiler would otherwise chase.
-fn boot_carrying<'a>(
-    family: Family,
-    agent_id: &'a AgentId,
-    kernel: &'a Arc<Kernel>,
-    carried: HashSet<String>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send + 'a>> {
-    Box::pin(boot_carrying_inner(family, agent_id, kernel, carried))
-}
-
-async fn boot_carrying_inner(
-    family: Family,
-    agent_id: &AgentId,
-    kernel: &Arc<Kernel>,
-    carried: HashSet<String>,
-) -> Value {
+/// What a boot is before its transport: the record's `transport` kind, or the answer
+/// now (an open leg is `already`; no kind is refused).
+fn boot_kind(agent_id: &AgentId, kernel: &Kernel) -> Result<String, Value> {
     // python: idempotent only while the transport is OPEN — a closed leg is
     // rebuilt in place.
     if let Some(existing) = BRIDGES.lock().get(agent_id).cloned() {
         if !existing.transport.closed() {
-            return json!({"already": true, "transport": existing.transport_kind});
+            return Err(json!({"already": true, "transport": existing.transport_kind}));
         }
     }
     // The leg's rules are NOT cached here: the gate and `forward` read them off
@@ -759,88 +773,168 @@ async fn boot_carrying_inner(
 
     // The record declares its `transport` (required); the builder is chosen by
     // the derivation, not by the kind.
-    let Some(kind) = meta_string(agent_id, kernel, "transport") else {
-        return json!({"error": "bridge: the record has no `transport`"});
-    };
-    let transport: Arc<dyn BridgeTransport> = match injected_for(&kind, agent_id) {
-        Some(Ok(t)) => t,
-        Some(Err(refusal)) => return refusal,
-        None => match build_transport(family, agent_id, kernel).await {
-            Ok(t) => t,
-            Err(e) => return json!({"error": format!("bridge: {kind} boot failed: {e}")}),
-        },
-    };
-
-    let state = Arc::new(BridgeState {
-        transport: Arc::clone(&transport),
-        transport_kind: kind.clone(),
-        read_task: AsyncMutex::new(None),
-        pending: Mutex::new(HashMap::new()),
-        // this boot's correlator nonce; the count restarts under it
-        corr_prefix: new_corr_prefix(agent_id),
-        corr_counter: AtomicU64::new(0),
-        down_emitted: std::sync::atomic::AtomicBool::new(false),
-        watching: Mutex::new(carried.clone()),
-        served: Mutex::new(HashMap::new()),
-    });
-
-    // HELLO FIRST: the far `web_ws` registers this connection as this kernel's
-    // leg, so its agents reach ours as `<guid>|<agent>` — at every boot, so a
-    // redial (`reconnect`) replaces the dropped connection there. A kernel with
-    // no guid yet has no address to give and says nothing.
-    if family == Family::Ws {
-        if let Some(guid) = own_guid(kernel) {
-            let hello = json!({"type": "hello", "guid": guid, "leg": agent_id.as_str()});
-            if let Err(e) = transport.send_frame(hello).await {
-                transport.close().await;
-                return json!({"error": format!("bridge: {kind} boot failed: hello: {}", transport_error_text(&e))});
-            }
-        }
-    }
-
-    // Spawn the read loop BEFORE we publish the state so the
-    // very first inbound frame can land.
-    let read_state = Arc::clone(&state);
-    let read_agent = agent_id.clone();
-    let read_kernel = Arc::clone(kernel);
-    let read_family = family;
-    // REGISTERED, AND UNDER THE LEG'S OWN IDENTITY. The read loop outlives the
-    // `boot` dispatch and issues a send per inbound frame, so it is real work:
-    // `spawn_task` gives it a `ps` row and a `cancel` that reaches it, and
-    // carries this dispatch's sender into the fork — without it an inbound `call`
-    // would reach `Kernel::launch` with `current_sender() == None`, the OPERATOR,
-    // and the two-sided gate would be skipped for every frame a peer sends.
-    let task_id = kernel.spawn_task(&agent_id.clone(), "read_loop", async move {
-        read_loop(read_agent, read_state, read_kernel, read_family).await;
-    });
-    *state.read_task.lock().await = Some(task_id);
-
-    BRIDGES.lock().insert(agent_id.clone(), Arc::clone(&state));
-
-    // The watches the dropped link held, asked for again on this one. A failed
-    // send is the link dropping already: the read loop sees it and redials.
-    for src in &carried {
-        let _ = transport
-            .send_frame(json!({"type": "watch", "src": src}))
-            .await;
-    }
-
-    kernel.emit(agent_id, json!({"type": "bridge_up"})).await;
-    json!({"booted": true, "transport": kind})
+    meta_string(agent_id, kernel, "transport")
+        .ok_or_else(|| json!({"error": "bridge: the record has no `transport`"}))
 }
 
-/// python's per-derivation `build_transport(kind, rec, kernel, st)` — the ONLY
-/// difference between the two bundles. Its `Err` is python's raised `ValueError`
-/// text; the caller wraps it as `bridge: <kind> boot failed: <text>`.
-async fn build_transport(
-    family: Family,
-    agent_id: &AgentId,
-    kernel: &Arc<Kernel>,
-) -> Result<Arc<dyn BridgeTransport>, String> {
-    match family {
-        Family::Ws => build_ws_transport(agent_id, kernel).await,
-        Family::Relay => build_relay_transport(agent_id, kernel).await,
+/// A `ws` leg's `boot`, with the remote agents a dropped link was watching: the new
+/// link asks the far side for each of them again, so a watcher of this leg keeps
+/// receiving without subscribing anew. A plain `boot` carries none.
+///
+/// Boxed: the read loop `boot` spawns redials through this very function, and a
+/// boxed `Send` future breaks the cycle the compiler would otherwise chase.
+fn boot_ws<'a>(
+    agent_id: &'a AgentId,
+    kernel: &'a Arc<Kernel>,
+    carried: HashSet<String>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send + 'a>> {
+    Box::pin(async move {
+        let kind = match boot_kind(agent_id, kernel) {
+            Ok(k) => k,
+            Err(v) => return v,
+        };
+        let transport: Arc<dyn BridgeTransport> = match injected_for(&kind, agent_id) {
+            Some(Ok(t)) => t,
+            Some(Err(refusal)) => return refusal,
+            None => match build_ws_transport(agent_id, kernel).await {
+                Ok(t) => t,
+                Err(e) => return json!({"error": format!("bridge: {kind} boot failed: {e}")}),
+            },
+        };
+        booted(Family::Ws, agent_id, kernel, kind, transport, carried).await
+    })
+}
+
+/// The relay legs whose boot is reading its password: what each later boot of the
+/// same leg runs with the first one's answer (one dial per leg, never two).
+static RELAY_BOOTING: OnceLock<Mutex<HashMap<AgentId, Vec<BootDone>>>> = OnceLock::new();
+
+fn relay_booting() -> std::sync::MutexGuard<'static, HashMap<AgentId, Vec<BootDone>>> {
+    RELAY_BOOTING
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("relay booting poisoned")
+}
+
+/// A relay leg's `boot`, as STEPS (#795): the transport's eager dial reads the
+/// password first (a step), and its settle builds the leg; `done` gets the reply. A
+/// boot of the same leg while one is dialing gets that boot's answer (`already` when
+/// it came up) once it is in.
+async fn boot_relay(agent_id: &AgentId, kernel: &Arc<Kernel>, done: BootDone) {
+    let kind = match boot_kind(agent_id, kernel) {
+        Ok(k) => k,
+        Err(v) => return done(v).await,
+    };
+    match injected_for(&kind, agent_id) {
+        Some(Ok(t)) => {
+            let v = booted(Family::Relay, agent_id, kernel, kind, t, HashSet::new()).await;
+            return done(v).await;
+        }
+        Some(Err(refusal)) => return done(refusal).await,
+        None => {}
     }
+    {
+        let mut booting = relay_booting();
+        if let Some(joiners) = booting.get_mut(agent_id) {
+            joiners.push(done);
+            return;
+        }
+        booting.insert(agent_id.clone(), Vec::new());
+    }
+    let (id, k) = (agent_id.clone(), Arc::clone(kernel));
+    build_relay_transport(
+        agent_id,
+        kernel,
+        Box::new(move |built| {
+            Box::pin(async move {
+                let v = match built {
+                    Ok(t) => booted(Family::Relay, &id, &k, kind.clone(), t, HashSet::new()).await,
+                    Err(e) => json!({"error": format!("bridge: {kind} boot failed: {e}")}),
+                };
+                let joiners = relay_booting().remove(&id).unwrap_or_default();
+                for j in joiners {
+                    let again = if v.get("error").is_none() {
+                        json!({"already": true, "transport": kind})
+                    } else {
+                        v.clone()
+                    };
+                    j(again).await;
+                }
+                done(v).await;
+            })
+        }),
+    )
+    .await;
+}
+
+/// The leg built over its `transport`: the state published, the read loop spawned,
+/// the carried watches asked again, `bridge_up` said.
+fn booted<'a>(
+    family: Family,
+    agent_id: &'a AgentId,
+    kernel: &'a Arc<Kernel>,
+    kind: String,
+    transport: Arc<dyn BridgeTransport>,
+    carried: HashSet<String>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send + 'a>> {
+    Box::pin(async move {
+        let state = Arc::new(BridgeState {
+            transport: Arc::clone(&transport),
+            transport_kind: kind.clone(),
+            read_task: AsyncMutex::new(None),
+            pending: Mutex::new(HashMap::new()),
+            // this boot's correlator nonce; the count restarts under it
+            corr_prefix: new_corr_prefix(agent_id),
+            corr_counter: AtomicU64::new(0),
+            down_emitted: std::sync::atomic::AtomicBool::new(false),
+            watching: Mutex::new(carried.clone()),
+            served: Mutex::new(HashMap::new()),
+        });
+
+        // HELLO FIRST: the far `web_ws` registers this connection as this kernel's
+        // leg, so its agents reach ours as `<guid>|<agent>` — at every boot, so a
+        // redial (`reconnect`) replaces the dropped connection there. A kernel with
+        // no guid yet has no address to give and says nothing.
+        if family == Family::Ws {
+            if let Some(guid) = own_guid(kernel) {
+                let hello = json!({"type": "hello", "guid": guid, "leg": agent_id.as_str()});
+                if let Err(e) = transport.send_frame(hello).await {
+                    transport.close().await;
+                    return json!({"error": format!("bridge: {kind} boot failed: hello: {}", transport_error_text(&e))});
+                }
+            }
+        }
+
+        // Spawn the read loop BEFORE we publish the state so the
+        // very first inbound frame can land.
+        let read_state = Arc::clone(&state);
+        let read_agent = agent_id.clone();
+        let read_kernel = Arc::clone(kernel);
+        let read_family = family;
+        // REGISTERED, AND UNDER THE LEG'S OWN IDENTITY. The read loop outlives the
+        // `boot` dispatch and issues a send per inbound frame, so it is real work:
+        // `spawn_task` gives it a `ps` row and a `cancel` that reaches it, and
+        // carries this dispatch's sender into the fork — without it an inbound `call`
+        // would reach `Kernel::launch` with `current_sender() == None`, the OPERATOR,
+        // and the two-sided gate would be skipped for every frame a peer sends.
+        let task_id = kernel.spawn_task(&agent_id.clone(), "read_loop", async move {
+            read_loop(read_agent, read_state, read_kernel, read_family).await;
+        });
+        *state.read_task.lock().await = Some(task_id);
+
+        BRIDGES.lock().insert(agent_id.clone(), Arc::clone(&state));
+
+        // The watches the dropped link held, asked for again on this one. A failed
+        // send is the link dropping already: the read loop sees it and redials.
+        for src in &carried {
+            let _ = transport
+                .send_frame(json!({"type": "watch", "src": src}))
+                .await;
+        }
+
+        kernel.emit(agent_id, json!({"type": "bridge_up"})).await;
+        json!({"booted": true, "transport": kind})
+    })
 }
 
 /// python `ws_bridge._ws.build_transport` — `host` explicit, nothing guessed.
@@ -864,10 +958,39 @@ async fn build_ws_transport(
 
 /// python `relay_connector._relay.build_transport` — validates BEFORE minting
 /// the guid, so a refused boot leaves no identity behind.
-async fn build_relay_transport(
-    agent_id: &AgentId,
-    kernel: &Arc<Kernel>,
-) -> Result<Arc<dyn BridgeTransport>, String> {
+async fn build_relay_transport(agent_id: &AgentId, kernel: &Arc<Kernel>, next: BuiltNext) {
+    match relay_args(agent_id, kernel).await {
+        Ok((relay_url, guid, partner, reconnect, heartbeat)) => {
+            let identity = identity_from_meta(agent_id, kernel);
+            RelayTransport::connect(
+                &relay_url,
+                &guid,
+                password_reader(agent_id, kernel, &relay_url),
+                &partner,
+                reconnect,
+                heartbeat,
+                identity,
+                RelaySpawn::new(kernel, agent_id),
+                Box::new(move |t| {
+                    Box::pin(async move {
+                        next(t.map(|t| t as Arc<dyn BridgeTransport>).map_err(|e| transport_error_text(&e))).await;
+                    })
+                }),
+            )
+            .await;
+        }
+        Err(e) => next(Err(e)).await,
+    }
+}
+
+/// What runs with a built relay transport, or why it was not built.
+type BuiltNext = Box<
+    dyn FnOnce(Result<Arc<dyn BridgeTransport>, String>) -> futures_util::future::BoxFuture<'static, ()> + Send,
+>;
+
+/// A relay leg's dial arguments off its record — `(relay_url, guid, partner,
+/// reconnect, heartbeat)` — the guid minted and written on its first boot.
+async fn relay_args(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(String, String, String, f64, f64), String> {
     let relay_url = meta_string(agent_id, kernel, "relay_url");
     let partner = meta_string(agent_id, kernel, "partner_guid");
     let (Some(relay_url), Some(partner)) = (relay_url, partner) else {
@@ -905,20 +1028,7 @@ async fn build_relay_transport(
             g
         }
     };
-    let identity = identity_from_meta(agent_id, kernel);
-    RelayTransport::connect(
-        &relay_url,
-        &guid,
-        password_reader(agent_id, kernel, &relay_url),
-        &partner,
-        reconnect,
-        heartbeat,
-        identity,
-        RelaySpawn::new(kernel, agent_id),
-    )
-    .await
-    .map(|t| t as Arc<dyn BridgeTransport>)
-    .map_err(|e| transport_error_text(&e))
+    Ok((relay_url, guid, partner, reconnect, heartbeat))
 }
 
 /// The bare message a python `ConnectionClosed`/`ValueError` carries — rust's
@@ -973,11 +1083,6 @@ async fn shutdown_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     // Python branch: callers see a ConnectionError flavour.
     fail_pending(kernel, &state, "bridge shut down");
     json!({"stopped": true})
-}
-
-async fn reconnect_reply(family: Family, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
-    let _ = shutdown_reply(agent_id, kernel).await;
-    boot_reply(family, agent_id, kernel).await
 }
 
 /// The shared forward engine — ships a raw `call` frame (text, or binary when
@@ -1588,7 +1693,7 @@ async fn read_loop(
     // loop is not a drop to heal: the memory transport is a test pair, and the
     // relay transport heals its own socket.
     if family == Family::Ws && state.transport_kind == "ws" {
-        redial(family, &agent_id, &state, &kernel).await;
+        redial(&agent_id, &state, &kernel).await;
     }
 }
 
@@ -1614,7 +1719,6 @@ fn redial_delay(attempt: u32) -> std::time::Duration {
 /// `shutdown` (the verb or the agent's deletion) cancels it with that task; a
 /// `reconnect` or `boot` that got there first has replaced the state, and ends it.
 async fn redial(
-    family: Family,
     agent_id: &AgentId,
     dropped: &Arc<BridgeState>,
     kernel: &Arc<Kernel>,
@@ -1633,7 +1737,7 @@ async fn redial(
         if !current.is_some_and(|c| Arc::ptr_eq(&c, dropped)) {
             return;
         }
-        let r = boot_carrying(family, agent_id, kernel, watched.clone()).await;
+        let r = boot_ws(agent_id, kernel, watched.clone()).await;
         if r.get("error").is_none() {
             return;
         }

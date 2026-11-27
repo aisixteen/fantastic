@@ -649,21 +649,35 @@ async fn the_images_of_a_request_reach_the_provider_on_the_binary_path_before_th
     let part = json!({"type": "image", "needs": "images", "ref": "img-7", "media_type": "image/png",
                       "width": 16, "height": 16, "bytes": raw.len(), "hash": "x"});
     let rp = crate::remote_provider::RemoteProvider::new(&k, &chat, "pics");
-    let sent = fantastic_kernel::test_support::as_agent(chat.clone(), async {
+    // the request as a message: its image goes first (a store read, then one `complete`
+    // item, each a step), then the `complete` that carries the messages
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, crate::provider::ProviderError>>();
+    fantastic_kernel::test_support::as_agent(chat.clone(), async {
         crate::memory::put_bytes(&chat, &k, "img-7", "image/png", raw.clone())
             .await
             .unwrap();
-        let messages = [json!({"role": "user", "content": "see", "images": [part]})];
-        let s = futures_util::StreamExt::collect::<Vec<_>>(
-            crate::provider::Provider::chat(&rp, &messages, None)
-                .await
-                .unwrap(),
+        let messages = vec![json!({"role": "user", "content": "see", "images": [part]})];
+        let done: crate::provider::Done = Box::new(move |r| {
+            Box::pin(async move {
+                let _ = tx.send(r);
+            })
+        });
+        rp.begin(
+            messages,
+            None,
+            (std::time::Duration::from_secs(30), 30.0),
+            Arc::new(NoLive) as Arc<dyn crate::provider::Live>,
+            done,
+            Box::new(|_| {}),
         )
         .await;
-        s.len()
     })
     .await;
-    assert_eq!(sent, 0);
+    let whole = tokio::time::timeout(std::time::Duration::from_secs(20), rx)
+        .await
+        .expect("the request settled")
+        .expect("done ran");
+    assert_eq!(whole.ok().as_deref(), Some(""), "the pass's answer: the provider streams nothing");
     let got = seen().lock().unwrap().clone();
     let mine: Vec<_> = got
         .iter()
@@ -671,4 +685,12 @@ async fn the_images_of_a_request_reach_the_provider_on_the_binary_path_before_th
         .collect();
     assert_eq!(mine.len(), 1, "{got:?}");
     assert_eq!((mine[0].1.as_str(), &mine[0].2), ("img-7", &raw));
+}
+
+/// A live view that shows nothing.
+struct NoLive;
+
+#[async_trait::async_trait]
+impl crate::provider::Live for NoLive {
+    async fn token(&self, _t: &str) {}
 }

@@ -534,3 +534,219 @@ async fn a_memory_verb_whose_store_is_gone_fails_as_a_raise() {
         out.result
     );
 }
+
+// ── the provider side (#795 C2) ──────────────────────────────────────────────
+
+/// A credential store whose `get` is held until [`CREDS_OPEN`] opens; it answers the
+/// key `k-steps` for any ref.
+struct HeldCreds;
+
+static CREDS_OPEN: OnceLock<tokio::sync::watch::Sender<bool>> = OnceLock::new();
+static CREDS_HELD: AtomicUsize = AtomicUsize::new(0);
+
+fn creds_gate() -> &'static tokio::sync::watch::Sender<bool> {
+    CREDS_OPEN.get_or_init(|| tokio::sync::watch::channel(false).0)
+}
+
+/// `get` of the held credential store.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct Get {
+    /// The ref.
+    #[serde(rename = "ref")]
+    _reference: String,
+    /// The host the read is pinned to.
+    #[serde(rename = "host")]
+    _host: Option<String>,
+}
+
+mod creds_verbs {
+    use super::Get;
+    fantastic_kernel::verbs! { "get" => Get }
+}
+
+#[async_trait]
+impl Handler for HeldCreds {
+    type Call = creds_verbs::Call;
+    fn name(&self) -> &str {
+        "steps_creds"
+    }
+    fn man(&self) -> &'static str {
+        "A credential store that answers once its gate opens."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        creds_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, a: &Agent) -> Vec<fantastic_kernel::DynVerb> {
+        creds_verbs::dynamic_verbs(a)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &crate::tests_decl::any::RECORD
+    }
+    async fn handle(&self, agent_id: &AgentId, call: Self::Call, _kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
+        use creds_verbs::Call;
+        Ok(Some(match call {
+            Call::Reflect(_) => json!({"id": agent_id.as_str()}),
+            Call::Get(_) => {
+                CREDS_HELD.fetch_add(1, Ordering::SeqCst);
+                let mut rx = creds_gate().subscribe();
+                while !*rx.borrow_and_update() {
+                    if rx.changed().await.is_err() {
+                        break;
+                    }
+                }
+                json!({"fields": {"api_key": "k-steps"}})
+            }
+        }))
+    }
+}
+
+/// A model that answers with the key its request was given for its endpoint.
+struct Keyed(Arc<dyn crate::credentials::KeySource>);
+
+#[async_trait]
+impl Provider for Keyed {
+    async fn chat(&self, _messages: &[Value], _max_tokens: Option<i64>) -> Result<ProviderStream, ProviderError> {
+        let key = self.0.key("http://steps.test/v1").await.map_err(|e| ProviderError::raised(e.0))?;
+        let ev: Vec<Result<ProviderEvent, ProviderError>> = vec![Ok(ProviderEvent::Token(format!("key={key:?}")))];
+        Ok(Box::pin(futures_util::stream::iter(ev)))
+    }
+    fn model(&self) -> String {
+        "keyed-1".to_string()
+    }
+}
+
+/// A provider agent: every verb through [`crate::remote_provider::handle`], its key read
+/// from its record's `credentials`.
+struct StepsProvider;
+
+#[async_trait]
+impl Handler for StepsProvider {
+    type Call = crate::declared::provider::Call;
+    fn name(&self) -> &str {
+        "steps_provider"
+    }
+    fn man(&self) -> &'static str {
+        "A provider whose key and settings are steps."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        crate::declared::provider::VERBS
+    }
+    fn dynamic_verbs(&self, a: &Agent) -> Vec<fantastic_kernel::DynVerb> {
+        crate::declared::provider::dynamic_verbs(a)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &crate::tests_decl::any::RECORD
+    }
+    async fn handle(&self, agent_id: &AgentId, call: Self::Call, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
+        crate::remote_provider::handle(
+            agent_id,
+            call,
+            kernel,
+            Some(crate::remote_provider::Keys { backend: "steps_provider", required: false }),
+            None,
+            |_meta, key| Arc::new(Keyed(key)) as Arc<dyn Provider>,
+            crate::remote_provider::NO_LIVE,
+            || json!({"id": "steps_provider"}),
+        )
+        .await
+    }
+}
+
+/// A kernel with the gated store, the held credential store `steps_creds` and the
+/// provider agent `provider` (its settings in the store, its key in `steps_creds`).
+async fn provider_setup(tmp: &TempDir, provider: &str) -> Arc<Kernel> {
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
+    kernel.bundles.register("steps_provider.tools", StepsProvider);
+    kernel.bundles.register("steps_creds.tools", HeldCreds);
+    kernel.bundles.register(
+        fantastic_ram_store::HANDLER_MODULE,
+        Gated(fantastic_ram_store::RamStoreBundle::default()),
+    );
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(AgentId::from("kernel_state"), None, None, Map::new(), tmp.path().join(".fantastic"), false);
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    if kernel.resolve_target("steps_creds").is_none() {
+        create(&kernel, json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "steps_creds.tools", "id": "steps_creds"})).await;
+    }
+    let can = json!({"steps_creds": {"call": ["get"]}});
+    let memory = fantastic_ram_store::test_support::memory_meta(&kernel, provider, can).await;
+    let mut c = json!({
+        "type": "create_agent",
+        "parent_id": "kernel",
+        "handler_module": "steps_provider.tools",
+        "id": provider,
+        "endpoint": "http://steps.test/v1",
+        "credentials": {"store": "steps_creds", "ref": "steps"},
+    });
+    for (k, v) in memory {
+        c[k] = v;
+    }
+    create(&kernel, c).await;
+    kernel
+}
+
+/// A PROVIDER'S KEY READ IS A STEP (#795): its `complete` defers and sends the read to
+/// the credential store; while the store holds it the call stays open, and the read's
+/// settle runs the pass with that key, pinned to the record's endpoint.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_providers_key_read_is_a_step_and_its_settle_runs_the_pass() {
+    let tmp = TempDir::new().unwrap();
+    let p = "steps_p1";
+    let kernel = provider_setup(&tmp, p).await;
+    let before = CREDS_HELD.load(Ordering::SeqCst);
+    let settle = call_bg(
+        &kernel,
+        p,
+        json!({"type": "complete", "rid": "r1", "model": "keyed-1",
+               "messages": [{"role": "user", "content": "hi"}]}),
+    );
+    assert!(
+        until(|| CREDS_HELD.load(Ordering::SeqCst) > before).await,
+        "the key was never read"
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!settle.is_finished(), "complete was answered before its key was read");
+    let _ = creds_gate().send(true);
+    let out = tokio::time::timeout(Duration::from_secs(5), settle)
+        .await
+        .expect("complete never settled")
+        .unwrap();
+    assert_eq!(out.status, fantastic_kernel::Status::Completed, "{}", out.result);
+    assert_eq!(out.result["text"], json!("key=Some(\"k-steps\")"), "{}", out.result);
+}
+
+/// A PROVIDER'S SETTINGS ARE STEPS (#795): `set_default_model` stays open while the
+/// store holds its write and settles from the write's settle; `models` reads the default
+/// the same way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_providers_setting_write_and_read_are_steps() {
+    let tmp = TempDir::new().unwrap();
+    let p = "steps_p2";
+    let kernel = provider_setup(&tmp, p).await;
+    let g = gate(p, What::Append);
+    let settle = call_bg(&kernel, p, json!({"type": "set_default_model", "model": "m-2"}));
+    assert!(until(|| g.held.load(Ordering::SeqCst) >= 1).await, "the setting never went to the store");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!settle.is_finished(), "set_default_model was answered before its write settled");
+    let _ = g.open.send(true);
+    let out = tokio::time::timeout(Duration::from_secs(5), settle)
+        .await
+        .expect("set_default_model never settled")
+        .unwrap();
+    assert_eq!(out.result, json!({"default": "m-2"}));
+    let g = gate(p, What::Read);
+    let settle = call_bg(&kernel, p, json!({"type": "models"}));
+    assert!(until(|| g.held.load(Ordering::SeqCst) >= 1).await, "the default was never read");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!settle.is_finished(), "models was answered before its read settled");
+    let _ = g.open.send(true);
+    let out = tokio::time::timeout(Duration::from_secs(5), settle)
+        .await
+        .expect("models never settled")
+        .unwrap();
+    assert_eq!(out.result["default"], json!("m-2"), "{}", out.result);
+}

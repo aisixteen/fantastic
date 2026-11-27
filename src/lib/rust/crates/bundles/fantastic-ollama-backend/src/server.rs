@@ -11,7 +11,7 @@
 //! request's `num_ctx`, else the Modelfile's, else the server's default — and that
 //! default is not in the API, so nothing about the window is read.
 
-use fantastic_ai_core::credentials::{key_reader, KeySource};
+use fantastic_ai_core::credentials::KeySource;
 use fantastic_ai_core::helpers;
 use fantastic_kernel::refusal::{refusal, with};
 use fantastic_kernel::{AgentId, Kernel};
@@ -100,9 +100,10 @@ pub(crate) async fn read_model_at(endpoint: &str, key: &dyn KeySource) -> Result
     served_model(&body, &url).map_err(|e| (None, e))
 }
 
-/// Read an absent `model` from the server and write it back. `None` when the
-/// record names one or it was written; otherwise the verb's refusal.
-pub async fn resolve(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Option<Value> {
+/// Read an absent `model` from the server with `key` (read for the record's endpoint
+/// before, a step) and write it back. `None` when the record names one or it was
+/// written; otherwise the verb's refusal.
+pub async fn resolve(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &dyn KeySource) -> Option<Value> {
     let rec = helpers::agent_meta(agent_id, kernel);
     let endpoint = rec
         .get("endpoint")
@@ -114,8 +115,7 @@ pub async fn resolve(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Option<Value> 
     if rec.get("model").is_some_and(|m| !m.is_null()) || endpoint.is_empty() {
         return None;
     }
-    let key = key_reader(agent_id, kernel, crate::BACKEND, false);
-    match read_model_at(&endpoint, &key).await {
+    match read_model_at(&endpoint, key).await {
         Ok(model) => {
             let mut patch = Map::new();
             patch.insert("model".into(), json!(model));

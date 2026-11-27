@@ -228,6 +228,18 @@ async fn rig_on(
     key: &str,
     credentials: bool,
 ) -> (Arc<Kernel>, tempfile::TempDir) {
+    rig_with_store(url, host, key, credentials, None).await
+}
+
+/// [`rig_on`] on `held` as the credential store (a slow store, #795), else the plain
+/// test store.
+async fn rig_with_store(
+    url: &str,
+    host: Option<&str>,
+    key: &str,
+    credentials: bool,
+    held: Option<creds::HeldBundle>,
+) -> (Arc<Kernel>, tempfile::TempDir) {
     let authority = reqwest::Url::parse(url).unwrap();
     let authority = format!(
         "{}:{}",
@@ -237,9 +249,12 @@ async fn rig_on(
     let host = host.unwrap_or(&authority);
     let tmp = tempfile::TempDir::new().unwrap();
     let mut kernel = Kernel::new();
-    kernel
-        .bundles
-        .register(fantastic_credential_store::HANDLER_MODULE, creds::bundle());
+    match held {
+        Some(h) => kernel.bundles.register(fantastic_credential_store::HANDLER_MODULE, h),
+        None => kernel
+            .bundles
+            .register(fantastic_credential_store::HANDLER_MODULE, creds::bundle()),
+    }
     kernel
         .bundles
         .register(HANDLER_MODULE, McpClientBundle::default());
@@ -787,4 +802,37 @@ async fn a_call_past_its_timeout_settles_timed_out() {
     item.timeout = Some(0.5);
     let out = r.kernel.operator_send(vec![item]).await.remove(0);
     assert_eq!(out.status, Status::TimedOut, "{}", out.result);
+}
+
+/// THE KEY READ IS A STEP (#795): a `boot` call defers and sends the key read to the
+/// credential store; while the store holds it the call stays open and the server is
+/// not reached; the read's settle lists the tools and settles the call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_key_read_is_a_step_and_its_settle_lists_the_tools() {
+    let (srv, seen) = server(Some(KEY), vec![PROTOCOL]).await;
+    let url = format!("{}/mcp", srv.uri());
+    let (store, gate) = creds::held_bundle("mcp");
+    let (kernel, _tmp) = rig_with_store(&url, None, KEY, true, Some(store)).await;
+    let k = Arc::clone(&kernel);
+    let boot = tokio::spawn(async move { send(&k, "mcp", json!({"type": "boot"})).await });
+    for _ in 0..250 {
+        if gate.held() >= 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(gate.held() >= 1, "the key was never read");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!boot.is_finished(), "boot was answered before its key was read");
+    assert!(seen.lock().unwrap().is_empty(), "the server was reached before the key was read");
+    gate.open();
+    let out = tokio::time::timeout(std::time::Duration::from_secs(5), boot)
+        .await
+        .expect("boot never settled")
+        .unwrap();
+    assert_eq!(out.status, Status::Completed, "{}", out.result);
+    assert!(out.result["tools"].as_array().is_some_and(|t| !t.is_empty()), "{}", out.result);
+    for (h, _) in seen.lock().unwrap().iter() {
+        assert_eq!(h["authorization"], format!("Bearer {KEY}"), "the key read is the one sent");
+    }
 }

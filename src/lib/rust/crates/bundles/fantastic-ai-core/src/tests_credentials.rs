@@ -64,11 +64,11 @@ async fn the_reader_reads_the_key_per_request_and_records_none() {
     let tmp = tempfile::TempDir::new().unwrap();
     let k = mk(&tmp).await;
     let read = key_reader(&AgentId::from("ai"), &k, "responses_backend", true);
-    assert_eq!(fantastic_kernel::test_support::as_agent(AgentId::from("ai"), read.read(EP)).await, Ok(Some(KEY.to_string())));
+    assert_eq!(fantastic_kernel::test_support::as_agent(AgentId::from("ai"), read.read_now(EP)).await, Ok(Some(KEY.to_string())));
     // rotate
     creds::set_key(&k, tmp.path(), "ai", "claude", "api.example.com", KEY2).await;
     assert_eq!(
-        fantastic_kernel::test_support::as_agent(AgentId::from("ai"), read.read(EP)).await,
+        fantastic_kernel::test_support::as_agent(AgentId::from("ai"), read.read_now(EP)).await,
         Ok(Some(KEY2.to_string())),
         "a rotated key is used by the next request"
     );
@@ -89,7 +89,7 @@ async fn a_key_bound_to_another_host_is_refused() {
     let k = mk(&tmp).await;
     let read = key_reader(&AgentId::from("ai"), &k, "responses_backend", true);
     let e = fantastic_kernel::test_support::as_agent(AgentId::from("ai"), read
-        .read("https://evil.example.net/v1/messages")).await
+        .read_now("https://evil.example.net/v1/messages")).await
         .unwrap_err();
     assert!(e.0.contains("bound to host 'api.example.com'"), "{e}");
     assert_eq!(
@@ -113,11 +113,11 @@ async fn no_credentials_is_no_key_or_a_loud_refusal() {
     ));
     let bare = AgentId::from("bare");
     assert_eq!(
-        fantastic_kernel::test_support::as_agent(bare.clone(), key_reader(&bare, &k, "vllm_backend", false).read(EP)).await,
+        fantastic_kernel::test_support::as_agent(bare.clone(), key_reader(&bare, &k, "vllm_backend", false).read_now(EP)).await,
         Ok(None)
     );
     let e = fantastic_kernel::test_support::as_agent(bare.clone(), key_reader(&bare, &k, "responses_backend", true)
-        .read(EP)).await
+        .read_now(EP)).await
         .unwrap_err();
     assert_eq!(
         e.0,
@@ -142,7 +142,7 @@ async fn a_malformed_record_or_a_missing_field_is_named() {
     set_cred(json!({"store": "creds"}));
     assert_eq!(
         fantastic_kernel::test_support::as_agent(ai.clone(), key_reader(&ai, &k, "responses_backend", true)
-            .read(EP)).await
+            .read_now(EP)).await
             .unwrap_err(),
         CredentialError(
             "responses_backend: credentials creds/: get: argument 'ref' must be string of at least 1 character(s), got str"
@@ -172,7 +172,7 @@ async fn a_malformed_record_or_a_missing_field_is_named() {
     assert_eq!(out.result["stored"], json!(true), "{}", out.result);
     assert_eq!(
         fantastic_kernel::test_support::as_agent(ai.clone(), key_reader(&ai, &k, "responses_backend", true)
-            .read(EP)).await
+            .read_now(EP)).await
             .unwrap_err()
             .0,
         "responses_backend: credential 'other' in 'creds' has no 'api_key' field"
@@ -199,7 +199,7 @@ async fn a_key_that_is_not_a_legal_header_value_is_refused_by_its_ref() {
         format!("{KEY}é"),
     ] {
         creds::set_key(&k, tmp.path(), "ai", "claude", "api.example.com", &bad).await;
-        let e = fantastic_kernel::test_support::as_agent(AgentId::from("ai"), read.read(EP)).await.unwrap_err();
+        let e = fantastic_kernel::test_support::as_agent(AgentId::from("ai"), read.read_now(EP)).await.unwrap_err();
         assert_eq!(
             e.0,
             "responses_backend: credential 'claude' in 'creds': 'api_key' is not a legal \
@@ -210,7 +210,7 @@ async fn a_key_that_is_not_a_legal_header_value_is_refused_by_its_ref() {
         assert!(!e.0.contains(&KEY[4..]));
     }
     creds::set_key(&k, tmp.path(), "ai", "claude", "api.example.com", "sk a\tb").await;
-    assert_eq!(fantastic_kernel::test_support::as_agent(AgentId::from("ai"), read.read(EP)).await, Ok(Some("sk a\tb".to_string())));
+    assert_eq!(fantastic_kernel::test_support::as_agent(AgentId::from("ai"), read.read_now(EP)).await, Ok(Some("sk a\tb".to_string())));
 }
 
 const TOKEN: &str = "tok-made-up-4455";
@@ -234,11 +234,11 @@ async fn read_fields_returns_the_named_fields_of_one_ref_in_order() {
     store_fields(&k, json!({"token": TOKEN, "app_id": APP})).await;
     let read = key_reader(&AgentId::from("ai"), &k, "github_backend", true);
     assert_eq!(
-        fantastic_kernel::test_support::as_agent(AgentId::from("ai"), read.read_fields(EP, &["app_id", "token"])).await,
+        fantastic_kernel::test_support::as_agent(AgentId::from("ai"), read.read_fields_now(EP, &["app_id", "token"])).await,
         Ok(Some(vec![APP.to_string(), TOKEN.to_string()]))
     );
     assert_eq!(
-        fantastic_kernel::test_support::as_agent(AgentId::from("ai"), read.read_fields(EP, &["token", "app_id"])).await,
+        fantastic_kernel::test_support::as_agent(AgentId::from("ai"), read.read_fields_now(EP, &["token", "app_id"])).await,
         Ok(Some(vec![TOKEN.to_string(), APP.to_string()]))
     );
 }
@@ -250,7 +250,7 @@ async fn read_fields_names_the_missing_field_never_a_value() {
     store_fields(&k, json!({"token": TOKEN})).await;
     let read = key_reader(&AgentId::from("ai"), &k, "github_backend", true);
     let e = fantastic_kernel::test_support::as_agent(AgentId::from("ai"), read
-        .read_fields(EP, &["token", "app_id"])).await
+        .read_fields_now(EP, &["token", "app_id"])).await
         .unwrap_err();
     assert_eq!(
         e.0,
@@ -266,7 +266,7 @@ async fn read_fields_is_pinned_to_the_endpoint_host() {
     store_fields(&k, json!({"token": TOKEN})).await;
     let read = key_reader(&AgentId::from("ai"), &k, "github_backend", true);
     let e = fantastic_kernel::test_support::as_agent(AgentId::from("ai"), read
-        .read_fields("https://evil.example.net/v1", &["token"])).await
+        .read_fields_now("https://evil.example.net/v1", &["token"])).await
         .unwrap_err();
     assert_eq!(
         e.0,
@@ -289,5 +289,5 @@ async fn read_fields_without_credentials_is_none_when_optional() {
         false,
     ));
     let read = key_reader(&AgentId::from("bare"), &k, "github_backend", false);
-    assert_eq!(fantastic_kernel::test_support::as_agent(AgentId::from("bare"), read.read_fields(EP, &["token"])).await, Ok(None));
+    assert_eq!(fantastic_kernel::test_support::as_agent(AgentId::from("bare"), read.read_fields_now(EP, &["token"])).await, Ok(None));
 }

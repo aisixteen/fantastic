@@ -13,7 +13,7 @@ pub mod fold;
 pub mod strip;
 
 use crate::constants::NOTICE_ENVELOPE_RESERVE;
-use crate::model_format::pass::Pass;
+use crate::model_format::pass::{Pass, Pending};
 use fantastic_bundle::py_strip;
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Value};
@@ -109,11 +109,13 @@ pub fn recent_split(body: &[Value], recent_n: usize) -> (Vec<Value>, Vec<Value>)
 /// NO INPUT CUT. A REASONING MODEL THINKS OUT LOUD HERE TOO: unstripped,
 /// model-written folds carry titles beginning `<think>The user wants me to
 /// summarize…`. Side calls strip like the main turn.
-pub(crate) async fn summarize(
+///
+/// The answer is READ FROM THE PASS'S BOOK (#795): [`Pending`] when it has not come yet.
+pub(crate) fn summarize(
     pass: &Pass,
     msgs: &[Value],
     max_tokens: Option<i64>,
-) -> (String, bool) {
+) -> Result<(String, bool), Pending> {
     let rendered: String = msgs
         .iter()
         .map(|m| {
@@ -143,33 +145,33 @@ pub(crate) async fn summarize(
              decisions, facts, preferences, and unresolved tasks. Output ONLY the summary."}),
         json!({"role": "user", "content": rendered}),
     ];
-    let Some(done) = pass.task(&prompt, max_tokens).await else {
-        return (String::new(), false);
+    let Some(done) = pass.task(&prompt, max_tokens)? else {
+        return Ok((String::new(), false));
     };
     let cut = done.report.stop_reason.as_deref() == Some("max_tokens");
-    (done.text, cut)
+    Ok((done.text, cut))
 }
 
 /// Summarize the overflow via [`summarize`]; degrade to a stub on ANY failure (a
 /// degraded artifact — the full transcript is whole in the durable store, so this
 /// is not a fallback chain). Python `safe_summary`.
-pub(crate) async fn safe_summary(pass: &Pass, overflow: &[Value]) -> String {
-    let (s, _cut) = summarize(pass, overflow, None).await;
+pub(crate) fn safe_summary(pass: &Pass, overflow: &[Value]) -> Result<String, Pending> {
+    let (s, _cut) = summarize(pass, overflow, None)?;
     let s = py_strip(&s);
-    if s.is_empty() {
+    Ok(if s.is_empty() {
         STUB_SUMMARY.to_string()
     } else {
         s.to_string()
-    }
+    })
 }
 
 /// `compact` (DEFAULT): keep the recent turns verbatim + an LLM summary of
 /// the overflow. The summary rides the artifact; the seam wraps it.
-pub(crate) async fn compact(body: &[Value], recent: usize, budget: i64, pass: &Pass) -> Projection {
+pub(crate) fn compact(body: &[Value], recent: usize, budget: i64, pass: &Pass) -> Result<Projection, Pending> {
     let size = |m: &Value| pass.tokens(m);
     let (overflow, recent_turns) = recent_split(body, recent);
     if overflow.is_empty() {
-        return Projection {
+        return Ok(Projection {
             body: fit_tail(body, budget, &size),
             summary: None,
             omitted_marker: false,
@@ -177,9 +179,9 @@ pub(crate) async fn compact(body: &[Value], recent: usize, budget: i64, pass: &P
             stripped_bytes: 0,
             folds: Vec::new(),
             unanchored: 0,
-        };
+        });
     }
-    let summary = safe_summary(pass, &overflow).await;
+    let summary = safe_summary(pass, &overflow)?;
     // Reserve room for the notice the seam prepends: the wrapper envelope +
     // the summary text itself (the seam embeds this exact summary).
     let summary_cost = size(&json!({"role": "user", "content": summary}));
@@ -192,7 +194,7 @@ pub(crate) async fn compact(body: &[Value], recent: usize, budget: i64, pass: &P
     // doing. `truncate` pins this turn too. Cost is one turn of budget, charged
     // before the tail.
     let Some(first) = body.first() else {
-        return Projection {
+        return Ok(Projection {
             body: fit_tail(&recent_turns, avail, &size),
             summary: Some(summary),
             omitted_marker: false,
@@ -200,7 +202,7 @@ pub(crate) async fn compact(body: &[Value], recent: usize, budget: i64, pass: &P
             stripped_bytes: 0,
             folds: Vec::new(),
             unanchored: 0,
-        };
+        });
     };
     let head_cost = size(first);
     let kept = fit_tail(&recent_turns, (avail - head_cost).max(0), &size);
@@ -212,7 +214,7 @@ pub(crate) async fn compact(body: &[Value], recent: usize, budget: i64, pass: &P
         out.extend(kept);
         out
     };
-    Projection {
+    Ok(Projection {
         body,
         summary: Some(summary),
         omitted_marker: false,
@@ -220,7 +222,7 @@ pub(crate) async fn compact(body: &[Value], recent: usize, budget: i64, pass: &P
         stripped_bytes: 0,
         folds: Vec::new(),
         unanchored: 0,
-    }
+    })
 }
 
 /// `truncate`: keep the first (task-framing) turn + the recent turns, drop the

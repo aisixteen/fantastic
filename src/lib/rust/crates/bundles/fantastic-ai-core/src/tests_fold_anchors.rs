@@ -294,8 +294,8 @@ async fn project(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
     .expect("store read");
     as_agent(
         agent.clone(),
-        crate::projection::project_context(
-            &crate::model_format::pass::Pass::for_test(Arc::clone(&provider)),
+        crate::projection::projected(
+            crate::model_format::pass::Pass::for_test(Arc::clone(&provider)),
             agent,
             &state,
             kernel,
@@ -880,7 +880,7 @@ async fn summarize_fold_reports_an_unplaceable_span_before_it_summarizes() {
     };
     let out = as_agent(
         backend.clone(),
-        crate::strategies::fold::summarize_fold(&ctx, &rows, &[0, 1]),
+        async { crate::strategies::fold::summarize_fold(&ctx, &rows, &[0, 1]) },
     )
     .await;
     match out {

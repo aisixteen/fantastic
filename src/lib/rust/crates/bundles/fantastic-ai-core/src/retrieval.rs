@@ -21,8 +21,7 @@ use crate::folds::member_anchor;
 use crate::folds::{expand_ids, quoted_title, render as fold_render, row_content, row_id};
 use crate::helpers::{agent_meta, now_secs};
 use crate::history_view::{parse_reply_tag, reply_blocks};
-use crate::memory::{load_history, save_history, save_view};
-use crate::model_format::pass::Pass;
+use crate::model_format::pass::{Pass, Pending};
 use crate::strategies::fold::{fold_down, fold_row, summarize_span, summary_title};
 use crate::strategies::strip::{pid_of, LOW};
 use crate::strategies::ProjectionCtx;
@@ -261,11 +260,12 @@ pub fn first_json(text: &str) -> Option<Map<String, Value>> {
 }
 
 /// One plain completion, reasoning stripped. Python `_compose`. A TASK PASS (#766): the
-/// prompt is rendered for the pass's model type, and the answer is never parsed.
-async fn compose(pass: &Pass, prompt: &str) -> String {
-    pass.task(&[json!({"role": "user", "content": prompt})], None)
-        .await
-        .map_or_else(String::new, |done| done.text)
+/// prompt is rendered for the pass's model type, and the answer is never parsed; read
+/// from the pass's book (#795), [`Pending`] until it came.
+fn compose(pass: &Pass, prompt: &str) -> Result<String, Pending> {
+    Ok(pass
+        .task(&[json!({"role": "user", "content": prompt})], None)?
+        .map_or_else(String::new, |done| done.text))
 }
 
 /// `context_clear`: a NEW THREAD on the same store — a CLEAR-FOLD: one row whose
@@ -382,27 +382,28 @@ fn is_boundary(row: &Value) -> bool {
 /// Refused, with the reason named: an empty range, an id not in the view, a range
 /// crossing a fold or clear row, a turn running for this agent.
 ///
-/// # Errors
-/// The memory store refused a read or a write; a summary would not fit its budget
-/// after every re-summarise; a member has no known place (the turn fails loud,
-/// as an automatic fold does).
+/// AS STEPS (#795): the history read, the fold reckoned over the pass's book (its
+/// summary a task request, [`crate::model_format::pass::drive`]), then the view row
+/// written; `settle` settles the verb. It fails — the memory store refused a read or a
+/// write; a summary would not fit its budget after every re-summarise; a member has no
+/// known place — loud, as an automatic fold does.
 pub(crate) async fn context_fold(
     agent_id: &AgentId,
-    args: &crate::declared::ContextFold,
+    args: crate::declared::ContextFold,
     kernel: &Arc<Kernel>,
-    pass: &Pass,
+    pass: Pass,
     model_window: i64,
-) -> Result<Value, crate::assembly::BlockFail> {
-    use crate::memory::load_view;
+    settle: crate::steps::Settle,
+) {
     use fantastic_kernel::refusal::{bad, refusal_hint, with, BAD_ARG, LOCKED};
     let verb = "context_fold";
     // A pass in flight reads the view: it must not move under it.
     if crate::state::state_for(agent_id).life.lock().expect("life poisoned").running {
-        return Ok(refusal_hint(
+        return settle.with(Ok::<_, crate::assembly::BlockFail>(refusal_hint(
             LOCKED,
             format!("{verb}: a turn is running for {agent_id}"),
             "fold once the running turn has answered",
-        ));
+        )));
     }
     // The view is rendered as the next turn renders it, so the fold
     // persists exactly the view the next turn will send. A primer pins its prefix.
@@ -416,20 +417,88 @@ pub(crate) async fn context_fold(
                 "set caching to none or provider_cache",
             );
             with(&mut v, "arg", Value::from("caching"));
-            return Ok(v);
+            return settle.with(Ok::<_, crate::assembly::BlockFail>(v));
         }
     };
     // `from` / `to`: absent is the default.
     let (from, to) = (args.from, args.to);
     // `summary`: absent writes the summarizer's; a given one is the text.
-    let summary = match args.summary.as_deref() {
+    let summary = match args.summary {
         None => None,
         Some(s) if !s.trim().is_empty() => Some(s),
-        Some(_) => return Ok(bad(verb, "summary", "a non-empty string")),
+        Some(_) => return settle.with(Ok::<_, crate::assembly::BlockFail>(bad(verb, "summary", "a non-empty string"))),
     };
-    let rows = load_history(agent_id, kernel, false).await?;
-    let listed = listed_entries(&rows, load_view(agent_id, kernel).await?.as_ref());
-    let view = render_history(&rows, listed.as_deref());
+    // the history (a step: the head brought up to the store), then the fold reckoned
+    let (me, k) = (agent_id.clone(), Arc::clone(kernel));
+    crate::steps::history(agent_id, kernel, (pass, settle), move |(pass, settle), rows| async move {
+        let rows = match rows {
+            Ok(r) => r,
+            Err(e) => return settle.with(Err::<Value, _>(crate::assembly::BlockFail::Store(e))),
+        };
+        let view_doc = crate::memory::cached_view(&me, &k);
+        let (k2, me2) = (Arc::clone(&k), me.clone());
+        let helper = move |pass: &Pass, _: &mut crate::steps::Settle| {
+            match plan_fold(pass, &me2, &k2, &rows, view_doc.as_ref(), (from, to), summary.as_deref(), primer, &meta, model_window) {
+                Err(crate::assembly::BlockFail::Pending) => Err(Pending),
+                other => Ok(other),
+            }
+        };
+        let (k3, me3) = (Arc::clone(&k), me.clone());
+        crate::model_format::pass::drive(k, me, pass, settle, helper, move |settle, _pass, plan| async move {
+            match plan {
+                Err(e) => settle.with(Err::<Value, _>(e)),
+                Ok(FoldPlan::Answer(v)) => settle.with(Ok::<_, crate::assembly::BlockFail>(v)),
+                Ok(FoldPlan::Write { fold, ids, budget, rows, summarized }) => {
+                    let fid = row_id(&fold).unwrap_or_default();
+                    crate::steps::save_view(&me3, &k3, std::slice::from_ref(&fold), &ids, budget, verb, settle, move |settle, minted| async move {
+                        settle.with(minted.map_err(crate::assembly::BlockFail::Store).map(|minted| {
+                            let fid = minted.get(&fid).copied().unwrap_or(fid);
+                            json!({"folded": fid, "rows": rows, "summarized": summarized})
+                        }));
+                    })
+                    .await;
+                }
+            }
+        })
+        .await;
+    })
+    .await;
+}
+
+/// What a `context_fold` comes to: its answer as it is (a refusal), or the fold row and
+/// the view to write with it.
+enum FoldPlan {
+    Answer(Value),
+    Write {
+        fold: Value,
+        ids: Vec<Value>,
+        budget: i64,
+        rows: usize,
+        summarized: bool,
+    },
+}
+
+/// THE FOLD RECKONED over `rows` and the stored view `view_doc`, plain code over the
+/// pass's book (#795): the range checked, the summary (a task answer, or the given
+/// text), the fold row and the new view. [`crate::assembly::BlockFail::Pending`]: the
+/// summary's answer has not come yet.
+#[allow(clippy::too_many_arguments)]
+fn plan_fold(
+    pass: &Pass,
+    agent_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    rows: &[Value],
+    view_doc: Option<&Map<String, Value>>,
+    (from, to): (Option<i64>, Option<i64>),
+    summary: Option<&str>,
+    primer: Option<i64>,
+    meta: &Map<String, Value>,
+    model_window: i64,
+) -> Result<FoldPlan, crate::assembly::BlockFail> {
+    use fantastic_kernel::refusal::{bad, refusal_hint, with, BAD_ARG};
+    let verb = "context_fold";
+    let listed = listed_entries(rows, view_doc);
+    let view = render_history(rows, listed.as_deref());
     let pos_of = |id: i64| view.iter().position(|r| row_id(&rows[r.idx]) == Some(id));
     let empty = |arg: &str, why: &str| {
         let mut v = refusal_hint(
@@ -441,7 +510,7 @@ pub(crate) async fn context_fold(
         v
     };
     if view.is_empty() {
-        return Ok(empty("from", "the view holds no rows"));
+        return Ok(FoldPlan::Answer(empty("from", "the view holds no rows")));
     }
     // The default `from` is the row after the last fold or clear in the view.
     let default_from = view
@@ -452,18 +521,18 @@ pub(crate) async fn context_fold(
         None => default_from,
         Some(id) => match pos_of(id) {
             Some(p) => p,
-            None => return Ok(bad(verb, "from", "a row id in this agent's view")),
+            None => return Ok(FoldPlan::Answer(bad(verb, "from", "a row id in this agent's view"))),
         },
     };
     let to_p = match to {
         None => view.len() - 1,
         Some(id) => match pos_of(id) {
             Some(p) => p,
-            None => return Ok(bad(verb, "to", "a row id in this agent's view")),
+            None => return Ok(FoldPlan::Answer(bad(verb, "to", "a row id in this agent's view"))),
         },
     };
     if from_p > to_p {
-        return Ok(empty("to", "to comes before from"));
+        return Ok(FoldPlan::Answer(empty("to", "to comes before from")));
     }
     // THE PRIMER IS PINNED: the cached prefix ends at its row, so a range that starts at
     // or before that row (a range before it, or one that includes it) would move bytes
@@ -480,7 +549,7 @@ pub(crate) async fn context_fold(
                 "fold rows after the primer; the primer and the rows before it stay as they are",
             );
             with(&mut v, "arg", Value::from("from"));
-            return Ok(v);
+            return Ok(FoldPlan::Answer(v));
         }
     }
     let span: Vec<usize> = view[from_p..=to_p].iter().map(|r| r.idx).collect();
@@ -491,22 +560,21 @@ pub(crate) async fn context_fold(
             "fold the rows on each side of it separately; a fold row is never folded again by a range",
         );
         with(&mut v, "arg", Value::from("from"));
-        return Ok(v);
+        return Ok(FoldPlan::Answer(v));
     }
-    let anchor = member_anchor(&rows, &span).map_err(crate::assembly::BlockFail::FoldAnchor)?;
+    let anchor = member_anchor(rows, &span).map_err(crate::assembly::BlockFail::FoldAnchor)?;
     let (title, body, summarized) = match summary {
         // Verbatim: the body IS the given text, its first line the title.
         Some(text) => (summary_title(text), text.to_string(), true),
         None => {
-            let line = crate::line_summary::of_span(agent_id, kernel, &rows, &span);
-            let (title, body, degraded) =
-                summarize_span(pass, &rows, &span, line.as_deref()).await?;
+            let line = crate::line_summary::of_span(agent_id, kernel, rows, &span);
+            let (title, body, degraded) = summarize_span(pass, rows, &span, line.as_deref())?;
             (title, body, !degraded)
         }
     };
     // the fold row is written below, with its view row, in ONE append (#766 RS5); its
     // id is minted there (#766, fold id order)
-    let fold = fold_row(&rows, &span, anchor, &title, &body, !summarized);
+    let fold = fold_row(rows, &span, anchor, &title, &body, !summarized);
     let fid = row_id(&fold).unwrap_or_default();
     // THE NEW VIEW: the rows before the range as they were rendered (a trimmed body
     // kept as trimmed, a dropped row left out), the fold where the range began, then
@@ -521,17 +589,13 @@ pub(crate) async fn context_fold(
         }
         ids.push(kept_entry(&rows[r.idx], &r.msg, &r.res));
     }
-    let minted = save_view(
-        agent_id,
-        kernel,
-        std::slice::from_ref(&fold),
-        &ids,
-        agent_budget(&meta, model_window),
-        verb,
-    )
-    .await?;
-    let fid = minted.get(&fid).copied().unwrap_or(fid);
-    Ok(json!({"folded": fid, "rows": span.len(), "summarized": summarized}))
+    Ok(FoldPlan::Write {
+        fold,
+        ids,
+        budget: agent_budget(meta, model_window),
+        rows: span.len(),
+        summarized,
+    })
 }
 
 /// `context_forget`: compact this agent's OWN store — drop the rows the model can
@@ -760,20 +824,135 @@ pub(crate) fn standing(view: &[Value]) -> Vec<usize> {
 /// `unread`: the rows of the messages the pass that owes the recall reads (#795) —
 /// stored, but not yet history: the recall is over the rows before the first of them,
 /// and they follow its view.
+///
+/// AS STEPS (#795): the history read, the recall reckoned over the pass's book (each
+/// fold summary and the choice a task request, [`crate::model_format::pass::drive`]),
+/// then the view row and the recall row written; `next` gets the pass back and the
+/// reply, or why it failed.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn context_recall(
+pub(crate) async fn context_recall<R, F, Fut>(
     agent_id: &AgentId,
     dry: bool,
     kernel: &Arc<Kernel>,
-    pass: Option<&Pass>,
+    pass: Option<Pass>,
+    decl: &'static crate::model_format::Decl<'static>,
+    model_window: i64,
+    client_id: Option<String>,
+    unread: Vec<i64>,
+    me: Value,
+    rec: R,
+    next: F,
+) where
+    R: Send + 'static,
+    F: FnOnce(R, Option<Pass>, Result<Value, crate::assembly::BlockFail>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let (me_id, k) = (agent_id.clone(), Arc::clone(kernel));
+    crate::steps::history(agent_id, kernel, (pass, rec, next), move |(pass, rec, next), rows| async move {
+        let rows = match rows {
+            Ok(r) => r,
+            Err(e) => return next(rec, pass, Err(crate::assembly::BlockFail::Store(e))).await,
+        };
+        let client = client_id.unwrap_or_default();
+        let at = Recall { agent_id: me_id.clone(), kernel: Arc::clone(&k), decl, model_window, client: client.clone(), unread, me };
+        // A dry recall makes no model call: no pass, nothing asked
+        let Some(pass) = pass.filter(|_| !dry) else {
+            let plan = reckon_recall(None, &at, rows);
+            return written(at, plan, (), move |(), r| next(rec, None, r)).await;
+        };
+        let (k2, me2) = (Arc::clone(&k), me_id.clone());
+        let at2 = at.clone();
+        let helper = move |p: &Pass, _: &mut (R, F)| match reckon_recall(Some(p), &at2, rows.clone()) {
+            Err(crate::assembly::BlockFail::Pending) => Err(Pending),
+            other => Ok(other),
+        };
+        crate::model_format::pass::drive(k2, me2, pass, (rec, next), helper, move |(rec, next), pass, plan| async move {
+            written(at, plan, (rec, pass), move |(rec, pass), r| next(rec, Some(pass), r)).await;
+        })
+        .await;
+    })
+    .await;
+}
+
+/// TESTS: [`context_recall`] run to its end, its reply handed back here.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn recalled(
+    agent_id: &AgentId,
+    dry: bool,
+    kernel: &Arc<Kernel>,
+    pass: Option<Pass>,
     decl: &'static crate::model_format::Decl<'static>,
     model_window: i64,
     client_id: Option<&str>,
     unread: &[i64],
     me: &Value,
 ) -> Result<Value, crate::assembly::BlockFail> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    context_recall(
+        agent_id,
+        dry,
+        kernel,
+        pass,
+        decl,
+        model_window,
+        client_id.map(str::to_string),
+        unread.to_vec(),
+        me.clone(),
+        tx,
+        |tx, _pass, r| async move {
+            let _ = tx.send(r);
+        },
+    )
+    .await;
+    rx.await.expect("the recall ran its last step")
+}
+
+/// Who a recall is for, owned, so its steps carry it.
+#[derive(Clone)]
+struct Recall {
+    agent_id: AgentId,
+    kernel: Arc<Kernel>,
+    decl: &'static crate::model_format::Decl<'static>,
+    model_window: i64,
+    client: String,
+    unread: Vec<i64>,
+    me: Value,
+}
+
+/// What a recall comes to: its answer as it is (nothing to rebuild), or the view and
+/// the decision row to write.
+enum RecallPlan {
+    Answer(Value),
+    Write {
+        folds: Vec<Value>,
+        ids: Vec<Value>,
+        body_budget: i64,
+        why: String,
+        kept: usize,
+        expanded: usize,
+        view_len: usize,
+        live_txt: String,
+        degraded: bool,
+    },
+}
+
+/// THE RECALL RECKONED over `rows`, plain code over the pass's book (#795): the fold of
+/// a head past the budget (its summaries task answers), the mechanical fit, the model's
+/// choice (a task answer). `pass`: none for a dry recall, which asks nothing.
+/// [`crate::assembly::BlockFail::Pending`]: a task answer has not come yet.
+fn reckon_recall(pass: Option<&Pass>, at: &Recall, rows_in: Vec<Value>) -> Result<RecallPlan, crate::assembly::BlockFail> {
+    let (agent_id, kernel, decl, model_window, client_id, unread, me) = (
+        &at.agent_id,
+        &at.kernel,
+        at.decl,
+        at.model_window,
+        at.client.as_str(),
+        at.unread.as_slice(),
+        &at.me,
+    );
     let meta = agent_meta(agent_id, kernel);
-    let mut rows = load_history(agent_id, kernel, false).await?;
+    let mut rows = rows_in;
     // the thread as it is: its first row dates the environment section
     let thread = rows.clone();
     // the history BEFORE the pass's messages: they, and whatever landed after them
@@ -782,9 +961,9 @@ pub(crate) async fn context_recall(
         rows.retain(|r| row_id(r).is_none_or(|id| id < first));
     }
     if rows.is_empty() {
-        return Ok(
+        return Ok(RecallPlan::Answer(
             json!({"kept": 0, "expanded": 0, "dropped": 0, "folded": 0, "why": "empty store", "degraded": false}),
-        );
+        ));
     }
     // THE TYPE THE NEXT PASS IS SENT IN (`decl`: the pass's, else the one the chat's
     // model resolves to); the sizes below are of the bytes it is sent. The block the pass
@@ -797,7 +976,6 @@ pub(crate) async fn context_recall(
     let body_budget = (agent_budget(&meta, model_window) - sys_tokens - NOTICE_ENVELOPE_RESERVE)
         .max(BUDGET_FLOOR);
     let target = (body_budget as f64 * LOW) as i64;
-    let pass = pass.filter(|_| !dry);
     // A HEAD LONGER THAN THE BUDGET FOLDS FIRST. A store
     // written under a larger window — another model, a planted past — is folded
     // the way the turn's own `fold` projection folds it: oldest spans into fold
@@ -815,9 +993,9 @@ pub(crate) async fn context_recall(
                 pass: p,
                 self_id: agent_id,
                 kernel,
-                client_id: client_id.unwrap_or(""),
+                client_id,
             };
-            let (r, _, f, _) = fold_down(&rows, &fctx, body_budget).await?;
+            let (r, _, f, _) = fold_down(&rows, &fctx, body_budget)?;
             rows = r;
             folds = f;
         }
@@ -827,9 +1005,9 @@ pub(crate) async fn context_recall(
         .filter(|r| row_id(r).is_some())
         .collect();
     if view.is_empty() {
-        return Ok(
+        return Ok(RecallPlan::Answer(
             json!({"kept": 0, "expanded": 0, "dropped": 0, "folded": 0, "why": "no addressable rows", "degraded": false}),
-        );
+        ));
     }
     let digest = |r: &Value| -> Value {
         if res_of(r) == "full" && row_content(r).starts_with("[reply to ") {
@@ -952,7 +1130,7 @@ pub(crate) async fn context_recall(
             .replace("{lines}", &lines.join("\n"));
         // python `if ans:` — an EMPTY object is no answer at all, so `degraded`
         // stays true and `why` stays `mechanical fit`.
-        let answered = first_json(&compose(pass, &prompt).await).filter(|a| !a.is_empty());
+        let answered = first_json(&compose(pass, &prompt)?).filter(|a| !a.is_empty());
         if let Some(ans) = answered {
             let head_ids: HashSet<i64> = head.iter().filter_map(|&i| row_id(&view[i])).collect();
             // python `_as_list(ans.get("expand"))`: a list as is, a scalar
@@ -1010,10 +1188,6 @@ pub(crate) async fn context_recall(
     // after them (a resume row, a late reply) must not leave them before its place
     let kept = ids.len();
     ids.extend(unread.iter().map(|id| json!({"id": id, "res": "full"})));
-    save_view(agent_id, kernel, &folds, &ids, body_budget, &why).await?;
-    let folded = folds.len();
-    // the decision is a ROW — the next reload reads why the last recall chose as it did
-    let rid = kernel.mint_id();
     // THE LIVE TASK IS NAMED. The view keeps the first root (the goal) at the top,
     // and after a recall a model with several roots can re-answer the FIRST one
     // and call done. The newest root is
@@ -1028,10 +1202,45 @@ pub(crate) async fn context_recall(
             .collect();
         format!(" · live task: {} \"{text}\"", row_id(l).unwrap_or(0))
     });
-    save_history(
-        agent_id,
-        kernel,
-        &[json!({
+    Ok(RecallPlan::Write {
+        folds,
+        ids,
+        body_budget,
+        why,
+        kept,
+        expanded: expand.len(),
+        view_len: view.len(),
+        live_txt,
+        degraded,
+    })
+}
+
+/// A recall's end, as steps: its view row written with its folds (one append), then the
+/// decision row; RAM scratch dropped and the caller told of a fold; `next` gets the reply.
+async fn written<R, F, Fut>(at: Recall, plan: Result<RecallPlan, crate::assembly::BlockFail>, rec: R, next: F)
+where
+    R: Send + 'static,
+    F: FnOnce(R, Result<Value, crate::assembly::BlockFail>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let (folds, ids, body_budget, why, kept, expanded, view_len, live_txt, degraded) = match plan {
+        Err(e) => return next(rec, Err(e)).await,
+        Ok(RecallPlan::Answer(v)) => return next(rec, Ok(v)).await,
+        Ok(RecallPlan::Write { folds, ids, body_budget, why, kept, expanded, view_len, live_txt, degraded }) => {
+            (folds, ids, body_budget, why, kept, expanded, view_len, live_txt, degraded)
+        }
+    };
+    let folded = folds.len();
+    let (agent_id, kernel) = (at.agent_id.clone(), Arc::clone(&at.kernel));
+    let w = why.clone();
+    crate::steps::save_view(&agent_id, &kernel, &folds, &ids, body_budget, &w, (at, rec, next), move |(at, rec, next), r| async move {
+        if let Err(e) = r {
+            return next(rec, Err(crate::assembly::BlockFail::Store(e))).await;
+        }
+        // the decision is a ROW — the next reload reads why the last recall chose as it did
+        let (agent_id, kernel) = (at.agent_id.clone(), Arc::clone(&at.kernel));
+        let rid = kernel.mint_id();
+        let row = json!({
             "role": "user",
             "id": rid,
             "parent": Value::Null,
@@ -1039,47 +1248,58 @@ pub(crate) async fn context_recall(
             "title": why,
             "content": format!(
                 "[recall {rid} · kept {} rows, {} in full] {why}{live_txt}",
-                kept, expand.len()
+                kept, expanded
             ),
-        })],
-    )
-    .await?;
-    // RAM is scratch, reconstructible by definition; the store is never cleared.
-    let st = crate::state::state_for(agent_id);
-    *st.projection.lock().expect("projection poisoned") = None;
-    *st.compaction_mark.lock().expect("mark poisoned") = None;
-    crate::strategies::strip::forget(agent_id.as_str());
-    if let (true, Some(c)) = (folded > 0, client_id.filter(|c| !c.is_empty())) {
-        // The caller is told its context was compacted, as by a turn's projection.
-        to_caller(
-            kernel,
-            agent_id,
-            c,
-            json!({
-                "type": "context", "source": agent_id.as_str(), "ts": now_secs(),
-                "phase": "compacted",
-                "detail": {
-                    "strategy": "fold",
-                    "recall": true,
-                    "dropped_messages": view.len() - kept,
-                    "kept_messages": kept,
-                    "summarized": false,
-                    "pinned_facts": 0,
-                    "stripped": 0,
-                    "stripped_bytes": 0,
+        });
+        crate::steps::append(&agent_id, &kernel, &[row], (at, rec, next), move |(at, rec, next), r| async move {
+            if let Err(e) = r {
+                return next(rec, Err(crate::assembly::BlockFail::Store(e))).await;
+            }
+            let (agent_id, kernel) = (&at.agent_id, &at.kernel);
+            // RAM is scratch, reconstructible by definition; the store is never cleared.
+            let st = crate::state::state_for(agent_id);
+            *st.projection.lock().expect("projection poisoned") = None;
+            *st.compaction_mark.lock().expect("mark poisoned") = None;
+            crate::strategies::strip::forget(agent_id.as_str());
+            if folded > 0 && !at.client.is_empty() {
+                // The caller is told its context was compacted, as by a turn's projection.
+                to_caller(
+                    kernel,
+                    agent_id,
+                    &at.client,
+                    json!({
+                        "type": "context", "source": agent_id.as_str(), "ts": now_secs(),
+                        "phase": "compacted",
+                        "detail": {
+                            "strategy": "fold",
+                            "recall": true,
+                            "dropped_messages": view_len - kept,
+                            "kept_messages": kept,
+                            "summarized": false,
+                            "pinned_facts": 0,
+                            "stripped": 0,
+                            "stripped_bytes": 0,
+                            "folded": folded,
+                        },
+                    }),
+                )
+                .await;
+            }
+            next(
+                rec,
+                Ok(json!({
+                    "kept": kept,
+                    "expanded": expanded,
+                    "dropped": view_len - kept,
                     "folded": folded,
-                },
-            }),
-        )
+                    "budget": body_budget,
+                    "why": why,
+                    "degraded": degraded,
+                })),
+            )
+            .await;
+        })
         .await;
-    }
-    Ok(json!({
-        "kept": kept,
-        "expanded": expand.len(),
-        "dropped": view.len() - kept,
-        "folded": folded,
-        "budget": body_budget,
-        "why": why,
-        "degraded": degraded,
-    }))
+    })
+    .await;
 }
