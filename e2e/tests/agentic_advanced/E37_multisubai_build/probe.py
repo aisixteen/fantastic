@@ -45,7 +45,7 @@ from helpers.kernel import home
 from helpers import add_lines, creds, lines, memory, probe_agent, relay, verdict  # noqa: E402
 from helpers.ai import CHAT_MODULE, KNOBS, split_record  # noqa: E402
 from helpers.lines import is_unknown  # noqa: E402
-from helpers.ai import IDLE_END, QuietWatch  # noqa: E402
+from helpers.ai import IDLE_END, QuietWatch, follow  # noqa: E402
 from tests.agentic_advanced.E30_subai import probe as P  # noqa: E402
 from tests.agentic_advanced.E36_multisubai import probe as S  # noqa: E402
 
@@ -57,6 +57,16 @@ ORACLES, SOLVERS, LEDGER_NAMES, N = S.ORACLES, S.SOLVERS, S.LEDGER_NAMES, S.N
 MINE = {*P.MINE, "kernel_store", "notes", "user", CREATOR, *ORACLES}
 #: the oracles' records before the run: no agent writes on a callee (`doors_ok`)
 ORACLE_BEFORE: dict[str, dict] = {}
+#: THE SHELL'S ONE LINE, the operator's: `send` on the creator, so a solver can report
+#: back. The creator cannot hand it out (its `create` line gives nothing on itself, and
+#: a writer hands out only what its own lines hold), so the shell carries it; the
+#: creator's fill keeps it — a line unchanged against the stored `can` passes.
+SHELL_CAN = {CREATOR: lines.call("send")}
+#: Each solver's record as of its latest pass end (`_snapshot`). The creator deletes
+#: the fleet in its last step, so the scorer reads a deleted solver's record here.
+SEEN: dict[str, dict] = {}
+#: The solvers' pass followers (`follow`), closed by the scorer.
+FOLLOWERS: list = []
 UNATTENDED = S.UNATTENDED
 
 
@@ -131,12 +141,14 @@ TASK = (
     "(solver k holds the ledger of `oracle_k`). Give each solver this `can`:\n"
     "  `{\"<oracle_k>\": {\"call\": [\"*\"]}, \"notes\": {\"call\": [\"*\"]}, "
     "\"memory\": {\"call\": [\"*\"]}, \"creds\": {\"call\": [\"get\"]}, "
-    "\"<solver_j>\": {\"call\": [\"send\"]}, \"<solver_i>\": {\"call\": [\"send\"]}}` — "
+    "\"<solver_j>\": {\"call\": [\"send\"]}, \"<solver_i>\": {\"call\": [\"send\"]}, "
+    f"\"{CREATOR}\": {{\"call\": [\"send\"]}}}}` — "
     "its own oracle only, `notes`, the store its conversation lives in (`memory`), the "
     "key store line (its provider reads its key through its own `creds` line, and the "
     "solver is that provider's ancestor, so the call passes only when the solver holds "
-    "the line too: hand it the one you hold), and `send` on EACH of the two other "
-    "solvers.\n"
+    "the line too: hand it the one you hold), `send` on EACH of the two other "
+    f"solvers, and `send` on `{CREATOR}` (you, its creator; the shell already holds "
+    "that line, so keep it).\n"
     "That is: solver k reaches its own oracle and both peers; its provider is below "
     "it. You are their parent, so you reach them with no line.\n\n"
     "STEP 2 — KICK OFF ALL THREE AT ONCE: one batch of three `send` calls, one per "
@@ -241,9 +253,10 @@ async def wire_builder(root, aid: str) -> None:
     for k, sid in enumerate(SOLVERS):
         r = (await root.send([{"target": root.id, "payload": {
             "type": "create_agent", "parent_id": aid, "id": sid,
-            "handler_module": CHAT_MODULE,
+            "handler_module": CHAT_MODULE, "can": SHELL_CAN,
             "description": f"Solver {k + 1} of three (to be filled by its creator)."}}]))[0]["result"]
         assert not (isinstance(r, dict) and r.get("error")), f"create shell {sid}: {r}"
+        FOLLOWERS.append(await follow(root, sid, on_end=_snapshot(root, sid)))
     await add_lines(root, aid, {sid: lines.call("send") for sid in SOLVERS})
     for oid in ORACLES:
         ORACLE_BEFORE[oid] = await asyncio.to_thread(root.record, oid)
@@ -257,9 +270,29 @@ async def wire_builder(root, aid: str) -> None:
     assert ((r.get("reason") == "not_allowed" and r.get("arg") == "can")
             or is_unknown(r, creds.CREDS)), f"a line the writer lacks was handed out: {r}"
     shell = await asyncio.to_thread(root.record, SOLVERS[0])
-    assert not shell.get("can"), f"the refused fill changed {SOLVERS[0]}: {shell.get('can')}"
+    assert shell.get("can") == SHELL_CAN, f"the refused fill changed {SOLVERS[0]}: {shell.get('can')}"
     gone = (await root.send([{"target": root.id, "payload": {"type": "delete_agent", "id": "creator_hand"}}]))[0]["result"]
     assert not gone.get("error"), f"delete creator_hand: {gone}"
+
+
+def _snapshot(root, sid: str):
+    """At each of `sid`'s pass ends: its record, read through ack + settle, kept in
+    `SEEN` (a deleted solver answers the unknown answer, `{}`: the last one stays)."""
+
+    async def snap() -> None:
+        rec = await asyncio.to_thread(root.record, sid)
+        if rec:
+            SEEN[sid] = rec
+
+    return snap
+
+
+async def _team(root, ai_module=None) -> tuple[dict[str, dict], list[str]]:
+    """Every record `rest` sees, a deleted solver's as last seen (`SEEN`), and the
+    solvers among them: the chats the fixture did not make."""
+    records = {**SEEN, **{k: v for k, v in (await P.records_of(root)).items() if v}}
+    ai_module = ai_module or P.bundle(records.get("brain", {}))
+    return records, [aid for aid, a in records.items() if aid not in MINE and P.bundle(a) == ai_module]
 
 
 async def _rows(root, aid):
@@ -274,40 +307,12 @@ async def score(root, store_id, total, new_total, transcript):
     _ = (store_id, total, new_total, transcript)
     print("\n" + "=" * (P.W + 4))
     print(f"  puzzle seed={S.PUZZLE_SEED} code={S.CODE}")
-    records = await P.records_of(root)
-    ai_module = P.bundle(records.get("brain", {}))
-    solvers = [aid for aid, a in records.items() if aid not in MINE and P.bundle(a) == ai_module]
-
-    # ── 1. STRUCTURE: three solvers, the creator's children, one oracle each, pairs both ways ──
-    def can(aid):
-        return records.get(aid, {}).get("can") or {}
-
-    per = {s: {o for o in ORACLES if o in can(s)} for s in solvers}
-    oracle_ok = len(solvers) == N and all(len(v) == 1 for v in per.values()) and len(set().union(*per.values())) == N if per else False
-    # no agent writes on a callee: the oracles' records are as the fixture made them
-    doors_ok = bool(ORACLE_BEFORE) and all(records.get(o) == ORACLE_BEFORE.get(o) for o in ORACLES)
-    pairs_ok = all(t in can(s) for s in solvers for t in solvers if s != t) if solvers else False
-    children_ok = all(records.get(s, {}).get("parent_id") == CREATOR for s in solvers)
-    c1 = oracle_ok and doors_ok and pairs_ok and children_ok
-    print(
-        f"    1. team built and wired             {'OK' if c1 else 'NO'} solvers={per} "
-        f"oracles_untouched={doors_ok} pairs_both_ways={pairs_ok} children={children_ok}"
-    )
-
-    # ── 2. ONE-BATCH KICKOFF with replies discarded, then `done` ──
-    creator = (await _rows(root, CREATOR))
-    kick_pass = None
-    for r in creator:
-        if r.get("role") != "assistant":
-            continue
-        body = str(r.get("content") or "")
-        n = sum(1 for s in solvers if re.search(rf"<target_id>\s*{s}\s*</target_id>", body))
-        if n == N:
-            kick_pass = body
-            break
-    discarded = bool(kick_pass) and len(re.findall(r"<reply_to>\s*null\s*</reply_to>", kick_pass)) >= N
-    c2 = kick_pass is not None and discarded
-    print(f"    2. one-batch kickoff, replies null  {'OK' if c2 else 'NO'} kickoff_pass={'yes' if kick_pass else 'no'} reply_to_null={discarded}")
+    # THE BUILD IS SCORED LAST. The creator's passes, the swarm and its own wake are
+    # async (#795): the builder's drive ends on a quiet chain, not at the kickoff, and
+    # the creator's last step deletes the fleet — so steps 1 and 2 read the records as
+    # last seen (`SEEN`, each solver's at its pass ends) once steps 3 and 4 are over.
+    ai_module = P.bundle((await asyncio.to_thread(root.record, "brain")) or {})
+    _, solvers = await _team(root, ai_module)
 
     # ── 3. THE SWARM CONCLUDES (E36's measure) ──
     print(f"       … the team works unattended, up to {UNATTENDED:.0f}s")
@@ -357,6 +362,41 @@ async def score(root, store_id, total, new_total, transcript):
         f"    4. woken → validated → fleet deleted → done {'OK' if c4 else 'NO'} "
         f"woken={woke} validated={validated} deleted={deleted} done={stopped}"
     )
+
+    for f in FOLLOWERS:
+        await f.close()
+    records, solvers = await _team(root, ai_module)
+
+    # ── 1. STRUCTURE: three solvers, the creator's children, one oracle each, pairs both ways ──
+    def can(aid):
+        return records.get(aid, {}).get("can") or {}
+
+    per = {s: {o for o in ORACLES if o in can(s)} for s in solvers}
+    oracle_ok = len(solvers) == N and all(len(v) == 1 for v in per.values()) and len(set().union(*per.values())) == N if per else False
+    # no agent writes on a callee: the oracles' records are as the fixture made them
+    doors_ok = bool(ORACLE_BEFORE) and all(records.get(o) == ORACLE_BEFORE.get(o) for o in ORACLES)
+    pairs_ok = all(t in can(s) for s in solvers for t in solvers if s != t) if solvers else False
+    children_ok = all(records.get(s, {}).get("parent_id") == CREATOR for s in solvers)
+    c1 = oracle_ok and doors_ok and pairs_ok and children_ok
+    print(
+        f"    1. team built and wired             {'OK' if c1 else 'NO'} solvers={per} "
+        f"oracles_untouched={doors_ok} pairs_both_ways={pairs_ok} children={children_ok}"
+    )
+
+    # ── 2. ONE-BATCH KICKOFF with replies discarded, then `done` ──
+    creator = (await _rows(root, CREATOR))
+    kick_pass = None
+    for r in creator:
+        if r.get("role") != "assistant":
+            continue
+        body = str(r.get("content") or "")
+        n = sum(1 for s in solvers if re.search(rf"<target_id>\s*{s}\s*</target_id>", body))
+        if n == N:
+            kick_pass = body
+            break
+    discarded = bool(kick_pass) and len(re.findall(r"<reply_to>\s*null\s*</reply_to>", kick_pass)) >= N
+    c2 = kick_pass is not None and discarded
+    print(f"    2. one-batch kickoff, replies null  {'OK' if c2 else 'NO'} kickoff_pass={'yes' if kick_pass else 'no'} reply_to_null={discarded}")
 
     # ── THE EVIDENCE, always: the records the creator wrote, the exchange, the errors ──
     print("\n  ── solver records (as the creator wrote them) ──")

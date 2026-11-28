@@ -75,23 +75,20 @@ async def _connect(root, core):
 
 
 async def _ask(root, text: str, *, timeout: float = 240.0) -> None:
-    """The human sends to the EXISTING agent and waits for its chain to go quiet."""
-    from helpers.ai import _live_tasks
+    """The human sends to the EXISTING agent and waits for its chain to go quiet: its
+    passes followed off its own `status` events (`follow`), not `ps` — a pass runs as
+    steps that hold no task of the agent's (#795)."""
+    from helpers.ai import follow
 
-    r = await call(root, "user", {"type": "send", "target": AI,
-                                  "payload": {"type": "send", "text": text, "client_id": AI}})
-    assert not (isinstance(r, dict) and r.get("error")), f"ask: {r}"
-    end = asyncio.get_event_loop().time() + timeout
-    await asyncio.sleep(2.0)
-    quiet = 0
-    while asyncio.get_event_loop().time() < end:
-        if not await _live_tasks(root, AI):
-            quiet += 1
-            if quiet >= 3:
-                return
-        else:
-            quiet = 0
-        await asyncio.sleep(1.0)
+    passes = await follow(root, AI)
+    try:
+        r = await call(root, "user", {"type": "send", "target": AI,
+                                      "payload": {"type": "send", "text": text, "client_id": AI}})
+        assert not (isinstance(r, dict) and r.get("error")), f"ask: {r}"
+        if not await passes.quiet(grace=3.0, timeout=timeout):
+            print(f"  ** {AI}: the chain did not go quiet in {timeout:.0f}s **", flush=True)
+    finally:
+        await passes.close()
 
 
 async def _thread(root) -> list[dict]:

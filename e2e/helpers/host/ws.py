@@ -30,7 +30,11 @@ class WSWatcher:
         self._r: asyncio.StreamReader | None = None
         self._w: asyncio.StreamWriter | None = None
 
-    async def connect(self) -> None:
+    async def connect(self, ready: bool = False) -> None:
+        """`ready`: return only once the watch is LIVE — an `emit` to the agent sent
+        after the `watch` comes back on it only then (the connection's frames take
+        effect in order, as `SettleFollower` waits), so nothing sent after this
+        returns is missed."""
         self._r, self._w = await asyncio.open_connection("127.0.0.1", self.port)
         key = base64.b64encode(os.urandom(16)).decode()
         self._w.write(
@@ -46,6 +50,27 @@ class WSWatcher:
         # REGISTER as a synthetic watcher of the agent — the frame the kernel's
         # ws face answers with `{type:"event", payload}` pushes.
         await self._send(json.dumps({"type": "watch", "src": self.agent_id}))
+        if ready:
+            await asyncio.wait_for(self._ready(), 30)
+
+    async def _ready(self) -> None:
+        marker = f"watch-ready-{os.urandom(6).hex()}"
+        await self._send(json.dumps(
+            {"type": "emit", "target": self.agent_id, "payload": {"type": marker}}))
+        while True:
+            raw = await self._frame()
+            if raw is None:
+                raise ConnectionError(f"the watch on {self.agent_id!r} closed before it came live")
+            try:
+                frame = json.loads(raw) if raw else None
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(frame, dict):
+                continue
+            if frame.get("type") == "event" and (frame.get("payload") or {}).get("type") == marker:
+                return
+            # an `error` frame here may be the socket's connect-time auto-watch of the
+            # web host, refused (see `StateWatcher`): not this watch's; the bound decides
 
     async def _send(self, text: str | bytes, opcode: int = 0x1) -> None:
         body = text.encode() if isinstance(text, str) else text

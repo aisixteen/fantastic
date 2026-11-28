@@ -439,7 +439,7 @@ async def main():
     # mutate nothing.
     stale = 0
     seen_writes = -1
-    ender = ChainEnd(root, aid)
+    ender = ChainEnd(root, aid, passes=conn.pass_watch)
     while idle < IDLE:
         await asyncio.sleep(TICK)
         writes = _progress_count(transcript)
@@ -512,7 +512,7 @@ async def main():
                 ).get("tasks")
                 or []
             )
-            if any(t.get("agent") == aid and t.get("verb") != "ps" for t in _rows):
+            if conn.pass_watch.live or any(t.get("agent") == aid and t.get("verb") != "ps" for t in _rows):
                 print(
                     f"  … idle {idle:.0f}s but a pass is STILL GENERATING — waiting on",
                     flush=True,

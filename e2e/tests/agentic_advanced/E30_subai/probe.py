@@ -70,7 +70,7 @@ from helpers import (
 )
 from helpers.ai import CHAT_MODULE
 from helpers.ai import TICK as POLL
-from helpers.ai import ChainEnd, make_chat
+from helpers.ai import ChainEnd, Passes, make_chat
 from helpers.kernel import WRAPS, open_kernel, wrap_with, home
 from helpers.rows import rows_for
 
@@ -864,6 +864,9 @@ async def run(
     # IN-PROCESS ONLY: the inbox tap needs a handle on the live kernel. Across
     # a wire a dead chain is caught by the drive loop's `ps` check instead.
     _errtask = None
+    # THE BUILDER'S PASSES, off its own `status` events: a pass in flight holds no
+    # task of its own in `ps` (#795), so the chain-end check asks these.
+    passes = Passes()
     if core is not None:
         root.ctx.ensure_inbox("errspy")
         root.watch(aid, "errspy")
@@ -872,6 +875,7 @@ async def run(
         q = root.ctx.inboxes["errspy"]
         while True:
             ev = await q.get()
+            passes.note(ev)
             if ev.get("type") == "context" and ev.get("phase") == "too_small":
                 d = ev.get("detail") or {}
                 print(
@@ -972,11 +976,17 @@ async def run(
         # after ONE pass with no reason recoverable anywhere.
         from helpers.host.ws import WSWatcher
 
+        # LIVE BEFORE THE FIRST SEND: the pass that send starts is followed too.
+        watcher = WSWatcher(root.k.port, aid)
+        try:
+            await watcher.connect(ready=True)
+        except Exception as e:
+            print(f"  ** event watch unavailable: {e} **", flush=True)
+
         async def _wire_errspy() -> None:
-            watcher = WSWatcher(root.k.port, aid)
             try:
-                await watcher.connect()
                 async for ev in watcher.events():
+                    passes.note(ev)
                     det = ev.get("detail") or {}
                     if errored_status(ev):
                         print(f"\n  ** PASS FAILED: {det['error']} **\n", flush=True)
@@ -1036,7 +1046,7 @@ async def run(
     # result forever still stops. MAX_PASSES remains as a far backstop.
     stale = 0
     seen_writes = -1
-    ender = ChainEnd(root, aid)
+    ender = ChainEnd(root, aid, passes=passes)
     while idle < IDLE:
         await asyncio.sleep(POLL)
         writes = _progress_count(spy.transcript)
@@ -1118,7 +1128,7 @@ async def run(
                 ).get("tasks")
                 or []
             )
-            if any(t.get("agent") == aid and t.get("verb") != "ps" for t in _rows):
+            if passes.live or any(t.get("agent") == aid and t.get("verb") != "ps" for t in _rows):
                 print(
                     f"  … idle {idle:.0f}s but a pass is STILL GENERATING — waiting on",
                     flush=True,
