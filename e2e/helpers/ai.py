@@ -60,6 +60,8 @@ class Connected:
     #: THE STREAM JUNCTION (`helpers/stream.py`) — the agent's streaming parts, as
     #: drafts settled by end/abort/match. In process only (None over a wire).
     streams: StreamJunction | None = None
+    #: its passes, followed off its own `status` events (`Passes`)
+    pass_watch: Any = field(default_factory=lambda: Passes())
     _tasks: list = field(default_factory=list)
 
     @property
@@ -224,6 +226,7 @@ async def connect(
     # the store per request, the store from the variable the run exported.
 
     conn = Connected(id=aid, root=root, proxy=None, limits=L)  # type: ignore[arg-type]
+    PASSES[aid] = conn.pass_watch
     # Parts that go to the caller land on the agent's own inbox; a call part lands
     # on its addressee's. Watch both ends the run can see.
     if getattr(getattr(root, "ctx", None), "agents", None) is not None:
@@ -292,11 +295,17 @@ async def connect(
         # died mid-flight looks exactly like a model that chose to stop.
         from helpers.host.ws import WSWatcher
 
+        # LIVE BEFORE THE FIRST SEND: the pass that send starts is followed too.
+        watcher = WSWatcher(root.k.port, aid)
+        try:
+            await watcher.connect(ready=True)
+        except Exception as e:  # the watcher must never kill the run
+            print(f"  ** event watch unavailable: {e} **", flush=True)
+
         async def _wire_errspy() -> None:
-            watcher = WSWatcher(root.k.port, aid)
             try:
-                await watcher.connect()
                 async for ev in watcher.events():
+                    conn.pass_watch.note(ev)
                     det = ev.get("detail") or {}
                     if _errored(ev, det):
                         _failed(str(det["error"]))
@@ -324,6 +333,7 @@ async def connect(
         q = root.ctx.inboxes[inbox]
         while True:
             ev = await q.get()
+            conn.pass_watch.note(ev)
             det = ev.get("detail") or {}
             if _died(ev, det):
                 _failed(f"pass ended: {det.get('reason')}")
@@ -351,6 +361,19 @@ def errored_status(ev: dict) -> bool:
     """
     det = ev.get("detail") or {}
     return ev.get("type") == "status" and bool(det.get("error")) and ev.get("phase") != "retrying"
+
+
+#: Every connected AI's passes (`Connected.pass_watch`), by id — what `at_work` asks.
+PASSES: dict[str, "Passes"] = {}
+
+
+async def at_work(root, aid: str) -> bool:
+    """Has `aid` work in flight NOW: a pass (off its own events, `PASSES`; a pass's
+    steps hold no task of its own, #795) or a task of its own in `ps`."""
+    p = PASSES.get(aid)
+    if p is not None and p.live:
+        return True
+    return bool(await _live_tasks(root, aid))
 
 
 async def _live_tasks(root, aid) -> list[dict]:
@@ -500,6 +523,116 @@ async def busy(root) -> list[tuple]:
     return [(t.get("agent"), t.get("verb")) for t in rows if t.get("verb") not in _QUIET_VERBS]
 
 
+#: An AI's `status` phases while one of its passes runs, and the two that end it.
+PASS_ON = frozenset({"thinking", "streaming", "retrying"})
+PASS_OFF = frozenset({"done", "failed"})
+#: The per-send ceiling (the call deadline): no pass outlives it, so a pass whose end
+#: event never came stops counting as live after it.
+SEND_CEILING = 600.0
+
+
+class Passes:
+    """An AI's PASSES, followed off its own `status` events (#795), never polled.
+
+    A pass runs as STEPS: its reads, its model call (a call on its PROVIDER, that
+    agent's task) and its row writes hold no task of the AI's own, so `ps` cannot say
+    a pass is running. The AI says it: `thinking` when a pass starts, `done` or
+    `failed` when it ends. `note` takes each event the watcher reads; `on_end`
+    callbacks run (as tasks) at each pass end."""
+
+    def __init__(self) -> None:
+        self.phase: str | None = None
+        self.at = 0.0
+        self.starts = 0
+        self.ends = 0
+        self.on_end: list = []
+        self._running: set = set()
+        self._changed: asyncio.Event | None = None
+        self._watch = None
+        self._task: asyncio.Task | None = None
+
+    def _event(self) -> asyncio.Event:
+        if self._changed is None:
+            self._changed = asyncio.Event()
+        return self._changed
+
+    def note(self, ev: dict) -> None:
+        phase = ev.get("phase") if ev.get("type") == "status" else None
+        if phase not in PASS_ON and phase not in PASS_OFF:
+            return
+        if phase == "thinking" or (phase in PASS_ON and self.phase not in PASS_ON):
+            self.starts += 1
+        if phase in PASS_OFF and self.phase not in PASS_OFF:
+            self.ends += 1
+            for cb in self.on_end:
+                t = asyncio.get_running_loop().create_task(cb())
+                self._running.add(t)
+                t.add_done_callback(self._running.discard)
+        self.phase, self.at = phase, asyncio.get_running_loop().time()
+        self._event().set()
+
+    @property
+    def live(self) -> bool:
+        """Is a pass in flight now (its start seen, its end not yet)?"""
+        if self.phase not in PASS_ON:
+            return False
+        return asyncio.get_running_loop().time() - self.at < SEND_CEILING
+
+    async def _changed_within(self, seconds: float) -> bool:
+        ev = self._event()
+        ev.clear()
+        try:
+            await asyncio.wait_for(ev.wait(), max(seconds, 0.0))
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    async def quiet(self, after: int = 0, *, grace: float = 2.0,
+                    timeout: float = SEND_CEILING) -> bool:
+        """Wait until a pass ended after the `after`-th end, none is live, and none
+        started for `grace` seconds (a call's result wakes the next pass as a
+        message). False when `timeout` passes first."""
+        end = asyncio.get_running_loop().time() + timeout
+        while True:
+            left = end - asyncio.get_running_loop().time()
+            if left <= 0:
+                return False
+            if self.ends > after and not self.live:
+                if not await self._changed_within(min(grace, left)):
+                    return True
+                continue
+            await self._changed_within(left)
+
+    async def close(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+        if self._watch is not None:
+            await self._watch.close()
+
+
+async def follow(root, aid: str, on_end=None) -> Passes:
+    """`aid`'s passes, followed over the kernel's ws face from now on: the watch is
+    live when this returns, so a pass started by a send made after it is seen."""
+    from helpers.host.ws import WSWatcher
+
+    p = Passes()
+    if on_end is not None:
+        p.on_end.append(on_end)
+    w = WSWatcher(root.k.port, aid)
+    await w.connect(ready=True)
+    p._watch = w
+
+    async def pump() -> None:
+        try:
+            async for ev in w.events():
+                p.note(ev)
+        except Exception as e:  # the watcher must never kill the run
+            print(f"  ** pass watch {aid} unavailable: {e} **", flush=True)
+
+    p._task = asyncio.get_running_loop().create_task(pump())
+    return p
+
+
 class QuietWatch:
     """True from `quiet()` once nothing has been in flight for `IDLE_END` seconds,
     measured across calls — call it from a polling loop."""
@@ -537,6 +670,9 @@ class ChainEnd:
 
     root: Any
     aid: str
+    #: the AI's passes off its own events (`Passes`): a pass in flight holds no task
+    #: of the AI's in `ps` (#795), so without it a long generation reads as an end
+    passes: Any = None
     ps_at: float = 0.0
 
     async def check(self, transcript: list[str], idle: float) -> tuple[str, bool]:
@@ -548,6 +684,8 @@ class ChainEnd:
             said_done = False  # the test still has a message to send this agent
         if not (idle >= 30 or (said_done and idle >= DONE_QUIET)):
             return "", False
+        if self.passes is not None and self.passes.live:
+            return "", True
         now = asyncio.get_running_loop().time()
         if now - self.ps_at < PS_EVERY:
             return "", False
@@ -634,7 +772,7 @@ async def drive(
         print(f"\n  ** FIRST SEND FAILED: {first['error']} **\n", flush=True)
 
     idle, last, stale, seen_calls, capped = 0.0, 0, 0, -1, ""
-    ender = ChainEnd(root, aid)
+    ender = ChainEnd(root, aid, passes=conn.pass_watch)
     while idle < L.idle:
         await asyncio.sleep(TICK)
         calls = distinct_calls(conn.proxy.transcript)

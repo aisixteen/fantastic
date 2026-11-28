@@ -6,7 +6,6 @@ keep each probe to what it measures."""
 
 from __future__ import annotations
 
-import asyncio
 import os
 from typing import Any
 
@@ -50,23 +49,20 @@ async def agent(root, core, bk, aid: str, *, strategy: str = "fold", window: int
 
 
 async def ask(root, aid: str, text: str, *, timeout: float = 300.0) -> None:
-    """The human sends to an EXISTING agent and waits for its chain to go quiet."""
-    from helpers.ai import _live_tasks
+    """The human sends to an EXISTING agent and waits for its chain to go quiet: its
+    passes followed off its own `status` events (`follow`), not `ps` — a pass runs as
+    steps that hold no task of the agent's (#795)."""
+    from helpers.ai import follow
 
-    r = await call(root, "user", {"type": "send", "target": aid,
-                                  "payload": {"type": "send", "text": text, "client_id": aid}})
-    assert not (isinstance(r, dict) and r.get("error")), f"ask {aid}: {r}"
-    end = asyncio.get_event_loop().time() + timeout
-    await asyncio.sleep(2.0)
-    quiet = 0
-    while asyncio.get_event_loop().time() < end:
-        if not await _live_tasks(root, aid):
-            quiet += 1
-            if quiet >= 3:
-                return
-        else:
-            quiet = 0
-        await asyncio.sleep(1.0)
+    passes = await follow(root, aid)
+    try:
+        r = await call(root, "user", {"type": "send", "target": aid,
+                                      "payload": {"type": "send", "text": text, "client_id": aid}})
+        assert not (isinstance(r, dict) and r.get("error")), f"ask {aid}: {r}"
+        if not await passes.quiet(grace=3.0, timeout=timeout):
+            print(f"  ** {aid}: the chain did not go quiet in {timeout:.0f}s **", flush=True)
+    finally:
+        await passes.close()
 
 
 def answers(rows: list[dict], since: int = 0) -> str:

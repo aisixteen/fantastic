@@ -1455,6 +1455,37 @@ async fn reflect_at_create_level_adds_creatable_bundles_with_schemas() {
     assert_eq!(r["verbs"], json!({}), "{r}");
 }
 
+/// A creator whose `create` line is on ITSELF (E37's shape, Q33) reads the catalog on
+/// its own reflect, each bundle with its schema; its `reflect` line on the root is the
+/// call level there, which shows no catalog.
+#[tokio::test]
+async fn a_creator_reads_the_catalog_on_its_own_reflect_and_none_on_the_root() {
+    let kernel = v9_kernel();
+    // the line on the root, held by the creator and by each ancestor that caps it
+    for holder in ["canvas_garage", "canvas_root", "user"] {
+        crate::test_support::grant(
+            &kernel,
+            holder,
+            "kernel_state",
+            json!({"call": ["reflect"]}),
+        );
+    }
+    let payload = json!({"type": "reflect", "bundles": "all", "tree": "none"});
+    let own = reflect_as(&kernel, "canvas_garage", "canvas_garage", payload.clone())
+        .await
+        .result;
+    let cat = own["bundles"]
+        .as_array()
+        .expect("the catalog on its own reflect");
+    assert!(cat.iter().any(|b| b["name"] == "chat"), "{own}");
+    assert!(cat.iter().all(|b| b.get("schema").is_some()), "{own}");
+    let root = reflect_as(&kernel, "canvas_garage", "kernel_state", payload)
+        .await
+        .result;
+    assert_eq!(root["id"], "kernel_state", "{root}");
+    assert!(root.get("bundles").is_none(), "{root}");
+}
+
 #[tokio::test]
 async fn a_hidden_node_is_omitted_and_its_visible_children_lifted_with_their_real_parent() {
     // garage/chat1/canvas1/chat2: t1_w1's create line selects the `chat` agents

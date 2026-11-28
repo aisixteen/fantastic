@@ -8,11 +8,12 @@ checks the provider AS THE KERNEL USES IT. Three agents on one kernel, one ask e
                tokens stream on its id, the `<call>` it wrote runs, the reply reaches
                it, the answer carries the word, the pass ends `done/ok`, and NO stored
                assistant row carries thinking;
-  ai_cut     — the same backend with a 16-token budget: the cut main pass FAILS
-               naming the cut (never a fake finish) and stores no assistant row;
-  ai_cancel  — a long generation cancelled mid-stream through `ps` → `cancel`: the
-               call settles `cancelled`, the pass closes `done/cancelled`, the token
-               stream stops, nothing is left in flight.
+  ai_cut     — the same backend with a 16-token budget: the send is taken, the cut
+               main pass FAILS naming the cut (never a fake finish) and stores no
+               assistant row;
+  ai_cancel  — a long generation cancelled mid-stream through `ps` → `cancel` of the
+               pass's request (its `complete` on the provider, #795): the pass closes
+               `done/cancelled`, the token stream stops, nothing is left in flight.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ from ai_core.core import THINK_OPEN
 from backends import backend as _resolve_backend
 from helpers import ctx_score, drive, memory, verdict
 from helpers import mem_probe as M
-from helpers.ai import _live_tasks
+from helpers.ai import at_work
 from helpers.kernel import open_kernel
 from helpers.sse import check
 
@@ -69,6 +70,25 @@ def _spy(root, core, aid: str, sink: list) -> asyncio.Task:
             sink.append((time.monotonic(), await q.get()))
 
     return asyncio.create_task(run())
+
+
+async def _event(events: list, match, bound: float):
+    """The first event `match` takes in the spy's list, once it has come — a HANG
+    GUARD of `bound` seconds, never a pass. The list is the spy's own (the agent's
+    event stream), not the kernel."""
+    end = time.monotonic() + bound
+    while time.monotonic() < end:
+        hit = next((e for _, e in events if match(e)), None)
+        if hit is not None:
+            return hit
+        await asyncio.sleep(0.1)
+    return None
+
+
+async def _tasks(root) -> list[dict]:
+    """The kernel's task table (`ps`, a kernel verb)."""
+    r = (await root.send([{"target": "kernel", "payload": {"type": "ps"}}]))[0].get("result")
+    return [t for t in ((r or {}).get("tasks") or []) if t.get("verb") != "ps"]
 
 
 def _tokens(events: list) -> list:
@@ -139,23 +159,19 @@ async def main():
         await asyncio.sleep(1.0)
         out = (await root.send([{"target": "ai_cut", "payload": {
             "type": "send", "text": "Explain in detail how rivers form.", "client_id": "ai_cut"}}]))[0]
-        # THE RESULT CARRIES THE VERDICT on both sides of the wire — a raised pass
-        # settles `{error, raised: true}`. (The REST face returns the result alone,
-        # not the settle's `status`.)
+        # THE SEND IS TAKEN, THE PASS ANSWERS LATER (#795): the send's settle is the
+        # message stored; the cut pass ends with its own `failed` status, naming the
+        # cut, on the agent's event stream. Bounded wait for it — never a pass by timeout.
         res = out.get("result")
-        err = str(res)
-        check(checks, "ai_cut: the cut pass FAILED", isinstance(res, dict) and res.get("raised") is True,
-              f"status={out.get('status')} result={err[:80]}")
+        check(checks, "ai_cut: the send was taken", not (isinstance(res, dict) and res.get("error")),
+              str(res)[:120])
+        failed = await _event(events["ai_cut"], lambda e: e.get("type") == "status"
+                              and e.get("phase") == "failed", 240)
+        err = str(((failed or {}).get("detail") or {}).get("error") or "")
+        check(checks, "ai_cut: the cut pass FAILED", failed is not None,
+              _done_reasons(events["ai_cut"], "failed"))
         check(checks, "ai_cut: the error names the cut", "max_tokens" in err or "max_output_tokens" in err,
               err[:160])
-        # The status event rides the agent's event stream, the reply rides the call:
-        # over the wire they are two connections, so the event may land after the
-        # reply.
-        # Bounded wait for it — never a pass by timeout.
-        for _ in range(50):
-            if _done_reasons(events["ai_cut"], "failed"):
-                break
-            await asyncio.sleep(0.1)
         check(checks, "ai_cut: the pass closed failed/error", "error" in _done_reasons(events["ai_cut"], "failed"),
               _done_reasons(events["ai_cut"], "failed"))
         cut_rows = await memory.rows_of(root, "ai_cut", conversation_only=True)
@@ -167,33 +183,40 @@ async def main():
         await M.agent(root, core, BK, "ai_cancel")
         spies.append(_spy(root, core, "ai_cancel", events["ai_cancel"]))
         await asyncio.sleep(1.0)
-        pending = asyncio.create_task(root.send([{"target": "ai_cancel", "payload": {
+        sent = (await root.send([{"target": "ai_cancel", "payload": {
             "type": "send", "client_id": "ai_cancel",
-            "text": "Write a long, detailed 3000-word essay on the history of rivers. Call no tools."}}]))
+            "text": "Write a long, detailed 3000-word essay on the history of rivers. Call no tools."}}]))[0]
+        sres = sent.get("result")
+        check(checks, "ai_cancel: the send was taken", not (isinstance(sres, dict) and sres.get("error")),
+              str(sres)[:120])
         end = time.monotonic() + 240
         while time.monotonic() < end and not _tokens(events["ai_cancel"]):
             await asyncio.sleep(0.5)
         streaming = bool(_tokens(events["ai_cancel"]))
         check(checks, "ai_cancel: streaming before the cancel", streaming)
-        live = [t for t in await _live_tasks(root, "ai_cancel") if t.get("verb") == "send"]
-        for t in live:
-            await root.send([{"target": "kernel", "payload": {"type": "cancel", "task_id": t["id"]}}])
+        # THE PASS'S REQUEST is the task to cancel: a pass runs as steps (#795), and
+        # its model call is a `complete` on the chat's provider — `ps` lists it there.
+        prov = (await asyncio.to_thread(root.record, "ai_cancel")).get("provider_id")
+        live = [t for t in await _tasks(root)
+                if t.get("verb") == "complete" and t.get("agent") in (prov, "ai_cancel")]
+        cancels = [(await root.send([{"target": "kernel", "payload": {
+            "type": "cancel", "task_id": t["id"]}}]))[0].get("result") for t in live]
         t_cancel = time.monotonic()
-        try:
-            item = (await asyncio.wait_for(pending, 60))[0]
-        except TimeoutError:
-            item = {"status": "still in flight 60s after cancel"}
-        cres = item.get("result")
-        check(checks, "ai_cancel: the call settled cancelled",
-              isinstance(cres, dict) and cres.get("cancelled") is True,
-              f"status={item.get('status')} result={str(cres)[:80]}")
+        check(checks, "ai_cancel: ps listed its request and the cancel took it",
+              bool(live) and not any(isinstance(c, dict) and c.get("error") for c in cancels),
+              f"live={[(t.get('agent'), t.get('verb')) for t in live]} cancels={str(cancels)[:120]}")
+        closed = await _event(events["ai_cancel"], lambda e: e.get("type") == "status"
+                              and e.get("phase") in ("done", "failed"), 60)
         await asyncio.sleep(3)
         late = [1 for t, e in _tokens(events["ai_cancel"]) if t > t_cancel + 0.5]
         check(checks, "ai_cancel: the token stream stopped", streaming and not late,
               f"{len(late)} tokens after cancel")
         check(checks, "ai_cancel: the pass closed done/cancelled",
-              "cancelled" in _done_reasons(events["ai_cancel"]), _done_reasons(events["ai_cancel"]))
-        check(checks, "ai_cancel: nothing left in flight", not await _live_tasks(root, "ai_cancel"))
+              closed is not None and "cancelled" in _done_reasons(events["ai_cancel"]),
+              _done_reasons(events["ai_cancel"]))
+        left = [t for t in await _tasks(root) if t.get("agent") in (prov, "ai_cancel")]
+        check(checks, "ai_cancel: nothing left in flight",
+              not left and not await at_work(root, "ai_cancel"), left)
 
         ok = all(v for _, v in checks)
         verdict(ok, f"{sum(v for _, v in checks)}/{len(checks)} contract checks on "

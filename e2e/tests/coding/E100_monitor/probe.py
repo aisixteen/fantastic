@@ -40,6 +40,7 @@ sys.path.insert(
 )
 from backends import backend as _resolve_backend
 from helpers import Limits, connect, drive, human, human_line, lines, verdict
+from helpers.ai import at_work
 from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
@@ -138,7 +139,7 @@ class Sampler:
         #: monitor id → whether its job still ran when it was first seen gone
         self.ended_while_running: dict[int, bool] = {}
         self.ai_busy = False
-        #: (sample time, the AI had a task in `ps`) — its pass time, for the windows
+        #: (sample time, the AI was at work — `at_work`) — its pass time, for the windows
         self.busy_marks: list[tuple[float, bool]] = []
         self.stop = asyncio.Event()
 
@@ -165,8 +166,9 @@ class Sampler:
             self.ended_while_running[gone] = job in running
         self.live = live
         self.max_monitors = max(self.max_monitors, len(live))
-        ps = (await _call(self.root, "kernel", {"type": "ps"})).get("tasks") or []
-        self.ai_busy = any(t.get("agent") == AI for t in ps)
+        # IN A PASS: off the AI's own `status` events, or a task of its own — a pass
+        # runs as steps that hold no task of the agent's (#795)
+        self.ai_busy = await at_work(self.root, AI)
         self.busy_marks.append((time.time(), self.ai_busy))
 
     def busy_between(self, a: float, b: float) -> float:

@@ -557,14 +557,14 @@ def after_replies(root, aid: str, n: int = 1):
 
 def after_tasks(root, aid: str, laters: list):
     """Readiness for a FINAL: every earlier task was DELIVERED and the agent has gone
-    quiet (no in-flight task of its own). Polled every few seconds, so it lands well
+    quiet (no pass and no task of its own in flight, `at_work`). Polled every few seconds, so it lands well
     inside the driver's 30 s idle cap and restarts the chain instead of missing it. A
     done-count does not work: a model that batches or skips `done` per task keeps the
     count short and the FINAL would arrive after the run."""
-    from helpers.ai import _live_tasks
+    from helpers.ai import at_work
 
     async def ready() -> bool:
-        return all(t.done() for t in laters) and not await _live_tasks(root, aid)
+        return all(t.done() for t in laters) and not await at_work(root, aid)
 
     return ready
 
@@ -603,13 +603,13 @@ async def send_in_pass(root, aid: str, texts: list[str], *, quiet: float = 1.0,
     import asyncio
     import time
 
-    from helpers.ai import _live_tasks
+    from helpers.ai import at_work
 
     async def _after_current() -> None:
         end = time.monotonic() + max_wait
         seen, quiet_since = False, None
         while time.monotonic() < end:
-            if await _live_tasks(root, aid):
+            if await at_work(root, aid):
                 seen, quiet_since = True, None
             elif seen:
                 quiet_since = quiet_since or time.monotonic()
